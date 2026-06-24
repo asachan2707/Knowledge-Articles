@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Collapsible Topic Tree | Learning Hub</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="./chat-widget.js" defer></script>
+  <style>
+    body { margin: 0; background: #f7f7f5; }
+
+    /* ── Hero ─────────────────────────────────────────────────────────────── */
+    .tree-hero {
+      padding: 2rem 0 1.2rem;
+      background: linear-gradient(135deg, #f7faf9 0%, #fafaf8 100%);
+      border-bottom: 1px solid #e7e5df;
+    }
+    .tree-hero h1 {
+      margin: 0 0 .4rem;
+      font-size: clamp(1.6rem, 3vw, 2.4rem);
+      line-height: 1.1;
+    }
+    .tree-hero p {
+      margin: 0;
+      color: #5f5f5b;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: .98rem;
+    }
+    .hero-nav {
+      display: flex;
+      gap: .6rem;
+      margin-top: 1rem;
+      flex-wrap: wrap;
+    }
+    .hero-nav-link {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      padding: .4rem .85rem;
+      border: 1px solid #e7e5df;
+      border-radius: 10px;
+      background: #fff;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: .85rem;
+      font-weight: 700;
+      color: #0f766e;
+      text-decoration: none;
+      transition: border-color 120ms, box-shadow 120ms;
+    }
+    .hero-nav-link:hover {
+      border-color: #0f766e;
+      box-shadow: 0 3px 10px rgba(15,118,110,.15);
+    }
+
+    /* ── View stats bar ──────────────────────────────────────────────────── */
+    .view-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin-top: .9rem;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .view-stat {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      padding: .28rem .75rem;
+      border: 1px solid #e7e5df;
+      border-radius: 999px;
+      background: #fff;
+      font-size: .82rem;
+      color: #444;
+    }
+    .view-stat-num   { font-weight: 800; color: #0f766e; font-size: .9rem; }
+    .view-stat-label { font-weight: 600; letter-spacing: .01em; }
+
+    /* ── Controls ─────────────────────────────────────────────────────────── */
+    .tree-controls {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: .6rem;
+      padding: .8rem 0 0;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .tc-btn {
+      padding: .35rem .8rem;
+      border: 1px solid #e7e5df;
+      border-radius: 8px;
+      background: #fff;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: .82rem;
+      font-weight: 700;
+      color: #5f5f5b;
+      cursor: pointer;
+      transition: border-color 120ms, color 120ms;
+    }
+    .tc-btn:hover { border-color: #0f766e; color: #0f766e; }
+    .tc-sep { width: 1px; height: 1.2rem; background: #e7e5df; }
+    .tc-hint {
+      margin-left: auto;
+      font-size: .78rem;
+      color: #9ca3af;
+    }
+
+    /* ── Canvas ───────────────────────────────────────────────────────────── */
+    #tree-wrap {
+      width: 100%;
+      height: calc(100vh - 230px);
+      min-height: 520px;
+      border: 1px solid #e7e5df;
+      border-radius: 16px;
+      background: #ffffff;
+      overflow: hidden;
+      margin: 1rem 0 2rem;
+      box-shadow: 0 12px 28px rgba(15,23,42,.06);
+      position: relative;
+    }
+
+    svg#tree-svg { width: 100%; height: 100%; cursor: grab; }
+    svg#tree-svg:active { cursor: grabbing; }
+
+    /* ── Node styles ──────────────────────────────────────────────────────── */
+    .t-node { cursor: pointer; }
+
+    .t-node circle.node-circle {
+      stroke-width: 2.5px;
+      transition: r .15s ease;
+    }
+
+    /* Root */
+    .t-node.root circle.node-circle {
+      r: 18;
+      fill: #1e293b;
+      stroke: #0f172a;
+    }
+    .t-node.root text { font-weight: 800; font-size: 14px; }
+
+    /* Category */
+    .t-node.category circle.node-circle { r: 13; }
+    .t-node.category text { font-weight: 800; font-size: 12px; }
+
+    /* Topic */
+    .t-node.topic circle.node-circle { r: 7; }
+    .t-node.topic text { font-size: 11px; font-weight: 600; }
+
+    /* Collapsed indicator ring */
+    circle.collapse-ring {
+      fill: none;
+      stroke-width: 2px;
+      pointer-events: none;
+    }
+
+    /* Node labels */
+    .t-node text {
+      font-family: Arial, Helvetica, sans-serif;
+      fill: #1a1a1a;
+      dominant-baseline: middle;
+      paint-order: stroke;
+      stroke: rgba(255,255,255,.9);
+      stroke-width: 3px;
+      pointer-events: none;
+    }
+
+    /* Links */
+    .t-link {
+      fill: none;
+      stroke: #cbd5e1;
+      stroke-width: 1.5px;
+      stroke-opacity: .75;
+    }
+
+    /* Cross-link arcs */
+    .cross-arc {
+      fill: none;
+      stroke-width: 1.8px;
+      stroke-dasharray: 6,3;
+      stroke-opacity: .55;
+      cursor: pointer;
+      transition: stroke-opacity 120ms, stroke-width 120ms;
+    }
+    .cross-arc:hover,
+    .cross-arc.is-highlighted {
+      stroke-opacity: 1;
+      stroke-width: 3px;
+    }
+
+    /* Active state for toggle buttons */
+    .tc-btn.is-active {
+      background: #0f766e;
+      border-color: #0f766e;
+      color: #fff;
+    }
+    .tc-btn.is-active:hover {
+      background: #0d6860;
+    }
+
+    /* Category badges (secondary cats on topic nodes) */
+    .cat-tag {
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+
+    /* ── Tooltip ──────────────────────────────────────────────────────────── */
+    #tree-tooltip {
+      position: absolute;
+      pointer-events: none;
+      padding: .5rem .75rem;
+      border: 1px solid #e7e5df;
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 8px 22px rgba(15,23,42,.13);
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: .82rem;
+      line-height: 1.5;
+      max-width: 240px;
+      opacity: 0;
+      transition: opacity 120ms;
+      z-index: 20;
+    }
+    #tree-tooltip.visible { opacity: 1; }
+    .tt-title { font-weight: 800; color: #111; margin-bottom: .2rem; }
+    .tt-sub   { color: #5f5f5b; font-size: .76rem; }
+    .tt-action { color: #0f766e; font-size: .74rem; margin-top: .25rem; }
+
+    /* ── Legend ───────────────────────────────────────────────────────────── */
+    #tree-legend {
+      position: absolute;
+      bottom: .9rem;
+      left: .9rem;
+      padding: .55rem .75rem;
+      border: 1px solid #e7e5df;
+      border-radius: 10px;
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(4px);
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: .74rem;
+      display: flex;
+      flex-direction: column;
+      gap: .3rem;
+    }
+    .leg-row { display: flex; align-items: center; gap: .4rem; color: #444; }
+    .leg-circle { border-radius: 50%; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+
+<div class="tree-hero">
+  <div class="container">
+    <a class="back-link" href="./index.html">← Back to Learning Hub</a>
+    <p class="eyebrow">Learning Project · Tree View</p>
+    <h1>Collapsible Topic Tree</h1>
+    <p>Topics organised by primary category in a collapsible hierarchy.
+       Click any category node to expand or collapse its topics.</p>
+
+    <div class="view-stats" id="tree-stats"></div>
+
+    <div class="hero-nav">
+      <a class="hero-nav-link" href="./tree-multi.html">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        Multi-Path View
+      </a>
+      <a class="hero-nav-link" href="./graph.html">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        Force Graph
+      </a>
+      <a class="hero-nav-link" href="./index.html">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        Card Grid
+      </a>
+    </div>
+
+    <div class="tree-controls">
+      <button class="tc-btn" id="tc-expand-all">Expand all</button>
+      <button class="tc-btn" id="tc-collapse-all">Collapse all</button>
+      <span class="tc-sep"></span>
+      <button class="tc-btn" id="tc-cross-links">Show cross-links</button>
+      <span class="tc-sep"></span>
+      <button class="tc-btn" id="tc-reset-zoom">Reset zoom</button>
+      <span class="tc-hint">Click category to expand · Click topic to open · Drag to pan · Scroll to zoom</span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div id="tree-wrap">
+    <svg id="tree-svg"></svg>
+    <div id="tree-tooltip"></div>
+    <div id="tree-legend">
+      <div class="leg-row">
+        <svg width="14" height="14"><circle cx="7" cy="7" r="7" fill="#1e293b"/></svg>
+        Hub root
+      </div>
+      <div class="leg-row">
+        <svg width="14" height="14"><circle cx="7" cy="7" r="7" fill="#0f766e"/></svg>
+        Category <em style="opacity:.6">(click to expand)</em>
+      </div>
+      <div class="leg-row">
+        <svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="none" stroke="#888" stroke-width="2"/><circle cx="7" cy="7" r="2.5" fill="#888"/></svg>
+        Topic <em style="opacity:.6">(click to open)</em>
+      </div>
+      <div class="leg-row">
+        <svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="2,2"/></svg>
+        Has extra categories
+      </div>
+      <div class="leg-row" id="leg-cross-links" style="display:none">
+        <svg width="14" height="14"><line x1="0" y1="7" x2="14" y2="7" stroke="#94a3b8" stroke-width="2" stroke-dasharray="4,2"/></svg>
+        Cross-link arc
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ── Category palette ───────────────────────────────────────────────────────
+
+  var CAT = {
+    'ai':            { label:'AI',            color:'#7c3aed' },
+    'agents':        { label:'Agents',        color:'#ea580c' },
+    'mcp':           { label:'MCP',           color:'#0891b2' },
+    'claude-code':   { label:'Claude Code',   color:'#a21caf' },
+    'python':        { label:'Python',        color:'#0369a1' },
+    'system-design': { label:'System Design', color:'#c2410c' },
+    'career':        { label:'Career',        color:'#16a34a' },
+    'productivity':  { label:'Productivity',  color:'#be185d' },
+    'finance':       { label:'Finance',       color:'#b45309' },
+    'tools':         { label:'Tools',         color:'#4338ca' },
+    'project':       { label:'Project',       color:'#475569' },
+    'interview':     { label:'Interview',     color:'#7e22ce' },
+    'slack':         { label:'Slack',         color:'#5b21b6' },
+    'web':           { label:'Web',           color:'#1d4ed8' },
+  };
+
+  // ── Topic data  (primary category = cats[0], drives tree placement) ────────
+
+  var TOPICS = [
+    // AI
+    { id:'ai-replaced-coding',        title:'AI Replaced 80% of Coding',                  cats:['ai','career'],                        href:'./topics/ai-replaced-80-percent-of-coding.html' },
+    { id:'chatgpt-prompts',           title:'Absurdly Powerful ChatGPT Prompts',           cats:['ai','productivity'],                   href:'./topics/absurdly-powerful-chatgpt-prompts.html' },
+    { id:'best-claude-skills',        title:'Best Claude Skills (Tried 100)',              cats:['ai','tools'],                          href:'./topics/best-claude-skills.html' },
+    { id:'20-ai-concepts',            title:'20 AI Concepts in 20 Minutes',               cats:['ai'],                       href:'./topics/20-ai-concepts-in-20-minutes.html' },
+    { id:'claude-vs-chatgpt',         title:'8 Things Claude Can Do',                     cats:['ai','tools'],                          href:'./topics/claude-vs-chatgpt-features.html' },
+    { id:'monetize-ai',               title:'Monetize Your AI Skills',                    cats:['ai','career'],                         href:'./topics/monetize-ai-skills.html' },
+    { id:'claude-usage-limit',        title:'Never Hit Claude\'s Usage Limit',             cats:['claude-code','productivity'],            href:'./topics/never-hit-claude-usage-limit.html' },
+    { id:'context-engineering',       title:'Context Engineering for AI Agents',          cats:['agents'],                       href:'./topics/context-engineering-for-ai-agents.html' },
+    { id:'claude-code-backend',       title:'Claude Code for Backend Dev',                cats:['claude-code','career'],                  href:'./topics/claude-code-for-backend-development.html' },
+    { id:'claude-skills-2',           title:'Build Claude Skills 2.0',                    cats:['claude-code'],                href:'./topics/claude-skills-2-better-than-99-percent.html' },
+    { id:'notebooklm',                title:'5 New NotebookLM Features',                  cats:['ai','tools'],  href:'./topics/notebooklm-features-2026.html' },
+    { id:'graphify',                  title:'Graphify: Folder → Knowledge Graph',         cats:['ai','tools'],                          href:'./topics/graphify-folder-knowledge-graph.html' },
+    { id:'skills-vs-mcp',             title:'Skills Replaced Half My MCP Servers',        cats:['mcp','tools'],                          href:'./topics/anthropic-skills-replaced-mcp-servers.html' },
+    { id:'web-scrape-claude',         title:'Web Scrape Any Site w/ Claude',              cats:['ai','tools','productivity'],            href:'./topics/web-scrape-claude-cowork-no-coding.html' },
+    { id:'ai-auto-research',          title:'$1000+/Month Using AI Auto Research',        cats:['ai','career','finance'],                href:'./topics/ai-auto-research-1000-month.html' },
+    { id:'ai-agents-mcp-foundations', title:'AI, Agents, and MCP Foundations',            cats:['agents','mcp'],                href:'./topics/ai-agents-mcp-foundations.html' },
+    { id:'build-ai-agent',            title:'Build an AI Agent Step by Step',             cats:['agents'],                       href:'./topics/build-ai-agent-step-by-step.html' },
+    { id:'build-mcp-server',          title:'Build an MCP Server Step by Step',           cats:['mcp'],                href:'./topics/build-mcp-server-step-by-step.html' },
+    { id:'agent-memory',              title:'Agent Memory, Evals & Guardrails',           cats:['agents'],                       href:'./topics/agent-memory-evals-guardrails.html' },
+    { id:'mcp-security',              title:'MCP Security and Auth Patterns',             cats:['mcp'],                href:'./topics/mcp-security-and-auth-patterns.html' },
+    { id:'seap-terminology',          title:'SEAP Terminology Deep Dive',                 cats:['agents','career'],                href:'./topics/seap-terminology-deep-dive.html' },
+    // Python
+    { id:'python-multithreading',     title:'12 Python Multithreading Secrets',           cats:['python'],                              href:'./topics/python-multithreading-secrets.html' },
+    { id:'python-skills-2026',        title:'Python Skills That Get You Hired',           cats:['python','career'],                     href:'./topics/python-skills-for-2026.html' },
+    { id:'python-jobs-2026',          title:'20 Python Job Interviews in 2026',           cats:['python','career'],                     href:'./topics/python-jobs-in-2026.html' },
+    { id:'python-enum',               title:'The Python Enum Trick',                      cats:['python'],                              href:'./topics/python-enum-trick.html' },
+    { id:'python-projects-2026',      title:'Structure Python Projects in 2026',          cats:['python'],                              href:'./topics/how-to-structure-python-projects-in-2026.html' },
+    { id:'python-habits',             title:'9 Python Habits for Reliable Code',          cats:['python'],                              href:'./topics/python-habits-reliable-developer.html' },
+    { id:'python-tricks',             title:'8 Python Tricks That Look Senior',           cats:['python'],                              href:'./topics/python-tricks-senior-developer.html' },
+    { id:'python-automation',         title:'The Python Automation Stack',                cats:['python','tools'],                      href:'./topics/python-automation-stack.html' },
+    { id:'python-libraries',          title:'9 Python Libraries for Prod Code',           cats:['python'],                              href:'./topics/python-libraries-professional-code.html' },
+    { id:'r-vs-python',               title:'The R Resurgence vs Python in 2026',         cats:['python'],                   href:'./topics/r-resurgence-vs-python-2026.html' },
+    { id:'python-good-to-great',      title:'8 Python Skills: Good to Great',             cats:['python','career'],                     href:'./topics/python-skills-good-to-great.html' },
+    // System Design
+    { id:'google-l7-system-design',   title:'Google L7 System Design Lesson',             cats:['system-design','career'],              href:'./topics/google-l7-system-design.html' },
+    { id:'system-design-tradeoffs',   title:'7 System Design Tradeoffs (L4→L7)',          cats:['system-design','career'],              href:'./topics/system-design-tradeoffs-l4-to-l7.html' },
+    { id:'url-shortener-design',      title:'URL Shortener Design',                       cats:['system-design','project'],             href:'./topics/url-shortener/index.html' },
+    { id:'buildright',                title:'BuildRightLogistics Architecture Pack',      cats:['system-design','project'],             href:'./projects/BuildRightLogistics/docs/BuildRight-Logistics-HLD.md' },
+    { id:'engineering-papers',        title:'10 Engineering Papers (Netflix, Uber…)',     cats:['system-design'],            href:'./topics/engineering-papers-behind-netflix-uber-amazon-google.html' },
+    // Career
+    { id:'remote-jobs',               title:'High-Paying Remote Offers Without Applying', cats:['career'],                              href:'./topics/high-paying-remote-job-offers.html' },
+    // Productivity
+    { id:'note-taking',               title:'Note-Taking Switch to Learn Faster',         cats:['productivity'],             href:'./topics/note-taking-switch-learn-faster.html' },
+    { id:'terminal',                  title:'I Used the Terminal Wrong for Years',        cats:['tools','productivity'],                href:'./topics/terminal-used-wrong-for-years.html' },
+    { id:'iphone-apps',               title:'3 iPhone Apps That Improved Daily Life',     cats:['tools','productivity'],                href:'./topics/iphone-apps-made-life-easier.html' },
+    // Finance
+    { id:'financial-milestones',      title:'Financial Milestones Before 40',             cats:['finance'],                             href:'./topics/financial-milestones-before-40.html' },
+    // Learning
+    { id:'read-more-books',           title:'Why You Should Read More Books',             cats:['productivity'],             href:'./topics/why-you-should-read-more-books.html' },
+    { id:'10-books',                  title:'10 Books to Be Most Interesting Person',     cats:['productivity'],             href:'./topics/10-books-most-interesting-person.html' },
+    // Project
+    { id:'url-shortener-demo',        title:'URL Shortener Demo Project',                 cats:['project'],                             href:'./projects/url-shortener-app/index.html' },
+    // Slack
+    { id:'slack-app-dev',             title:'Slack App Development — Tech Stack',         cats:['slack'],                    href:'./topics/slack-app-development/index.html' },
+    // Interview
+    { id:'interview-bank',            title:'Interview Questions — System Design Bank',  cats:['interview','career','system-design'],  href:'./topics/interview/index.html' },
+    { id:'uber-matching',             title:'Uber: Match a Driver in Seconds',           cats:['interview','system-design','career'],  href:'./topics/interview/uber-driver-matching.html' },
+    { id:'ai-write-like-you',        title:'The Best Way to Make AI Write Like You',     cats:['ai','productivity'],                  href:'./topics/ai-write-like-you.html' },
+    { id:'how-to-do-hard-things',    title:'Do Hard Things With Zero Motivation',        cats:['productivity'],            href:'./topics/how-to-do-hard-things.html' },
+    { id:'best-claude-code-skills',  title:'Best Claude Code Skills 2026',               cats:['claude-code'],              href:'./topics/best-claude-code-skills-2026.html' },
+    { id:'python-trading-strategy',  title:'Python Trading Strategy Discovery',          cats:['python','tools'],                    href:'./topics/python-trading-strategy-discovery.html' },
+    { id:'claude-code-expert-sites', title:'6 Websites for Claude Code Mastery',         cats:['claude-code'],              href:'./topics/claude-code-expert-websites.html' },
+    { id:'beginners-agentic-ai',     title:'Beginner\'s Guide to Agentic AI',            cats:['agents'],                     href:'./topics/beginners-guide-agentic-ai.html' },
+    { id:'claude-decisions',         title:'Claude for Better Decisions',                cats:['ai','productivity'],                  href:'./topics/claude-skill-better-decisions.html' },
+    { id:'claude-connectors',        title:'The 10 Best Claude Connectors',              cats:['mcp','tools'],                        href:'./topics/claude-connectors-best.html' },
+    { id:'claude-learning',          title:'Claude Changed My Learning Approach',        cats:['ai','productivity'],       href:'./topics/claude-learning-approach.html' },
+    { id:'claudemd-mastery',         title:'CLAUDE.md Mastery 2026',                    cats:['claude-code'],                        href:'./topics/claudemd-mastery-2026.html' },
+    { id:'claude-code-commands',     title:'14 Claude Code Commands',                    cats:['claude-code'],                        href:'./topics/claude-code-commands-changed-everything.html' },
+    { id:'gpt5-vs-claude-opus4',     title:'GPT-5.5 vs Claude Opus 4.7',                cats:['ai'],                     href:'./topics/gpt5-vs-claude-opus4.html' },
+  ];
+
+  // ── Build hierarchy data ───────────────────────────────────────────────────
+  // Root → Category → Topic (placed under primary category = cats[0])
+
+  var catMap = {};
+  Object.keys(CAT).forEach(function (k) { catMap[k] = []; });
+  TOPICS.forEach(function (t) { catMap[t.cats[0]].push(t); });
+
+  // ── Populate stats bar ──────────────────────────────────────────────────
+  (function () {
+    var activeCats = Object.keys(CAT).filter(function (k) { return catMap[k].length > 0; });
+    var multiCount = TOPICS.filter(function (t) { return t.cats.length > 1; }).length;
+    var statsEl = document.getElementById('tree-stats');
+    if (!statsEl) return;
+    [
+      { num: TOPICS.length,    label: 'Topics' },
+      { num: activeCats.length, label: 'Categories' },
+      { num: multiCount,        label: 'Multi-category topics' },
+    ].forEach(function (s) {
+      var chip = document.createElement('span');
+      chip.className = 'view-stat';
+      chip.innerHTML = '<span class="view-stat-num">' + s.num + '</span>' +
+                       '<span class="view-stat-label">' + s.label + '</span>';
+      statsEl.appendChild(chip);
+    });
+  }());
+
+  var treeData = {
+    id:    'root',
+    name:  'Learning Hub',
+    type:  'root',
+    children: Object.keys(CAT)
+      .filter(function (k) { return catMap[k].length > 0; })
+      .map(function (k) {
+        return {
+          id:    'cat:' + k,
+          name:  CAT[k].label,
+          type:  'category',
+          cat:   k,
+          color: CAT[k].color,
+          children: catMap[k].map(function (t) {
+            return {
+              id:    'topic:' + t.id,
+              name:  t.title,
+              type:  'topic',
+              cats:  t.cats,
+              href:  t.href,
+              color: CAT[t.cats[0]].color,
+            };
+          })
+        };
+      })
+  };
+
+  // ── Layout constants ───────────────────────────────────────────────────────
+
+  var NODE_HEIGHT = 28;   // vertical spacing between siblings
+  var NODE_WIDTH  = 260;  // horizontal spacing between depth levels
+  var DURATION    = 400;  // transition ms
+  var MARGIN      = { top: 30, right: 200, bottom: 30, left: 80 };
+
+  // ── SVG setup ──────────────────────────────────────────────────────────────
+
+  var wrap  = document.getElementById('tree-wrap');
+  var W     = wrap.clientWidth;
+  var H     = wrap.clientHeight;
+
+  var svg = d3.select('#tree-svg')
+    .attr('width', W)
+    .attr('height', H);
+
+  var zoomG  = svg.append('g');   // zoom/pan container
+  var gLink  = zoomG.append('g').attr('class', 'links');
+  var gCross = zoomG.append('g').attr('class', 'cross-links');  // arcs layer — between links and nodes
+  var gNode  = zoomG.append('g').attr('class', 'nodes');
+
+  var zoom = d3.zoom()
+    .scaleExtent([0.15, 3])
+    .on('zoom', function (event) { zoomG.attr('transform', event.transform); });
+  svg.call(zoom).on('dblclick.zoom', null);
+
+  // ── Tree layout ────────────────────────────────────────────────────────────
+
+  var treeFn = d3.tree().nodeSize([NODE_HEIGHT, NODE_WIDTH]);
+
+  // ── Build d3 hierarchy, collapse all categories by default ────────────────
+
+  var root = d3.hierarchy(treeData);
+  root.x0 = H / 2;
+  root.y0 = 0;
+
+  // Store children in _children to collapse; null children = collapsed
+  root.descendants().forEach(function (d) {
+    d._children = d.children;
+    // Start: categories collapsed (topics hidden)
+    if (d.data.type === 'category') d.children = null;
+  });
+
+  // ── Diagonal link path (cubic Bezier, horizontal) ─────────────────────────
+
+  function diagonal(s, d) {
+    return 'M ' + s.y + ',' + s.x +
+           ' C ' + ((s.y + d.y) / 2) + ',' + s.x +
+           '   ' + ((s.y + d.y) / 2) + ',' + d.x +
+           '   ' + d.y + ',' + d.x;
+  }
+
+  // ── Tooltip ────────────────────────────────────────────────────────────────
+
+  var tip = document.getElementById('tree-tooltip');
+
+  function showTip(event, d) {
+    var html = '';
+    if (d.data.type === 'root') {
+      html = '<div class="tt-title">Learning Hub</div>' +
+             '<div class="tt-sub">' + TOPICS.length + ' topics across ' +
+             Object.keys(CAT).length + ' categories</div>';
+    } else if (d.data.type === 'category') {
+      var count = catMap[d.data.cat].length;
+      var state = d.children ? 'expanded' : 'collapsed';
+      html = '<div class="tt-title">' + d.data.name + '</div>' +
+             '<div class="tt-sub">' + count + ' topic' + (count !== 1 ? 's' : '') +
+             ' · ' + state + '</div>' +
+             '<div class="tt-action">Click to ' + (d.children ? 'collapse' : 'expand') + '</div>';
+    } else {
+      var extra = d.data.cats.slice(1).map(function (c) {
+        return (CAT[c] || {label: c}).label;
+      }).join(', ');
+      html = '<div class="tt-title">' + d.data.name + '</div>' +
+             (extra ? '<div class="tt-sub">Also in: ' + extra + '</div>' : '') +
+             '<div class="tt-action">Click to open article ↗</div>';
+    }
+    tip.innerHTML = html;
+    tip.classList.add('visible');
+    moveTip(event);
+  }
+
+  function moveTip(event) {
+    var r  = wrap.getBoundingClientRect();
+    var x  = event.clientX - r.left + 14;
+    var y  = event.clientY - r.top  - 10;
+    if (x + 260 > wrap.clientWidth)  x = event.clientX - r.left - 270;
+    if (y + 90  > wrap.clientHeight) y = event.clientY - r.top  - 100;
+    tip.style.left = x + 'px';
+    tip.style.top  = y + 'px';
+  }
+
+  function hideTip() { tip.classList.remove('visible'); }
+
+  // ── Update function (called on every expand/collapse) ─────────────────────
+
+  var uid = 0;   // unique id counter for enter nodes
+
+  function update(source) {
+    var treeNodes = treeFn(root);
+    var nodes = treeNodes.descendants();
+    var links = treeNodes.links();
+
+    // ── Links ──────────────────────────────────────────────────────────────
+
+    var link = gLink.selectAll('path.t-link')
+      .data(links, function (d) { return d.target.id || (d.target.id = ++uid); });
+
+    var linkEnter = link.enter()
+      .append('path')
+      .attr('class', 't-link')
+      .attr('d', function () {
+        var o = { x: source.x0, y: source.y0 };
+        return diagonal(o, o);
+      });
+
+    var linkUpdate = linkEnter.merge(link);
+    linkUpdate.transition().duration(DURATION)
+      .attr('d', function (d) { return diagonal(d.source, d.target); })
+      .attr('stroke', function (d) {
+        // Colour by the category of the child node
+        var cat = d.target.data.cat || (d.target.data.cats && d.target.data.cats[0]);
+        return cat ? (CAT[cat] || {color:'#cbd5e1'}).color + '88' : '#cbd5e1';
+      });
+
+    link.exit()
+      .transition().duration(DURATION)
+      .attr('d', function () {
+        var o = { x: source.x, y: source.y };
+        return diagonal(o, o);
+      })
+      .remove();
+
+    // ── Nodes ──────────────────────────────────────────────────────────────
+
+    var node = gNode.selectAll('g.t-node')
+      .data(nodes, function (d) { return d.id || (d.id = ++uid); });
+
+    var nodeEnter = node.enter()
+      .append('g')
+      .attr('class', function (d) { return 't-node ' + d.data.type; })
+      .attr('transform', function () {
+        return 'translate(' + source.y0 + ',' + source.x0 + ')';
+      })
+      .style('opacity', 0)
+      .on('click', function (event, d) {
+        event.stopPropagation();
+        if (d.data.type === 'topic') {
+          window.open(d.data.href, '_blank', 'noopener');
+        } else {
+          // toggle collapse
+          d.children = d.children ? null : d._children;
+          update(d);
+        }
+      })
+      .on('mouseover', showTip)
+      .on('mousemove', moveTip)
+      .on('mouseout',  hideTip);
+
+    // Main circle
+    nodeEnter.append('circle')
+      .attr('class', 'node-circle')
+      .attr('r', 1e-6)
+      .attr('fill', function (d) {
+        if (d.data.type === 'root')     return '#1e293b';
+        if (d.data.type === 'category') return d.data.color;
+        // topic: lighter fill
+        return d.data.color + '30';
+      })
+      .attr('stroke', function (d) {
+        if (d.data.type === 'root') return '#0f172a';
+        return d.data.color;
+      });
+
+    // Collapse ring (shows when category is collapsed and has children)
+    nodeEnter.filter(function (d) { return d.data.type === 'category'; })
+      .append('circle')
+      .attr('class', 'collapse-ring')
+      .attr('r', 1e-6)
+      .attr('stroke', function (d) { return d.data.color; });
+
+    // Inner dot for topic nodes
+    nodeEnter.filter(function (d) { return d.data.type === 'topic'; })
+      .append('circle')
+      .attr('r', 1e-6)
+      .attr('fill', function (d) { return d.data.color; })
+      .attr('pointer-events', 'none');
+
+    // Multi-cat ring (dashed amber outline for topics with extra categories)
+    nodeEnter.filter(function (d) {
+      return d.data.type === 'topic' && d.data.cats && d.data.cats.length > 1;
+    })
+      .append('circle')
+      .attr('class', 'multi-cat-ring')
+      .attr('r', 1e-6)
+      .attr('fill', 'none')
+      .attr('stroke', '#f59e0b')
+      .attr('stroke-width', 1.5)
+      .attr('stroke-dasharray', '2,2')
+      .attr('pointer-events', 'none');
+
+    // Label
+    nodeEnter.append('text')
+      .attr('x', function (d) {
+        if (d.data.type === 'root') return 25;
+        if (d.data.type === 'category') return 20;
+        return 12;
+      })
+      .attr('dy', '0.35em')
+      .text(function (d) {
+        var t = d.data.name;
+        var max = d.data.type === 'root' ? 24 : (d.data.type === 'category' ? 22 : 32);
+        return t.length > max ? t.slice(0, max - 1) + '…' : t;
+      });
+
+    // ── Merge enter + existing nodes for transition ────────────────────────
+
+    var nodeUpdate = nodeEnter.merge(node);
+
+    nodeUpdate.transition().duration(DURATION)
+      .attr('transform', function (d) { return 'translate(' + d.y + ',' + d.x + ')'; })
+      .style('opacity', 1);
+
+    nodeUpdate.select('circle.node-circle')
+      .transition().duration(DURATION)
+      .attr('r', function (d) {
+        if (d.data.type === 'root')     return 18;
+        if (d.data.type === 'category') return 13;
+        return 7;
+      });
+
+    nodeUpdate.select('circle.collapse-ring')
+      .transition().duration(DURATION)
+      .attr('r', function (d) {
+        // Show ring when collapsed (no visible children but has hidden ones)
+        return (!d.children && d._children) ? 18 : 1e-6;
+      });
+
+    nodeUpdate.select('circle:not(.node-circle):not(.collapse-ring):not(.multi-cat-ring)')
+      .transition().duration(DURATION)
+      .attr('r', function (d) { return d.data.type === 'topic' ? 3 : 1e-6; });
+
+    nodeUpdate.select('circle.multi-cat-ring')
+      .transition().duration(DURATION)
+      .attr('r', function (d) { return d.data.type === 'topic' ? 11 : 1e-6; });
+
+    node.exit()
+      .transition().duration(DURATION)
+      .attr('transform', function () { return 'translate(' + source.y + ',' + source.x + ')'; })
+      .style('opacity', 0)
+      .remove();
+
+    // Save positions for next transition
+    nodes.forEach(function (d) { d.x0 = d.x; d.y0 = d.y; });
+  }
+
+  // Initial draw — center the root node vertically
+  root.x0 = 0;
+  root.y0 = 0;
+  update(root);
+
+  // After first draw, pan so root is centred in the viewport
+  var initialTransform = d3.zoomIdentity
+    .translate(MARGIN.left, H / 2)
+    .scale(1);
+  svg.call(zoom.transform, initialTransform);
+
+  // ── Cross-link arcs ───────────────────────────────────────────────────────
+  //
+  // For every topic with secondary categories, draw a dashed curved arc from
+  // the topic node to each secondary category node — but ONLY when both
+  // endpoints are currently visible (i.e. both categories are expanded).
+  //
+  // Arc shape: a quadratic Bézier that bows outward from the tree.
+  // The control point is pushed right (outside the tree area) so arcs
+  // never overlap the main tree links.
+
+  var crossLinksVisible = false;
+
+  // Build a lookup: nodeId → current {x, y} position in tree coordinates.
+  // We read this from the live d3 nodes after each update().
+  function getPositionMap() {
+    var map = {};
+    root.descendants().forEach(function (d) {
+      map[d.data.id] = { x: d.x, y: d.y, visible: !!d.parent };
+      // A node is "visible" in the tree if it has been laid out (has a parent
+      // or is root) AND its parent's children array contains it.
+    });
+    return map;
+  }
+
+  // Returns true if the node with given data-id is currently rendered
+  // (its parent category is expanded and it appears in the live layout).
+  function isNodeVisible(dataId) {
+    var found = null;
+    root.descendants().forEach(function (d) {
+      if (d.data.id === dataId) found = d;
+    });
+    if (!found) return false;
+    // The node is visible when it appears in the current treeFn layout —
+    // i.e. its parent has .children (not null) containing it.
+    if (!found.parent) return true;   // root
+    return !!(found.parent.children);
+  }
+
+  function arcPath(sx, sy, tx, ty) {
+    // Midpoint, then push control point to the right (positive y in tree = rightward)
+    var mx = (sx + tx) / 2;
+    var my = (sy + ty) / 2;
+    // Bow amount — larger horizontal distance → larger bow
+    var bow = Math.abs(tx - ty) * 0.35 + 80;
+    var cx  = mx + bow;   // control point pushed rightward
+    var cy  = my;
+    return 'M ' + sy + ',' + sx +
+           ' Q ' + cy + ',' + cx +
+           '   ' + ty + ',' + tx;
+  }
+
+  function drawCrossLinks() {
+    gCross.selectAll('path.cross-arc').remove();
+
+    // Collect all (topic → secondary-cat) pairs where both nodes are visible
+    var arcs = [];
+    TOPICS.forEach(function (t) {
+      if (t.cats.length < 2) return;
+      var topicId = 'topic:' + t.id;
+      if (!isNodeVisible(topicId)) return;
+
+      t.cats.slice(1).forEach(function (secCat) {
+        var catId = 'cat:' + secCat;
+        if (!isNodeVisible(catId)) return;
+
+        // Find positions
+        var tNode = null, cNode = null;
+        root.descendants().forEach(function (d) {
+          if (d.data.id === topicId) tNode = d;
+          if (d.data.id === catId)   cNode = d;
+        });
+        if (!tNode || !cNode) return;
+
+        arcs.push({
+          topicTitle: t.title,
+          secCatLabel: CAT[secCat] ? CAT[secCat].label : secCat,
+          color: CAT[secCat] ? CAT[secCat].color : '#94a3b8',
+          sx: tNode.x, sy: tNode.y,
+          tx: cNode.x, ty: cNode.y,
+        });
+      });
+    });
+
+    gCross.selectAll('path.cross-arc')
+      .data(arcs)
+      .enter()
+      .append('path')
+      .attr('class', 'cross-arc')
+      .attr('d', function (d) { return arcPath(d.sx, d.sy, d.tx, d.ty); })
+      .attr('stroke', function (d) { return d.color; })
+      .on('mouseover', function (event, d) {
+        d3.select(this).classed('is-highlighted', true);
+        tip.innerHTML =
+          '<div class="tt-title">' + d.topicTitle + '</div>' +
+          '<div class="tt-sub">Cross-link → <strong>' + d.secCatLabel + '</strong></div>' +
+          '<div class="tt-action">This topic also belongs to ' + d.secCatLabel + '</div>';
+        tip.classList.add('visible');
+        moveTip(event);
+      })
+      .on('mousemove', moveTip)
+      .on('mouseout', function () {
+        d3.select(this).classed('is-highlighted', false);
+        hideTip();
+      });
+  }
+
+  function clearCrossLinks() {
+    gCross.selectAll('path.cross-arc').remove();
+  }
+
+  // Re-draw arcs after every tree update when they are visible
+  var _origUpdate = update;
+  update = function (source) {
+    _origUpdate(source);
+    if (crossLinksVisible) drawCrossLinks();
+  };
+
+  // ── Toolbar buttons ────────────────────────────────────────────────────────
+
+  document.getElementById('tc-expand-all').addEventListener('click', function () {
+    root.descendants().forEach(function (d) {
+      if (d._children) d.children = d._children;
+    });
+    update(root);
+  });
+
+  document.getElementById('tc-collapse-all').addEventListener('click', function () {
+    root.descendants().forEach(function (d) {
+      if (d.data.type === 'category') d.children = null;
+    });
+    update(root);
+  });
+
+  document.getElementById('tc-cross-links').addEventListener('click', function () {
+    crossLinksVisible = !crossLinksVisible;
+    this.classList.toggle('is-active', crossLinksVisible);
+    this.textContent = crossLinksVisible ? 'Hide cross-links' : 'Show cross-links';
+    document.getElementById('leg-cross-links').style.display = crossLinksVisible ? 'flex' : 'none';
+    if (crossLinksVisible) drawCrossLinks(); else clearCrossLinks();
+  });
+
+  document.getElementById('tc-reset-zoom').addEventListener('click', function () {
+    svg.transition().duration(DURATION)
+      .call(zoom.transform, initialTransform);
+  });
+
+  // Click on SVG background → collapse all
+  svg.on('click', function () {
+    root.descendants().forEach(function (d) {
+      if (d.data.type === 'category') d.children = null;
+    });
+    update(root);
+  });
+
+  // ── Resize ─────────────────────────────────────────────────────────────────
+
+  window.addEventListener('resize', function () {
+    W = wrap.clientWidth;
+    H = wrap.clientHeight;
+    svg.attr('width', W).attr('height', H);
+  });
+
+}());
+</script>
+</body>
+</html>

@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Topic Graph | Learning Hub</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="./chat-widget.js" defer></script>
+  <style>
+    /* ── Page shell ─────────────────────────────────────────────────────── */
+    body { margin: 0; background: #f7f7f5; }
+
+    .graph-hero {
+      padding: 2rem 0 1.2rem;
+      background: linear-gradient(135deg, #f7faf9 0%, #fafaf8 100%);
+      border-bottom: 1px solid #e7e5df;
+    }
+    .graph-hero .eyebrow { margin: 0 0 .4rem; }
+    .graph-hero h1 { margin: 0 0 .5rem; font-size: clamp(1.6rem,3vw,2.4rem); line-height:1.1; }
+    .graph-hero p  { margin: 0; color: #5f5f5b; font-family: Arial,Helvetica,sans-serif; font-size:.98rem; }
+
+    /* ── Shared view-stats bar ─────────────────────────────────────────── */
+    .view-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin-top: .9rem;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .view-stat {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      padding: .28rem .75rem;
+      border: 1px solid #e7e5df;
+      border-radius: 999px;
+      background: #fff;
+      font-size: .82rem;
+      color: #444;
+    }
+    .view-stat-num {
+      font-weight: 800;
+      color: #0f766e;
+      font-size: .9rem;
+    }
+    .view-stat-label {
+      font-weight: 600;
+      letter-spacing: .01em;
+    }
+
+    .graph-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: .7rem;
+      margin: 1rem 0 0;
+      font-family: Arial,Helvetica,sans-serif;
+    }
+    .gc-label {
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: #5f5f5b;
+    }
+    .gc-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      padding: .32rem .75rem;
+      border: 2px solid transparent;
+      border-radius: 999px;
+      font-size: .8rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 120ms, transform 120ms, box-shadow 120ms;
+      user-select: none;
+    }
+    .gc-chip:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(0,0,0,.12); }
+    .gc-chip.is-muted { opacity: .35; }
+    .gc-chip-dot {
+      width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+    }
+    .gc-divider { width: 1px; height: 1.4rem; background: #e7e5df; }
+    .gc-btn {
+      padding: .32rem .75rem;
+      border: 1px solid #e7e5df;
+      border-radius: 8px;
+      background: #fff;
+      font-family: Arial,Helvetica,sans-serif;
+      font-size: .8rem;
+      font-weight: 600;
+      color: #5f5f5b;
+      cursor: pointer;
+      transition: border-color 120ms, color 120ms;
+    }
+    .gc-btn:hover { border-color: #0f766e; color: #0f766e; }
+
+    /* ── Graph canvas ───────────────────────────────────────────────────── */
+    #graph-wrap {
+      position: relative;
+      width: 100%;
+      height: calc(100vh - 220px);
+      min-height: 500px;
+      background: #ffffff;
+      border: 1px solid #e7e5df;
+      border-radius: 16px;
+      overflow: hidden;
+      margin: 1.2rem 0 2rem;
+      box-shadow: 0 12px 28px rgba(15,23,42,.06);
+    }
+
+    svg#graph { width: 100%; height: 100%; }
+
+    /* nodes */
+    .node-category circle {
+      stroke-width: 3px;
+      cursor: pointer;
+      filter: drop-shadow(0 2px 6px rgba(0,0,0,.15));
+      transition: r .15s ease;
+    }
+    .node-category text {
+      font-family: Arial,Helvetica,sans-serif;
+      font-weight: 800;
+      font-size: 12px;
+      pointer-events: none;
+      fill: #1a1a1a;
+      paint-order: stroke;
+      stroke: rgba(255,255,255,.85);
+      stroke-width: 3px;
+    }
+
+    .node-topic circle {
+      stroke-width: 2px;
+      cursor: pointer;
+      transition: r .15s ease;
+    }
+    .node-topic text {
+      font-family: Arial,Helvetica,sans-serif;
+      font-weight: 600;
+      font-size: 10px;
+      pointer-events: none;
+      fill: #222;
+      paint-order: stroke;
+      stroke: rgba(255,255,255,.9);
+      stroke-width: 3px;
+    }
+
+    /* links */
+    .link {
+      stroke-opacity: .45;
+      fill: none;
+    }
+
+    /* tooltip */
+    #graph-tooltip {
+      position: absolute;
+      pointer-events: none;
+      padding: .55rem .8rem;
+      border: 1px solid #e7e5df;
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 8px 22px rgba(15,23,42,.13);
+      font-family: Arial,Helvetica,sans-serif;
+      font-size: .82rem;
+      max-width: 240px;
+      line-height: 1.5;
+      opacity: 0;
+      transition: opacity 120ms;
+      z-index: 10;
+    }
+    #graph-tooltip.is-visible { opacity: 1; }
+    #graph-tooltip .tt-title { font-weight: 800; color: #111; margin-bottom: .25rem; }
+    #graph-tooltip .tt-cats  { color: #5f5f5b; font-size: .76rem; }
+    #graph-tooltip .tt-hint  { color: #0f766e; font-size: .74rem; margin-top: .3rem; }
+
+    /* legend */
+    #graph-legend {
+      position: absolute;
+      bottom: .9rem;
+      left: .9rem;
+      display: flex;
+      flex-direction: column;
+      gap: .35rem;
+      padding: .6rem .75rem;
+      border: 1px solid #e7e5df;
+      border-radius: 10px;
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(4px);
+      font-family: Arial,Helvetica,sans-serif;
+      font-size: .74rem;
+    }
+    .legend-row { display: flex; align-items: center; gap: .4rem; color: #444; }
+    .legend-circle { width:12px; height:12px; border-radius:50%; flex-shrink:0; }
+    .legend-ring   { width:12px; height:12px; border-radius:50%; border:2.5px solid #888; background:transparent; flex-shrink:0; }
+
+    /* instruction banner */
+    #graph-hint {
+      position: absolute;
+      top: .75rem; left: 50%; transform: translateX(-50%);
+      padding: .3rem .8rem;
+      border-radius: 999px;
+      background: rgba(15,118,110,.1);
+      border: 1px solid rgba(15,118,110,.25);
+      color: #0f766e;
+      font-family: Arial,Helvetica,sans-serif;
+      font-size: .74rem;
+      font-weight: 600;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div class="graph-hero">
+  <div class="container">
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem;">
+      <a class="back-link" style="margin-bottom:0;" href="./index.html">← Back to Learning Hub</a>
+      <a href="./tree.html" style="display:inline-flex;align-items:center;gap:.35rem;font-family:Arial,Helvetica,sans-serif;font-size:.85rem;font-weight:700;color:#0f766e;text-decoration:none;opacity:.8;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.8">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+        Switch to Topic Tree →
+      </a>
+    </div>
+    <p class="eyebrow">Learning Project · Graph View</p>
+    <h1>Topic Knowledge Graph</h1>
+    <p>Every topic linked to its categories. Multi-category topics float between their groups.
+       Click a category node to isolate it. Drag nodes. Scroll to zoom.</p>
+
+    <div class="view-stats" id="graph-stats"></div>
+
+    <div class="graph-controls" id="graph-controls">
+      <span class="gc-label">Filter</span>
+      <!-- chips injected by JS -->
+      <span class="gc-divider"></span>
+      <button class="gc-btn" id="gc-show-all">Show all</button>
+      <button class="gc-btn" id="gc-reset-layout">Reset layout</button>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div id="graph-wrap">
+    <svg id="graph"></svg>
+    <div id="graph-tooltip"></div>
+    <div id="graph-legend">
+      <div class="legend-row"><span class="legend-circle" style="background:#0f766e;width:18px;height:18px;"></span> Category node</div>
+      <div class="legend-row"><span class="legend-ring"></span> Topic node (single category)</div>
+      <div class="legend-row">
+        <svg width="18" height="18" style="flex-shrink:0">
+          <circle cx="9" cy="9" r="6" fill="none" stroke="#888" stroke-width="2.5"/>
+          <circle cx="9" cy="9" r="3" fill="#bbb"/>
+        </svg>
+        Topic node (multi-category)
+      </div>
+    </div>
+    <div id="graph-hint">Scroll to zoom · Drag to pan · Click category to focus</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ── 1. Raw topic data (mirrors index.html cards) ───────────────────────────
+
+  var TOPICS = [
+    { id:'ai-replaced-coding',       title:'AI Replaced 80% of Coding',                    cats:['ai','career'],                      href:'./topics/ai-replaced-80-percent-of-coding.html' },
+    { id:'python-multithreading',    title:'12 Python Multithreading Secrets',              cats:['python'],                           href:'./topics/python-multithreading-secrets.html' },
+    { id:'google-l7-system-design',  title:'Google L7 System Design Lesson',               cats:['system-design','career'],            href:'./topics/google-l7-system-design.html' },
+    { id:'chatgpt-prompts',          title:'Absurdly Powerful ChatGPT Prompts',             cats:['ai','productivity'],                 href:'./topics/absurdly-powerful-chatgpt-prompts.html' },
+    { id:'python-skills-2026',       title:'Python Skills That Get You Hired in 2026',     cats:['python','career'],                   href:'./topics/python-skills-for-2026.html' },
+    { id:'financial-milestones',     title:'Financial Milestones Before 40',               cats:['finance'],                          href:'./topics/financial-milestones-before-40.html' },
+    { id:'best-claude-skills',       title:'Best Claude Skills (Tried 100)',               cats:['ai','tools'],                        href:'./topics/best-claude-skills.html' },
+    { id:'20-ai-concepts',           title:'20 AI Concepts in 20 Minutes',                 cats:['ai'],                    href:'./topics/20-ai-concepts-in-20-minutes.html' },
+    { id:'claude-vs-chatgpt',        title:'8 Things Claude Can Do (That ChatGPT Can\'t)', cats:['ai','tools'],                        href:'./topics/claude-vs-chatgpt-features.html' },
+    { id:'note-taking',              title:'Note-Taking Switch to Learn Faster',           cats:['productivity'],           href:'./topics/note-taking-switch-learn-faster.html' },
+    { id:'monetize-ai',              title:'Monetize Your AI Skills (Outside 9–5)',        cats:['ai','career'],                       href:'./topics/monetize-ai-skills.html' },
+    { id:'system-design-tradeoffs',  title:'7 System Design Tradeoffs (L4 → L7)',          cats:['system-design','career'],            href:'./topics/system-design-tradeoffs-l4-to-l7.html' },
+    { id:'python-jobs-2026',         title:'20 Python Job Interviews in 2026',             cats:['python','career'],                   href:'./topics/python-jobs-in-2026.html' },
+    { id:'python-enum',              title:'The Python Enum Trick',                        cats:['python'],                           href:'./topics/python-enum-trick.html' },
+    { id:'terminal',                 title:'I Used the Terminal Wrong for Years',          cats:['tools','productivity'],              href:'./topics/terminal-used-wrong-for-years.html' },
+    { id:'url-shortener-design',     title:'URL Shortener Design',                         cats:['system-design','project'],           href:'./topics/url-shortener/index.html' },
+    { id:'url-shortener-demo',       title:'URL Shortener Demo Project',                   cats:['project'],                          href:'./projects/url-shortener-app/index.html' },
+    { id:'buildright',               title:'BuildRightLogistics Architecture Pack',        cats:['system-design','project'],           href:'./projects/BuildRightLogistics/docs/BuildRight-Logistics-HLD.md' },
+    { id:'slack-app-dev',            title:'Slack App Development — Tech Stack',           cats:['slack'],                  href:'./topics/slack-app-development/index.html' },
+    { id:'read-more-books',          title:'Why You Should Read More Books',               cats:['productivity'],           href:'./topics/why-you-should-read-more-books.html' },
+    { id:'python-projects-2026',     title:'How to Structure Python Projects in 2026',    cats:['python'],                           href:'./topics/how-to-structure-python-projects-in-2026.html' },
+    { id:'python-habits',            title:'9 Python Habits for Reliable Code',            cats:['python'],                           href:'./topics/python-habits-reliable-developer.html' },
+    { id:'claude-usage-limit',       title:'How to Never Hit Claude\'s Usage Limit',       cats:['claude-code','productivity'],         href:'./topics/never-hit-claude-usage-limit.html' },
+    { id:'python-tricks',            title:'8 Python Tricks That Look Senior',             cats:['python'],                           href:'./topics/python-tricks-senior-developer.html' },
+    { id:'iphone-apps',              title:'3 iPhone Apps That Improved Daily Life',       cats:['tools','productivity'],              href:'./topics/iphone-apps-made-life-easier.html' },
+    { id:'python-automation',        title:'The Python Automation Stack to Adopt Early',  cats:['python','tools'],                    href:'./topics/python-automation-stack.html' },
+    { id:'python-libraries',         title:'9 Python Libraries That Signal Production Code', cats:['python'],                         href:'./topics/python-libraries-professional-code.html' },
+    { id:'remote-jobs',              title:'High-Paying Remote Offers Without Applying',  cats:['career'],                           href:'./topics/high-paying-remote-job-offers.html' },
+    { id:'r-vs-python',              title:'The R Resurgence vs Python in 2026',          cats:['python'],                 href:'./topics/r-resurgence-vs-python-2026.html' },
+    { id:'python-good-to-great',     title:'8 Python Skills That Make Code Great',        cats:['python','career'],                   href:'./topics/python-skills-good-to-great.html' },
+    { id:'engineering-papers',       title:'10 Engineering Papers Behind Netflix, Uber…', cats:['system-design'],          href:'./topics/engineering-papers-behind-netflix-uber-amazon-google.html' },
+    { id:'context-engineering',      title:'Context Engineering for AI Agents',           cats:['agents'],                    href:'./topics/context-engineering-for-ai-agents.html' },
+    { id:'claude-code-backend',      title:'Claude Code for Backend Development',         cats:['claude-code','career'],               href:'./topics/claude-code-for-backend-development.html' },
+    { id:'claude-skills-2',          title:'How to Build Claude Skills 2.0',              cats:['claude-code'],             href:'./topics/claude-skills-2-better-than-99-percent.html' },
+    { id:'notebooklm',               title:'5 New NotebookLM Features in 2026',           cats:['ai','tools'], href:'./topics/notebooklm-features-2026.html' },
+    { id:'graphify',                 title:'Graphify: Turn Any Folder Into a Knowledge Graph', cats:['ai','tools'],                   href:'./topics/graphify-folder-knowledge-graph.html' },
+    { id:'skills-vs-mcp',            title:'Skills That Replaced Half My MCP Servers',   cats:['mcp','tools'],                        href:'./topics/anthropic-skills-replaced-mcp-servers.html' },
+    { id:'web-scrape-claude',        title:'Web Scrape Any Site Using Claude Cowork',     cats:['ai','tools','productivity'],         href:'./topics/web-scrape-claude-cowork-no-coding.html' },
+    { id:'ai-auto-research',         title:'Make $1000+/Month Using AI Auto Research',   cats:['ai','career','finance'],             href:'./topics/ai-auto-research-1000-month.html' },
+    { id:'10-books',                 title:'10 Books to Be the Most Interesting Person',  cats:['productivity'],           href:'./topics/10-books-most-interesting-person.html' },
+    { id:'ai-agents-mcp-foundations',title:'AI, Agents, and MCP Foundations',            cats:['agents','mcp'],             href:'./topics/ai-agents-mcp-foundations.html' },
+    { id:'build-ai-agent',           title:'Build an AI Agent Step by Step',             cats:['agents'],                    href:'./topics/build-ai-agent-step-by-step.html' },
+    { id:'build-mcp-server',         title:'Build an MCP Server Step by Step',           cats:['mcp'],             href:'./topics/build-mcp-server-step-by-step.html' },
+    { id:'agent-memory',             title:'Agent Memory, Evals, and Guardrails',         cats:['agents'],                    href:'./topics/agent-memory-evals-guardrails.html' },
+    { id:'mcp-security',             title:'MCP Security and Auth Patterns',              cats:['mcp'],             href:'./topics/mcp-security-and-auth-patterns.html' },
+    { id:'interview-bank',           title:'Interview Questions — System Design Bank',   cats:['interview','career','system-design'], href:'./topics/interview/index.html' },
+    { id:'uber-matching',            title:'Uber: Match a Driver in Seconds at Scale',   cats:['interview','system-design','career'], href:'./topics/interview/uber-driver-matching.html' },
+    { id:'seap-terminology',         title:'SEAP Terminology — Every Term Explained',    cats:['agents','career'],             href:'./topics/seap-terminology-deep-dive.html' },
+    { id:'ai-write-like-you',        title:'The Best Way to Make AI Write Like You',     cats:['ai','productivity'],                  href:'./topics/ai-write-like-you.html' },
+    { id:'how-to-do-hard-things',    title:'Do Hard Things With Zero Motivation',        cats:['productivity'],            href:'./topics/how-to-do-hard-things.html' },
+    { id:'best-claude-code-skills',  title:'Best Claude Code Skills 2026',               cats:['claude-code'],              href:'./topics/best-claude-code-skills-2026.html' },
+    { id:'python-trading-strategy',  title:'Python Trading Strategy Discovery',          cats:['python','tools'],                    href:'./topics/python-trading-strategy-discovery.html' },
+    { id:'claude-code-expert-sites', title:'6 Websites for Claude Code Mastery',         cats:['claude-code'],              href:'./topics/claude-code-expert-websites.html' },
+    { id:'beginners-agentic-ai',     title:'Beginner\'s Guide to Agentic AI',            cats:['agents'],                     href:'./topics/beginners-guide-agentic-ai.html' },
+    { id:'claude-decisions',         title:'Claude for Better Decisions',                cats:['ai','productivity'],                  href:'./topics/claude-skill-better-decisions.html' },
+    { id:'claude-connectors',        title:'The 10 Best Claude Connectors',              cats:['mcp','tools'],                        href:'./topics/claude-connectors-best.html' },
+    { id:'claude-learning',          title:'Claude Changed My Learning Approach',        cats:['ai','productivity'],       href:'./topics/claude-learning-approach.html' },
+    { id:'claudemd-mastery',         title:'CLAUDE.md Mastery 2026',                    cats:['claude-code'],                        href:'./topics/claudemd-mastery-2026.html' },
+    { id:'claude-code-commands',     title:'14 Claude Code Commands That Changed Everything', cats:['claude-code'],                   href:'./topics/claude-code-commands-changed-everything.html' },
+    { id:'gpt5-vs-claude-opus4',     title:'GPT-5.5 vs Claude Opus 4.7',                cats:['ai'],                     href:'./topics/gpt5-vs-claude-opus4.html' },
+  ];
+
+  // ── 2. Category colour palette ─────────────────────────────────────────────
+
+  var CAT_META = {
+    'ai':            { label: 'AI',            color: '#7c3aed' },
+    'python':        { label: 'Python',        color: '#0369a1' },
+    'system-design': { label: 'System Design', color: '#c2410c' },
+    'career':        { label: 'Career',        color: '#16a34a' },
+    'productivity':  { label: 'Productivity',  color: '#be185d' },
+    'finance':       { label: 'Finance',       color: '#b45309' },
+    'tools':         { label: 'Tools',         color: '#4338ca' },
+    'learning':      { label: 'Learning',      color: '#0f766e' },
+    'project':       { label: 'Project',       color: '#475569' },
+    'interview':     { label: 'Interview',     color: '#7e22ce' },
+    'slack':         { label: 'Slack',         color: '#5b21b6' },
+  };
+
+  var ALL_CATS = Object.keys(CAT_META);
+
+  // ── Populate stats bar ────────────────────────────────────────────────────
+  (function () {
+    var multiCount = TOPICS.filter(function (t) { return t.cats.length > 1; }).length;
+    var activeCatCount = ALL_CATS.filter(function (k) {
+      return TOPICS.some(function (t) { return t.cats.indexOf(k) !== -1; });
+    }).length;
+    var statsEl = document.getElementById('graph-stats');
+    if (!statsEl) return;
+    [
+      { num: TOPICS.length,   label: 'Topics' },
+      { num: activeCatCount,  label: 'Categories' },
+      { num: multiCount,      label: 'Multi-category topics' },
+    ].forEach(function (s) {
+      var chip = document.createElement('span');
+      chip.className = 'view-stat';
+      chip.innerHTML = '<span class="view-stat-num">' + s.num + '</span>' +
+                       '<span class="view-stat-label">' + s.label + '</span>';
+      statsEl.appendChild(chip);
+    });
+  }());
+
+  // ── 3. Build nodes + links ─────────────────────────────────────────────────
+
+  var nodes = [];
+  var links = [];
+  var nodeById = {};
+
+  // Category nodes
+  ALL_CATS.forEach(function (cat) {
+    var n = { id: 'cat:' + cat, type: 'category', cat: cat,
+              label: CAT_META[cat].label, color: CAT_META[cat].color };
+    nodes.push(n);
+    nodeById[n.id] = n;
+  });
+
+  // Topic nodes + one link per category membership
+  TOPICS.forEach(function (t) {
+    var n = { id: 'topic:' + t.id, type: 'topic',
+              title: t.title, cats: t.cats, href: t.href,
+              // primary colour = first category
+              color: (CAT_META[t.cats[0]] || {color:'#94a3b8'}).color };
+    nodes.push(n);
+    nodeById[n.id] = n;
+    t.cats.forEach(function (cat) {
+      if (nodeById['cat:' + cat]) {
+        links.push({ source: 'topic:' + t.id, target: 'cat:' + cat, cat: cat });
+      }
+    });
+  });
+
+  // ── 4. SVG setup ──────────────────────────────────────────────────────────
+
+  var wrap    = document.getElementById('graph-wrap');
+  var svgEl   = document.getElementById('graph');
+  var tooltip = document.getElementById('graph-tooltip');
+
+  var W = wrap.clientWidth;
+  var H = wrap.clientHeight;
+
+  var svg = d3.select(svgEl);
+
+  // Zoom layer
+  var g = svg.append('g').attr('class', 'zoom-layer');
+
+  svg.call(
+    d3.zoom()
+      .scaleExtent([0.2, 4])
+      .on('zoom', function (event) { g.attr('transform', event.transform); })
+  );
+
+  // ── 5. Force simulation ────────────────────────────────────────────────────
+
+  var simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(function (d) { return d.id; })
+      .distance(function (d) {
+        // Multi-cat topics need more slack to sit between their categories
+        var srcNode = d.source.id ? d.source : nodeById[d.source];
+        return srcNode && srcNode.cats && srcNode.cats.length > 1 ? 120 : 90;
+      })
+      .strength(0.4))
+    .force('charge', d3.forceManyBody()
+      .strength(function (d) { return d.type === 'category' ? -600 : -180; }))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    .force('collision', d3.forceCollide()
+      .radius(function (d) { return d.type === 'category' ? 52 : 28; })
+      .strength(0.7))
+    .alphaDecay(0.025);
+
+  // ── 6. Draw links ──────────────────────────────────────────────────────────
+
+  var linkSel = g.append('g').attr('class', 'links')
+    .selectAll('line')
+    .data(links)
+    .enter().append('line')
+    .attr('class', 'link')
+    .attr('stroke', function (d) { return (CAT_META[d.cat] || {color:'#ccc'}).color; })
+    .attr('stroke-width', 1.5);
+
+  // ── 7. Draw nodes ──────────────────────────────────────────────────────────
+
+  var nodeSel = g.append('g').attr('class', 'nodes')
+    .selectAll('g')
+    .data(nodes)
+    .enter().append('g')
+    .attr('class', function (d) { return 'node-' + d.type; })
+    .call(
+      d3.drag()
+        .on('start', function (event, d) {
+          if (!event.active) simulation.alphaTarget(0.3).restart();
+          d.fx = d.x; d.fy = d.y;
+        })
+        .on('drag', function (event, d) { d.fx = event.x; d.fy = event.y; })
+        .on('end', function (event, d) {
+          if (!event.active) simulation.alphaTarget(0);
+          d.fx = null; d.fy = null;
+        })
+    );
+
+  // Category circles
+  nodeSel.filter(function (d) { return d.type === 'category'; })
+    .append('circle')
+    .attr('r', 36)
+    .attr('fill', function (d) { return d.color; })
+    .attr('stroke', function (d) { return d3.color(d.color).darker(0.5); })
+    .on('mouseover', onNodeOver)
+    .on('mousemove', onNodeMove)
+    .on('mouseout',  onNodeOut)
+    .on('click',     onCategoryClick);
+
+  nodeSel.filter(function (d) { return d.type === 'category'; })
+    .append('text')
+    .attr('text-anchor', 'middle')
+    .attr('dy', '0.35em')
+    .text(function (d) { return d.label; });
+
+  // Topic circles — multi-cat gets a split ring
+  var topicSel = nodeSel.filter(function (d) { return d.type === 'topic'; });
+
+  topicSel.append('circle')
+    .attr('r', 16)
+    .attr('fill', function (d) {
+      if (d.cats.length === 1) return d.color + '22';  // very light fill
+      // multi-cat: white fill, ring drawn separately
+      return '#ffffff';
+    })
+    .attr('stroke', function (d) { return d.color; })
+    .on('mouseover', onNodeOver)
+    .on('mousemove', onNodeMove)
+    .on('mouseout',  onNodeOut)
+    .on('click',     onTopicClick);
+
+  // Multi-cat indicator: second colour arc on inner circle
+  topicSel.filter(function (d) { return d.cats.length > 1; })
+    .append('circle')
+    .attr('r', 7)
+    .attr('fill', function (d) {
+      var c2 = d.cats[1];
+      return (CAT_META[c2] || {color:'#94a3b8'}).color;
+    })
+    .attr('stroke', '#fff')
+    .attr('stroke-width', 1.5)
+    .attr('pointer-events', 'none');
+
+  // Single-cat inner dot
+  topicSel.filter(function (d) { return d.cats.length === 1; })
+    .append('circle')
+    .attr('r', 4)
+    .attr('fill', function (d) { return d.color; })
+    .attr('pointer-events', 'none');
+
+  // Topic labels (short — truncate if needed)
+  topicSel.append('text')
+    .attr('text-anchor', 'middle')
+    .attr('dy', '2.2em')
+    .text(function (d) {
+      var t = d.title;
+      return t.length > 28 ? t.slice(0, 26) + '…' : t;
+    });
+
+  // ── 8. Tick ────────────────────────────────────────────────────────────────
+
+  simulation.on('tick', function () {
+    linkSel
+      .attr('x1', function (d) { return d.source.x; })
+      .attr('y1', function (d) { return d.source.y; })
+      .attr('x2', function (d) { return d.target.x; })
+      .attr('y2', function (d) { return d.target.y; });
+
+    nodeSel.attr('transform', function (d) {
+      return 'translate(' + d.x + ',' + d.y + ')';
+    });
+  });
+
+  // ── 9. Tooltip ─────────────────────────────────────────────────────────────
+
+  function onNodeOver(event, d) {
+    tooltip.classList.add('is-visible');
+    var html = '';
+    if (d.type === 'category') {
+      var count = TOPICS.filter(function (t) { return t.cats.indexOf(d.cat) !== -1; }).length;
+      html = '<div class="tt-title">' + d.label + '</div>' +
+             '<div class="tt-cats">' + count + ' topic' + (count !== 1 ? 's' : '') + '</div>' +
+             '<div class="tt-hint">Click to focus this category</div>';
+    } else {
+      var catLabels = d.cats.map(function (c) { return (CAT_META[c] || {label:c}).label; }).join(', ');
+      html = '<div class="tt-title">' + d.title + '</div>' +
+             '<div class="tt-cats">Categories: ' + catLabels + '</div>' +
+             '<div class="tt-hint">Click to open article</div>';
+    }
+    tooltip.innerHTML = html;
+  }
+
+  function onNodeMove(event) {
+    var rect = wrap.getBoundingClientRect();
+    var x = event.clientX - rect.left + 14;
+    var y = event.clientY - rect.top  - 10;
+    // Keep tooltip inside wrap
+    if (x + 250 > wrap.clientWidth)  x = event.clientX - rect.left - 260;
+    if (y + 80  > wrap.clientHeight) y = event.clientY - rect.top  - 90;
+    tooltip.style.left = x + 'px';
+    tooltip.style.top  = y + 'px';
+  }
+
+  function onNodeOut() {
+    tooltip.classList.remove('is-visible');
+  }
+
+  function onTopicClick(event, d) {
+    event.stopPropagation();
+    window.open(d.href, '_blank', 'noopener');
+  }
+
+  // ── 10. Category focus ────────────────────────────────────────────────────
+
+  var activeCats  = new Set(ALL_CATS);  // all visible on first load
+  var pristine    = true;               // true until the user clicks any chip/node
+
+  function applyVisibility() {
+    // A topic is visible if ANY of its cats is active
+    nodeSel.style('opacity', function (d) {
+      if (d.type === 'category') return activeCats.has(d.cat) ? 1 : 0.15;
+      var visible = d.cats.some(function (c) { return activeCats.has(c); });
+      return visible ? 1 : 0.08;
+    });
+    linkSel.style('opacity', function (d) {
+      return activeCats.has(d.cat) ? 0.45 : 0.04;
+    });
+  }
+
+  function onCategoryClick(event, d) {
+    event.stopPropagation();
+    toggleCat(d.cat);
+  }
+
+  // Click on SVG background → reset to all
+  svg.on('click', function () {
+    activeCats = new Set(ALL_CATS);
+    pristine   = true;
+    applyVisibility();
+    syncChips();
+  });
+
+  // ── 11. Control chips ─────────────────────────────────────────────────────
+
+  var controlsEl = document.getElementById('graph-controls');
+
+  ALL_CATS.forEach(function (cat) {
+    var meta = CAT_META[cat];
+    var chip = document.createElement('button');
+    chip.className = 'gc-chip';
+    chip.dataset.cat = cat;
+    chip.style.background = meta.color + '18';
+    chip.style.borderColor = meta.color + '55';
+    chip.style.color       = meta.color;
+    chip.innerHTML =
+      '<span class="gc-chip-dot" style="background:' + meta.color + '"></span>' +
+      meta.label;
+    chip.addEventListener('click', function () { toggleCat(cat); });
+    // Insert before the divider
+    var divider = controlsEl.querySelector('.gc-divider');
+    controlsEl.insertBefore(chip, divider);
+  });
+
+  // Shared selection logic for both chip clicks and category node clicks:
+  //   • First-ever click → isolate that category (clear all others)
+  //   • Subsequent clicks → add or remove the clicked category
+  //   • Clicking the last remaining active category → restore all
+  function toggleCat(cat) {
+    if (pristine) {
+      // First interaction: isolate this one category
+      activeCats = new Set([cat]);
+      pristine   = false;
+    } else if (!activeCats.has(cat)) {
+      // Category was off → add it
+      activeCats.add(cat);
+    } else if (activeCats.size === 1) {
+      // Last active category clicked again → restore everything
+      activeCats = new Set(ALL_CATS);
+      pristine   = true;
+    } else {
+      // Category was on and others are also on → remove it
+      activeCats.delete(cat);
+    }
+    applyVisibility();
+    syncChips();
+  }
+
+  function syncChips() {
+    document.querySelectorAll('.gc-chip[data-cat]').forEach(function (chip) {
+      chip.classList.toggle('is-muted', !activeCats.has(chip.dataset.cat));
+    });
+  }
+
+  document.getElementById('gc-show-all').addEventListener('click', function () {
+    activeCats = new Set(ALL_CATS);
+    pristine   = true;
+    applyVisibility();
+    syncChips();
+  });
+
+  document.getElementById('gc-reset-layout').addEventListener('click', function () {
+    nodes.forEach(function (n) { n.fx = null; n.fy = null; });
+    simulation.alpha(0.8).restart();
+  });
+
+  // ── 12. Resize ────────────────────────────────────────────────────────────
+
+  window.addEventListener('resize', function () {
+    W = wrap.clientWidth;
+    H = wrap.clientHeight;
+    simulation.force('center', d3.forceCenter(W / 2, H / 2));
+    simulation.alpha(0.3).restart();
+  });
+
+}());
+</script>
+</body>
+</html>
