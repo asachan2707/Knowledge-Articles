@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SQL Fundamentals | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Prereq · Database · 4 hours</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>SQL Fundamentals</h1>
+        <p class="summary">
+          Even when your Slack app starts on Mongo, SQL eventually shows up — for installation history,
+          audit trails, billing records, and analytics. The full SQL playlist covers schema design,
+          queries, joins, indexes, and transactions. This page is the senior cheat sheet over it.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack prereq · Tech Stack 1</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Read, write, and reason about SQL queries</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~4 hour playlist + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Postgres install store, analytics, ACID page</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          SQL is two skills: writing queries (<code>SELECT</code>, joins, aggregates) and designing
+          schemas (normalization, keys, indexes). Both matter equally — a beautiful schema with bad
+          queries is slow, and a great query against a bad schema is unmaintainable.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Where SQL fits in a Slack app:</strong> Postgres is the safe default for the
+            installation store, audit log, billing, and any data that must survive a node restart with
+            zero loss. Mongo for variable-shape state, Postgres for relational truth.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The query toolbox</h2>
+        <pre class="code-block"><code>-- 1. SELECT + WHERE
+SELECT id, team_id, scopes
+FROM   installations
+WHERE  enterprise_id IS NULL
+  AND  installed_at &gt; NOW() - INTERVAL '7 days';
+
+-- 2. JOIN
+SELECT i.team_id, COUNT(e.id) AS event_count
+FROM   installations i
+LEFT JOIN events e ON e.team_id = i.team_id
+GROUP BY i.team_id
+ORDER BY event_count DESC;
+
+-- 3. Window function
+SELECT team_id,
+       installed_at,
+       ROW_NUMBER() OVER (PARTITION BY team_id ORDER BY installed_at DESC) AS rn
+FROM   installations;
+
+-- 4. CTE
+WITH active AS (
+  SELECT team_id FROM installations WHERE uninstalled_at IS NULL
+)
+SELECT * FROM active LIMIT 100;</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Joins — the four shapes</h2>
+        <ul>
+          <li><strong>INNER JOIN</strong> — rows that match in both tables.</li>
+          <li><strong>LEFT JOIN</strong> — every row from the left, NULLs where the right is missing.</li>
+          <li><strong>RIGHT JOIN</strong> — same, mirrored.</li>
+          <li><strong>FULL OUTER JOIN</strong> — every row from both sides.</li>
+        </ul>
+        <p>
+          90% of the time you want INNER or LEFT. The trap: <code>LEFT JOIN ... WHERE right.col = ...</code>
+          silently turns into an INNER join. Push the predicate into the <code>ON</code> clause to keep
+          the LEFT semantics.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Schema design checklist</h2>
+        <ol>
+          <li><strong>Normalize first</strong> — third normal form by default. Denormalize only with a measured reason.</li>
+          <li><strong>Pick keys deliberately</strong> — surrogate <code>BIGSERIAL</code>/<code>UUID</code> primary keys; natural keys as UNIQUE indexes.</li>
+          <li><strong>Foreign keys with <code>ON DELETE</code></strong> — pick CASCADE / SET NULL / RESTRICT consciously.</li>
+          <li><strong>Constraints over comments</strong> — <code>NOT NULL</code>, <code>CHECK</code>, <code>UNIQUE</code> beat documentation.</li>
+          <li><strong>Index every JOIN and WHERE column</strong> — and verify with <code>EXPLAIN ANALYZE</code>.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Indexes that matter</h2>
+        <ul>
+          <li><strong>B-tree</strong> — default; equality + range.</li>
+          <li><strong>Composite</strong> — leftmost-prefix matters: index on <code>(team_id, ts)</code> serves <code>WHERE team_id = ?</code> and <code>WHERE team_id = ? AND ts &gt; ?</code> but not <code>WHERE ts &gt; ?</code> alone.</li>
+          <li><strong>Partial</strong> — index only the rows you query: <code>CREATE INDEX ... WHERE uninstalled_at IS NULL</code>.</li>
+          <li><strong>GIN/GiST</strong> — full-text, JSONB containment, ranges.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Transactions &amp; isolation</h2>
+        <p>
+          Wrap multi-statement writes in a transaction. Default isolation in Postgres is READ COMMITTED;
+          for "balance" / counter logic, use REPEATABLE READ or SERIALIZABLE. For bookkeeping, prefer
+          <code>UPDATE ... RETURNING</code> over read-then-write so the database does the locking.
+        </p>
+        <pre class="code-block"><code>BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Reading <code>EXPLAIN</code></h2>
+        <p>
+          The single most useful skill: read a query plan. Look for:
+        </p>
+        <ul>
+          <li><strong>Sequential Scan</strong> on a big table = missing index.</li>
+          <li><strong>Hash Join</strong> on huge inputs with no index = missing FK index.</li>
+          <li><strong>Sort</strong> with disk = work_mem too small or missing covering index.</li>
+        </ul>
+        <pre class="code-block"><code>EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM events WHERE team_id = 'T1' ORDER BY ts DESC LIMIT 50;</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Slack app data that belongs in SQL</h2>
+        <ul>
+          <li>OAuth installation history (one row per install/uninstall, never overwritten).</li>
+          <li>Audit log of admin actions and event-API deliveries (with retention TTL).</li>
+          <li>Billing / metering data — must be transactional and exact.</li>
+          <li>Workspace ↔ user ↔ role relationships in B2B apps.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Postgres is the safe default for any Slack data that must be exact and durable.</li>
+          <li>Index every JOIN/WHERE column; read <code>EXPLAIN</code> before you "optimize" anything.</li>
+          <li>Use transactions for multi-row writes; pick the right isolation level deliberately.</li>
+          <li>Constraints in the database beat comments in the codebase.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=q_JsgpiuY98&list=PL9ooVrP1hQOG6DQnOD6ujdCEchaqADfCU" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              SQL Full Course (playlist)
+            </a>
+          </li>
+          <li>
+            <a href="https://www.postgresql.org/docs/current/sql.html" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              PostgreSQL — SQL language reference
+            </a>
+          </li>
+          <li>
+            <a href="https://use-the-index-luke.com/" target="_blank" rel="noopener">
+              <span class="resource-kind guide">Guide</span>
+              Use The Index, Luke! (SQL performance)
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

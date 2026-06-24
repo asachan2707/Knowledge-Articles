@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Message Queue | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&h=700&fit=crop&auto=format&q=80" alt="Circuit board representing message flow" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Async Architecture · Concept 04 · 12 min</span></div>
+        </figure>
+        <h1>Message Queue</h1>
+        <p class="summary">Decouples producers from consumers by putting a durable buffer between them. Producers enqueue messages at their own pace; consumers process them asynchronously at theirs. The mechanism behind every reliable async workflow.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">04 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Async Architecture</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">RabbitMQ, AWS SQS, Kafka, BullMQ</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Stripe, Uber, Slack, every e-commerce platform</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Without a message queue, Service A calls Service B directly. If B is slow, A waits. If B is down, A fails. If B is overwhelmed, A gets errors. A message queue breaks every one of these coupling points: A drops a message into the queue and immediately returns. B processes it whenever it can, at its own pace, and can be restarted without losing work.</p>
+        <div class="callout"><p><strong>The core property:</strong> Durability + decoupling. The queue persists messages to disk — if the consumer crashes, messages survive and are reprocessed. The producer never needs to know if the consumer is alive, slow, or being deployed. This is what makes queues so valuable for reliability engineering.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">How It Works</span>
+        <h2>Message lifecycle and delivery semantics</h2>
+        <div class="diagram-box">
+<span class="step">Message Queue — point-to-point, competing consumers</span>
+
+<span class="hi">Producer A</span> ──▶ │                 │ ──▶ <span class="ok">Consumer 1</span>  (processes msg 1)
+<span class="hi">Producer B</span> ──▶ │   <span class="note">Queue</span>         │ ──▶ <span class="ok">Consumer 2</span>  (processes msg 2)
+<span class="hi">Producer C</span> ──▶ │  [1][2][3][4]  │ ──▶ <span class="ok">Consumer 3</span>  (processes msg 3)
+               │                 │
+<span class="dim">Each message delivered to EXACTLY ONE consumer (competing consumers pattern)</span>
+
+<span class="step">Visibility timeout — in-flight message protection</span>
+
+Consumer 1 picks msg ──▶ msg becomes <span class="warn">invisible</span> (30s visibility timeout)
+Consumer 1 processes  ──▶ <span class="ok">ACK</span> ──▶ msg deleted from queue
+Consumer 1 crashes    ──▶ timeout expires ──▶ msg becomes <span class="hi">visible again</span>
+                      ──▶ Consumer 2 picks it up ──▶ reprocessed safely
+        </div>
+
+        <p class="mini-heading">Delivery guarantees</p>
+        <table class="data-table">
+          <thead><tr><th>Guarantee</th><th>Meaning</th><th>Example systems</th></tr></thead>
+          <tbody>
+            <tr><td><strong>At-most-once</strong></td><td>Message may be lost, never duplicated. Fire and forget.</td><td>UDP, SNS without SQS</td></tr>
+            <tr><td><strong>At-least-once</strong></td><td>Message will definitely be delivered, but may be duplicated on failure/retry. Consumer must be idempotent.</td><td>SQS, RabbitMQ, Kafka</td></tr>
+            <tr><td><strong>Exactly-once</strong></td><td>Delivered once and only once. Hard to implement, expensive. Usually achieved via idempotency at the consumer, not the queue.</td><td>Kafka transactions, SQS FIFO + deduplication</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Exactly-once is a lie at the infrastructure level.</strong> Every real system is at-least-once, and you make it effectively exactly-once by building idempotent consumers. Design your consumers to handle duplicate messages safely — check if work was already done before doing it.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Producer and consumer in Node.js</h2>
+        <pre><code class="language-js">// Using BullMQ — Redis-backed job queue for Node.js
+import { Queue, Worker } from 'bullmq';
+import { createClient } from 'redis';
+
+const connection = { host: process.env.REDIS_HOST, port: 6379 };
+
+// ─── PRODUCER ─────────────────────────────────────────────────────────────
+const emailQueue = new Queue('email-notifications', { connection });
+
+// Enqueue a job — producer returns immediately, does not wait for processing
+async function sendWelcomeEmail(userId, email) {
+  await emailQueue.add(
+    'welcome',
+    { userId, email, template: 'welcome-v2' },
+    {
+      attempts: 3,                    // retry up to 3 times on failure
+      backoff: { type: 'exponential', delay: 2000 }, // 2s, 4s, 8s
+      removeOnComplete: 100,          // keep last 100 completed jobs for debugging
+      removeOnFail: 500,              // keep last 500 failed jobs for investigation
+    }
+  );
+}
+
+// ─── CONSUMER (Worker) ────────────────────────────────────────────────────
+const emailWorker = new Worker(
+  'email-notifications',
+  async (job) => {
+    const { userId, email, template } = job.data;
+
+    // Idempotency check — don't send the same email twice
+    const alreadySent = await db.query(
+      'SELECT 1 FROM sent_emails WHERE user_id=$1 AND template=$2',
+      [userId, template]
+    );
+    if (alreadySent.rows.length > 0) {
+      console.log(`Email already sent for ${userId}, skipping`);
+      return { skipped: true }; // idempotent — safe to call multiple times
+    }
+
+    await emailService.send({ to: email, template });
+
+    // Record that we sent it
+    await db.query(
+      'INSERT INTO sent_emails (user_id, template, sent_at) VALUES ($1, $2, NOW())',
+      [userId, template]
+    );
+
+    return { delivered: true };
+  },
+  {
+    connection,
+    concurrency: 5,  // process 5 jobs simultaneously per worker instance
+  }
+);
+
+emailWorker.on('completed', (job, result) => {
+  console.log(`Job ${job.id} done:`, result);
+});
+
+emailWorker.on('failed', (job, err) => {
+  console.error(`Job ${job.id} failed after ${job.attemptsMade} attempts:`, err.message);
+  // After all retries exhausted, job moves to 'failed' set
+  // Alert engineering team, investigate root cause
+});
+
+// ─── DEAD LETTER QUEUE ───────────────────────────────────────────────────
+// Messages that fail all retry attempts go to a DLQ for manual inspection
+// BullMQ keeps them in the 'failed' set — you can inspect and retry them manually
+
+async function requeueFailedJobs() {
+  const failedJobs = await emailQueue.getFailed(0, 100);
+  for (const job of failedJobs) {
+    await job.retry(); // manually requeue after investigation/fix
+  }
+}</code></pre>
+
+        <p class="mini-heading">Dead Letter Queue (DLQ) — the safety net</p>
+        <p>When a message fails all its retry attempts, it is moved to a Dead Letter Queue — a separate queue for failed messages. This prevents bad messages from blocking the main queue forever. Ops teams monitor DLQs for patterns: if 100 messages fail with the same error, that's a bug to fix, not random noise.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Queue vs Pub/Sub</span>
+        <h2>Message Queue vs Pub-Sub — the critical distinction</h2>
+        <table class="data-table">
+          <thead><tr><th></th><th>Message Queue</th><th>Pub-Sub</th></tr></thead>
+          <tbody>
+            <tr><td>Delivery model</td><td>One message → one consumer (competing consumers)</td><td>One message → all subscribers (fan-out)</td></tr>
+            <tr><td>Message durability</td><td>Until consumed and ACKed</td><td>Varies by subscription type</td></tr>
+            <tr><td>Use case</td><td>Task distribution, work queues</td><td>Event broadcasting, notifications</td></tr>
+            <tr><td>Example</td><td>Process 1 order placed → charge payment</td><td>Order placed → notify inventory + analytics + email + mobile push</td></tr>
+            <tr><td>Tools</td><td>SQS, RabbitMQ queue, BullMQ</td><td>SNS, Kafka topics, Redis Pub/Sub</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How Stripe and Uber use message queues</h2>
+        <p><strong>Stripe:</strong> Every payment event (charge.succeeded, charge.failed, invoice.paid) is published to an internal queue. Downstream services subscribe to relevant events — fraud detection, email receipts, Sigma analytics, webhook delivery. The payment processing core is decoupled from everything that happens after a payment. If the email service is down, payments still work; emails retry when it recovers.</p>
+        <p><strong>Uber:</strong> Driver location updates from millions of drivers arrive continuously. A queue buffers these updates before they flow into the dispatch system, the mapping system, and the ETA calculation service. Without the queue, a spike in driver updates would directly overwhelm the dispatch database.</p>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Producer/consumer fully decoupled — deploy independently</li><li>Natural traffic shaping — queue absorbs spikes</li><li>Built-in retry with backoff for transient failures</li><li>Dead letter queue for failure investigation</li><li>Consumer can scale independently based on queue depth</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Eventual (not immediate) processing — not for real-time requirements</li><li>Message ordering not guaranteed (unless FIFO queue)</li><li>At-least-once delivery means idempotent consumers required</li><li>Another system to operate and monitor</li><li>Debugging async failures is harder than synchronous calls</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A message queue is a durability and decoupling primitive. It lets producers and consumers operate at different speeds, scale independently, and fail independently without losing work. The price is asynchrony — processing is delayed, not immediate. Design consumers to be idempotent (safe to run twice), implement a dead letter queue for failures, and size your consumer fleet to the queue depth metric, not to the producer rate.</p>
+      </section>
+    </main>
+  </body>
+</html>

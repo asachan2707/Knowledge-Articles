@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Throttling | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1600&h=700&fit=crop&auto=format&q=80" alt="Flow control and traffic shaping" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Resilience · Concept 30 · 8 min</span></div>
+        </figure>
+        <h1>Throttling</h1>
+        <p class="summary">Slowing down excess traffic rather than rejecting it outright. The leaky bucket algorithm, queue-based throttling, and the key distinction from rate limiting — throttling shapes traffic flow while preserving request delivery; rate limiting stops it.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">30 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Resilience</span></div>
+          <div><span class="meta-label">Pair With</span><span class="meta-value">Rate Limiting (Concept 10), Circuit Breaker (Concept 07)</span></div>
+          <div><span class="meta-label">Algorithm</span><span class="meta-value">Leaky bucket, queue with concurrency limit</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Rate limiting stops requests once a quota is exceeded — the excess gets a 429 and the client must retry. Throttling takes a different approach: absorb excess requests into a queue and process them at a controlled rate. No requests are lost; they are delayed. This is the distinction between protecting a downstream service by shedding load (rate limiting) vs protecting it by smoothing load (throttling).</p>
+        <div class="callout"><p><strong>Rate limiting vs throttling:</strong> Rate limiting: "you've made 100 requests this minute — I'm returning 429, come back in 60 seconds." Throttling: "you've sent requests faster than I can process them — I'm queuing the excess and processing them at 100/minute." Rate limiting is a hard stop. Throttling is a flow regulator.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Algorithm</span>
+        <h2>Leaky bucket — smoothing bursty traffic</h2>
+        <div class="diagram-box">
+<span class="step">Leaky bucket analogy</span>
+
+Requests come in ──▶ [ bucket (queue) ] ──▶ leak out at FIXED rate ──▶ processed
+
+Bucket capacity = 100 (max queue size)
+Leak rate       = 10 req/sec (processing rate)
+
+t=0:  50 requests arrive instantly ──▶ queued     [ 50 in bucket ]
+t=0s: process 10 ──▶ delivered      [ 40 in bucket ]
+t=1s: 60 more requests arrive       [ 100 in bucket — at capacity ]
+t=1s: process 10 ──▶ delivered      [ 90 in bucket ]
+t=1s: 10 more arrive                ──▶ <span class="warn">dropped</span> (bucket full)
+
+vs Token Bucket:
+  burst of 100 can be processed instantly if bucket is full
+  Leaky bucket: always processes at fixed rate — smooths ALL bursts
+
+<span class="step">Queue-based throttling with concurrency limit</span>
+
+Concurrency limit: 10 simultaneous requests to downstream
+Queue:             unlimited (or capped) waiting requests
+
+t=0:  100 requests → 10 start immediately, 90 wait in queue
+t=0.5s: 5 complete → 5 more start from queue
+t=1.0s: 5 more complete → 5 more start
+...
+All 100 eventually processed. <span class="ok">No rejections, just queuing delay.</span>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Throttle with concurrency queue in Node.js</h2>
+        <pre><code class="language-js">// ─── CONCURRENCY-LIMITED THROTTLE ─────────────────────────────────────────
+// Process at most N tasks concurrently. Excess tasks wait in queue.
+class Throttle {
+  constructor({ concurrency = 10, queueLimit = 1000 } = {}) {
+    this.concurrency = concurrency;
+    this.queueLimit  = queueLimit;
+    this.running     = 0;
+    this.queue       = [];
+  }
+
+  async run(fn) {
+    if (this.queue.length >= this.queueLimit) {
+      throw new Error('Throttle queue full — shedding load');
+    }
+
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject });
+      this._tick();
+    });
+  }
+
+  _tick() {
+    while (this.running < this.concurrency && this.queue.length > 0) {
+      const { fn, resolve, reject } = this.queue.shift();
+      this.running++;
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => {
+        this.running--;
+        this._tick(); // Process next queued item when slot frees up
+      });
+    }
+  }
+}
+
+// Usage: throttle outgoing calls to a downstream service
+const dbThrottle = new Throttle({ concurrency: 5, queueLimit: 500 });
+
+async function queryWithThrottle(sql, params) {
+  return dbThrottle.run(() => db.query(sql, params));
+}
+
+// ─── LEAKY BUCKET RATE SHAPER (outgoing requests) ─────────────────────────
+// Shape a burst of outgoing requests to a fixed rate (N per second)
+class LeakyBucket {
+  constructor({ rate = 10, capacity = 100 }) {
+    this.rate      = rate;      // requests per second to process
+    this.capacity  = capacity;  // max queue size
+    this.queue     = [];
+    this.running   = false;
+  }
+
+  async add(fn) {
+    if (this.queue.length >= this.capacity) {
+      throw new Error('Leaky bucket overflow — request dropped');
+    }
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject });
+      if (!this.running) this._start();
+    });
+  }
+
+  _start() {
+    this.running = true;
+    const interval = 1000 / this.rate; // ms between each processed request
+
+    const tick = () => {
+      if (this.queue.length === 0) { this.running = false; return; }
+      const { fn, resolve, reject } = this.queue.shift();
+      Promise.resolve().then(fn).then(resolve, reject);
+      setTimeout(tick, interval);
+    };
+    tick();
+  }
+}
+
+// Send 100 emails at most 5 per second, regardless of how fast they arrive
+const emailBucket = new LeakyBucket({ rate: 5, capacity: 500 });
+emails.forEach(email => emailBucket.add(() => sendEmail(email)));
+
+// ─── EXPRESS MIDDLEWARE: concurrency throttle per route ───────────────────
+function throttleMiddleware({ concurrency = 20, queueLimit = 200 } = {}) {
+  const throttle = new Throttle({ concurrency, queueLimit });
+
+  return async (req, res, next) => {
+    try {
+      await throttle.run(() => new Promise((resolve) => {
+        req._throttleResolve = resolve;
+        next();
+      }));
+    } catch {
+      res.status(503).json({
+        error:      'Service temporarily overloaded',
+        retryAfter: 5,
+      });
+    }
+  };
+}
+
+// Throttle expensive endpoint to at most 10 concurrent executions
+app.post('/reports/generate', throttleMiddleware({ concurrency: 10, queueLimit: 50 }), async (req, res) => {
+  const report = await generateReport(req.body);
+  req._throttleResolve?.();
+  res.json(report);
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>AWS SDK adaptive throttling and Nginx rate shaping</h2>
+        <p><strong>AWS SDK adaptive retry mode:</strong> The AWS SDK's "adaptive" retry mode includes a client-side token bucket that throttles the rate of requests when receiving throttling responses. Rather than immediately retrying at full speed, it reduces the token refill rate until the service stops throttling. This is self-regulating throttling — it backs off proportionally to the amount of throttling received.</p>
+        <p><strong>Nginx limit_req:</strong> <code>limit_req zone=one burst=5 nodelay</code> implements leaky bucket at the reverse proxy layer. <code>burst=5</code> allows a queue of 5 excess requests. <code>nodelay</code> processes burst requests immediately (token bucket behaviour). Without <code>nodelay</code>, excess requests are delayed by the leaky bucket rate — a form of throttling, not rejection.</p>
+        <p><strong>When to throttle vs rate limit:</strong> Throttle outgoing calls to third-party APIs with quota limits — you want to use the quota evenly, not burn it in 10 seconds. Throttle expensive internal operations (report generation, ML inference) to prevent overloading the backend while still accepting all requests. Rate limit untrusted external clients to prevent abuse.</p>
+
+        <div class="insight-box"><strong>Throttling is the right tool when request loss is unacceptable.</strong> If every request represents a financial transaction, a customer order, or an irreversible action — you can't afford to return 429 and tell the client to retry. Absorb the excess in a queue and process at a safe rate. Size your queue conservatively: a queue of 10,000 items sounds safe but if each takes 1 second, the last item waits 2.7 hours. Combine throttling with sensible queue limits and a maximum wait time.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Throttling pros</h4><ul><li>No requests lost — queued, not rejected</li><li>Protects downstream from burst load</li><li>Smooths traffic — more predictable load on downstream</li><li>Better user experience than hard rejections</li></ul></div>
+          <div class="trade-col cons"><h4>Throttling cons</h4><ul><li>Adds latency — queued requests wait</li><li>Queue can grow unboundedly if not capped</li><li>Not suitable when SLA requires fast rejection (e.g. real-time bidding)</li><li>Memory overhead for large queues</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Throttling and rate limiting solve related but different problems. Rate limiting stops requests above a quota (hard reject). Throttling delays excess requests in a queue (slow, not stop). Use throttling for outgoing calls to third-party APIs with quota limits, for expensive operations where every request must eventually be processed, and for protecting internal services from burst load. Use a concurrency-limited queue as the implementation. Cap your queue size — unbounded queues become unbounded memory usage. Combine throttling with a maximum wait time so requests don't queue indefinitely.</p>
+      </section>
+    </main>
+  </body>
+</html>

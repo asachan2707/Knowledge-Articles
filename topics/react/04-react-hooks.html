@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>React Hooks | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1555099962-4199c345e5dd?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Hooks connecting pieces together" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 4 of 11 · ~35 min</span>
+          </div>
+        </figure>
+        <h1>React Hooks</h1>
+        <p class="summary">Deep dives into the six essential hooks — useState, useEffect with cleanup, useContext, useReducer for complex state, useRef for DOM access, and building your own custom hooks to share stateful logic across components.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">4 of 11</span></div>
+          <div><span class="meta-label">Concepts</span><span class="meta-value">useState · useEffect · useContext · useReducer · useRef · Custom Hooks</span></div>
+          <div><span class="meta-label">Rules</span><span class="meta-value">Only call hooks at the top level — never inside loops, conditions, or nested functions</span></div>
+        </div>
+      </header>
+
+      <!-- ─── useState ─────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Hook 1</span>
+        <h2>useState — local component state</h2>
+        <pre><code class="language-jsx">import { useState } from 'react';
+
+// Basic usage
+const [value, setValue] = useState(initialValue);
+
+// ─── Updating complex state ────────────────────────────────────────────────
+// Always produce a new object/array — never mutate in place
+function ProfileEditor({ initialUser }) {
+  const [user, setUser] = useState(initialUser);
+
+  const updateField = (field, value) =>
+    setUser(prev => ({ ...prev, [field]: value }));
+
+  const addTag = (tag) =>
+    setUser(prev => ({ ...prev, tags: [...prev.tags, tag] }));
+
+  const removeTag = (tag) =>
+    setUser(prev => ({ ...prev, tags: prev.tags.filter(t => t !== tag) }));
+
+  return (
+    &lt;form&gt;
+      &lt;input value={user.name} onChange={e =&gt; updateField('name', e.target.value)} /&gt;
+      &lt;input value={user.email} onChange={e =&gt; updateField('email', e.target.value)} /&gt;
+      {user.tags.map(tag =&gt; (
+        &lt;Badge key={tag} onRemove={() =&gt; removeTag(tag)}&gt;{tag}&lt;/Badge&gt;
+      ))}
+    &lt;/form&gt;
+  );
+}
+
+// ─── Multiple state slices vs one object ──────────────────────────────────
+// Prefer multiple small state values when they change independently
+const [firstName, setFirstName] = useState('');
+const [lastName, setLastName]   = useState('');
+const [age, setAge]             = useState(0);
+
+// Group into an object when they always change together (form data)
+const [formData, setFormData] = useState({ firstName: '', lastName: '', age: 0 });
+</code></pre>
+      </section>
+
+      <!-- ─── useEffect ────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Hook 2</span>
+        <h2>useEffect — synchronizing with external systems</h2>
+        <p>useEffect runs after render to synchronize your component with something outside React — APIs, subscriptions, timers, DOM measurements. The dependency array controls when it re-runs. The cleanup function prevents memory leaks.</p>
+        <pre><code class="language-jsx">import { useEffect, useState } from 'react';
+
+// ─── Dependency array patterns ─────────────────────────────────────────────
+useEffect(() => { /* runs after every render */ });
+useEffect(() => { /* runs once on mount */ }, []);
+useEffect(() => { /* runs when dep changes */ }, [dep]);
+
+// ─── Data fetching with cleanup (abort on unmount/dependency change) ───────
+function UserProfile({ userId }) {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+
+    fetch(`/api/users/${userId}`, { signal: controller.signal })
+      .then(res => res.json())
+      .then(data => { setUser(data); setLoading(false); })
+      .catch(err => { if (err.name !== 'AbortError') setLoading(false); });
+
+    return () => controller.abort();  // cleanup: cancel in-flight request
+  }, [userId]);  // re-run when userId changes
+
+  if (loading) return &lt;Spinner /&gt;;
+  return &lt;h1&gt;{user?.name}&lt;/h1&gt;;
+}
+
+// ─── Event listeners ──────────────────────────────────────────────────────
+function WindowSize() {
+  const [size, setSize] = useState({ width: window.innerWidth, height: window.innerHeight });
+
+  useEffect(() => {
+    const handleResize = () =>
+      setSize({ width: window.innerWidth, height: window.innerHeight });
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);  // cleanup
+  }, []); // only once
+
+  return &lt;p&gt;{size.width} × {size.height}&lt;/p&gt;;
+}
+
+// ─── Subscriptions ─────────────────────────────────────────────────────────
+function LivePrice({ symbol }) {
+  const [price, setPrice] = useState(null);
+
+  useEffect(() => {
+    const ws = new WebSocket(`wss://prices.example.com/${symbol}`);
+    ws.onmessage = (e) => setPrice(JSON.parse(e.data).price);
+    return () => ws.close();  // cleanup: close WebSocket
+  }, [symbol]);
+
+  return &lt;span&gt;{price ? `$${price}` : 'Loading...'}&lt;/span&gt;;
+}
+
+// ─── What NOT to put in useEffect ─────────────────────────────────────────
+// Transforming data for rendering → do it during render (useMemo or plain)
+// User event handlers → put directly in event handlers
+// Derived state → compute from existing state, no useEffect needed
+</code></pre>
+        <div class="warn-box"><strong>The most common useEffect mistake:</strong> missing a dependency in the array. The ESLint rule <code>react-hooks/exhaustive-deps</code> catches this. If you suppress the warning, you'll get stale closure bugs that are hard to debug. Fix the real issue instead: restructure so the function doesn't need the missing dep, or use <code>useCallback</code>.</div>
+      </section>
+
+      <!-- ─── useContext ────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Hook 3</span>
+        <h2>useContext — consuming shared values without prop drilling</h2>
+        <pre><code class="language-jsx">import { createContext, useContext, useState, useCallback } from 'react';
+
+// ─── Create a context with a type-safe custom hook ─────────────────────────
+const AuthContext = createContext(null);
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+
+  const login = useCallback(async (email, password) => {
+    const data = await apiLogin(email, password);
+    setUser(data.user);
+    localStorage.setItem('token', data.token);
+  }, []);
+
+  const logout = useCallback(() => {
+    setUser(null);
+    localStorage.removeItem('token');
+  }, []);
+
+  return (
+    &lt;AuthContext.Provider value={{ user, login, logout, isAuthenticated: !!user }}&gt;
+      {children}
+    &lt;/AuthContext.Provider&gt;
+  );
+}
+
+// Custom hook with a clear error message if used outside provider
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider');
+  return ctx;
+}
+
+// ─── Wrap your app ────────────────────────────────────────────────────────
+function App() {
+  return (
+    &lt;AuthProvider&gt;
+      &lt;Router&gt;
+        &lt;Routes&gt;{/* ... */}&lt;/Routes&gt;
+      &lt;/Router&gt;
+    &lt;/AuthProvider&gt;
+  );
+}
+
+// ─── Consume anywhere in the tree ─────────────────────────────────────────
+function TopNav() {
+  const { user, logout } = useAuth();
+  return (
+    &lt;nav&gt;
+      {user ? &lt;button onClick={logout}&gt;Log out, {user.name}&lt;/button&gt; : &lt;LoginLink /&gt;}
+    &lt;/nav&gt;
+  );
+}
+
+// ─── Performance: splitting contexts ─────────────────────────────────────
+// If a context value changes frequently, split into stable and dynamic parts
+// to avoid re-rendering all consumers on every change
+const UserContext   = createContext(null);  // changes on login/logout only
+const ThemeContext  = createContext(null);  // changes on theme toggle
+// Consumers of UserContext don't re-render when theme changes
+</code></pre>
+      </section>
+
+      <!-- ─── useReducer ────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Hook 4</span>
+        <h2>useReducer — complex state with actions</h2>
+        <p>useReducer is useState for when state logic gets complex. It is Redux-style — you dispatch actions, a pure reducer function computes the next state. Best when: multiple sub-values, or next state depends on the previous in complex ways.</p>
+        <pre><code class="language-jsx">import { useReducer } from 'react';
+
+// ─── Real example: shopping cart ─────────────────────────────────────────
+const cartReducer = (state, action) => {
+  switch (action.type) {
+    case 'ADD_ITEM': {
+      const existing = state.items.find(i => i.id === action.product.id);
+      if (existing) {
+        return {
+          ...state,
+          items: state.items.map(i =>
+            i.id === action.product.id ? { ...i, qty: i.qty + 1 } : i
+          ),
+        };
+      }
+      return { ...state, items: [...state.items, { ...action.product, qty: 1 }] };
+    }
+    case 'REMOVE_ITEM':
+      return { ...state, items: state.items.filter(i => i.id !== action.id) };
+
+    case 'UPDATE_QTY':
+      return {
+        ...state,
+        items: state.items.map(i =>
+          i.id === action.id ? { ...i, qty: Math.max(1, action.qty) } : i
+        ),
+      };
+
+    case 'CLEAR':
+      return { ...state, items: [] };
+
+    default:
+      return state;
+  }
+};
+
+const initialCart = { items: [], coupon: null };
+
+function Cart() {
+  const [cart, dispatch] = useReducer(cartReducer, initialCart);
+
+  const total = cart.items.reduce((sum, i) => sum + i.priceCents * i.qty, 0);
+
+  return (
+    &lt;div&gt;
+      {cart.items.map(item =&gt; (
+        &lt;CartRow
+          key={item.id}
+          item={item}
+          onRemove={() =&gt; dispatch({ type: 'REMOVE_ITEM', id: item.id })}
+          onQtyChange={qty =&gt; dispatch({ type: 'UPDATE_QTY', id: item.id, qty })}
+        /&gt;
+      ))}
+      &lt;p&gt;Total: ${(total / 100).toFixed(2)}&lt;/p&gt;
+      &lt;button onClick={() =&gt; dispatch({ type: 'CLEAR' })}&gt;Clear cart&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+        <div class="insight-box"><strong>When to use useReducer vs useState:</strong> useState is simpler and usually sufficient. Switch to useReducer when state has more than 3–4 sub-values that transition together, when the same state update logic is called from multiple places, or when you want to write pure tests for the state logic in isolation.</div>
+      </section>
+
+      <!-- ─── useRef ────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Hook 5</span>
+        <h2>useRef — DOM access and mutable values that don't trigger re-renders</h2>
+        <pre><code class="language-jsx">import { useRef, useEffect, useState } from 'react';
+
+// ─── DOM access ──────────────────────────────────────────────────────────
+function AutoFocusInput() {
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();  // focus on mount
+  }, []);
+
+  return &lt;input ref={inputRef} placeholder="Auto-focused" /&gt;;
+}
+
+// ─── Video player controls ─────────────────────────────────────────────
+function VideoPlayer({ src }) {
+  const videoRef = useRef(null);
+
+  const play  = () => videoRef.current?.play();
+  const pause = () => videoRef.current?.pause();
+
+  return (
+    &lt;div&gt;
+      &lt;video ref={videoRef} src={src} /&gt;
+      &lt;button onClick={play}&gt;Play&lt;/button&gt;
+      &lt;button onClick={pause}&gt;Pause&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Storing mutable values without triggering re-render ─────────────────
+// Classic use case: tracking the previous value of a prop/state
+function Counter() {
+  const [count, setCount] = useState(0);
+  const prevCountRef = useRef(0);
+
+  useEffect(() => {
+    prevCountRef.current = count;  // update after render, no re-render triggered
+  });
+
+  return (
+    &lt;p&gt;
+      Now: {count} | Before: {prevCountRef.current}
+      &lt;button onClick={() =&gt; setCount(c =&gt; c + 1)}&gt;+&lt;/button&gt;
+    &lt;/p&gt;
+  );
+}
+
+// ─── Storing timer/interval IDs ────────────────────────────────────────
+function Stopwatch() {
+  const [elapsed, setElapsed] = useState(0);
+  const intervalRef = useRef(null);
+
+  const start = () => {
+    if (intervalRef.current) return; // already running
+    intervalRef.current = setInterval(() => setElapsed(e => e + 1), 1000);
+  };
+
+  const stop = () => {
+    clearInterval(intervalRef.current);
+    intervalRef.current = null;
+  };
+
+  useEffect(() => () => clearInterval(intervalRef.current), []); // cleanup on unmount
+
+  return (
+    &lt;div&gt;
+      &lt;p&gt;{elapsed}s&lt;/p&gt;
+      &lt;button onClick={start}&gt;Start&lt;/button&gt;
+      &lt;button onClick={stop}&gt;Stop&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── CUSTOM HOOKS ──────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Hook 6</span>
+        <h2>Custom Hooks — extracting and sharing stateful logic</h2>
+        <p>A custom hook is a function that starts with <code>use</code> and calls other hooks. They are the best way to share stateful logic between components — far better than HOCs or render props for this purpose.</p>
+        <pre><code class="language-jsx">// ─── useFetch — generic data fetching ─────────────────────────────────────
+function useFetch(url) {
+  const [data, setData]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState(null);
+
+  useEffect(() => {
+    if (!url) return;
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+
+    fetch(url, { signal: controller.signal })
+      .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
+      .then(data => { setData(data); setLoading(false); })
+      .catch(err => { if (err.name !== 'AbortError') { setError(err.message); setLoading(false); } });
+
+    return () => controller.abort();
+  }, [url]);
+
+  return { data, loading, error };
+}
+
+// Usage
+function Products() {
+  const { data: products, loading, error } = useFetch('/api/products');
+  if (loading) return &lt;Spinner /&gt;;
+  if (error)   return &lt;Error message={error} /&gt;;
+  return &lt;ProductGrid products={products} /&gt;;
+}
+
+// ─── useLocalStorage — persistent state ──────────────────────────────────
+function useLocalStorage(key, initialValue) {
+  const [value, setValue] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(key)) ?? initialValue; }
+    catch { return initialValue; }
+  });
+
+  const setStoredValue = (val) => {
+    const nextVal = typeof val === 'function' ? val(value) : val;
+    setValue(nextVal);
+    localStorage.setItem(key, JSON.stringify(nextVal));
+  };
+
+  return [value, setStoredValue];
+}
+
+// Usage — drop-in replacement for useState
+const [theme, setTheme] = useLocalStorage('theme', 'light');
+
+// ─── useDebounce — delay expensive operations ─────────────────────────────
+function useDebounce(value, delay = 300) {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+
+  return debounced;
+}
+
+// Usage — delay search query before firing API call
+function SearchPage() {
+  const [query, setQuery] = useState('');
+  const debouncedQuery = useDebounce(query, 400);
+
+  const { data: results } = useFetch(
+    debouncedQuery ? `/api/search?q=${debouncedQuery}` : null
+  );
+
+  return (
+    &lt;div&gt;
+      &lt;input value={query} onChange={e =&gt; setQuery(e.target.value)} /&gt;
+      {results?.map(r =&gt; &lt;SearchResult key={r.id} result={r} /&gt;)}
+    &lt;/div&gt;
+  );
+}
+
+// ─── useOnClickOutside — close dropdowns on outside click ─────────────────
+function useOnClickOutside(ref, handler) {
+  useEffect(() => {
+    const listener = (e) => {
+      if (!ref.current || ref.current.contains(e.target)) return;
+      handler(e);
+    };
+    document.addEventListener('mousedown', listener);
+    return () => document.removeEventListener('mousedown', listener);
+  }, [ref, handler]);
+}
+
+function Dropdown({ children, content }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useOnClickOutside(ref, () => setOpen(false));
+
+  return (
+    &lt;div ref={ref}&gt;
+      &lt;button onClick={() =&gt; setOpen(o =&gt; !o)}&gt;{children}&lt;/button&gt;
+      {open &amp;&amp; &lt;div className="dropdown-content"&gt;{content}&lt;/div&gt;}
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+        <div class="insight-box"><strong>Name custom hooks with use prefix</strong> — this is not just convention, it is required. React's linter uses it to know that hook rules apply. A function called <code>useAuth</code> gets hook rule checking; a function called <code>getAuth</code> does not, even if it calls hooks inside.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 4 Takeaway</h2>
+        <p>Hooks replace the need for class components entirely. useState for local state, useEffect for synchronizing with external systems (with cleanup), useContext for shared values, useReducer for complex state machines, and useRef for DOM access or mutable values that shouldn't trigger renders. Custom hooks are how you share all this logic — extract early, name clearly, keep focused on one concern.</p>
+      </section>
+    </main>
+  </body>
+</html>

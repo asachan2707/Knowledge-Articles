@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Caching | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=1600&h=700&fit=crop&auto=format&q=80" alt="Fast data processing" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Performance · Concept 02 · 12 min</span></div>
+        </figure>
+        <h1>Caching</h1>
+        <p class="summary">Stores frequently accessed data in fast memory so it doesn't need to be recomputed or re-fetched from a slow source. One of the highest-leverage performance improvements in distributed systems — a well-placed cache can reduce database load by 80–95%.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">02 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Performance</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Twitter, Facebook, Slack, every FAANG</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">Redis, Memcached, CDN edge</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every database query takes time. Even fast queries — sub-millisecond on a local machine — become 5–20ms over the network. At 10,000 requests/second, that latency compounds into a bottleneck. Caching breaks the loop: compute the answer once, store it in memory, serve it from there for every subsequent request until the data changes.</p>
+        <div class="callout"><p><strong>The fundamental trade-off:</strong> Caching trades memory for speed, and consistency for performance. Every cache introduces the possibility of serving stale data. The design question is never "should we cache?" — it's "for how long can we tolerate stale data for this specific piece of information?"</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Cache Strategies</span>
+        <h2>The four write strategies — and when each breaks</h2>
+
+        <p class="mini-heading">Cache-Aside (Lazy Loading) — the most common</p>
+        <p>Application checks cache first. On miss: fetch from DB, populate cache, return. On hit: return from cache. The application owns the cache population logic. Cache only contains data that was actually requested — no pre-loading waste. Problem: the first request always misses (cold start). Can be mitigated with cache warming.</p>
+        <div class="diagram-box">
+<span class="step">Cache-Aside (Read)</span>
+App ──▶ <span class="hi">Cache</span> ──▶ <span class="ok">HIT</span>  ──▶ return data
+          │
+          └──▶ <span class="warn">MISS</span> ──▶ <span class="hi">DB</span> ──▶ write to cache ──▶ return data
+
+<span class="step">Cache-Aside (Write)</span>
+App ──▶ <span class="hi">DB</span> (write) ──▶ <span class="warn">invalidate cache key</span>
+<span class="dim">-- next read will repopulate from DB --</span>
+        </div>
+
+        <p class="mini-heading">Write-Through — consistency first</p>
+        <p>Every write goes to the cache and the DB synchronously before returning to the caller. Cache is always consistent with DB. Cost: write latency doubles (two writes). Good for read-heavy workloads where consistency is important. Bad for write-heavy workloads.</p>
+
+        <p class="mini-heading">Write-Behind (Write-Back) — throughput first</p>
+        <p>Write to cache immediately, persist to DB asynchronously in the background. Write latency drops to near zero. Risk: if the cache node crashes before the async write completes, data is lost. Used by databases internally (write-ahead log buffers) but risky at application level without durable queues.</p>
+
+        <p class="mini-heading">Read-Through — transparent caching</p>
+        <p>Cache sits between app and DB. On miss, the cache itself fetches from DB (not the app). The app always reads only from the cache. Simplifies application code but the cache must know how to talk to your DB — not always possible with generic solutions.</p>
+
+        <pre><code class="language-js">import { createClient } from 'redis';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+// Cache-aside pattern — the standard approach
+async function getUserById(userId) {
+  const cacheKey = `user:${userId}`;
+  const TTL_SECONDS = 300; // 5 minutes
+
+  // 1. Check cache
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    return JSON.parse(cached); // Cache HIT
+  }
+
+  // 2. Cache MISS — fetch from DB
+  const user = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
+  if (!user) return null;
+
+  // 3. Populate cache with TTL
+  await redis.setEx(cacheKey, TTL_SECONDS, JSON.stringify(user));
+
+  return user;
+}
+
+// Write-through: update DB and cache atomically
+async function updateUser(userId, data) {
+  // Write to DB first (source of truth)
+  const updated = await db.query(
+    'UPDATE users SET name=$2, email=$3 WHERE id=$1 RETURNING *',
+    [userId, data.name, data.email]
+  );
+
+  // Immediately update cache (write-through)
+  const cacheKey = `user:${userId}`;
+  await redis.setEx(cacheKey, 300, JSON.stringify(updated.rows[0]));
+
+  return updated.rows[0];
+}
+
+// Invalidation on delete
+async function deleteUser(userId) {
+  await db.query('DELETE FROM users WHERE id = $1', [userId]);
+  await redis.del(`user:${userId}`);
+}
+
+// Cache stampede prevention — only one worker fetches, others wait
+const inFlight = new Map();
+
+async function getUserSafe(userId) {
+  const cacheKey = `user:${userId}`;
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  // Prevent multiple simultaneous DB fetches for the same key
+  if (!inFlight.has(cacheKey)) {
+    inFlight.set(cacheKey,
+      db.query('SELECT * FROM users WHERE id = $1', [userId])
+        .then(async user => {
+          if (user) await redis.setEx(cacheKey, 300, JSON.stringify(user));
+          inFlight.delete(cacheKey);
+          return user;
+        })
+    );
+  }
+  return inFlight.get(cacheKey);
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Eviction Policies</span>
+        <h2>Cache eviction — what gets removed when memory fills</h2>
+        <table class="data-table">
+          <thead><tr><th>Policy</th><th>Removes</th><th>Best for</th></tr></thead>
+          <tbody>
+            <tr><td><strong>LRU</strong> (Least Recently Used)</td><td>Item not accessed for longest</td><td>General purpose — most used in production</td></tr>
+            <tr><td><strong>LFU</strong> (Least Frequently Used)</td><td>Item accessed fewest times</td><td>Skewed workloads where some keys are always hot</td></tr>
+            <tr><td><strong>TTL</strong> (Time-To-Live)</td><td>Expired items</td><td>Time-sensitive data (prices, sessions)</td></tr>
+            <tr><td><strong>FIFO</strong></td><td>Oldest written item</td><td>Simple queues, not general caches</td></tr>
+            <tr><td><strong>Random</strong></td><td>Random item</td><td>Uniform access patterns, simple implementation</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Redis default is LRU with maxmemory-policy allkeys-lru.</strong> In production, always set maxmemory explicitly and choose the right eviction policy. An unconfigured Redis will run out of memory and start refusing writes — usually discovered at 2am during a traffic spike.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>Cache stampede, thundering herd, and cold start</h2>
+
+        <p><strong>Cache stampede (thundering herd):</strong> A popular key expires. At the exact moment it expires, 10,000 requests arrive, all miss the cache simultaneously, and all fire a DB query. The database gets 10,000 simultaneous queries instead of 1. Solution: probabilistic early expiration (refresh a key slightly before it expires), mutex locks, or background refresh.</p>
+        <p><strong>Cache penetration:</strong> Attackers query for keys that don't exist in either the cache or the DB. Every request misses cache and hits the DB. Solution: cache negative results (cache null with a short TTL), or use a Bloom filter to reject requests for non-existent keys before hitting DB.</p>
+        <p><strong>Cache avalanche:</strong> Many keys are set with the same TTL, causing a mass expiration event. The cache empties in waves, flooding the DB. Solution: add jitter to TTLs — instead of exactly 300s, use 300 + random(0, 60).</p>
+
+        <pre><code class="language-js">// TTL jitter — prevents cache avalanche
+function setWithJitter(redis, key, value, baseTTL) {
+  const jitter = Math.floor(Math.random() * (baseTTL * 0.2)); // ±20% jitter
+  return redis.setEx(key, baseTTL + jitter, JSON.stringify(value));
+}
+
+// Bloom filter for cache penetration prevention (using Redis SETBIT)
+async function mightExist(userId) {
+  // In production use a proper Bloom filter library like 'bloom-filters'
+  // This is a conceptual illustration
+  const bits = hashToBits(userId); // multiple hash functions → bit positions
+  const results = await Promise.all(bits.map(bit => redis.getBit('users:bloom', bit)));
+  return results.every(b => b === 1); // All bits set = probably exists
+}
+
+async function getUserSafe(userId) {
+  // Fast rejection: if Bloom filter says definitely not in DB, don't even try
+  if (!(await mightExist(userId))) {
+    return null; // Definitely doesn't exist — no DB query
+  }
+  return getUserById(userId); // Might exist — proceed with cache-aside
+}</code></pre>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Massive latency reduction (DB: 5ms → Cache: 0.2ms)</li><li>DB load reduction (80–95% hit rate typical)</li><li>Throughput multiplier — same DB handles 10× more app servers</li><li>Resilience — app survives temporary DB outages if cache is warm</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Stale data — always a consistency gap</li><li>Invalidation complexity — especially with relational data</li><li>Cache stampede risk on popular key expiry</li><li>Another system to operate, monitor, and scale</li><li>Memory is expensive at scale</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How production teams use caching</h2>
+        <p><strong>Twitter:</strong> Stores timelines in Redis. Every user's home timeline is a pre-computed list of tweet IDs stored in a sorted set. When you open Twitter, your timeline is read from Redis (sub-millisecond), not assembled from DB joins. New tweets from people you follow are fanned out and written to all followers' Redis timelines. This is called "fanout-on-write" or the "push model".</p>
+        <p><strong>Facebook:</strong> Uses Memcached as its L1 cache (within a data center region) and TAO (their custom graph cache) for social graph data. The infamous "look-aside" cache paper from Facebook describes how they handle cache invalidation at billions-of-users scale using a lease system to prevent thundering herd.</p>
+        <p><strong>Stripe:</strong> Idempotency keys are stored in Redis with a TTL. Every payment request carries an idempotency key; Stripe caches the result so duplicate requests return the cached result instead of charging twice.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Caching is not one thing — it is a family of strategies, each with different consistency, complexity, and durability trade-offs. Cache-aside with TTL-based expiration and jitter handles 90% of cases. The hard problems are invalidation (when does stale become wrong?), stampede prevention (what happens when a hot key expires?), and penetration (what happens when attackers query missing keys?). Design your eviction policy and failure modes before your cache goes to production.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The LLM Backbone: Building a RAG-Based GPT from Scratch | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract neural network visualization" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · RAG · Build · 22 min read</span>
+          </div>
+        </figure>
+        <h1>The LLM Backbone: Building a RAG-Based GPT from Scratch</h1>
+        <p class="summary">
+          A ground-up walkthrough of every component needed to build a custom GPT-style assistant
+          over your own data — ingestion, chunking, embedding, vector storage, retrieval, re-ranking,
+          and generation with citations. By the end you have a running Node.js service, not just theory.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">kuriko-iwai.com/courses/llm-backbone-custom-gpt</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Node.js · Anthropic SDK · pgvector · Voyage embeddings</span></div>
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          "Building a RAG system" sounds like one step. In practice it is eight: document ingestion,
+          cleaning, chunking, embedding, indexing, query processing, retrieval, and generation. Each
+          step has configuration decisions that compound — a bad chunking strategy quietly degrades every
+          answer the system gives, forever. This guide builds each step from scratch and explains the
+          decisions at each layer.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> A RAG-based GPT is a pipeline with eight stages. Understanding
+          each stage independently lets you debug, improve, and replace components without touching the rest.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">System architecture</span>
+        <h2>The eight-stage pipeline</h2>
+        <pre class="code-block"><code>/*
+  RAG Pipeline — component map
+
+  OFFLINE (indexing) pipeline — runs once or on update:
+  ┌──────────┐   ┌─────────┐   ┌──────────┐   ┌─────────────┐   ┌──────────────┐
+  │ Ingest   │──▶│  Clean  │──▶│  Chunk   │──▶│   Embed     │──▶│  Index/Store │
+  │ (load    │   │ (strip  │   │ (split   │   │ (voyage-3   │   │  (pgvector + │
+  │ docs)    │   │  noise) │   │  text)   │   │  embeddings)│   │   tsvector)  │
+  └──────────┘   └─────────┘   └──────────┘   └─────────────┘   └──────────────┘
+
+  ONLINE (query) pipeline — runs on every user query:
+  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐
+  │ Query    │──▶│ Retrieve │──▶│ Re-rank  │──▶│  Generate    │
+  │ (expand  │   │ (hybrid  │   │ (cross   │   │  (Claude +   │
+  │  + embed)│   │  search) │   │ encoder) │   │   citations) │
+  └──────────┘   └──────────┘   └──────────┘   └──────────────┘
+*/</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Stage 1–2: Ingest &amp; Clean</span>
+        <h2>Loading and normalising documents</h2>
+        <pre class="code-block"><code>// document-loader.js
+import fs from 'fs/promises';
+import path from 'path';
+
+// Supported loaders by extension
+const LOADERS = {
+  '.txt':  content => content,
+  '.md':   content => content.replace(/^#+\s/gm, '').replace(/\*\*/g, ''),
+  '.json': content => {
+    const obj = JSON.parse(content);
+    // Flatten JSON to readable text for embedding
+    return JSON.stringify(obj, null, 2);
+  },
+};
+
+async function loadDocument(filePath) {
+  const ext     = path.extname(filePath).toLowerCase();
+  const loader  = LOADERS[ext];
+  if (!loader) throw new Error(`Unsupported file type: ${ext}`);
+
+  const raw = await fs.readFile(filePath, 'utf8');
+  return {
+    id:      path.basename(filePath, ext),
+    source:  filePath,
+    content: clean(loader(raw)),
+  };
+}
+
+function clean(text) {
+  return text
+    .replace(/\r\n/g, '\n')                   // normalise line endings
+    .replace(/\n{3,}/g, '\n\n')               // collapse excessive blank lines
+    .replace(/[ \t]+/g, ' ')                  // normalise whitespace
+    .replace(/https?:\/\/\S+/g, '[URL]')      // redact URLs (optional)
+    .trim();
+}
+
+// Load a whole directory
+async function loadDirectory(dir) {
+  const files = await fs.readdir(dir);
+  return Promise.all(
+    files
+      .filter(f => Object.keys(LOADERS).includes(path.extname(f)))
+      .map(f => loadDocument(path.join(dir, f)))
+  );
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Stage 3: Chunk</span>
+        <h2>Splitting text into retrievable units</h2>
+        <pre class="code-block"><code>// chunker.js — recursive splitter with overlap
+function chunkText(text, {
+  maxLen  = 800,   // ~600 tokens at 0.75 tok/word
+  overlap = 100,
+  sep     = ['\n\n', '\n', '. ', ' '],
+} = {}) {
+  if (text.length <= maxLen) return [text];
+
+  const separator = sep.find(s => text.includes(s)) ?? '';
+  const parts     = separator ? text.split(separator) : [text];
+
+  const chunks = [];
+  let   current = '';
+
+  for (const part of parts) {
+    const candidate = current ? current + separator + part : part;
+
+    if (candidate.length > maxLen && current) {
+      chunks.push(current.trim());
+      // Overlap: keep tail of previous chunk
+      const tail = current.slice(-overlap);
+      current    = tail + separator + part;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+// Chunk all loaded documents and attach metadata
+function chunkDocuments(docs, options = {}) {
+  return docs.flatMap(doc =>
+    chunkText(doc.content, options).map((chunk, i) => ({
+      id:          `${doc.id}::${i}`,
+      doc_id:      doc.id,
+      source:      doc.source,
+      chunk_index: i,
+      content:     chunk,
+    }))
+  );
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Stage 4–5: Embed &amp; Index</span>
+        <h2>Generating vectors and storing them</h2>
+        <pre class="code-block"><code>// embedder.js — Voyage embeddings via Anthropic
+import Anthropic from '@anthropic-ai/sdk';
+import postgres   from 'postgres';
+
+const client = new Anthropic();
+const sql    = postgres(process.env.DATABASE_URL);
+
+// Generate embeddings in batches of 96
+async function embedBatch(texts) {
+  const all = [];
+  for (let i = 0; i < texts.length; i += 96) {
+    const batch = texts.slice(i, i + 96);
+    const res   = await client.embeddings.create({
+      model:      'voyage-3-large',
+      input:      batch,
+      input_type: 'document',
+    });
+    all.push(...res.data.map(d => d.embedding));
+  }
+  return all;
+}
+
+// Store chunks + vectors in Postgres (pgvector)
+async function indexChunks(chunks) {
+  const texts      = chunks.map(c => c.content);
+  const embeddings = await embedBatch(texts);
+
+  const rows = chunks.map((c, i) => ({
+    id:          c.id,
+    doc_id:      c.doc_id,
+    source:      c.source,
+    chunk_index: c.chunk_index,
+    content:     c.content,
+    embedding:   JSON.stringify(embeddings[i]), // pgvector accepts JSON array
+  }));
+
+  await sql`
+    INSERT INTO chunks ${sql(rows, 'id','doc_id','source','chunk_index','content','embedding')}
+    ON CONFLICT (id) DO UPDATE SET
+      content   = EXCLUDED.content,
+      embedding = EXCLUDED.embedding::vector,
+      indexed_at = now()
+  `;
+
+  // Update BM25 full-text search vector
+  await sql`
+    UPDATE chunks SET search_vector = to_tsvector('english', content)
+    WHERE doc_id = ANY(${[...new Set(chunks.map(c => c.doc_id))]})
+  `;
+
+  console.log(`Indexed ${rows.length} chunks`);
+}</code></pre>
+
+        <pre class="code-block"><code>-- schema.sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS chunks (
+  id           TEXT PRIMARY KEY,
+  doc_id       TEXT NOT NULL,
+  source       TEXT,
+  chunk_index  INT,
+  content      TEXT NOT NULL,
+  embedding    vector(1024),
+  search_vector tsvector,
+  indexed_at   TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+CREATE INDEX ON chunks USING gin (search_vector);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Stage 6–7: Retrieve &amp; Re-rank</span>
+        <h2>Finding the right chunks at query time</h2>
+        <pre class="code-block"><code>// retriever.js
+import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+async function embedQuery(query) {
+  const res = await client.embeddings.create({
+    model:      'voyage-3-large',
+    input:      [query],
+    input_type: 'query', // different input_type for queries vs documents
+  });
+  return res.data[0].embedding;
+}
+
+// Hybrid: dense + sparse, merged via RRF
+async function retrieve(query, topK = 20) {
+  const qVec = await embedQuery(query);
+
+  const [dense, sparse] = await Promise.all([
+    sql`
+      SELECT id, content, source,
+             1 - (embedding <=> ${JSON.stringify(qVec)}::vector) AS score
+      FROM chunks
+      ORDER BY embedding <=> ${JSON.stringify(qVec)}::vector
+      LIMIT ${topK * 2}
+    `,
+    sql`
+      SELECT id, content, source,
+             ts_rank(search_vector, plainto_tsquery('english', ${query})) AS score
+      FROM chunks
+      WHERE search_vector @@ plainto_tsquery('english', ${query})
+      ORDER BY score DESC
+      LIMIT ${topK * 2}
+    `,
+  ]);
+
+  return rrf(dense, sparse, topK);
+}
+
+function rrf(a, b, topK, k = 60) {
+  const scores = new Map();
+  const docs   = new Map();
+
+  const addScores = (results) =>
+    results.forEach((r, rank) => {
+      scores.set(r.id, (scores.get(r.id) ?? 0) + 1 / (k + rank + 1));
+      docs.set(r.id, r);
+    });
+
+  addScores(a);
+  addScores(b);
+
+  return [...scores.entries()]
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, topK)
+    .map(([id, score]) => ({ ...docs.get(id), fusionScore: score }));
+}
+
+// Re-rank with Cohere for precision
+async function rerank(query, candidates, topN = 5) {
+  const res = await fetch('https://api.cohere.ai/v1/rerank', {
+    method:  'POST',
+    headers: { Authorization: `Bearer ${process.env.COHERE_API_KEY}`, 'Content-Type': 'application/json' },
+    body:    JSON.stringify({
+      model:     'rerank-english-v3.0',
+      query,
+      documents: candidates.map(c => c.content),
+      top_n:     topN,
+    }),
+  }).then(r => r.json());
+
+  return res.results.map(r => ({ ...candidates[r.index], rerankScore: r.relevance_score }));
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Stage 8: Generate</span>
+        <h2>Answer with citations</h2>
+        <pre class="code-block"><code>// generator.js
+import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+async function generate(query, chunks) {
+  const context = chunks
+    .map((c, i) => `[${i + 1}] ${c.source}\n${c.content}`)
+    .join('\n\n---\n\n');
+
+  const response = await client.messages.create({
+    model:      'claude-sonnet-4-6',
+    max_tokens: 2048,
+    system: `You are a factual assistant. Rules:
+1. Only use the provided sources. Never use outside knowledge.
+2. Cite every claim: [1], [2], etc.
+3. If the answer is not in the sources, say so explicitly.
+4. Be concise and direct.`,
+    messages: [{ role: 'user', content: `Sources:\n${context}\n\nQuestion: ${query}` }],
+  });
+
+  return {
+    answer:  response.content[0].text,
+    sources: chunks.map((c, i) => ({ ref: i + 1, source: c.source, excerpt: c.content.slice(0, 200) })),
+    usage:   response.usage,
+  };
+}
+
+// Full pipeline entry point
+export async function ask(question) {
+  const candidates = await retrieve(question, 20);
+  const reranked   = await rerank(question, candidates, 5);
+  return generate(question, reranked);
+}
+
+// Usage
+const result = await ask('What are the main pricing tiers for the product?');
+console.log(result.answer);
+console.log('Sources:', result.sources);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">HTTP API layer</span>
+        <h2>Wrapping it in an Express endpoint</h2>
+        <pre class="code-block"><code>// server.js
+import express  from 'express';
+import { ask }  from './generator.js';
+import { indexChunks } from './embedder.js';
+import { loadDirectory, chunkDocuments } from './document-loader.js';
+
+const app = express();
+app.use(express.json());
+
+// Query endpoint
+app.post('/ask', async (req, res) => {
+  const { question } = req.body;
+  if (!question) return res.status(400).json({ error: 'question required' });
+
+  try {
+    const result = await ask(question);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Re-index endpoint (admin)
+app.post('/index', async (req, res) => {
+  const { dir } = req.body;
+  const docs   = await loadDirectory(dir);
+  const chunks = chunkDocuments(docs, { maxLen: 800, overlap: 100 });
+  await indexChunks(chunks);
+  res.json({ indexed: chunks.length });
+});
+
+app.listen(3000, () => console.log('RAG API listening on :3000'));</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A production-ready RAG system is eight discrete stages: ingest, clean, chunk, embed, index,
+          retrieve, re-rank, generate. Each stage is independently replaceable. The most impactful
+          improvements come from chunking strategy (affects retrieval quality) and the re-ranking step
+          (converts recall into precision). Citations are non-negotiable for trust — ask the model to
+          cite or you will get confident hallucination at scale.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

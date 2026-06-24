@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SOLID Principles | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · OOP · 30 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>SOLID Principles</h1>
+        <p class="summary">
+          The five SOLID principles — Single Responsibility, Open/Closed, Liskov Substitution, Interface
+          Segregation, Dependency Inversion — are the language we use to describe well-structured object
+          code. They show up the moment your Slack app has more than one command.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Refactor confidently using a shared vocabulary</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~30 min</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">Multi-feature Bolt apps, services, repositories</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          SOLID isn't a set of rules to grade code against. It's a vocabulary that lets reviewers say
+          "this class has two reasons to change" or "this hard-codes the dependency" instead of
+          gesturing at a pile of code and saying "this feels off."
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Practical use:</strong> when reviewing your own Slack app PR, ask "what would I
+            need to change here to add a second slash command?" If the answer is "rewrite half the
+            module," SOLID is the toolkit for fixing that.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>S — Single Responsibility</h2>
+        <p>A class/module should have one reason to change.</p>
+        <p class="code-caption">Bad: a handler that does everything</p>
+        <pre class="code-block"><code>app.command('/standup', async ({ command, ack, client }) =&gt; {
+  await ack();
+  // 1. parse input
+  const project = command.text.split(' ')[0];
+  // 2. fetch data
+  const items = await fetch(`https://jira/api/${project}`).then(r =&gt; r.json());
+  // 3. render UI
+  const blocks = items.map(i =&gt; ({ type: 'section', text: { type: 'mrkdwn', text: i.title } }));
+  // 4. post
+  await client.chat.postMessage({ channel: command.channel_id, blocks });
+});</code></pre>
+        <p class="code-caption">Better: split responsibilities</p>
+        <pre class="code-block"><code>// 1. parser.ts
+export const parseStandupArgs = (text) =&gt; ({ project: text.split(' ')[0] });
+
+// 2. jira-service.ts
+export const fetchStandupItems = (project) =&gt; fetch(`https://jira/api/${project}`).then(r =&gt; r.json());
+
+// 3. blocks.ts
+export const standupBlocks = (items) =&gt; items.map(i =&gt; ({ type: 'section', text: { type: 'mrkdwn', text: i.title } }));
+
+// 4. command.ts (the only Slack-aware file)
+app.command('/standup', async ({ command, ack, client }) =&gt; {
+  await ack();
+  const { project } = parseStandupArgs(command.text);
+  const items = await fetchStandupItems(project);
+  await client.chat.postMessage({ channel: command.channel_id, blocks: standupBlocks(items) });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>O — Open/Closed</h2>
+        <p>Modules should be open for extension, closed for modification.</p>
+        <p>
+          For a Slack app, this often means: instead of growing one big <code>handleAction</code>
+          switch statement, register many small <code>app.action(id, handler)</code> entries. Adding a
+          new button means adding a new file, not editing the dispatcher.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>L — Liskov Substitution</h2>
+        <p>
+          Subtypes must be usable wherever their base type is expected, without surprising the caller.
+        </p>
+        <p>
+          The classic Slack-app sin: an <code>InstallationStore</code> implementation that throws on
+          <code>delete</code> "because we never delete." Now no caller can rely on the interface.
+          Either implement it correctly or document the limitation in the type.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>I — Interface Segregation</h2>
+        <p>
+          Many small interfaces beat one fat interface. Don't force a class to implement methods it
+          doesn't need.
+        </p>
+        <p>
+          Example: instead of one <code>SlackClient</code> that has every Web API method, your service
+          can take just a <code>{ chat: { postMessage } }</code> shape. Easy to mock in tests, easy to
+          replace.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>D — Dependency Inversion</h2>
+        <p>
+          High-level modules should not depend on low-level modules. Both should depend on abstractions.
+        </p>
+        <p>
+          In a Slack app: <strong>pass the Web API client into your service</strong> rather than
+          importing the global one. Same for the database. Your service no longer "knows" about Slack
+          or Mongo — it just uses the interfaces it was handed.
+        </p>
+        <pre class="code-block"><code>// service depends on an interface, not a concrete client
+export class StandupService {
+  constructor(private slack: { chat: { postMessage: Function } },
+              private repo: { save: Function }) {}
+  async run(channel, items) {
+    await this.repo.save({ channel, items });
+    await this.slack.chat.postMessage({ channel, text: '...' });
+  }
+}
+
+// in tests, pass mocks. in app, pass real clients. no code change in the service.</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>SOLID smell test</h2>
+        <p>Run through these questions before merging:</p>
+        <ul>
+          <li>If I add a second feature, do I edit existing code or just add new files? <em>(O)</em></li>
+          <li>Does this module have more than one reason to change? <em>(S)</em></li>
+          <li>Can I unit-test this without instantiating Slack/DB clients? <em>(D)</em></li>
+          <li>Does any subclass make the parent's contract weaker? <em>(L)</em></li>
+          <li>Does any consumer have to implement methods it doesn't need? <em>(I)</em></li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>SOLID is a code-review vocabulary, not a grade.</li>
+          <li>Pass dependencies in (DI) — your services become unit-testable for free.</li>
+          <li>Many small action handlers &gt; one big dispatcher (OCP).</li>
+          <li>Keep Slack-aware code in command/view/event files; pure logic everywhere else.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=kF7rQmSRlq0" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              SOLID Principles (ByteByteGo)
+            </a>
+          </li>
+          <li>
+            <a href="https://en.wikipedia.org/wiki/SOLID" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              SOLID — Wikipedia
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

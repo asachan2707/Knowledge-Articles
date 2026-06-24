@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Slack APIs (Web + Events) | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Slack messaging app open on laptop and phone"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Core · API · 60 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@austindistel" target="_blank" rel="noopener">Austin Distel</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Slack APIs — Web API &amp; Events API</h1>
+        <p class="summary">
+          Slack exposes two main API surfaces: the <strong>Web API</strong> (you call Slack) and the
+          <strong>Events API</strong> (Slack calls you). Add Socket Mode as a third transport for the
+          inbound side. This page covers all three and the patterns that keep them reliable.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack core</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Reliably read &amp; write across Slack APIs</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~60 min read</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Bolt internals, custom integrations</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Almost every method Bolt exposes is a thin wrapper over one of these APIs. Knowing the raw
+          shapes — request, response, error codes — makes you faster at debugging and unblocks you when
+          you outgrow the SDK.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Two directions:</strong> Web API (HTTP request → JSON response, ~250 methods).
+            Events API (Slack POSTs JSON to your URL, or pushes via Socket Mode WebSocket).
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Web API — anatomy</h2>
+        <p>
+          All endpoints are <code>https://slack.com/api/&lt;method&gt;</code>, take POST with
+          <code>application/json</code> or <code>application/x-www-form-urlencoded</code>, and return
+          <code>{ ok: boolean, error?: string, ... }</code>. Authentication is via the
+          <code>Authorization: Bearer xoxb-…</code> header.
+        </p>
+        <pre class="code-block"><code>// Raw fetch
+const res = await fetch('https://slack.com/api/chat.postMessage', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+    'Content-Type': 'application/json; charset=utf-8',
+  },
+  body: JSON.stringify({ channel: 'C1', text: 'hi' }),
+});
+const data = await res.json();
+if (!data.ok) throw new Error(data.error);
+
+// Or, the typed SDK client (preferred)
+import { WebClient } from '@slack/web-api';
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
+await slack.chat.postMessage({ channel: 'C1', text: 'hi' });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Method families to know</h2>
+        <ul>
+          <li><strong>chat.*</strong> — postMessage, postEphemeral, update, delete, scheduleMessage.</li>
+          <li><strong>conversations.*</strong> — list, info, history, members, replies, open, join, invite, archive.</li>
+          <li><strong>users.*</strong> — info, list, lookupByEmail, profile.get/set.</li>
+          <li><strong>views.*</strong> — open, push, update, publish (for App Home).</li>
+          <li><strong>files.*</strong> — uploadV2, info, list, delete.</li>
+          <li><strong>reactions.*</strong> — add, remove, get.</li>
+          <li><strong>oauth.v2.*</strong> — access (token exchange), exchange (for refresh tokens).</li>
+          <li><strong>auth.*</strong> — test (verify a token), revoke.</li>
+          <li><strong>admin.*</strong> — Enterprise Grid admin actions (separate scope set).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Pagination — the cursor pattern</h2>
+        <p>
+          List endpoints return a <code>response_metadata.next_cursor</code> field. Pass it back as
+          <code>cursor</code> until it's empty. Always set <code>limit</code> (max 200) explicitly.
+        </p>
+        <pre class="code-block"><code>let cursor;
+const channels = [];
+do {
+  const page = await slack.conversations.list({ limit: 200, cursor, exclude_archived: true });
+  channels.push(...page.channels);
+  cursor = page.response_metadata?.next_cursor;
+} while (cursor);
+
+// Or use the SDK's helper:
+for await (const page of slack.paginate('conversations.list', { limit: 200 })) {
+  channels.push(...page.channels);
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Events API — what you receive</h2>
+        <p>
+          Events are bot-scope events your app subscribed to in the manifest. Each delivery is a JSON
+          POST to your event URL containing:
+        </p>
+        <pre class="code-block"><code>{
+  "token": "...",                 // verification token (deprecated, prefer signing)
+  "team_id": "T1",
+  "api_app_id": "A1",
+  "event": {
+    "type": "message",
+    "user": "U1",
+    "text": "hello",
+    "ts": "1715000000.000100",
+    "channel": "C1",
+    "event_ts": "1715000000.000100"
+  },
+  "type": "event_callback",
+  "event_id": "Ev123",
+  "event_time": 1715000000
+}</code></pre>
+        <p>
+          You must respond with 200 OK within 3 seconds — same rule as interactivity. Slack retries
+          failed deliveries with backoff, so your handler must be <strong>idempotent</strong>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>URL verification challenge</h2>
+        <p>
+          When you set or change your event URL, Slack sends a one-time
+          <code>{ "type": "url_verification", "challenge": "…" }</code>. You must echo the
+          <code>challenge</code> back. Bolt handles this for you; for a custom receiver you must do it.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Socket Mode — WebSocket transport</h2>
+        <p>
+          Instead of receiving HTTP POSTs, your app opens a WebSocket to Slack and receives events as
+          frames. No public URL required — perfect for local dev, behind-the-firewall apps, and small
+          internal tools. Requires an <strong>app-level token</strong> (<code>xapp-…</code>) with the
+          <code>connections:write</code> scope.
+        </p>
+        <pre class="code-block"><code>import { App } from '@slack/bolt';
+
+const app = new App({
+  token:    process.env.SLACK_BOT_TOKEN,
+  appToken: process.env.SLACK_APP_TOKEN,   // xapp-...
+  socketMode: true,
+});
+
+await app.start();
+console.log('Socket Mode connected');</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Errors &amp; rate limits</h2>
+        <ul>
+          <li><strong>Common errors:</strong> <code>not_authed</code>, <code>missing_scope</code>, <code>channel_not_found</code>, <code>not_in_channel</code>, <code>cant_invite_self</code>, <code>rate_limited</code>.</li>
+          <li><strong>Rate limits:</strong> per-method per-team. Tier 1 (1/min), Tier 2 (20/min), Tier 3 (50+/min), Tier 4 (100+/min). <code>chat.postMessage</code> is roughly 1/channel/sec.</li>
+          <li><strong>429 handling:</strong> the WebClient retries by default. Customize with <code>retryConfig</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Idempotency — events fire twice</h2>
+        <p>
+          Slack will retry events if you don't ack within 3 seconds. Some events (especially
+          <code>message</code>) can also fan out unexpectedly. Always dedupe by <code>event_id</code>
+          (cache for 24 hours in Redis or Mongo with TTL).
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Web API = you → Slack. Events API / Socket Mode = Slack → you.</li>
+          <li>Use the <code>WebClient</code>; it handles retries, pagination helpers, types.</li>
+          <li>Always ack events fast and dedupe by <code>event_id</code>.</li>
+          <li>Socket Mode for dev / firewalled; HTTP for production distributed apps.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://api.slack.com/apis" target="_blank" rel="noopener">
+              <span class="resource-kind api">API</span>
+              Using Slack APIs (overview)
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/methods" target="_blank" rel="noopener">
+              <span class="resource-kind api">API</span>
+              Web API methods reference
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/events?ref=apis" target="_blank" rel="noopener">
+              <span class="resource-kind api">API</span>
+              Event API reference
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/apis/connections/socket" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Socket Mode
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

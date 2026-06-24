@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Andrej Karpathy Built an Entire GPT in 243 Lines of Python | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Neural network visualization with glowing nodes and connections"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Python · Deep Learning · 14 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@growtika" target="_blank" rel="noopener">Growtika</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Andrej Karpathy Just Built an Entire GPT in 243 Lines of Python</h1>
+        <p class="summary">
+          A walkthrough of Karpathy's nanoGPT — a complete, trainable transformer language model in 243 lines of Python — and what the code teaches you about how every modern LLM actually works from the ground up.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Source</span>
+            <span class="meta-value">Andrej Karpathy — nanoGPT (GitHub) + "Let's build GPT" lecture</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Transformer architecture from scratch — attention, embeddings, training loop</span>
+          </div>
+          <div>
+            <span class="meta-label">Level</span>
+            <span class="meta-value">Intermediate — requires basic Python and NumPy familiarity</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Most engineers who use LLMs every day have no idea what happens inside them. Karpathy's nanoGPT cuts through all abstraction: 243 lines of Python that define a complete transformer, train it on Shakespeare, and generate text. Reading it once is worth more than a semester of AI theory because the mystery disappears — you can see exactly where attention is computed, where loss is calculated, and why the architecture works.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> The entire transformer architecture — tokenization, embedding, multi-head self-attention, feed-forward layers, residual connections, layer norm, and the training loop — fits in 243 readable lines. Understanding them makes every LLM paper, product decision, and debugging session sharper.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Why Karpathy built it</span>
+        <p>
+          Karpathy's pedagogical philosophy is that the best way to understand something is to build it from scratch with no shortcuts. nanoGPT is the third iteration of this philosophy — after micrograd (autograd in 100 lines) and makemore (character-level language models). The goal was a GPT-2-class model with zero external dependencies except PyTorch, small enough to read in an afternoon, fast enough to train on a laptop.
+        </p>
+        <p>
+          The companion lecture ("Let's build GPT: from scratch, in code, spelled out") on YouTube is three and a half hours and walks through every line. It has become one of the most referenced deep learning resources in existence.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The architecture, component by component</span>
+        <h2>What the 243 lines actually contain</h2>
+
+        <p class="mini-heading">1. Tokenisation</p>
+        <p>
+          nanoGPT uses character-level tokenisation for simplicity: every unique character in the training text gets an integer ID. The vocabulary size is tiny (65 characters for Shakespeare) but the concept is identical to GPT-4's tiktoken: text → integer sequence → back to text.
+        </p>
+        <pre><code class="language-python">chars = sorted(list(set(text)))
+vocab_size = len(chars)
+stoi = {ch: i for i, ch in enumerate(chars)}
+encode = lambda s: [stoi[c] for c in s]
+decode = lambda l: ''.join([itos[i] for i in l])</code></pre>
+
+        <p class="mini-heading">2. Embeddings — token + position</p>
+        <p>
+          Every token ID maps to a learned vector (token embedding). Every position in the sequence maps to a separate learned vector (positional embedding). These two are summed — the model learns both what the token means and where it is in context.
+        </p>
+        <pre><code class="language-python">self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+self.position_embedding_table = nn.Embedding(block_size, n_embd)
+# At forward pass:
+tok_emb = self.token_embedding_table(idx)
+pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+x = tok_emb + pos_emb</code></pre>
+
+        <p class="mini-heading">3. Self-attention — the core mechanism</p>
+        <p>
+          Each token produces three vectors: <strong>Query</strong> (what am I looking for?), <strong>Key</strong> (what do I contain?), <strong>Value</strong> (what do I communicate if attended to?). Attention scores are computed as <code>Q × Kᵀ / √d_k</code>, masked so tokens can only attend to past positions (causal masking), softmaxed, then used to weight the Value vectors.
+        </p>
+        <pre><code class="language-python">k = self.key(x)    # (B, T, head_size)
+q = self.query(x)  # (B, T, head_size)
+# Scaled dot-product attention
+wei = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5  # (B, T, T)
+wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+wei = F.softmax(wei, dim=-1)
+v = self.value(x)
+out = wei @ v  # (B, T, head_size)</code></pre>
+
+        <p class="mini-heading">4. Multi-head attention</p>
+        <p>
+          Run <code>n_head</code> independent attention heads in parallel, each attending to different aspects of the input, then concatenate and project the results. More heads = richer representation.
+        </p>
+
+        <p class="mini-heading">5. Feed-forward layer</p>
+        <p>
+          After attention aggregates information across tokens, a two-layer MLP processes each token independently: <code>Linear → ReLU → Linear</code>. The hidden dimension is 4× the embedding dimension — a constant Karpathy calls the "4× rule" inherited from the original transformer paper.
+        </p>
+
+        <p class="mini-heading">6. Residual connections + layer normalisation</p>
+        <p>
+          Each sub-layer (attention, feed-forward) is wrapped in a residual connection: <code>x = x + sublayer(x)</code>. This lets gradients flow directly to earlier layers, making deep networks trainable. Layer norm stabilises the activations before each sub-layer.
+        </p>
+
+        <p class="mini-heading">7. The training loop</p>
+        <p>
+          Standard PyTorch: sample a batch of sequences, forward pass, compute cross-entropy loss (predicted token distribution vs actual next token), backward pass, AdamW optimiser step. The loss is averaged over all positions in all sequences in the batch.
+        </p>
+        <pre><code class="language-python">for iter in range(max_iters):
+    xb, yb = get_batch('train')
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">What this teaches you about real LLMs</span>
+        <h2>From 243 lines to GPT-4</h2>
+        <ul class="check-list">
+          <li><strong>Scale is the only real difference.</strong> GPT-4 uses the same architecture — more layers, larger embedding dimension, more heads, a larger vocabulary, and orders of magnitude more data. The components are identical to nanoGPT.</li>
+          <li><strong>Attention is the bottleneck.</strong> The <code>O(T²)</code> complexity of the attention matrix is why context windows are expensive. Every doubling of context length quadruples the attention compute.</li>
+          <li><strong>Temperature lives in the softmax.</strong> Dividing logits by a temperature value before softmax is a one-line change. Now you understand exactly what every LLM's temperature parameter does.</li>
+          <li><strong>The model only predicts the next token.</strong> Everything — code generation, reasoning, instruction following — emerges from one objective: what token comes next? RLHF fine-tuning shapes the distribution; it does not change the fundamental mechanism.</li>
+          <li><strong>Tokenisation shapes everything downstream.</strong> Character-level tokenisation in nanoGPT is pedagogically clean but inefficient. BPE tokenisation (tiktoken) compresses common subwords into single tokens, making the effective context window much larger for the same compute.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">How to run it</span>
+        <h2>From clone to generated Shakespeare in 20 minutes</h2>
+        <pre><code class="language-bash">git clone https://github.com/karpathy/nanoGPT
+cd nanoGPT
+pip install torch numpy
+# Prepare the dataset
+python data/shakespeare_char/prepare.py
+# Train (CPU takes ~10 min; GPU takes ~3 min)
+python train.py config/train_shakespeare_char.py
+# Generate text
+python sample.py --out_dir=out-shakespeare-char</code></pre>
+        <p>
+          The training script is <code>train.py</code>. The model definition is <code>model.py</code>. The configuration for Shakespeare character-level training sets context length to 256, embedding size to 384, 6 attention heads, 6 transformer blocks — a tiny model that still generates recognisable Shakespeare-style text after a few minutes of training.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Common questions</span>
+        <h2>FAQ</h2>
+        <ul class="faq-list">
+          <li class="faq-item">
+            <p class="faq-question">Do I need a GPU to run this?</p>
+            <p class="faq-answer">No. The Shakespeare character-level model trains on CPU in about 10 minutes. A GPU (even a consumer RTX 3080) reduces that to under 3 minutes. For learning purposes, CPU is fine.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">How does this relate to instruction-following models like Claude?</p>
+            <p class="faq-answer">nanoGPT is a base language model — it learns to predict text, not to follow instructions. Claude adds RLHF and Constitutional AI on top of the same base architecture. The transformer in nanoGPT is architecturally identical to the one inside Claude.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">What's the best way to learn from the code?</p>
+            <p class="faq-answer">Watch the companion lecture ("Let's build GPT" on YouTube) while reading the code. Karpathy explains every line. Then modify the model: change the number of heads, add dropout, change the context length, and observe what happens to the loss curve.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Every modern LLM — GPT-4, Claude, Gemini — is a scaled version of exactly what nanoGPT implements. Spend an afternoon reading the 243 lines. The mystery dissolves, and every subsequent interaction with an LLM is informed by actually understanding what it's doing.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

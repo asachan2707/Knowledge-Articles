@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Consistent Hashing | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1509228627152-72ae9ae6848d?w=1600&h=700&fit=crop&auto=format&q=80" alt="Ring topology representing consistent hashing" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Distributed Systems · Concept 11 · 12 min</span></div>
+        </figure>
+        <h1>Consistent Hashing</h1>
+        <p class="summary">Distributes keys across nodes using a virtual ring so that when a node joins or leaves, only K/N keys need to be remapped (K = keys, N = nodes) — instead of remapping everything. The algorithm powering Cassandra, DynamoDB, and every distributed cache worth its salt.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">11 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Distributed Systems</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Cassandra, DynamoDB, Memcached, Chord DHT</span></div>
+          <div><span class="meta-label">Invented By</span><span class="meta-value">Karger et al., MIT (1997)</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">The problem with naive hashing (<code>hash(key) % N</code>) is that changing N invalidates almost everything. Go from 4 nodes to 5 and <code>hash(key) % 5</code> maps most keys to different nodes than <code>hash(key) % 4</code>. In a distributed cache, this means a cache miss on almost every key during scaling — a thundering herd against your database. Consistent hashing limits remapping to ~1/N of keys when you add or remove a node.</p>
+        <div class="callout"><p><strong>The intuition:</strong> Instead of hashing keys to a slot number (0 to N), hash both keys and nodes to positions on a ring (0 to 2³²-1). Each key is owned by the first node clockwise from its position. When a node is added or removed, only keys in the arc between the new node and its predecessor need to move.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The Algorithm</span>
+        <h2>The hash ring — step by step</h2>
+        <div class="diagram-box">
+<span class="step">Hash ring — 0 to 2³² positions, nodes and keys placed by hash</span>
+
+Ring (0 ──────────────────────────────────── 2³²)
+
+         0
+         │
+    ┌────┘────────────────────────────────────┐
+    │                 Ring                    │
+    │  <span class="hi">Node A</span> @ 100   key "foo" @ 150       │
+    │                      ↓                  │
+    │             first node clockwise = <span class="hi">Node A</span>│ ✗ wrong direction
+    │                                         │
+    │  key "foo" @ 150 ──▶ first node CW      │
+    │  nodes on ring: A@100, B@300, C@600     │
+    │  150 → next CW node after 150 = <span class="ok">B@300</span>  │
+    │                                         │
+    └─────────────────────────────────────────┘
+
+<span class="step">Node removal — only keys in the vacated arc move</span>
+
+Before: A@100  B@300  C@600
+Keys 100–300 owned by B (keys: "foo"@150, "bar"@280)
+
+Remove B:
+Keys 100–300 now owned by C (next CW node)
+Only "foo" and "bar" move. All other keys unaffected.
+<span class="dim">In naive hashing: removing B remaps hash(key) % 2 for ALL keys.</span>
+
+<span class="step">Virtual nodes — fixes uneven distribution</span>
+
+Instead of placing Node A once, place it 150 times around the ring:
+A-1@50, A-2@450, A-3@820, A-4@1200, ...
+B-1@200, B-2@600, B-3@950, ...
+
+Each node owns many small arcs → load distributes evenly.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Consistent hash ring in Node.js</h2>
+        <pre><code class="language-js">import crypto from 'crypto';
+
+class ConsistentHashRing {
+  constructor(virtualNodes = 150) {
+    this.virtualNodes = virtualNodes; // replicas per physical node
+    this.ring = new Map();            // position → nodeId
+    this.sortedPositions = [];        // sorted list of positions for binary search
+  }
+
+  // Hash a string to a position on the ring (0 to 2³² - 1)
+  _hash(key) {
+    const buf = crypto.createHash('md5').update(key).digest();
+    return buf.readUInt32BE(0); // First 4 bytes as unsigned 32-bit int
+  }
+
+  // Add a physical node — creates virtualNodes positions on the ring
+  addNode(nodeId) {
+    for (let i = 0; i < this.virtualNodes; i++) {
+      const virtualKey = `${nodeId}#${i}`;
+      const position   = this._hash(virtualKey);
+      this.ring.set(position, nodeId);
+    }
+    this.sortedPositions = [...this.ring.keys()].sort((a, b) => a - b);
+  }
+
+  // Remove a physical node — removes all its virtual positions
+  removeNode(nodeId) {
+    for (let i = 0; i < this.virtualNodes; i++) {
+      const position = this._hash(`${nodeId}#${i}`);
+      this.ring.delete(position);
+    }
+    this.sortedPositions = [...this.ring.keys()].sort((a, b) => a - b);
+  }
+
+  // Get the node responsible for a key — binary search for next clockwise position
+  getNode(key) {
+    if (this.sortedPositions.length === 0) throw new Error('Ring is empty');
+
+    const pos = this._hash(key);
+
+    // Binary search for first position >= pos
+    let lo = 0, hi = this.sortedPositions.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.sortedPositions[mid] < pos) lo = mid + 1;
+      else hi = mid;
+    }
+
+    // Wrap around the ring if pos is beyond the last node
+    const ringPos = this.sortedPositions[lo] >= pos
+      ? this.sortedPositions[lo]
+      : this.sortedPositions[0];
+
+    return this.ring.get(ringPos);
+  }
+
+  // Get N nodes for a key (for replication) — walks clockwise for N distinct physical nodes
+  getNodes(key, n) {
+    const nodes = [];
+    const seen  = new Set();
+    const pos   = this._hash(key);
+    const start = this.sortedPositions.findIndex(p => p >= pos) ?? 0;
+
+    for (let i = 0; i < this.sortedPositions.length && nodes.length < n; i++) {
+      const idx  = (start + i) % this.sortedPositions.length;
+      const node = this.ring.get(this.sortedPositions[idx]);
+      if (!seen.has(node)) {
+        seen.add(node);
+        nodes.push(node);
+      }
+    }
+    return nodes;
+  }
+}
+
+// Usage — distributed cache with consistent hashing
+const ring = new ConsistentHashRing(150);
+ring.addNode('cache-1'); // 10.0.0.1
+ring.addNode('cache-2'); // 10.0.0.2
+ring.addNode('cache-3'); // 10.0.0.3
+
+const cacheClients = {
+  'cache-1': createRedisClient('10.0.0.1'),
+  'cache-2': createRedisClient('10.0.0.2'),
+  'cache-3': createRedisClient('10.0.0.3'),
+};
+
+async function cacheGet(key) {
+  const node   = ring.getNode(key);
+  const client = cacheClients[node];
+  return client.get(key);
+}
+
+async function cacheSet(key, value, ttl = 300) {
+  const node   = ring.getNode(key);
+  const client = cacheClients[node];
+  return client.setEx(key, ttl, value);
+}
+
+// Scale out — add a 4th cache node
+// Only ~25% of keys (1/4) will remap to the new node. Others stay put.
+ring.addNode('cache-4');
+cacheClients['cache-4'] = createRedisClient('10.0.0.4');
+
+// For replication: write to 2 nodes for every key (N=2 replicas)
+async function cacheSetReplicated(key, value, ttl = 300) {
+  const nodes = ring.getNodes(key, 2); // 2 distinct physical nodes
+  await Promise.all(nodes.map(node => cacheClients[node].setEx(key, ttl, value)));
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Cassandra, DynamoDB, and Memcached</h2>
+        <p><strong>Cassandra:</strong> Uses consistent hashing natively. The partition key of every row is hashed to a token (position on the ring). Each node owns a range of tokens. Cassandra distributes replica copies of each row to the next N nodes clockwise (where N is the replication factor). When you add a node via <code>nodetool decommission</code>, Cassandra automatically transfers only the token ranges that move to the new node — not all data.</p>
+        <p><strong>Amazon DynamoDB:</strong> Uses consistent hashing internally for partition management. Partition keys are hashed to determine which storage node holds the data. AWS manages the ring transparently — you never see it — but it's why DynamoDB scales seamlessly and why partition key design matters for even distribution.</p>
+        <p><strong>Memcached (client-side):</strong> Unlike Redis Cluster (server-side sharding), Memcached is single-node. Client libraries (libmemcached, node-memcached) implement consistent hashing to distribute keys across a pool of Memcached nodes. This is exactly the pattern above — the client decides which node holds each key.</p>
+
+        <div class="insight-box"><strong>Virtual nodes solve the uneven distribution problem.</strong> Without virtual nodes, when a node is removed, all its keys go to its single successor — which may already be the busiest node. With 150 virtual nodes per physical node, the removed node's keys are spread across ~150 different successors, distributing the migration load evenly.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Minimal key remapping when nodes join/leave (1/N keys)</li><li>No central coordinator — each node knows the ring</li><li>Natural support for replication (walk clockwise for N nodes)</li><li>Incremental scaling — add one node at a time</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Uneven distribution without virtual nodes (pure CH)</li><li>Ring state must be propagated to all nodes (gossip protocol overhead)</li><li>During ring transitions, some keys map to both old and new nodes (dual-read)</li><li>More complex than simple modulo hashing to implement correctly</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Consistent hashing solves the scale-without-invalidation problem. Naive modulo hashing remaps almost everything when you add or remove a node. Consistent hashing limits remapping to roughly 1/N of keys per node change — by mapping both keys and nodes to a ring. Virtual nodes (150+ per physical node) fix the uneven load distribution problem. This algorithm is the foundation of Cassandra, DynamoDB, and every distributed cache that needs to scale incrementally.</p>
+      </section>
+    </main>
+  </body>
+</html>

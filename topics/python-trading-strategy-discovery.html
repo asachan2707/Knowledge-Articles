@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Python Tool That Automatically Discovers Trading Strategies | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Stock market charts on multiple screens"
+            loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Python · Finance · Tools · 13 min read</span>
+          </div>
+        </figure>
+        <h1>I Built a Python Tool That Automatically Discovers Trading Strategies For You</h1>
+        <p class="summary">
+          Automated strategy discovery means using code to systematically search, test, and validate
+          trading rules across historical data — removing human bias from hypothesis generation.
+          Here is the full architecture, the key Python libraries, and the pitfalls that will destroy
+          your backtest results if you ignore them.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Libraries</span><span class="meta-value">VectorBT, backtesting.py, yfinance, pandas-ta, QuantStats</span></div>
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate Python — assumes basic pandas familiarity</span></div>
+          <div><span class="meta-label">Focus</span><span class="meta-value">Strategy discovery, backtesting, statistical validation</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Most algorithmic trading tutorials teach you how to backtest one strategy you already thought of.
+          Automated discovery inverts this: define a space of possible strategies, test all of them, and
+          let the data tell you which ones have an edge — without you forming a prior hypothesis first.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> VectorBT's vectorised approach lets you test thousands of
+          parameter combinations in seconds by running them as NumPy array operations instead of
+          Python loops. This is the key that makes automated discovery practical.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Why manual strategy selection fails</span>
+        <p>
+          When humans pick trading strategies to test, they carry confirmation bias — they gravitate toward
+          patterns that intuitively make sense. Automated discovery has no such bias. It tests every
+          combination in a defined parameter space and lets statistical filters separate genuine edge from
+          noise. The result is a ranked shortlist of strategies that survived objective screening, not
+          strategies that felt right.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The architecture</span>
+        <h2>Five layers of the discovery pipeline</h2>
+
+        <p class="mini-heading">1. Data layer</p>
+        <pre class="code-block"><code>import yfinance as yf
+df = yf.download("SPY", start="2015-01-01", auto_adjust=True)
+# Returns OHLCV DataFrame ready for backtesting</code></pre>
+        <p>
+          Use <code>yfinance</code> for free OHLCV data. For production, replace with
+          <code>alpaca-trade-api</code> or a broker's data feed. Always download point-in-time data
+          to avoid survivorship bias — testing only on stocks that survived to today inflates results.
+        </p>
+
+        <p class="mini-heading">2. Signal generation layer</p>
+        <p>
+          Define a parameter grid. For a dual-moving-average strategy, the grid is every combination
+          of fast and slow period within your chosen ranges:
+        </p>
+        <pre class="code-block"><code>from itertools import product
+fast_range = range(5, 50, 5)   # 5, 10, 15 ... 45
+slow_range = range(20, 200, 10) # 20, 30, 40 ... 190
+param_grid = list(product(fast_range, slow_range))
+# 9 × 18 = 162 combinations</code></pre>
+
+        <p class="mini-heading">3. Backtesting layer — VectorBT for scale</p>
+        <p>
+          <code>backtesting.py</code> is clean and readable — good for prototyping individual strategies.
+          VectorBT is the choice for automated discovery: it packs all parameter combinations into NumPy
+          arrays and runs them simultaneously using Numba kernels. 10,000 combinations runs in seconds.
+        </p>
+        <pre class="code-block"><code>import vectorbt as vbt
+
+# Run all combinations at once — no Python loops
+fast_ma = vbt.MA.run(close, window=fast_range, short_name='fast')
+slow_ma = vbt.MA.run(close, window=slow_range, short_name='slow')
+
+entries = fast_ma.ma_crossed_above(slow_ma)
+exits   = fast_ma.ma_crossed_below(slow_ma)
+
+portfolio = vbt.Portfolio.from_signals(close, entries, exits, freq='1D')
+stats = portfolio.stats()</code></pre>
+
+        <p class="mini-heading">4. Filtering layer</p>
+        <p>
+          Apply statistical thresholds to separate surviving strategies from noise:
+        </p>
+        <pre class="code-block"><code>survivors = stats[
+    (stats['Sharpe Ratio'] > 1.0)    &
+    (stats['Max Drawdown'] > -0.15)  &
+    (stats['Win Rate'] > 0.45)       &
+    (stats['Profit Factor'] > 1.3)
+]</code></pre>
+
+        <p class="mini-heading">5. Out-of-sample validation</p>
+        <p>
+          Split your data: train on 70%, validate on 30%. Re-run survivors on the held-out period.
+          Any strategy that degrades significantly on out-of-sample data is overfit — discard it.
+          Walk-forward validation (rolling windows) is more rigorous than a single split.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">ML-enhanced discovery</span>
+        <h2>Going beyond technical indicator sweeps</h2>
+        <p>
+          Instead of sweeping indicator parameters, use ML to discover which market features have
+          predictive power:
+        </p>
+        <ul class="check-list">
+          <li><strong>Feature engineering:</strong> RSI, MACD, Bollinger Band position, volume ratios,
+              rolling returns as model inputs</li>
+          <li><strong>Labeling:</strong> the Triple-Barrier Method (Marcos Lopez de Prado) creates more
+              honest trade labels than simple "up/down tomorrow" classification</li>
+          <li><strong>Models:</strong> Random Forest or XGBoost for feature importance — identifies
+              which indicators have actual predictive power before backtesting them</li>
+        </ul>
+        <p>
+          <code>MlFinLab</code> (Hudson &amp; Thames) provides production-grade implementations of
+          data structures, labelling, and ML models purpose-built for quantitative finance.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The critical pitfalls</span>
+        <h2>What will destroy your backtest results</h2>
+
+        <p class="mini-heading">Overfitting / curve-fitting</p>
+        <p>
+          A strategy optimised on training data that fails out-of-sample is the #1 failure mode. Always
+          reserve 30%+ of data for validation. Walk-forward optimisation is better than a simple split.
+        </p>
+
+        <p class="mini-heading">Look-ahead bias</p>
+        <p>
+          Using tomorrow's data to generate today's signal — accidentally common in vectorised backtesting.
+          Verify signal timing explicitly. A signal calculated from today's close should not influence
+          today's trade entry.
+        </p>
+
+        <p class="mini-heading">The multiple comparisons problem</p>
+        <p>
+          Testing 10,000 strategies, roughly 500 will look good by pure chance at 5% significance.
+          Use Bonferroni correction or the Deflated Sharpe Ratio (Bailey &amp; de Prado) to adjust for
+          multiple testing. Never report the raw Sharpe of a strategy found via grid search without
+          deflating it.
+        </p>
+
+        <p class="mini-heading">Transaction costs and slippage</p>
+        <p>
+          Naive backtests assume frictionless execution. Even 0.1% per trade destroys many short-term
+          strategies. Model commissions and a realistic slippage assumption in every backtest.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The library stack</span>
+        <h2>What each library does</h2>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Library</th><th>Role</th><th>Best for</th></tr></thead>
+            <tbody>
+              <tr><td><code>yfinance</code></td><td>Data fetching</td><td>Free price data, fast to set up</td></tr>
+              <tr><td><code>backtesting.py</code></td><td>Single-strategy testing</td><td>Prototyping, readable code</td></tr>
+              <tr><td><code>vectorbt</code></td><td>Parallel parameter sweeps</td><td>Discovery at scale</td></tr>
+              <tr><td><code>pandas-ta</code></td><td>Technical indicators</td><td>Signal calculation</td></tr>
+              <tr><td><code>MlFinLab</code></td><td>ML pipeline for quant finance</td><td>Production-grade ML signals</td></tr>
+              <tr><td><code>quantstats</code></td><td>Performance reporting</td><td>Portfolio analytics dashboards</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Automated strategy discovery is a data pipeline, not a single script. Build it in layers:
+          fetch data, generate a parameter grid, run everything with VectorBT in one vectorised call,
+          filter survivors by Sharpe and drawdown, then validate the survivors out-of-sample. Correct
+          for multiple comparisons. Model transaction costs. A strategy that survives all of that is
+          worth taking seriously. One that only survives training data is not.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

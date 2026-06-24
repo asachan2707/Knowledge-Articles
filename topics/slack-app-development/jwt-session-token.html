@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JWT &amp; Session vs. Token Auth | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Security · 15 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>JWT &amp; Session vs. Token Auth</h1>
+        <p class="summary">
+          JWTs are signed, self-contained tokens used for stateless authentication. Sessions are
+          server-side state pointed at by a cookie. Two videos cover both; this page focuses on which
+          to pick and why — including for Slack-app companion dashboards.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Pick the right auth model for the right app</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~15 min</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">Companion dashboards, service-to-service, webhooks</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Slack apps usually have a small companion web surface — an admin dashboard, a privacy page,
+          maybe a settings UI. That surface needs its own auth. The choice between sessions and JWTs
+          shapes everything from logout behavior to multi-instance scaling.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>One-line rule:</strong> sessions for first-party browser apps where you control the
+            backend; JWT for SPAs and service-to-service. Slack itself uses neither for its own webhook
+            verification — it uses HMAC over the raw body.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>What a JWT actually is</h2>
+        <p>
+          Three base64url-encoded parts, dot-separated:
+        </p>
+        <pre class="code-block"><code>HEADER       . PAYLOAD                            . SIGNATURE
+{"alg":"HS256","typ":"JWT"}
+              {"sub":"U1","exp":1715000000,"iat":1714996400,"role":"admin"}
+                                                  HMAC_SHA256(base64(header) + "." + base64(payload), secret)</code></pre>
+        <p>
+          Anyone can <em>read</em> the payload (it's just base64). The signature stops anyone without
+          the secret from <em>changing</em> it. Never put secrets in the payload — it's not encrypted.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Sessions — the classic model</h2>
+        <p>
+          The server creates a session row (in Redis or a DB), sends back a cookie with the session
+          ID. On every request, the server looks up the session by ID.
+        </p>
+        <p><strong>Pros:</strong></p>
+        <ul>
+          <li>Easy revocation — delete the row.</li>
+          <li>Small cookie payload.</li>
+          <li>Server can store arbitrary state per session.</li>
+        </ul>
+        <p><strong>Cons:</strong></p>
+        <ul>
+          <li>Requires a store reachable from every request handler.</li>
+          <li>Cross-domain (e.g., SPA → API on different host) is harder; needs CORS + cookie tricks.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>JWT — the stateless model</h2>
+        <p>
+          The server signs a JWT containing claims (user id, expiry, role). The client stores it
+          (usually in memory, or an httpOnly cookie). On every request, the server verifies the
+          signature and reads the claims — no DB lookup needed.
+        </p>
+        <p><strong>Pros:</strong></p>
+        <ul>
+          <li>Stateless — any service that knows the secret can verify.</li>
+          <li>Great for service-to-service and SPAs across domains.</li>
+        </ul>
+        <p><strong>Cons:</strong></p>
+        <ul>
+          <li>Hard to revoke before expiry (need a denylist or short TTL + refresh tokens).</li>
+          <li>Bigger payload sent with every request.</li>
+          <li>Easy to misuse (storing in localStorage = XSS risk).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>JWT pitfalls (the famous ones)</h2>
+        <ul>
+          <li><strong>Trusting <code>alg</code>:</strong> never accept <code>alg: "none"</code>; pin the expected alg in your verifier.</li>
+          <li><strong>HS256 secret leaks:</strong> shared secret = anyone with it can mint tokens. Use RS256/ES256 with public-key verification when possible.</li>
+          <li><strong>No expiry:</strong> always set <code>exp</code>. 15 min for access tokens; refresh tokens for longer sessions.</li>
+          <li><strong>Storing in localStorage:</strong> any XSS can steal it. Prefer httpOnly cookies with SameSite=Strict.</li>
+          <li><strong>Treating JWT as encryption:</strong> JWS = signed, not encrypted. Use JWE if you need encryption.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>What Slack uses</h2>
+        <p>
+          Slack does <strong>not</strong> use JWTs for webhook auth. Each request from Slack carries
+          <code>X-Slack-Signature</code>, an HMAC-SHA256 of the raw body + timestamp. You verify with
+          your signing secret. This is simpler and avoids JWT pitfalls.
+        </p>
+        <p>
+          For Slack OAuth, the result of installation is a <em>token</em> (<code>xoxb-...</code>),
+          which is opaque to you — Slack doesn't expose the structure. You store it and send it as
+          <code>Authorization: Bearer xoxb-...</code> on Web API calls.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Recipe — companion dashboard for a Slack app</h2>
+        <ol>
+          <li>"Sign in with Slack" via OAuth user-scope. Get the user's Slack ID + workspace.</li>
+          <li>Issue a short-lived JWT (15 min) with <code>{ sub: userId, team: teamId, role }</code> + a refresh token (7 days, stored in httpOnly cookie).</li>
+          <li>SPA puts the JWT in an <code>Authorization</code> header on API calls.</li>
+          <li>API verifies signature + expiry on every request — no DB hit.</li>
+          <li>Refresh endpoint rotates the JWT using the refresh cookie.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Sessions for classic server-rendered apps; JWT for SPAs and service-to-service.</li>
+          <li>Always set <code>exp</code>, pin the algorithm, never accept <code>alg: none</code>.</li>
+          <li>Store JWTs in httpOnly cookies, not localStorage.</li>
+          <li>For Slack itself, signature verification (HMAC over raw body) — not JWT.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=P2CPd9ynFLg" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Why is JWT popular?
+            </a>
+          </li>
+          <li>
+            <a href="https://www.youtube.com/watch?v=UBUNrFtufWo" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Session vs Token Authentication in 100 Seconds
+            </a>
+          </li>
+          <li>
+            <a href="https://jwt.io/introduction" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              jwt.io — Introduction
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

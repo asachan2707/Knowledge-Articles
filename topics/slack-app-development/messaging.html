@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Messaging | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Slack messaging app open on laptop and phone"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Core · API · 30 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@austindistel" target="_blank" rel="noopener">Austin Distel</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Messaging in Slack</h1>
+        <p class="summary">
+          The full posting surface: <code>chat.postMessage</code>, <code>chat.postEphemeral</code>,
+          updates, deletes, scheduled messages, threads, reactions, and incoming webhooks. This page
+          covers each method, the formatting model, and the patterns that keep your bot's chatter
+          useful.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack core</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Send the right message to the right surface</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~30 min read + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Block Kit, Interactivity, App Home</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Posting is the most common thing a Slack app does. Choose the right method for the right
+          situation and your app feels native. Choose the wrong one and your app is a notification spam
+          machine.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Default:</strong> use <code>chat.postMessage</code> with <code>blocks</code> for
+            anything user-facing. Use <code>chat.postEphemeral</code> for confirmations to one user.
+            Reply in-thread when you're following up on an existing message.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The core methods</h2>
+        <ul>
+          <li><strong><code>chat.postMessage</code></strong> — post a new message to a channel/DM/thread.</li>
+          <li><strong><code>chat.postEphemeral</code></strong> — visible to one user only; not persisted.</li>
+          <li><strong><code>chat.update</code></strong> — replace an existing message (you must own it).</li>
+          <li><strong><code>chat.delete</code></strong> — remove an existing message.</li>
+          <li><strong><code>chat.scheduleMessage</code></strong> — post at a future time (up to 120 days out).</li>
+          <li><strong><code>reactions.add</code></strong> — add an emoji reaction to a message.</li>
+          <li><strong>Incoming Webhooks</strong> — single-channel one-way URL; useful for static notifications.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>The formatting model</h2>
+        <p>
+          A message can carry <code>text</code> (plain text or <code>mrkdwn</code>) and/or
+          <code>blocks</code> (Block Kit JSON). Best practice: always send a <code>text</code> fallback
+          (used by notifications, accessibility, search) <em>and</em> rich <code>blocks</code> for the
+          in-Slack render.
+        </p>
+        <pre class="code-block"><code>await client.chat.postMessage({
+  channel: 'C1',
+  text: 'Build #421 succeeded.',  // notification + accessibility fallback
+  blocks: [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Build #421 succeeded* · main · 2m 14s' },
+    },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Open' }, url: 'https://ci/...' },
+      ],
+    },
+  ],
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>mrkdwn vs. plain_text</h2>
+        <ul>
+          <li><strong>mrkdwn</strong> — Slack's flavored markdown. Supports <code>*bold*</code>, <code>_italic_</code>, <code>~strike~</code>, <code>`code`</code>, <code>&gt; quote</code>, <code>&lt;https://...|label&gt;</code>, <code>&lt;@U123&gt;</code> mentions, <code>&lt;#C1|name&gt;</code> channels.</li>
+          <li><strong>plain_text</strong> — no formatting. Required for headers, button labels, input placeholders, modal titles.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Threads</h2>
+        <p>
+          To post a reply in a thread, set <code>thread_ts</code> to the parent message's
+          <code>ts</code>. To "broadcast" the reply back into the channel, also set
+          <code>reply_broadcast: true</code> (use sparingly).
+        </p>
+        <pre class="code-block"><code>// Reply in a thread
+await client.chat.postMessage({
+  channel: parent.channel,
+  thread_ts: parent.ts,
+  text: 'Done!',
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Updating &amp; deleting</h2>
+        <p>
+          <code>chat.update</code> needs the original <code>channel</code> + <code>ts</code>. Common
+          pattern: post a "running…" message, then update it with the result, then update again with
+          a final state — never spawning a new message per state change.
+        </p>
+        <pre class="code-block"><code>const { ts } = await client.chat.postMessage({ channel, text: 'Running…' });
+await doWork();
+await client.chat.update({ channel, ts, text: 'Done ✅' });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Scheduling, reminders, files</h2>
+        <ul>
+          <li><strong>Scheduled messages:</strong> <code>chat.scheduleMessage</code> with a future <code>post_at</code> Unix timestamp. List with <code>chat.scheduledMessages.list</code>; delete with <code>chat.deleteScheduledMessage</code>.</li>
+          <li><strong>Files:</strong> use <code>files.uploadV2</code> for file uploads (the v1 endpoint is deprecated).</li>
+          <li><strong>Reactions:</strong> <code>reactions.add</code> / <code>reactions.remove</code> — useful for "I saw it" acknowledgements without a reply.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Rate limits</h2>
+        <p>
+          Slack rate-limits per-method per-team. <code>chat.postMessage</code> is roughly 1 message per
+          channel per second sustained, with bursting allowed. The <code>@slack/web-api</code> client
+          handles 429s and retries with backoff if you set
+          <code>retryConfig: { retries: 3 }</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Anti-patterns to avoid</h2>
+        <ul>
+          <li>Posting one message per channel in a loop (use scheduled or bundled messages).</li>
+          <li>Updating a message every second to show progress (poll less, or use a single final update).</li>
+          <li>Sending public messages for personal confirmations.</li>
+          <li>Skipping the <code>text</code> fallback when using <code>blocks</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li><code>postMessage</code> + blocks for rich UI; <code>postEphemeral</code> for personal confirmations.</li>
+          <li>Always send a <code>text</code> fallback alongside <code>blocks</code>.</li>
+          <li>Threads keep channels tidy — use <code>thread_ts</code>.</li>
+          <li>Update existing messages instead of spawning new ones for state changes.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://api.slack.com/messaging/sending" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Sending messages
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/messaging/composing" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Composing your message (formatting, blocks)
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/docs/rate-limits" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Rate limits
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/methods/chat.postMessage" target="_blank" rel="noopener">
+              <span class="resource-kind api">API</span>
+              chat.postMessage
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

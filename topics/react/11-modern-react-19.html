@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Modern React 19+ | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+      .new-badge{display:inline-block;background:#dcfce7;color:#166534;border:1px solid #86efac;border-radius:12px;font-size:.7rem;font-weight:700;padding:.1rem .5rem;margin-left:.4rem;vertical-align:middle}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1677442135703-1787eea5ce01?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Modern React 19 and server components" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 11 of 11 · ~35 min</span>
+          </div>
+        </figure>
+        <h1>Modern React 19+</h1>
+        <p class="summary">Server Components that run zero JS on the client, Server Actions for form handling, the new useActionState and use() API, Edge Rendering for global low-latency, and building Agentic Apps with streaming AI responses.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">11 of 11 — final chapter</span></div>
+          <div><span class="meta-label">React version</span><span class="meta-value">React 19 (stable) · Next.js 15</span></div>
+          <div><span class="meta-label">The shift</span><span class="meta-value">Components can now run on the server — the client/server boundary moves to the component level</span></div>
+        </div>
+      </header>
+
+      <!-- ─── SERVER COMPONENTS ────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>Server Components <span class="new-badge">React 19</span> — zero client JavaScript</h2>
+        <p class="lead">React Server Components (RSC) run on the server — they can access databases, filesystems, and secrets directly, and their output is serialized HTML + React tree. They ship zero JavaScript to the browser. The client/server split is now at the component level, not the page level.</p>
+        <div class="diagram-box">
+<span class="step">Old model: pages are client or server</span>
+SSR page    → runs on server, hydrates with ALL component JS on client
+CSR page    → runs entirely in browser, no server rendering
+SPA route   → client JS only, requires fetch after load
+
+<span class="step">React 19 model: components are client or server</span>
+Server Component   → runs on server, <span class="ok">zero JS sent to browser</span>
+Client Component   → runs in browser (interactive, hooks, event handlers)
+Shared boundary    → parent is server, child is client — data passes as props
+        </div>
+        <pre><code class="language-tsx">// ─── Server Component (default in Next.js App Router) ────────────────────
+// No 'use client' → Server Component
+// Can: await, access DB, read filesystem, use server secrets
+// Cannot: useState, useEffect, event handlers
+
+// app/products/[id]/page.tsx
+export default async function ProductPage({ params }: { params: Promise&lt;{ id: string }&gt; }) {
+  const { id } = await params;
+
+  // Direct DB access — no API round trip, no loading state
+  const product = await prisma.product.findUnique({
+    where: { id },
+    include: { reviews: { take: 5, orderBy: { createdAt: 'desc' } } },
+  });
+
+  if (!product) return notFound();
+
+  return (
+    &lt;div&gt;
+      &lt;h1&gt;{product.name}&lt;/h1&gt;
+      &lt;p&gt;${(product.priceCents / 100).toFixed(2)}&lt;/p&gt;
+      &lt;p&gt;{product.description}&lt;/p&gt;
+
+      {/* Server-rendered review list — zero JS */}
+      &lt;ReviewList reviews={product.reviews} /&gt;
+
+      {/* Client component for interactivity */}
+      &lt;AddToCartButton productId={id} priceCents={product.priceCents} /&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Client Component — marked with 'use client' directive ───────────────
+// components/AddToCartButton.tsx
+'use client';
+
+function AddToCartButton({ productId, priceCents }: { productId: string; priceCents: number }) {
+  const { addItem }   = useCartStore();
+  const [added, setAdded] = useState(false);
+
+  const handleAdd = () => {
+    addItem({ id: productId, priceCents });
+    setAdded(true);
+    setTimeout(() => setAdded(false), 2000);
+  };
+
+  return (
+    &lt;button onClick={handleAdd}&gt;
+      {added ? '✓ Added!' : 'Add to Cart'}
+    &lt;/button&gt;
+  );
+}
+</code></pre>
+        <div class="insight-box"><strong>The biggest mental shift:</strong> In RSC, your component tree can span the server/client boundary. A server component can render a client component as a child, passing server-fetched data as props. The client component receives the data but doesn't need to fetch it — it was already there.</div>
+      </section>
+
+      <!-- ─── SERVER ACTIONS ───────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Server Actions <span class="new-badge">React 19</span> — form handling without API routes</h2>
+        <p>Server Actions are async functions marked with <code>'use server'</code> that run on the server but can be called from client components. They replace the need for dedicated API route handlers for form submissions.</p>
+        <pre><code class="language-tsx">// ─── Server Action definition ─────────────────────────────────────────────
+// actions/product.ts
+'use server';
+
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+
+const CreateProductSchema = z.object({
+  name:        z.string().min(1),
+  priceCents:  z.number().int().positive(),
+  description: z.string(),
+});
+
+export async function createProduct(formData: FormData) {
+  const session = await getServerSession();
+  if (!session?.user.isAdmin) throw new Error('Unauthorized');
+
+  const parsed = CreateProductSchema.safeParse({
+    name:        formData.get('name'),
+    priceCents:  Number(formData.get('priceCents')),
+    description: formData.get('description'),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.flatten().fieldErrors };
+  }
+
+  const product = await prisma.product.create({ data: parsed.data });
+
+  revalidatePath('/products');  // invalidate Next.js cache for this path
+  redirect(`/products/${product.id}`);  // server-side redirect
+}
+
+// ─── Using Server Action directly in a form ───────────────────────────────
+// (no 'use client' needed — form action runs on server)
+function CreateProductForm() {
+  return (
+    &lt;form action={createProduct}&gt;
+      &lt;input name="name" placeholder="Product name" required /&gt;
+      &lt;input name="priceCents" type="number" placeholder="Price in cents" /&gt;
+      &lt;textarea name="description"&gt;&lt;/textarea&gt;
+      &lt;button type="submit"&gt;Create Product&lt;/button&gt;
+    &lt;/form&gt;
+  );
+}
+
+// ─── Server Action from a Client Component ────────────────────────────────
+'use client';
+import { createProduct } from '@/actions/product';
+
+function CreateProductFormClient() {
+  const [state, formAction, isPending] = useActionState(createProduct, null);
+
+  return (
+    &lt;form action={formAction}&gt;
+      &lt;input name="name" /&gt;
+      {state?.error?.name &amp;&amp; &lt;p className="error"&gt;{state.error.name[0]}&lt;/p&gt;}
+      &lt;button type="submit" disabled={isPending}&gt;
+        {isPending ? 'Creating...' : 'Create Product'}
+      &lt;/button&gt;
+    &lt;/form&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── useActionState ───────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>useActionState <span class="new-badge">React 19</span> — form state management</h2>
+        <p><code>useActionState</code> (previously <code>useFormState</code>) manages the state returned by a Server Action, plus a pending state — eliminating the manual loading/error/data tri-state pattern for forms.</p>
+        <pre><code class="language-tsx">'use client';
+import { useActionState } from 'react';
+import { loginAction } from '@/actions/auth';
+
+// ─── loginAction (server action) returns ActionResult ─────────────────────
+type ActionResult = { error: string } | { success: true; redirect: string } | null;
+
+function LoginForm() {
+  const [state, formAction, isPending] = useActionState&lt;ActionResult, FormData&gt;(
+    loginAction,
+    null  // initial state
+  );
+
+  return (
+    &lt;form action={formAction}&gt;
+      &lt;div&gt;
+        &lt;label htmlFor="email"&gt;Email&lt;/label&gt;
+        &lt;input type="email" id="email" name="email" required /&gt;
+      &lt;/div&gt;
+
+      &lt;div&gt;
+        &lt;label htmlFor="password"&gt;Password&lt;/label&gt;
+        &lt;input type="password" id="password" name="password" required /&gt;
+      &lt;/div&gt;
+
+      {state &amp;&amp; 'error' in state &amp;&amp; (
+        &lt;div role="alert" className="error"&gt;{state.error}&lt;/div&gt;
+      )}
+
+      &lt;button type="submit" disabled={isPending}&gt;
+        {isPending ? 'Logging in...' : 'Log In'}
+      &lt;/button&gt;
+    &lt;/form&gt;
+  );
+}
+
+// ─── useFormStatus — read pending state inside a form ─────────────────────
+import { useFormStatus } from 'react-dom';
+
+// This component must be INSIDE a &lt;form&gt; — it reads the parent form's status
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    &lt;button type="submit" disabled={pending}&gt;
+      {pending ? &lt;Spinner /&gt; : 'Submit'}
+    &lt;/button&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── use() API ─────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>use() API <span class="new-badge">React 19</span> — promises and context in render</h2>
+        <p>The <code>use()</code> hook can unwrap promises and context values during rendering. Unlike other hooks, it can be called conditionally and inside loops — a fundamental change to React's hook rules.</p>
+        <pre><code class="language-tsx">import { use, Suspense } from 'react';
+
+// ─── use() with a promise ─────────────────────────────────────────────────
+// Pass a Promise to use() — React suspends until it resolves
+// The component must be wrapped in Suspense
+
+function UserProfile({ userPromise }: { userPromise: Promise&lt;User&gt; }) {
+  const user = use(userPromise);  // suspends until resolved
+  return &lt;h1&gt;{user.name}&lt;/h1&gt;;
+}
+
+// Parent creates the promise and passes it down
+// (creates it at render time so Suspense can catch it)
+function UserPage({ userId }: { userId: string }) {
+  const userPromise = fetchUser(userId);  // Promise starts immediately
+
+  return (
+    &lt;Suspense fallback={&lt;Skeleton /&gt;}&gt;
+      &lt;UserProfile userPromise={userPromise} /&gt;
+    &lt;/Suspense&gt;
+  );
+}
+
+// ─── use() with context ───────────────────────────────────────────────────
+// use() is an alternative to useContext() — it CAN be used conditionally
+function UserInfo({ showEmail }: { showEmail: boolean }) {
+  if (!showEmail) return null;
+
+  // useContext cannot be called conditionally — use() can
+  const user = use(UserContext);
+  return &lt;p&gt;{user?.email}&lt;/p&gt;;
+}
+
+// ─── Passing server data to client components via use() ───────────────────
+// Server Component passes a streaming Promise — client receives it via use()
+// This enables streaming data from server to client without waterfalls
+
+// Server Component
+async function ProductPage() {
+  // Both start fetching in parallel
+  const productPromise  = fetchProduct(id);
+  const reviewsPromise  = fetchReviews(id);
+
+  return (
+    &lt;&gt;
+      &lt;Suspense fallback={&lt;ProductSkeleton /&gt;}&gt;
+        &lt;ProductDetails productPromise={productPromise} /&gt;
+      &lt;/Suspense&gt;
+
+      &lt;Suspense fallback={&lt;ReviewsSkeleton /&gt;}&gt;
+        &lt;ReviewList reviewsPromise={reviewsPromise} /&gt;
+      &lt;/Suspense&gt;
+    &lt;/&gt;
+  );
+  // Product and reviews stream in independently — no waterfall
+}
+</code></pre>
+      </section>
+
+      <!-- ─── EDGE RENDERING ───────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>Edge Rendering — compute close to the user</h2>
+        <p>Edge functions run in data centers distributed globally — the same code that runs in Node.js runs 20–50ms from any user instead of 200ms+ from a single-region server. Critical for authentication middleware and personalized pages.</p>
+        <pre><code class="language-tsx">// ─── Next.js Edge Middleware (runs on every request at the CDN edge) ───────
+// middleware.ts (runs at Cloudflare/Vercel edge — not Node.js)
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // Auth check at the edge — before Next.js even starts rendering
+  if (pathname.startsWith('/dashboard')) {
+    const token = request.cookies.get('session')?.value;
+
+    if (!token) {
+      return NextResponse.redirect(new URL('/login', request.url));
+    }
+
+    // Verify JWT at the edge (using Web Crypto — no Node.js available)
+    const isValid = await verifyToken(token);
+    if (!isValid) {
+      const res = NextResponse.redirect(new URL('/login', request.url));
+      res.cookies.delete('session');
+      return res;
+    }
+  }
+
+  // A/B testing at the edge — zero latency
+  if (pathname === '/') {
+    const bucket = request.cookies.get('ab-bucket')?.value ?? (Math.random() < 0.5 ? 'a' : 'b');
+    const res = NextResponse.rewrite(new URL(`/variants/${bucket}`, request.url));
+    res.cookies.set('ab-bucket', bucket, { maxAge: 60 * 60 * 24 * 30 });
+    return res;
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*', '/'],
+};
+
+// ─── Edge API Route ───────────────────────────────────────────────────────
+// app/api/personalize/route.ts
+export const runtime = 'edge';
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const userId = searchParams.get('userId');
+
+  // Runs at edge — use global Web APIs, not Node.js
+  const userData = await fetch(`https://profile-service.internal/users/${userId}`, {
+    headers: { Authorization: `Bearer ${process.env.INTERNAL_TOKEN}` },
+  });
+
+  return Response.json(await userData.json());
+}
+</code></pre>
+        <div class="insight-box"><strong>Edge vs Node.js runtime:</strong> Edge runs <code>Web APIs</code> (fetch, Response, Request, crypto, URL) but NOT Node.js APIs (fs, path, Buffer, process). Most business logic works. Database drivers like Prisma require connection poolers (PgBouncer, Neon serverless) because WebSockets, not TCP, are available at the edge.</div>
+      </section>
+
+      <!-- ─── AGENTIC APPS ──────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Agentic Apps — streaming AI responses in React</h2>
+        <p>Agentic apps build on React's streaming primitives to handle AI responses that arrive incrementally. The Vercel AI SDK provides the React-native patterns for this — streaming text, structured outputs, and tool call rendering.</p>
+        <pre><code class="language-tsx">// npm install ai @ai-sdk/openai
+// app/api/chat/route.ts (Next.js App Router)
+import { streamText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+
+export async function POST(req: Request) {
+  const { messages } = await req.json();
+
+  const result = streamText({
+    model: openai('gpt-4o'),
+    messages,
+    system: 'You are a helpful shopping assistant.',
+    tools: {
+      searchProducts: {
+        description: 'Search for products',
+        parameters: z.object({ query: z.string() }),
+        execute: async ({ query }) => searchProductsDB(query),
+      },
+    },
+  });
+
+  return result.toDataStreamResponse();
+}
+
+// ─── Client: streaming chat UI ─────────────────────────────────────────────
+'use client';
+import { useChat } from 'ai/react';
+
+function AIChatInterface() {
+  const { messages, input, handleInputChange, handleSubmit, isLoading, stop } = useChat({
+    api: '/api/chat',
+    onError: (err) => showToast({ type: 'error', message: err.message }),
+  });
+
+  return (
+    &lt;div className="flex flex-col h-screen"&gt;
+      &lt;div className="flex-1 overflow-y-auto p-4 space-y-4"&gt;
+        {messages.map(message =&gt; (
+          &lt;div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}&gt;
+            &lt;div className={`max-w-lg rounded-2xl px-4 py-2 ${
+              message.role === 'user'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-900'
+            }`}&gt;
+              {/* Text content — streams in word by word */}
+              {message.content}
+
+              {/* Tool call results */}
+              {message.toolInvocations?.map(tool =&gt; (
+                tool.state === 'result' &amp;&amp; (
+                  &lt;ProductSearchResults key={tool.toolCallId} results={tool.result} /&gt;
+                )
+              ))}
+            &lt;/div&gt;
+          &lt;/div&gt;
+        ))}
+
+        {isLoading &amp;&amp; (
+          &lt;div className="flex justify-start"&gt;
+            &lt;div className="bg-gray-100 rounded-2xl px-4 py-2"&gt;
+              &lt;TypingIndicator /&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        )}
+      &lt;/div&gt;
+
+      &lt;form onSubmit={handleSubmit} className="border-t p-4 flex gap-2"&gt;
+        &lt;input
+          value={input}
+          onChange={handleInputChange}
+          placeholder="Ask about products..."
+          className="flex-1 border rounded-lg px-3 py-2"
+        /&gt;
+        {isLoading
+          ? &lt;button type="button" onClick={stop}&gt;Stop&lt;/button&gt;
+          : &lt;button type="submit"&gt;Send&lt;/button&gt;
+        }
+      &lt;/form&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Streaming structured output ───────────────────────────────────────────
+import { useObject } from 'ai/react';
+import { z } from 'zod';
+
+const ProductSchema = z.object({
+  recommendations: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    reason: z.string(),
+    score: z.number(),
+  })),
+});
+
+function ProductRecommender({ userId }: { userId: string }) {
+  const { object, submit, isLoading } = useObject({
+    api: '/api/recommend',
+    schema: ProductSchema,
+  });
+
+  return (
+    &lt;div&gt;
+      &lt;button onClick={() =&gt; submit({ userId })}&gt;Get Recommendations&lt;/button&gt;
+
+      {/* Streams in as JSON is partially parsed — items appear one by one */}
+      {object?.recommendations?.map((rec, i) =&gt; rec &amp;&amp; (
+        &lt;ProductRecommendationCard key={i} recommendation={rec} /&gt;
+      ))}
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+        <div class="insight-box"><strong>React 19's streaming architecture</strong> makes it the natural home for AI UIs. Suspense + streaming + Server Components + use() all compose together: the AI response streams from the edge, React progressively hydrates the content, and the user sees text appearing in real-time without any visible loading state for the parts that have already arrived.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 11 — Final Takeaway</h2>
+        <p>React 19 blurs the server/client boundary in a fundamental way. Server Components run with zero client JavaScript, Server Actions replace API routes for mutations, and streaming turns React into a real-time content delivery system. <code>useActionState</code> and <code>use()</code> complete the picture on the client side. These features compose beautifully with the Agentic Apps pattern — AI responses stream in progressively, tool calls render inline, and the whole system feels instant because content arrives incrementally rather than in one batch. This is where React is heading — less JavaScript on the client, more work done close to the data.</p>
+      </section>
+    </main>
+  </body>
+</html>

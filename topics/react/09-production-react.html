@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Production React | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1518432031352-d6fc5c10da5a?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Production deployment and monitoring" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 9 of 11 · ~35 min</span>
+          </div>
+        </figure>
+        <h1>Production React</h1>
+        <p class="summary">TypeScript patterns for React, testing with Vitest + Testing Library (what to test and what not to), CI/CD pipeline setup, Error Boundaries for graceful degradation, and runtime monitoring with Sentry.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">9 of 11</span></div>
+          <div><span class="meta-label">Philosophy</span><span class="meta-value">Test behaviour, not implementation — test what users see, not internals</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">TypeScript · Vitest · Testing Library · GitHub Actions · Sentry</span></div>
+        </div>
+      </header>
+
+      <!-- ─── TYPESCRIPT ────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>TypeScript — type-safe React components</h2>
+        <pre><code class="language-tsx">// ─── Typing props ─────────────────────────────────────────────────────────
+interface ButtonProps {
+  children: React.ReactNode;
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
+  size?: 'sm' | 'md' | 'lg';
+  loading?: boolean;
+  onClick?: (event: React.MouseEvent&lt;HTMLButtonElement&gt;) => void;
+  disabled?: boolean;
+}
+
+function Button({ children, variant = 'primary', size = 'md', loading = false, ...rest }: ButtonProps) {
+  return &lt;button className={`btn btn--${variant} btn--${size}`} {...rest}&gt;{loading ? '...' : children}&lt;/button&gt;;
+}
+
+// ─── Generic components ───────────────────────────────────────────────────
+interface ListProps&lt;T&gt; {
+  items: T[];
+  renderItem: (item: T, index: number) =&gt; React.ReactNode;
+  keyExtractor: (item: T) =&gt; string | number;
+  emptyState?: React.ReactNode;
+}
+
+function List&lt;T&gt;({ items, renderItem, keyExtractor, emptyState }: ListProps&lt;T&gt;) {
+  if (items.length === 0) return &lt;&gt;{emptyState}&lt;/&gt;;
+  return (
+    &lt;ul&gt;
+      {items.map((item, i) =&gt; (
+        &lt;li key={keyExtractor(item)}&gt;{renderItem(item, i)}&lt;/li&gt;
+      ))}
+    &lt;/ul&gt;
+  );
+}
+
+// Usage — fully typed
+&lt;List
+  items={users}
+  keyExtractor={u =&gt; u.id}
+  renderItem={u =&gt; &lt;UserRow user={u} /&gt;}
+/&gt;
+
+// ─── Typing hooks ─────────────────────────────────────────────────────────
+interface User { id: string; name: string; email: string; }
+
+function useUser(userId: string) {
+  const [user, setUser] = useState&lt;User | null&gt;(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState&lt;string | null&gt;(null);
+  // ...
+  return { user, loading, error };
+}
+
+// ─── Type narrowing ───────────────────────────────────────────────────────
+type ApiResult&lt;T&gt; =
+  | { status: 'loading' }
+  | { status: 'error'; error: string }
+  | { status: 'success'; data: T };
+
+function UserView({ result }: { result: ApiResult&lt;User&gt; }) {
+  if (result.status === 'loading') return &lt;Spinner /&gt;;
+  if (result.status === 'error')   return &lt;Error message={result.error} /&gt;;
+  // TypeScript knows result.data is User here
+  return &lt;h1&gt;{result.data.name}&lt;/h1&gt;;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── VITEST ────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Vitest — fast unit testing with Vite's infrastructure</h2>
+        <pre><code class="language-ts">// npm install -D vitest @vitest/ui
+// vite.config.ts
+import { defineConfig } from 'vitest/config';
+export default defineConfig({
+  test: {
+    globals: true,      // no need to import describe/it/expect
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      thresholds: { lines: 80, functions: 80 },
+    },
+  },
+});
+
+// ─── Testing pure functions ───────────────────────────────────────────────
+// utils/cart.test.ts
+import { calculateTotal, applyDiscount } from './cart';
+
+describe('calculateTotal', () => {
+  it('sums item prices times quantities', () => {
+    const items = [
+      { priceCents: 1000, qty: 2 },
+      { priceCents: 500,  qty: 1 },
+    ];
+    expect(calculateTotal(items)).toBe(2500);
+  });
+
+  it('returns 0 for empty cart', () => {
+    expect(calculateTotal([])).toBe(0);
+  });
+});
+
+describe('applyDiscount', () => {
+  it('applies percentage discount', () => {
+    expect(applyDiscount(1000, { type: 'percent', value: 10 })).toBe(900);
+  });
+
+  it('does not go below 0', () => {
+    expect(applyDiscount(100, { type: 'percent', value: 150 })).toBe(0);
+  });
+});
+</code></pre>
+      </section>
+
+      <!-- ─── TESTING LIBRARY ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>Testing Library — test what users see</h2>
+        <p>React Testing Library's philosophy: test the UI the way users use it — find elements by role, text, and label; interact by clicking and typing; assert on visible state. Never test implementation details like state variable names or component internals.</p>
+        <pre><code class="language-tsx">// npm install -D @testing-library/react @testing-library/user-event
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { LoginForm } from './LoginForm';
+
+describe('LoginForm', () => {
+  it('shows error for empty submission', async () => {
+    const user = userEvent.setup();
+    render(&lt;LoginForm onLogin={vi.fn()} /&gt;);
+
+    await user.click(screen.getByRole('button', { name: 'Log In' }));
+
+    expect(screen.getByText('Email is required')).toBeInTheDocument();
+  });
+
+  it('calls onLogin with credentials on valid submit', async () => {
+    const user = userEvent.setup();
+    const mockOnLogin = vi.fn().mockResolvedValue(undefined);
+    render(&lt;LoginForm onLogin={mockOnLogin} /&gt;);
+
+    await user.type(screen.getByLabelText('Email'), 'alice@example.com');
+    await user.type(screen.getByLabelText('Password'), 'secret123');
+    await user.click(screen.getByRole('button', { name: 'Log In' }));
+
+    await waitFor(() => {
+      expect(mockOnLogin).toHaveBeenCalledWith({
+        email: 'alice@example.com',
+        password: 'secret123',
+      });
+    });
+  });
+
+  it('disables button while submitting', async () => {
+    const user = userEvent.setup();
+    let resolve;
+    const pendingPromise = new Promise(r => { resolve = r; });
+    render(&lt;LoginForm onLogin={() =&gt; pendingPromise} /&gt;);
+
+    await user.type(screen.getByLabelText('Email'), 'alice@example.com');
+    await user.type(screen.getByLabelText('Password'), 'pw');
+    await user.click(screen.getByRole('button', { name: 'Log In' }));
+
+    expect(screen.getByRole('button', { name: 'Logging in...' })).toBeDisabled();
+    resolve();
+  });
+});
+
+// ─── Testing with mocked API calls (MSW) ─────────────────────────────────
+import { setupServer } from 'msw/node';
+import { http, HttpResponse } from 'msw';
+
+const server = setupServer(
+  http.get('/api/users/1', () => HttpResponse.json({ id: '1', name: 'Alice' })),
+  http.get('/api/users/999', () => HttpResponse.json({ error: 'Not found' }, { status: 404 })),
+);
+
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+it('renders user profile from API', async () => {
+  render(&lt;UserProfile userId="1" /&gt;);
+  expect(await screen.findByText('Alice')).toBeInTheDocument();
+});
+</code></pre>
+        <div class="insight-box"><strong>Queries in priority order (Testing Library guidance):</strong> getByRole → getByLabelText → getByPlaceholderText → getByText → getByTestId. If you're using getByTestId everywhere, you're testing implementation details. getByRole tests accessibility at the same time as functionality.</div>
+      </section>
+
+      <!-- ─── CI/CD ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>CI/CD — automated quality gates</h2>
+        <pre><code class="language-yaml"># .github/workflows/ci.yml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+
+      - run: npm ci
+      - run: npm run type-check    # tsc --noEmit
+      - run: npm run lint          # ESLint
+      - run: npm test -- --coverage
+      - run: npm run build
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+
+  preview:
+    needs: quality
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - run: npm ci && npm run build
+      - name: Deploy preview
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: my-app
+          directory: dist
+</code></pre>
+      </section>
+
+      <!-- ─── ERROR BOUNDARIES ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>Error Boundaries — graceful degradation</h2>
+        <p>Error boundaries catch JavaScript errors anywhere in their child component tree, preventing the whole app from crashing. They must be class components (no hook equivalent yet, though <code>react-error-boundary</code> wraps this nicely).</p>
+        <pre><code class="language-jsx">// npm install react-error-boundary
+import { ErrorBoundary, useErrorBoundary } from 'react-error-boundary';
+
+// ─── Using react-error-boundary ───────────────────────────────────────────
+function ErrorFallback({ error, resetErrorBoundary }) {
+  return (
+    &lt;div role="alert" className="error-boundary"&gt;
+      &lt;h2&gt;Something went wrong&lt;/h2&gt;
+      &lt;p&gt;{error.message}&lt;/p&gt;
+      &lt;button onClick={resetErrorBoundary}&gt;Try again&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+function App() {
+  return (
+    &lt;ErrorBoundary
+      FallbackComponent={ErrorFallback}
+      onError={(error, info) =&gt; Sentry.captureException(error, { extra: info })}
+      onReset={() =&gt; queryClient.clear()}
+    &gt;
+      &lt;Router /&gt;
+    &lt;/ErrorBoundary&gt;
+  );
+}
+
+// ─── Granular boundaries — don't crash the whole page ────────────────────
+function Dashboard() {
+  return (
+    &lt;div&gt;
+      &lt;DashboardHeader /&gt;  {/* critical — if this crashes, show full error */}
+
+      &lt;ErrorBoundary fallback={&lt;p&gt;Metrics unavailable.&lt;/p&gt;}&gt;
+        &lt;MetricsWidget /&gt;   {/* isolated — fallback if it crashes */}
+      &lt;/ErrorBoundary&gt;
+
+      &lt;ErrorBoundary fallback={&lt;p&gt;Activity feed unavailable.&lt;/p&gt;}&gt;
+        &lt;ActivityFeed /&gt;   {/* isolated — fallback if it crashes */}
+      &lt;/ErrorBoundary&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Throwing errors to the boundary from hooks ───────────────────────────
+function useRequiredData(id) {
+  const { showBoundary } = useErrorBoundary();
+
+  useEffect(() => {
+    fetchData(id).catch(showBoundary);  // sends error to nearest boundary
+  }, [id]);
+}
+</code></pre>
+      </section>
+
+      <!-- ─── MONITORING ────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Monitoring — Sentry and real user monitoring</h2>
+        <pre><code class="language-jsx">// npm install @sentry/react
+import * as Sentry from '@sentry/react';
+
+// ─── Initialize (main.tsx) ────────────────────────────────────────────────
+Sentry.init({
+  dsn: import.meta.env.VITE_SENTRY_DSN,
+  environment:  import.meta.env.VITE_ENV,
+  release:      import.meta.env.VITE_GIT_SHA,
+  tracesSampleRate: 0.1,        // 10% of transactions for performance monitoring
+  replaysSessionSampleRate: 0.05,
+  integrations: [
+    Sentry.browserTracingIntegration(),
+    Sentry.replayIntegration({ maskAllText: true }),
+    Sentry.reactRouterV6BrowserTracingIntegration({ useEffect, useLocation, useNavigationType, createRoutesFromChildren, matchRoutes }),
+  ],
+});
+
+// ─── Identify the user ────────────────────────────────────────────────────
+function AppRoot() {
+  const { user } = useAuth();
+
+  useEffect(() => {
+    if (user) {
+      Sentry.setUser({ id: user.id, email: user.email });
+    } else {
+      Sentry.setUser(null);
+    }
+  }, [user]);
+
+  return &lt;App /&gt;;
+}
+
+// ─── Custom error boundary with Sentry ───────────────────────────────────
+const SentryErrorBoundary = Sentry.withErrorBoundary(App, {
+  fallback: &lt;ErrorPage /&gt;,
+  showDialog: false,
+});
+
+// ─── Manual error capture ─────────────────────────────────────────────────
+async function handleCheckout(cartItems) {
+  try {
+    await processPayment(cartItems);
+  } catch (err) {
+    Sentry.captureException(err, {
+      extra: { cartItemCount: cartItems.length, userId: user.id },
+      tags:  { feature: 'checkout' },
+    });
+    showToast({ type: 'error', message: 'Payment failed. Our team has been notified.' });
+  }
+}
+
+// ─── Web Vitals ───────────────────────────────────────────────────────────
+import { onCLS, onINP, onLCP, onFCP, onTTFB } from 'web-vitals';
+
+[onCLS, onINP, onLCP, onFCP, onTTFB].forEach(fn =>
+  fn(({ name, value, rating }) =>
+    analytics.track('web_vital', { name, value, rating })
+  )
+);
+</code></pre>
+        <div class="warn-box"><strong>Never log PII to error monitoring tools.</strong> Sentry captures everything in scope on an exception — request bodies, component state, user data. Configure <code>maskAllText</code> in Sentry Replay, scrub sensitive fields in <code>beforeSend</code>, and never put tokens or passwords in component state.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 9 Takeaway</h2>
+        <p>Production React requires four pillars: TypeScript for correctness at compile time, tests that verify user behaviour (not internals), Error Boundaries to contain failures gracefully, and monitoring to know what's broken before users report it. The CI/CD pipeline enforces all four automatically on every push — type-check, lint, test, build, deploy preview. This turns "it works on my machine" into "it works in production".</p>
+      </section>
+    </main>
+  </body>
+</html>

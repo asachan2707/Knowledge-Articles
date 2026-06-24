@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Consistency Models | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1509228627152-72ae9ae6848d?w=1600&h=700&fit=crop&auto=format&q=80" alt="Distributed nodes synchronising" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Distributed Systems · Concept 22 · 12 min</span></div>
+        </figure>
+        <h1>Consistency Models</h1>
+        <p class="summary">What guarantees a distributed database makes about what you read after you write. Strong, eventual, causal, and read-your-writes consistency — each is a different contract between the database and its users, and each trades availability or latency for correctness.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">22 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Distributed Systems</span></div>
+          <div><span class="meta-label">Related</span><span class="meta-value">CAP Theorem (Concept 31), Sharding (Concept 09)</span></div>
+          <div><span class="meta-label">Key Insight</span><span class="meta-value">Consistency is a spectrum, not a binary</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">In a single-node database, consistency is trivial — after you write, every subsequent read returns the new value. In a distributed database with replicas on multiple nodes, it is not. A write goes to the primary; replicas are updated asynchronously. If you read from a replica before the update arrives, you see old data. Consistency models define the rules: what are you guaranteed to see after a write, under what conditions?</p>
+        <div class="callout"><p><strong>Why it matters:</strong> A shopping cart that shows "1 item" immediately after adding something, but "0 items" when you navigate to checkout — that is eventual consistency biting a user. An account that lets you withdraw the same money twice because two nodes each saw a positive balance — that is a consistency model mismatch with a financial workload.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The Spectrum</span>
+        <h2>Consistency models from strongest to weakest</h2>
+        <div class="diagram-box">
+<span class="step">Linearisability (strongest) — all operations appear instantaneous and in order</span>
+
+Write x=2 completes at t=5ms
+All reads after t=5ms return x=2, regardless of which replica serves them.
+Feels like a single machine. <span class="warn">Requires coordination — high latency.</span>
+Example: single-leader PostgreSQL with synchronous replication, etcd, ZooKeeper.
+
+<span class="step">Read-your-writes — you always see your own writes</span>
+
+User writes profile picture at t=10ms
+Next request from SAME USER always returns new picture.
+Other users MAY still see old picture (replica lag).
+<span class="ok">Good enough for most user-facing apps.</span> Achieved by routing reads to primary
+OR by attaching a session-scoped "read-after" timestamp to every request.
+
+<span class="step">Causal consistency — causally related operations are seen in order</span>
+
+User A posts a comment (t=1)
+User B replies to it   (t=2) — causally depends on A's comment
+
+Any replica serving reads sees: A's comment appears BEFORE B's reply.
+Unrelated operations (different posts) can arrive in any order.
+Used in: collaborative editing, social feed ordering.
+
+<span class="step">Eventual consistency (weakest guaranteeing convergence)</span>
+
+Write x=2 on node 1.
+Node 2 still serves x=1 for up to N seconds of replication lag.
+Eventually (after lag), all nodes converge to x=2.
+<span class="warn">Intermediate state: "split-brain" reads possible.</span>
+<span class="ok">Highest availability and lowest latency.</span> Example: Cassandra, DynamoDB default.
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Model</th><th>Guarantee</th><th>Latency</th><th>Availability</th><th>Used in</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Linearisable</strong></td><td>Reads always see latest write</td><td>High (coordination)</td><td>Low (can't serve during partition)</td><td>etcd, ZooKeeper, single-leader DB (sync replication)</td></tr>
+            <tr><td><strong>Sequential</strong></td><td>All nodes see same operation order</td><td>Medium</td><td>Medium</td><td>RAFT consensus, Spanner</td></tr>
+            <tr><td><strong>Causal</strong></td><td>Causally related ops in order</td><td>Low–Medium</td><td>High</td><td>MongoDB causal sessions, CockroachDB</td></tr>
+            <tr><td><strong>Read-your-writes</strong></td><td>Writer sees own writes immediately</td><td>Low</td><td>High</td><td>DynamoDB (strong reads), PostgreSQL read-replica routing</td></tr>
+            <tr><td><strong>Eventual</strong></td><td>Converges; intermediate state inconsistent</td><td>Lowest</td><td>Highest</td><td>Cassandra, DynamoDB (eventual reads), Redis async replication</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Read-your-writes in Node.js with PostgreSQL read replicas</h2>
+        <pre><code class="language-js">import { Pool } from 'pg';
+
+const primaryPool = new Pool({ host: process.env.DB_PRIMARY_HOST });
+const replicaPool = new Pool({ host: process.env.DB_REPLICA_HOST });
+
+// ─── READ-YOUR-WRITES via session tracking ────────────────────────────────
+// After a write, tag the session with a LSN (Log Sequence Number).
+// When reading, check if the replica has caught up to that LSN.
+// If not, fall back to primary for this request.
+
+async function writeWithLSN(query, params, session) {
+  const result = await primaryPool.query(query, params);
+
+  // PostgreSQL exposes current WAL position after a write
+  const { rows } = await primaryPool.query('SELECT pg_current_wal_lsn()::text AS lsn');
+  session.lastWriteLSN = rows[0].lsn; // Store in session (cookie, Redis, JWT claim)
+
+  return result;
+}
+
+async function readWithConsistency(query, params, session) {
+  if (!session.lastWriteLSN) {
+    // No recent writes from this session — replica is safe
+    return replicaPool.query(query, params);
+  }
+
+  // Check if replica has replayed up to our write position
+  const { rows } = await replicaPool.query(
+    `SELECT pg_last_wal_replay_lsn() >= $1::pg_lsn AS caught_up`,
+    [session.lastWriteLSN]
+  );
+
+  if (rows[0].caught_up) {
+    return replicaPool.query(query, params); // Replica is caught up — use it
+  }
+
+  // Replica is behind — read from primary to guarantee read-your-writes
+  return primaryPool.query(query, params);
+}
+
+// ─── CASSANDRA: tunable consistency ──────────────────────────────────────
+// Cassandra lets you specify consistency PER OPERATION.
+// QUORUM = majority of replicas must respond (strong-ish)
+// ONE = any single replica suffices (eventual, fastest)
+// ALL = all replicas must respond (strongest, slowest)
+
+// Node.js cassandra-driver example:
+const { Client, types } = require('cassandra-driver');
+const cassandra = new Client({ contactPoints: ['cassandra-1', 'cassandra-2'] });
+
+async function writeOrder(order) {
+  // Write with QUORUM consistency — majority of replicas acknowledge
+  await cassandra.execute(
+    'INSERT INTO orders (id, user_id, total) VALUES (?, ?, ?)',
+    [order.id, order.userId, order.total],
+    { consistency: types.consistencies.quorum }
+  );
+}
+
+async function readOrderStrong(orderId) {
+  // Read with QUORUM — majority must agree → read-your-writes guaranteed
+  const result = await cassandra.execute(
+    'SELECT * FROM orders WHERE id = ?',
+    [orderId],
+    { consistency: types.consistencies.quorum }
+  );
+  return result.rows[0];
+}
+
+async function readOrderEventual(orderId) {
+  // Read with ONE — any replica responds → lowest latency, may be stale
+  const result = await cassandra.execute(
+    'SELECT * FROM orders WHERE id = ?',
+    [orderId],
+    { consistency: types.consistencies.one }
+  );
+  return result.rows[0];
+}
+
+// ─── CONFLICT RESOLUTION for eventual consistency ─────────────────────────
+// When two nodes both accept writes to the same record (split brain),
+// they diverge. Merging is application-specific.
+
+// Cassandra: Last-Write-Wins (timestamp-based) — default, simplest
+// CRDTs (Conflict-free Replicated Data Types): counters, sets, maps
+//   that merge deterministically without coordination
+
+// Example CRDT counter (add-only, no subtraction):
+class GCounter {
+  constructor(nodeId) {
+    this.nodeId   = nodeId;
+    this.counters = { [nodeId]: 0 };
+  }
+
+  increment() { this.counters[this.nodeId]++; }
+
+  value() { return Object.values(this.counters).reduce((sum, v) => sum + v, 0); }
+
+  merge(other) {
+    // Take max of each node's counter — convergent under any ordering
+    for (const [node, count] of Object.entries(other.counters)) {
+      this.counters[node] = Math.max(this.counters[node] ?? 0, count);
+    }
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How Amazon, Cassandra, and Google Spanner choose consistency</h2>
+        <p><strong>Amazon shopping cart:</strong> Uses eventual consistency intentionally. Items added to a cart by two browser tabs might briefly show different counts — one tab's writes haven't replicated yet. Amazon's engineers determined that the business cost of an incorrect cart count for a few milliseconds is lower than the latency cost of strong consistency for every cart operation, globally. The cart is eventually correct.</p>
+        <p><strong>Google Spanner:</strong> Achieves external consistency (effectively linearisability) across a globally distributed database by using TrueTime — atomic clocks and GPS receivers in every Google data centre. Spanner knows the exact time a write committed and can determine before-after relationships across regions. This is unique to Google's infrastructure; most teams cannot replicate it.</p>
+        <p><strong>Cassandra tunable consistency:</strong> The standard pattern is QUORUM reads + QUORUM writes (R + W > N where N=replication factor). With N=3 replicas, QUORUM=2. A write confirmed by 2 replicas + a read from 2 replicas guarantees at least 1 overlapping node — you always read your own writes. Trade stronger consistency for higher latency by increasing the quorum level.</p>
+
+        <div class="insight-box"><strong>Read-your-writes is the minimum most applications actually need.</strong> True linearisability is expensive and usually unnecessary. For social apps, e-commerce, and most user-facing systems, the important guarantee is: "after I submit my form, when I navigate to the next page, I see my submission." Routing reads to primary immediately after writes (or using session LSN tracking) achieves this with far lower cost than full linearisability.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Consistency is not binary — it is a spectrum from linearisability (every read sees the latest write, globally) to eventual consistency (all replicas converge eventually, but may diverge temporarily). Most applications need read-your-writes consistency, not full linearisability. Achieve it cheaply by routing reads to primary immediately after writes, or by tracking WAL position in the session. For globally distributed systems, Cassandra's tunable consistency (QUORUM reads + QUORUM writes) is the practical sweet spot. Choose the consistency level that matches the business requirement — the shopping cart can be eventually consistent; the bank account cannot.</p>
+      </section>
+    </main>
+  </body>
+</html>

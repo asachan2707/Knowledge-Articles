@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Versioning | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="API evolution and versioning" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 26 · 8 min</span></div>
+        </figure>
+        <h1>API Versioning</h1>
+        <p class="summary">How to evolve an API without breaking existing clients. URL versioning, header versioning, and content negotiation — the trade-offs of each approach, what constitutes a breaking change, and how Stripe maintains hundreds of simultaneous API versions without a spaghetti codebase.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">26 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design</span></div>
+          <div><span class="meta-label">Key tension</span><span class="meta-value">Developer experience vs implementation simplicity</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Stripe, Twilio, GitHub, AWS</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">APIs are contracts. When a client builds on your API, they depend on its shape — field names, response structures, error formats. Changing these without notice breaks clients. API versioning is the mechanism that lets you evolve the API while honouring existing clients' contracts.</p>
+        <div class="callout"><p><strong>Breaking vs non-breaking changes:</strong> Adding a new optional field to a response is non-breaking — existing clients ignore unknown fields. Removing a field, renaming a field, changing a field's type, or changing the semantics of an existing field is a breaking change. Introduce a new version for breaking changes; additive changes can ship in the current version.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Strategies</span>
+        <h2>URL versioning, header versioning, and content negotiation</h2>
+        <div class="diagram-box">
+<span class="step">URL versioning — most common, most visible</span>
+GET /v1/users/123
+GET /v2/users/123
+<span class="ok">Pros: visible in URLs, easy to test in browser, simple to route.</span>
+<span class="warn">Cons: version in URL is technically not RESTful (URL should identify resource, not its representation).</span>
+
+<span class="step">Header versioning — cleaner URLs</span>
+GET /users/123
+Accept-version: v2
+<span class="ok">Pros: URL stays clean, resource-oriented.</span>
+<span class="warn">Cons: harder to test (must set header), not visible when sharing URLs.</span>
+
+<span class="step">Date-based versioning (Stripe pattern)</span>
+GET /v1/charges
+Stripe-Version: 2024-09-30
+<span class="ok">The endpoint stays /v1, but the response shape is determined by the date.</span>
+<span class="ok">Each new API account gets the latest date as default.</span>
+<span class="ok">Old accounts are "pinned" to their date — see no breaking changes.</span>
+<span class="dim">Stripe has 100+ active API version dates, each slightly different.</span>
+
+<span class="step">Content negotiation — RFC-compliant</span>
+GET /users/123
+Accept: application/vnd.myapi.v2+json
+<span class="warn">Verbose. Rarely used in practice outside media/hypermedia APIs.</span>
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Strategy</th><th>Discoverability</th><th>Implementation</th><th>Best for</th></tr></thead>
+          <tbody>
+            <tr><td><strong>URL versioning (/v2/)</strong></td><td>High — visible in URL</td><td>Simple routing</td><td>Public APIs, SDKs, developer experience focus</td></tr>
+            <tr><td><strong>Header versioning</strong></td><td>Low — hidden in header</td><td>Middleware inspection</td><td>Internal APIs where URL cleanliness matters</td></tr>
+            <tr><td><strong>Date versioning (Stripe)</strong></td><td>Medium</td><td>Complex — per-date transforms</td><td>APIs with many active clients and frequent changes</td></tr>
+            <tr><td><strong>Query param (?version=2)</strong></td><td>High</td><td>Simple</td><td>Quick prototypes — not recommended for production</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>URL versioning with version-specific transforms</h2>
+        <pre><code class="language-js">import express from 'express';
+
+const app = express();
+
+// ─── URL VERSIONING — separate routers per version ────────────────────────
+const v1 = express.Router();
+const v2 = express.Router();
+
+// v1: user has firstName + lastName as separate fields
+v1.get('/users/:id', async (req, res) => {
+  const user = await userService.findById(req.params.id);
+  res.json({
+    id:         user.id,
+    firstName:  user.name.split(' ')[0],
+    lastName:   user.name.split(' ').slice(1).join(' '),
+    email:      user.email,
+  });
+});
+
+// v2: user has single name field + added roles array
+v2.get('/users/:id', async (req, res) => {
+  const user = await userService.findById(req.params.id);
+  res.json({
+    id:    user.id,
+    name:  user.name,       // Breaking change: firstName/lastName → name
+    email: user.email,
+    roles: user.roles ?? [], // Additive: new optional field
+  });
+});
+
+app.use('/v1', v1);
+app.use('/v2', v2);
+// /v2 is also the default for unversioned paths
+app.use('/', v2);
+
+// ─── HEADER-BASED VERSIONING ────────────────────────────────────────────
+function versionMiddleware(req, res, next) {
+  const version = req.headers['api-version'] ?? '2';
+  req.apiVersion = parseInt(version);
+  next();
+}
+
+app.use(versionMiddleware);
+
+app.get('/users/:id', async (req, res) => {
+  const user = await userService.findById(req.params.id);
+
+  if (req.apiVersion === 1) {
+    return res.json({ id: user.id, firstName: user.name.split(' ')[0], email: user.email });
+  }
+  return res.json({ id: user.id, name: user.name, email: user.email, roles: user.roles });
+});
+
+// ─── DEPRECATION HEADERS ──────────────────────────────────────────────────
+// Always signal deprecated versions via response headers
+// so clients can migrate before the sunset date.
+function deprecationMiddleware(version, sunsetDate) {
+  return (req, res, next) => {
+    if (req.path.startsWith(`/v${version}`)) {
+      res.setHeader('Deprecation', `true`);
+      res.setHeader('Sunset', new Date(sunsetDate).toUTCString());
+      res.setHeader('Link', `</v${version + 1}/docs>; rel="successor-version"`);
+    }
+    next();
+  };
+}
+
+// /v1 is deprecated, sunsets 2027-01-01
+app.use(deprecationMiddleware(1, '2027-01-01'));
+
+// ─── WHAT COUNTS AS BREAKING ──────────────────────────────────────────────
+const BREAKING_CHANGES = [
+  'Removing a field',
+  'Renaming a field',
+  'Changing a field type (string → number)',
+  'Changing HTTP method (GET → POST)',
+  'Changing status code semantics (200 → 201)',
+  'Adding a required field to a request body',
+  'Changing authentication requirements',
+  'Changing error response shape',
+];
+
+const NON_BREAKING_CHANGES = [
+  'Adding a new optional response field',
+  'Adding a new endpoint',
+  'Adding a new optional request parameter with a default',
+  'Expanding an enum (adding new valid values)',
+  'Relaxing validation (accepting values previously rejected)',
+];</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How Stripe manages 100+ API versions</h2>
+        <p><strong>Stripe's approach:</strong> Every account has an API version date. New accounts default to the latest. Existing accounts are pinned to the date they joined. When Stripe makes a breaking change, they add a new version date. All requests include the account's pinned version in the Stripe-Version header. Internally, Stripe maintains a chain of "version gates" — each gate transforms the response for requests at that version date or older.</p>
+        <p><strong>Twilio:</strong> Uses date-based versioning (2010-04-01, 2023-12-01) for major version milestones, combined with strict backward compatibility within a version. Any change that would break existing integrations requires a new version date.</p>
+        <p><strong>GitHub:</strong> Uses header versioning: <code>X-GitHub-Api-Version: 2022-11-28</code>. GitHub commits to supporting API versions for at least 24 months before sunset.</p>
+
+        <div class="insight-box"><strong>Version early, version consistently.</strong> It is far harder to introduce versioning after your API already has clients. Design your routing to support versions from day one, even if you only have v1. When the time comes for v2, the infrastructure is already in place. Add Deprecation and Sunset headers to old versions months before removal to give clients time to migrate.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>API versioning is how you evolve an API without breaking clients. URL versioning (/v2/) is the most practical for public APIs — visible, easy to route, easy to document. Non-breaking additions (new optional fields, new endpoints) can go into the current version. Breaking changes (removing or renaming fields, changing types) require a new version. Signal deprecation via response headers (Deprecation, Sunset) with at least 6–12 months of notice. Stripe's date-based versioning is the gold standard for APIs with many long-lived clients — each client stays pinned to the version they tested against.</p>
+      </section>
+    </main>
+  </body>
+</html>

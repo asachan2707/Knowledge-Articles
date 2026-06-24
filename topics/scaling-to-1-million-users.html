@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scaling to 1 Million Users | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .diagram-box {
+        background: #0f172a; color: #e2e8f0;
+        border-radius: 10px; padding: 1.25rem 1.5rem;
+        font-family: 'Courier New', monospace; font-size: .82rem;
+        line-height: 1.7; overflow-x: auto; margin: 1.25rem 0;
+      }
+      .diagram-box .hi  { color: #38bdf8; font-weight: 700; }
+      .diagram-box .ok  { color: #4ade80; font-weight: 700; }
+      .diagram-box .warn{ color: #fb923c; font-weight: 700; }
+      .diagram-box .dim { color: #64748b; }
+      .diagram-box .hot { color: #f472b6; font-weight: 700; }
+
+      .phase-badge {
+        display: inline-block;
+        padding: .2rem .7rem;
+        border-radius: 20px;
+        font-size: .72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .07em;
+        margin-bottom: .75rem;
+      }
+      .phase-1 { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+      .phase-2 { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+      .phase-3 { background: #fefce8; color: #854d0e; border: 1px solid #fef08a; }
+      .phase-4 { background: #fdf4ff; color: #7e22ce; border: 1px solid #e9d5ff; }
+      .phase-5 { background: #fff1f2; color: #9f1239; border: 1px solid #fecdd3; }
+
+      .trade-grid {
+        display: grid; grid-template-columns: 1fr 1fr;
+        gap: .75rem; margin: 1rem 0;
+      }
+      .trade-grid .pro  { background: #f0fdf4; border-left: 4px solid #22c55e; padding: .75rem 1rem; border-radius: 0 8px 8px 0; font-size: .9rem; }
+      .trade-grid .con  { background: #fff1f2; border-left: 4px solid #f43f5e; padding: .75rem 1rem; border-radius: 0 8px 8px 0; font-size: .9rem; }
+      .trade-grid strong { display: block; margin-bottom: .35rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; opacity: .7; }
+
+      .insight-box {
+        background: #fdf4ff; border-left: 4px solid #a855f7;
+        padding: .85rem 1.1rem; border-radius: 0 8px 8px 0;
+        margin: 1rem 0; font-size: .93rem;
+      }
+      .insight-box strong { color: #7e22ce; }
+
+      .warn-box {
+        background: #fff7ed; border-left: 4px solid #f97316;
+        padding: .85rem 1.1rem; border-radius: 0 8px 8px 0;
+        margin: 1rem 0; font-size: .93rem;
+      }
+      .warn-box strong { color: #c2410c; }
+
+      .number-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 28px; height: 28px; border-radius: 50%;
+        background: #0f172a; color: #fff;
+        font-size: .8rem; font-weight: 700;
+        flex-shrink: 0; margin-right: .6rem;
+      }
+
+      .step-list { list-style: none; padding: 0; margin: 1rem 0; }
+      .step-list li {
+        display: flex; align-items: flex-start; gap: .5rem;
+        padding: .6rem 0; border-bottom: 1px solid #f1f5f9;
+        font-size: .94rem;
+      }
+      .step-list li:last-child { border-bottom: none; }
+
+      @media (max-width: 600px) {
+        .trade-grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks in a data centre representing large-scale web infrastructure"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · JavaScript · Infrastructure · 40 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Scaling to 1 Million Users</h1>
+        <p class="summary">
+          The complete, phase-by-phase playbook for growing a web application from a single server to
+          a distributed system that handles a million concurrent users — with real JavaScript
+          implementations at every layer. Covers horizontal scaling, caching, database replication,
+          sharding, message queues, microservices, and the Flash Sale stress-test that breaks
+          most architectures.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Portal</span><span class="meta-value">Internal · Curated</span></div>
+          <div><span class="meta-label">Focus</span><span class="meta-value">Architecture · Node.js · Redis · PostgreSQL · Kafka</span></div>
+          <div><span class="meta-label">Published</span><span class="meta-value">Jun 12, 2026</span></div>
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate → Advanced</span></div>
+        </div>
+      </header>
+
+      <!-- ─── INTRO ─────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <p class="lead">
+          Every application that ever ran on a single server once handled ten users. The difference
+          between ten users and a million is not a single architectural decision — it is a sequence
+          of bottleneck discoveries, each resolved with the right tool at the right time. The engineers
+          who build scalable systems are not the ones who designed it all upfront. They are the ones
+          who learned to recognise the next bottleneck before it became an outage.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The cardinal rule:</strong> Do not over-engineer for tomorrow's traffic on day one.
+            Build what handles today's load with one level of headroom. An architecture that handles
+            10k users when you have 1k is good engineering. An architecture that handles 10M users
+            when you have 1k is wasted complexity that will slow every feature you ship for years.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── THE SCALING MAP ───────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Overview</span>
+        <h2>The five phases — the full journey at a glance</h2>
+        <p>Each phase addresses the dominant bottleneck at that traffic tier. Skipping a phase is
+        usually wrong; the solution to phase 3's problem does not help with phase 2's problem.</p>
+
+        <div class="diagram-box">
+<pre><span class="dim">Users        Architecture                         Primary Bottleneck Solved</span>
+<span class="dim">─────────────────────────────────────────────────────────────────────────</span>
+<span class="ok">1 → 1k</span>      <span class="hi">Single Server</span>                        Vertical scale: bigger machine
+            [ Web + App + DB + Jobs ]
+
+<span class="ok">1k → 10k</span>    <span class="hi">Split Compute & Data</span>                 CPU/RAM contention
+            [ Web/App Server ] ──── [ DB Server ]
+
+<span class="ok">10k → 100k</span>  <span class="hi">Horizontal Scale + Load Balancer</span>     Single web server ceiling
+            [ LB ] → [ App1 | App2 | App3 ]
+                          ↓
+                      [ DB Server ]
+
+<span class="ok">100k → 500k</span> <span class="hi">Caching + Read Replicas + CDN</span>        DB read bottleneck
+            [ LB ] → [ App fleet ]
+              ↓               ↓
+          [ Redis ]    [ Primary DB ] → [ Replica × N ]
+                            CDN serves all static assets
+
+<span class="warn">500k → 1M+</span>  <span class="hi">Microservices + Queues + Sharding</span>    DB write bottleneck
+            [ LB ] → [ Service A | Service B | ... ]
+                             ↓
+                      [ Message Queue ]
+                             ↓
+                      [ Worker fleet ]
+                             ↓
+                   [ DB Shard 1 | DB Shard 2 | ... ]</pre>
+        </div>
+      </section>
+
+      <!-- ─── PHASE 1 ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="phase-badge phase-1">Phase 1 · 1 – 1,000 Users</span>
+        <h2>The Monolith — everything on one server</h2>
+        <p>
+          Your web server, application logic, database, and background jobs all run on a single machine.
+          This is correct for early-stage products. The complexity overhead of distributed systems
+          is not worth it at this scale, and the monolith is vastly easier to reason about, debug,
+          and deploy.
+        </p>
+        <p>Growth strategy: <strong>vertical scaling</strong>. When the server feels slow, buy a bigger one.</p>
+
+        <div class="diagram-box">
+<pre>┌──────────────────────────────────────────┐
+│               Single VPS                │
+│                                          │
+│  ┌──────────┐  ┌──────────┐             │
+│  │ Express  │  │PostgreSQL│             │
+│  │  App     │  │   DB     │             │
+│  └──────────┘  └──────────┘             │
+│  ┌──────────────────────────┐           │
+│  │   Background Job Runner  │           │
+│  └──────────────────────────┘           │
+└──────────────────────────────────────────┘
+           ↑ Vertical: upgrade CPU/RAM/SSD</pre>
+        </div>
+
+        <pre><code class="language-js">// ── Phase 1: Dead-simple Express monolith ────────────────────────────────
+import express from 'express';
+import { Pool } from 'pg';
+
+const app = express();
+const db  = new Pool({ connectionString: process.env.DATABASE_URL });
+
+app.use(express.json());
+
+// Reads and writes hit the same single DB — fine at this scale.
+app.get('/products', async (req, res) => {
+  const { rows } = await db.query('SELECT * FROM products ORDER BY created_at DESC');
+  res.json(rows);
+});
+
+app.post('/orders', async (req, res) => {
+  const { userId, productId, qty } = req.body;
+  const { rows } = await db.query(
+    'INSERT INTO orders (user_id, product_id, qty) VALUES ($1, $2, $3) RETURNING *',
+    [userId, productId, qty]
+  );
+  res.json(rows[0]);
+});
+
+app.listen(3000);</code></pre>
+
+        <div class="trade-grid">
+          <div class="pro"><strong>Works well</strong>Zero network latency between components. Single deploy. Trivial local dev. Fast iteration.</div>
+          <div class="con"><strong>Watch for</strong>CPU-bound jobs (image resize, PDF gen) blocking the event loop. Single point of failure. Can only scale vertically.</div>
+        </div>
+
+        <div class="insight-box">
+          <strong>When to leave Phase 1:</strong> When your DB CPU is consistently above 70% during peak, or when a background job (email sends, report generation) is causing noticeable latency spikes on API requests.
+        </div>
+      </section>
+
+      <!-- ─── PHASE 2 ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="phase-badge phase-2">Phase 2 · 1,000 – 10,000 Users</span>
+        <h2>Split Compute and Data — two servers</h2>
+        <p>
+          The first and highest-ROI architectural move you can make: separate the application server
+          from the database server. This lets each machine be tuned independently. Your app server
+          needs CPU and low latency. Your database server needs memory (for buffer pools), fast storage
+          (NVMe SSDs), and different CPU characteristics (fewer, faster cores vs many cores).
+        </p>
+
+        <div class="diagram-box">
+<pre>  Internet
+     │
+┌────▼────────────┐         ┌────────────────────┐
+│  App Server     │────────▶│  Database Server   │
+│  (Node.js)      │  TCP    │  (PostgreSQL)      │
+│  4 vCPU / 8GB   │  5432   │  8 vCPU / 32GB RAM │
+│                 │◀────────│  NVMe SSD          │
+└─────────────────┘         └────────────────────┘</pre>
+        </div>
+
+        <pre><code class="language-js">// ── Phase 2: App and DB on separate hosts ─────────────────────────────────
+// The code itself doesn't change — only the DATABASE_URL env var points to a
+// different machine. This is the beauty of the split: zero code refactor.
+
+// .env (app server)
+// DATABASE_URL=postgresql://user:pass@10.0.0.5:5432/mydb
+//                                     ^^^^^^^^
+//                                     private IP of DB server
+
+// Connection pool tuning matters now — you don't want to saturate the DB
+// with too many connections from the app fleet.
+const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,            // max connections per app server instance
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 2_000,
+});
+
+// Health check — if DB is unreachable, report unhealthy so load balancer
+// can route away (useful when you add LB in Phase 3).
+app.get('/health', async (req, res) => {
+  try {
+    await db.query('SELECT 1');
+    res.json({ status: 'ok' });
+  } catch {
+    res.status(503).json({ status: 'db_unreachable' });
+  }
+});</code></pre>
+
+        <div class="insight-box">
+          <strong>Key win:</strong> A slow report query no longer degrades the same CPU resources that your web server needs to handle requests. The machines have different jobs — let them have different specs.
+        </div>
+      </section>
+
+      <!-- ─── PHASE 3 ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="phase-badge phase-3">Phase 3 · 10,000 – 100,000 Users</span>
+        <h2>Horizontal Scaling — load balancer + stateless app servers</h2>
+        <p>
+          A single app server has a ceiling. You hit it around 10k–20k concurrent users depending on
+          workload. The solution is horizontal scaling: run multiple identical app server instances
+          behind a load balancer. The load balancer distributes incoming requests across the fleet
+          and health-checks each instance.
+        </p>
+        <p>
+          <strong>Critical prerequisite: stateless app servers.</strong> If your server stores session data
+          in memory, adding a second server breaks sessions — User A's request went to Server 1, but
+          their next request landed on Server 2 which has no memory of them. Fix this before you scale.
+        </p>
+
+        <div class="diagram-box">
+<pre>        Internet
+           │
+    ┌──────▼──────┐
+    │ Load Balancer│   Nginx / AWS ALB / Cloudflare
+    │  (Layer 7)  │   Health checks every 10s
+    └──┬───┬───┬──┘
+       │   │   │
+  ┌────▼┐ ┌▼───▼┐ ┌▼────┐
+  │App 1│ │App 2│ │App 3│   Auto-scaling group
+  │     │ │     │ │     │   Scale out when CPU > 70%
+  └──┬──┘ └──┬──┘ └──┬──┘   Scale in when CPU < 30%
+     └────────┴────────┘
+              │
+       ┌──────▼──────┐
+       │  Database   │
+       └─────────────┘</pre>
+        </div>
+
+        <pre><code class="language-js">// ── Phase 3a: Move sessions to Redis (stateless app servers) ──────────────
+import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { createClient } from 'redis';
+
+const redisClient = createClient({ url: process.env.REDIS_URL });
+await redisClient.connect();
+
+app.use(session({
+  store:  new RedisStore({ client: redisClient }),
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: true, maxAge: 24 * 60 * 60 * 1000 },
+}));
+// Now any app server can handle any request — they all read/write the same
+// Redis session store instead of each maintaining their own in-memory state.
+
+// ── Phase 3b: Nginx load balancer config ──────────────────────────────────
+/*
+upstream app_fleet {
+    least_conn;                   # route to server with fewest active connections
+    server 10.0.1.1:3000 weight=1;
+    server 10.0.1.2:3000 weight=1;
+    server 10.0.1.3:3000 weight=1;
+    keepalive 32;                 # maintain persistent connections to upstreams
+}
+
+server {
+    listen 443 ssl;
+    server_name example.com;
+
+    location / {
+        proxy_pass          http://app_fleet;
+        proxy_http_version  1.1;
+        proxy_set_header    Connection "";
+        proxy_set_header    X-Real-IP $remote_addr;
+        proxy_set_header    X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout    30s;
+    }
+
+    location /health {
+        proxy_pass http://app_fleet;
+        access_log off;           # don't log health check noise
+    }
+}
+*/
+
+// ── Phase 3c: Graceful shutdown — drain in-flight requests before dying ────
+// Without this, a server removed from the pool drops active requests mid-flight.
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received — draining...');
+  server.close(async () => {
+    await db.end();
+    await redisClient.quit();
+    process.exit(0);
+  });
+  // Force-exit if drain takes too long
+  setTimeout(() => process.exit(1), 30_000);
+});</code></pre>
+
+        <div class="warn-box">
+          <strong>The statefulness trap:</strong> In-memory caches, local file uploads, and WebSocket connections are the three most common things that break when you add a second server. Audit for all three before scaling horizontally.
+        </div>
+      </section>
+
+      <!-- ─── PHASE 4 ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="phase-badge phase-4">Phase 4 · 100,000 – 500,000 Users</span>
+        <h2>Caching, Read Replicas, and CDN — killing the DB bottleneck</h2>
+        <p>
+          At 100k users, your database becomes the bottleneck even though your app fleet is fine.
+          The pattern: most traffic is reads (product pages, user profiles, dashboards), not writes.
+          Read replicas let you distribute read load across multiple DB nodes. Redis caches the
+          hottest data so many reads never hit the database at all. A CDN removes static asset
+          requests entirely.
+        </p>
+
+        <div class="diagram-box">
+<pre>                          ┌─────────────┐
+                          │     CDN     │  Serves HTML/JS/CSS/images
+                          │  (edge PoP) │  99% of static requests handled here
+                          └──────┬──────┘
+                                 │ cache miss only
+                         ┌───────▼────────┐
+                    ┌────│  Load Balancer │────┐
+                    │    └───────┬────────┘    │
+               ┌────▼───┐   ┌───▼────┐   ┌────▼───┐
+               │ App 1  │   │ App 2  │   │ App 3  │
+               └────┬───┘   └───┬────┘   └────┬───┘
+                    └─────┬─────┘              │
+                     ┌────▼─────┐      ┌───────▼──────┐
+                     │  Redis   │      │              │
+                     │  Cache   │      │  Primary DB  │  writes only
+                     └──────────┘      │  (Postgres)  │
+                                       └──────┬───────┘
+                                 ┌────────────┼────────────┐
+                            ┌────▼───┐   ┌────▼───┐   ┌────▼───┐
+                            │Replica │   │Replica │   │Replica │  reads
+                            └────────┘   └────────┘   └────────┘</pre>
+        </div>
+
+        <pre><code class="language-js">// ── Phase 4a: Redis cache-aside pattern ───────────────────────────────────
+// "Cache-aside": app controls the cache explicitly.
+// Read from cache → hit: return it. miss: read DB, write to cache, return.
+
+async function getProduct(id) {
+  const cacheKey = `product:${id}`;
+
+  // 1. Try cache
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  // 2. Cache miss — read from DB (replica for reads)
+  const { rows } = await readDb.query(
+    'SELECT * FROM products WHERE id = $1', [id]
+  );
+  if (!rows[0]) return null;
+
+  // 3. Populate cache — TTL 5 minutes
+  await redis.setEx(cacheKey, 300, JSON.stringify(rows[0]));
+  return rows[0];
+}
+
+// Invalidate on write — always update the source of truth first.
+async function updateProduct(id, data) {
+  await writeDb.query(
+    'UPDATE products SET name=$1, price=$2 WHERE id=$3',
+    [data.name, data.price, id]
+  );
+  // Invalidate so the next read refreshes from DB.
+  await redis.del(`product:${id}`);
+}
+
+// ── Phase 4b: Separate read and write DB connections ──────────────────────
+const writeDb = new Pool({ connectionString: process.env.DB_PRIMARY_URL, max: 10 });
+const readDb  = new Pool({ connectionString: process.env.DB_REPLICA_URL, max: 30 });
+// Write pool is smaller — writes are serialised through primary.
+// Read pool is larger  — spread across N replicas via a connection string
+// that round-robins, or use PgBouncer as a read proxy.
+
+// Route queries explicitly
+async function getUser(userId) {
+  const { rows } = await readDb.query(      // hits a replica
+    'SELECT id, name, email FROM users WHERE id = $1', [userId]
+  );
+  return rows[0];
+}
+
+async function createUser(data) {
+  const { rows } = await writeDb.query(     // hits primary
+    'INSERT INTO users (name, email) VALUES ($1, $2) RETURNING *',
+    [data.name, data.email]
+  );
+  return rows[0];
+}
+
+// ── Phase 4c: Cache frequently-computed aggregates ────────────────────────
+// Leaderboards, category counts, dashboard totals — anything computed from
+// many rows is expensive. Cache the result, not the raw rows.
+
+async function getCategoryProductCount(categoryId) {
+  const key = `category:${categoryId}:count`;
+  const cached = await redis.get(key);
+  if (cached) return parseInt(cached, 10);
+
+  const { rows } = await readDb.query(
+    'SELECT COUNT(*) FROM products WHERE category_id = $1', [categoryId]
+  );
+  const count = parseInt(rows[0].count, 10);
+  await redis.setEx(key, 60, String(count)); // 60s TTL — stale is fine for counts
+  return count;
+}</code></pre>
+
+        <div class="insight-box">
+          <strong>The 80/20 of caching:</strong> In most CRUD applications, 20% of the data (product listings, user profiles, category aggregates) accounts for 80% of the reads. Cache those 20% with a generous TTL and your DB load drops dramatically. Don't cache everything — cache what's hot.
+        </div>
+      </section>
+
+      <!-- ─── PHASE 5 ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="phase-badge phase-5">Phase 5 · 500,000 – 1M+ Users</span>
+        <h2>Microservices, Message Queues, and Database Sharding</h2>
+        <p>
+          At this scale, two new problems dominate. First, your monolith's deployment surface is so
+          large that any change risks the whole system — teams are stepping on each other. Second,
+          even with replicas and caching, write throughput on a single primary DB node becomes the
+          ceiling. The solution is decomposition: break the system apart at the seams.
+        </p>
+
+        <div class="diagram-box">
+<pre><span class="dim">┌─────────────── API Gateway ───────────────┐</span>
+<span class="dim">│ Auth · Rate limiting · Routing            │</span>
+<span class="dim">└──┬────────────┬──────────────┬────────────┘</span>
+   │            │              │
+<span class="hi">┌──▼──────┐ ┌───▼──────┐ ┌────▼───────┐</span>
+<span class="hi">│ User    │ │ Product  │ │  Order     │</span>
+<span class="hi">│ Service │ │ Service  │ │  Service   │</span>
+<span class="hi">└──┬──────┘ └───┬──────┘ └────┬───────┘</span>
+   │            │              │
+   ▼            ▼              ▼
+<span class="ok">Users DB    Products DB   ┌──────────────────┐</span>
+<span class="ok">(Shard A/B) (Replica)    │  Message Queue   │</span>
+                          │  (Kafka/BullMQ)  │</span>
+                          └────────┬─────────┘</span>
+                                   │
+                     ┌─────────────▼──────────────┐
+                     │      Worker Fleet           │
+                     │  (payment · email · notify) │
+                     └─────────────┬──────────────┘
+                                   │
+                            <span class="warn">Orders DB</span>
+                            <span class="warn">(Shard by user_id)</span></pre>
+        </div>
+
+        <pre><code class="language-js">// ── Phase 5a: Message queue with BullMQ (Redis-backed) ────────────────────
+// Orders go into a queue instantly. Workers process them at a steady rate.
+// User gets immediate confirmation; heavy work is async.
+import { Queue, Worker } from 'bullmq';
+
+const connection = { host: process.env.REDIS_HOST, port: 6379 };
+
+// Producer — runs in the Order Service
+const orderQueue = new Queue('orders', { connection });
+
+async function placeOrder(userId, productId, qty) {
+  // 1. Write minimal "pending" row immediately (fast write)
+  const order = await writeDb.query(
+    'INSERT INTO orders (user_id, product_id, qty, status) VALUES ($1,$2,$3,$4) RETURNING id',
+    [userId, productId, qty, 'pending']
+  );
+
+  // 2. Enqueue the heavy work — returns in < 5ms
+  await orderQueue.add('process-order', {
+    orderId: order.rows[0].id,
+    userId,
+    productId,
+    qty,
+  }, {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: 1000,
+    removeOnFail: 5000,
+  });
+
+  // 3. Return instantly — user isn't waiting for payment processing
+  return { orderId: order.rows[0].id, status: 'pending' };
+}
+
+// Consumer — runs in the Payment Worker Service
+const orderWorker = new Worker('orders', async (job) => {
+  const { orderId, userId, productId, qty } = job.data;
+
+  // These operations can take 2–5 seconds — no problem off the main path.
+  const charge = await stripe.charges.create({
+    amount: await getProductPrice(productId) * qty,
+    currency: 'usd',
+    customer: await getStripeCustomerId(userId),
+  });
+
+  await writeDb.query(
+    'UPDATE orders SET status=$1, charge_id=$2 WHERE id=$3',
+    ['completed', charge.id, orderId]
+  );
+
+  await emailQueue.add('order-confirmation', { userId, orderId });
+}, { connection, concurrency: 5 });
+
+orderWorker.on('failed', (job, err) => {
+  console.error(`Order job ${job.id} failed:`, err.message);
+  // Alerting hook — PagerDuty / Sentry
+});
+
+// ── Phase 5b: Database sharding by user_id ────────────────────────────────
+// Split the orders table across N database shards.
+// Queries for a user always go to the same shard — no cross-shard joins.
+
+const SHARD_COUNT = 4;
+
+function getShardIndex(userId) {
+  // Consistent hash: same userId always maps to same shard
+  const hash = userId.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return hash % SHARD_COUNT;
+}
+
+const shards = [
+  new Pool({ connectionString: process.env.DB_SHARD_0 }),
+  new Pool({ connectionString: process.env.DB_SHARD_1 }),
+  new Pool({ connectionString: process.env.DB_SHARD_2 }),
+  new Pool({ connectionString: process.env.DB_SHARD_3 }),
+];
+
+async function getUserOrders(userId) {
+  const shard = shards[getShardIndex(userId)];
+  const { rows } = await shard.query(
+    'SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC', [userId]
+  );
+  return rows;
+}
+
+// ── Phase 5c: API Gateway with rate limiting ──────────────────────────────
+import rateLimit from 'express-rate-limit';
+import { createClient } from 'redis';
+import { RedisStore as RateLimitRedisStore } from 'rate-limit-redis';
+
+const redisClient = createClient({ url: process.env.REDIS_URL });
+await redisClient.connect();
+
+// Global rate limit — all endpoints
+const globalLimiter = rateLimit({
+  windowMs: 60_000,     // 1 minute
+  max: 100,             // 100 req / min per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: new RateLimitRedisStore({ sendCommand: (...args) => redisClient.sendCommand(args) }),
+  handler: (req, res) => res.status(429).json({
+    error: 'rate_limit_exceeded',
+    retryAfter: Math.ceil(req.rateLimit.resetTime / 1000),
+  }),
+});
+
+// Tight limit on expensive endpoints
+const heavyLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,  // 10 requests per minute for payment/export endpoints
+  store: new RateLimitRedisStore({ sendCommand: (...args) => redisClient.sendCommand(args) }),
+});
+
+app.use(globalLimiter);
+app.post('/api/checkout', heavyLimiter, checkoutHandler);</code></pre>
+      </section>
+
+      <!-- ─── FLASH SALE ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Stress Test</span>
+        <h2>The Flash Sale: 100,000 simultaneous buyers, 1,000 items</h2>
+        <p>
+          No architecture stress-test exposes more weaknesses simultaneously than a flash sale.
+          In one event: a massive concurrent traffic spike, database row contention under lock pressure,
+          and the need to give users instant feedback while ensuring no item is ever oversold.
+          Here is exactly what breaks in a naive implementation — and exactly how to fix each layer.
+        </p>
+
+        <h3>Why the naive implementation crashes</h3>
+        <pre><code class="language-js">// ── THE NAIVE IMPLEMENTATION — do not ship this ───────────────────────────
+// This crashes under flash sale conditions.
+
+app.post('/buy', async (req, res) => {
+  const { productId, userId } = req.body;
+
+  // 1. Check stock — this is a read
+  const { rows: [product] } = await db.query(
+    'SELECT stock FROM products WHERE id = $1', [productId]
+  );
+  if (product.stock <= 0) return res.status(409).json({ error: 'out_of_stock' });
+
+  // 2. Decrement stock — this is a write
+  // PROBLEM: 100,000 concurrent requests all run these two lines.
+  // Between step 1 (read) and step 2 (write), thousands of other requests
+  // also read stock = 1000, all see stock > 0, and all proceed.
+  // Result: 100,000 rows inserted into orders; database row lock contention
+  // causes cascading timeouts; oversell of 99,000 units.
+  await db.query('UPDATE products SET stock = stock - 1 WHERE id = $1', [productId]);
+  await db.query('INSERT INTO orders (user_id, product_id) VALUES ($1, $2)', [userId, productId]);
+
+  res.json({ success: true }); // reached by 100,000 concurrent requests — wrong
+});</code></pre>
+
+        <div class="warn-box">
+          <strong>The two failure modes in the naive approach:</strong><br/>
+          (1) <strong>Race condition oversell:</strong> multiple concurrent requests all read stock > 0 before any write completes.<br/>
+          (2) <strong>Lock contention crash:</strong> even with row-level locks (SELECT FOR UPDATE), 100,000 processes serialise on the same lock and the DB connection pool exhausts within seconds.
+        </div>
+
+        <h3>The production solution — five layers</h3>
+
+        <div class="diagram-box">
+<pre><span class="hi">Layer 1: CDN</span>
+  All page HTML/CSS/JS served from edge — zero origin requests for browsing.
+  Only the /buy POST ever touches your servers.
+
+<span class="hi">Layer 2: Waiting Room (Virtual Queue)</span>
+  Before /buy hits your app: throttle to N req/s.
+  Excess users see a "you're in the queue" page.
+  Protects the app fleet from the spike.
+
+<span class="hi">Layer 3: Redis atomic decrement</span>
+  Replaces SQL for the stock check + decrement.
+  DECRBY is single-threaded in Redis — no race conditions, no locks.
+  If result &lt; 0, INCRBY to undo and reject. Otherwise: reserved.
+
+<span class="hi">Layer 4: Message Queue</span>
+  Successful reservation → drop job into queue → return 202 immediately.
+  User gets instant "you got it!" — no waiting for payment processing.
+
+<span class="hi">Layer 5: Worker Fleet</span>
+  Pulls from queue at a steady, DB-safe rate.
+  Charges card, writes permanent order row, sends confirmation email.
+  Failures are retried; user is notified if payment ultimately fails.</pre>
+        </div>
+
+        <pre><code class="language-js">// ── THE PRODUCTION FLASH SALE IMPLEMENTATION ─────────────────────────────
+import express from 'express';
+import { createClient } from 'redis';
+import { Queue, Worker } from 'bullmq';
+import rateLimit from 'express-rate-limit';
+
+const redis      = createClient({ url: process.env.REDIS_URL });
+const orderQueue = new Queue('flash-orders', { connection: { host: process.env.REDIS_HOST } });
+await redis.connect();
+
+// ── Layer 2: Waiting room — cap burst to 500 req/s globally ───────────────
+const waitingRoom = rateLimit({
+  windowMs: 1000,
+  max: 500,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'waiting_room',
+      message: 'High demand — you are in the queue. Please retry in a moment.',
+      retryAfter: 1,
+    });
+  },
+});
+
+// ── Seed Redis stock counter before the sale goes live ────────────────────
+// Run once, minutes before the sale starts.
+async function seedFlashStock(productId, quantity) {
+  await redis.set(`flash:stock:${productId}`, quantity);
+  await redis.set(`flash:active:${productId}`, '1');
+  console.log(`Flash stock seeded: product ${productId} = ${quantity} units`);
+}
+
+// ── Layer 3 + 4: The buy endpoint ────────────────────────────────────────
+app.post('/flash/buy', waitingRoom, async (req, res) => {
+  const { productId, userId } = req.body;
+
+  // Guard: sale must be active
+  const isActive = await redis.get(`flash:active:${productId}`);
+  if (!isActive) return res.status(400).json({ error: 'sale_not_active' });
+
+  // Atomic decrement — single Redis operation, no race condition possible.
+  // If two requests arrive simultaneously, Redis processes them serially.
+  const remaining = await redis.decr(`flash:stock:${productId}`);
+
+  if (remaining < 0) {
+    // Undo the decrement — we went below zero (sold out).
+    await redis.incr(`flash:stock:${productId}`);
+    return res.status(409).json({ error: 'sold_out', message: 'This item is sold out.' });
+  }
+
+  // Stock reserved — enqueue the heavy work.
+  const reservationId = `res_${userId}_${productId}_${Date.now()}`;
+
+  await orderQueue.add('complete-order', {
+    reservationId,
+    userId,
+    productId,
+    reservedAt: new Date().toISOString(),
+  }, {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 3000 },
+  });
+
+  // Return immediately — user does NOT wait for payment.
+  res.status(202).json({
+    status: 'reserved',
+    reservationId,
+    message: 'Your item is reserved! Completing payment now...',
+  });
+});
+
+// ── Layer 5: Worker — processes reservations at a safe rate ───────────────
+const flashWorker = new Worker('flash-orders', async (job) => {
+  const { reservationId, userId, productId } = job.data;
+
+  // Charge the user's saved payment method.
+  const price   = await getProductPrice(productId);
+  const charge  = await stripe.charges.create({
+    amount:   price * 100,  // cents
+    currency: 'usd',
+    customer: await getStripeCustomerId(userId),
+    metadata: { reservationId },
+  });
+
+  // Write the permanent order record to the main relational DB.
+  await writeDb.query(
+    `INSERT INTO orders (user_id, product_id, reservation_id, charge_id, status)
+     VALUES ($1, $2, $3, $4, 'completed')`,
+    [userId, productId, reservationId, charge.id]
+  );
+
+  // Confirmation email
+  await emailQueue.add('order-confirmation', { userId, orderId: reservationId });
+
+}, {
+  connection: { host: process.env.REDIS_HOST },
+  concurrency: 10,     // 10 parallel payment calls — stay within Stripe rate limits
+  limiter: {
+    max: 50,           // max 50 jobs per second across all workers
+    duration: 1000,
+  },
+});
+
+flashWorker.on('failed', async (job, err) => {
+  console.error(`Flash order ${job.id} failed after all retries:`, err.message);
+  // Compensate: release the Redis reservation so it can be sold to someone else.
+  await redis.incr(`flash:stock:${job.data.productId}`);
+  // Notify user that payment failed.
+  await emailQueue.add('payment-failed', { userId: job.data.userId });
+});
+
+// ── Monitoring: real-time stock counter (read from Redis, not DB) ──────────
+app.get('/flash/stock/:productId', async (req, res) => {
+  const stock = await redis.get(`flash:stock:${req.params.productId}`);
+  res.json({ remaining: Math.max(0, parseInt(stock || '0', 10)) });
+});</code></pre>
+
+        <div class="insight-box">
+          <strong>Why Redis DECR is the key insight:</strong> Redis is single-threaded for command processing. Even though 100,000 requests arrive concurrently at your Node.js fleet, Redis processes each DECR one at a time. The first 1,000 get a non-negative result. Request 1,001 gets -1, undoes it, and is told "sold out." Zero race conditions. Zero DB row locks. Zero oversells.
+        </div>
+      </section>
+
+      <!-- ─── OBSERVABILITY ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Operations</span>
+        <h2>Observability — knowing what is happening at scale</h2>
+        <p>
+          At scale, you cannot manually inspect what is happening. You need metrics that tell you
+          when something is degraded before users report it. Three pillars: metrics (what is happening),
+          logs (what happened), traces (why a specific request was slow).
+        </p>
+
+        <pre><code class="language-js">// ── Request timing middleware (metrics) ───────────────────────────────────
+// Emit structured logs that a metrics pipeline (Datadog, Grafana) can parse.
+
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+    console.log(JSON.stringify({
+      level:    'info',
+      event:    'http_request',
+      method:   req.method,
+      path:     req.route?.path || req.path,
+      status:   res.statusCode,
+      ms:       Math.round(durationMs),
+      userId:   req.user?.id || null,
+      traceId:  req.headers['x-trace-id'] || null,
+    }));
+
+    // Emit to metrics system — p99 latency per route is your key SLO signal.
+    metrics.histogram('http.request.duration', durationMs, {
+      method: req.method,
+      route:  req.route?.path || 'unknown',
+      status: String(res.statusCode),
+    });
+  });
+
+  next();
+});
+
+// ── Health and readiness endpoints ────────────────────────────────────────
+// Liveness: is the process alive?
+app.get('/health/live', (req, res) => res.json({ status: 'ok' }));
+
+// Readiness: can this instance handle traffic right now?
+app.get('/health/ready', async (req, res) => {
+  const checks = await Promise.allSettled([
+    db.query('SELECT 1'),
+    redis.ping(),
+  ]);
+
+  const dbOk    = checks[0].status === 'fulfilled';
+  const redisOk = checks[1].status === 'fulfilled';
+
+  if (dbOk && redisOk) {
+    res.json({ status: 'ready', db: 'ok', redis: 'ok' });
+  } else {
+    res.status(503).json({
+      status: 'not_ready',
+      db:     dbOk    ? 'ok' : 'unreachable',
+      redis:  redisOk ? 'ok' : 'unreachable',
+    });
+  }
+});
+
+// ── Key metrics to track at each phase ────────────────────────────────────
+/*
+  Phase 3+ (horizontal):
+  - HTTP p50 / p95 / p99 latency per route
+  - Error rate (4xx, 5xx) per route
+  - Active connections per server instance
+
+  Phase 4+ (caching):
+  - Redis cache hit rate (target: > 80% for hot keys)
+  - DB replica lag (target: < 100ms for most workloads)
+  - DB connection pool utilisation (alert if > 80%)
+
+  Phase 5+ (queues/sharding):
+  - Queue depth per queue (alert if growing unboundedly)
+  - Worker concurrency utilisation
+  - Job failure rate and retry depth
+  - Shard data skew (alert if one shard > 2× average row count)
+*/</code></pre>
+      </section>
+
+      <!-- ─── DECISION MAP ──────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Reference</span>
+        <h2>Scaling decision map — when to do what</h2>
+
+        <div class="diagram-box">
+<pre><span class="hi">Symptom                        → Solution</span>
+<span class="dim">────────────────────────────────────────────────────────────────────</span>
+App server CPU > 80% sustained → Add app server instances (horizontal)
+App server CPU > 80% from jobs → Move background jobs to worker servers
+DB CPU > 70% sustained         → Add read replicas, add Redis cache
+DB slow queries on reads       → Add indexes, cache result in Redis
+DB slow queries on writes      → Investigate N+1s, add write queue, consider sharding
+DB connection pool exhausted   → Add PgBouncer, tune pool sizes
+Memory leak on app servers     → Fix the leak; interim: rolling restarts
+Flash traffic spike            → CDN + waiting room + Redis atomic ops + queue
+Session data on servers        → Move to Redis session store (before scaling horiz)
+Static asset load on origin    → Move to CDN (Cloudflare / CloudFront)
+Deployment risk too high       → Decompose into microservices
+Inconsistent scaling per team  → Service boundaries + separate deploy pipelines
+Single-region risk             → Multi-region active-passive or active-active</pre>
+        </div>
+      </section>
+
+      <!-- ─── TAKEAWAY ───────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>The core principle</h2>
+        <p>
+          The journey from 1 to 1M users is not a single architectural decision — it is five
+          measured transitions, each triggered by a specific bottleneck signal. Build the monolith
+          first. Split compute and data when CPU contention appears. Go horizontal when the app server
+          ceiling is hit — but only after making sessions stateless. Add caching and read replicas
+          when the DB read load dominates. Queue the work and shard the writes when the DB write path
+          becomes the constraint.
+        </p>
+        <p>
+          The Flash Sale is the ultimate test because it combines every bottleneck at once: a write
+          spike, row contention, and a user-experience requirement for immediate feedback. The answer
+          is always the same three-part move: push the contended resource into Redis for atomic
+          operations, decouple the slow work into a queue, and let the DB touch only what must be
+          durable — at a pace it can handle.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

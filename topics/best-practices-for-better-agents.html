@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Best Practices for Building Better AI Agents | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract neural network visualization representing AI agents and data flows"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · RAG · 14 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@googledeepmind" target="_blank" rel="noopener">Google DeepMind</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Best Practices for Building Better AI Agents</h1>
+        <p class="summary">
+          What separates a demo agent from a production agent is a set of decisions most tutorials skip:
+          how you feed it knowledge, how you scope its actions, how you tune retrieval, and how you make
+          its answers verifiable. This guide covers all of it — grounded in real implementation patterns,
+          not platform-specific steps.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Portal</span>
+            <span class="meta-value">Internal · Curated</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Agent design, RAG, prompt engineering</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">Jun 10, 2026</span>
+          </div>
+          <div>
+            <span class="meta-label">Level</span>
+            <span class="meta-value">Intermediate to Advanced</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ─── INTRO ─────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <p class="lead">
+          An AI agent that works in a demo often fails in production for the same set of reasons: it
+          doesn't know what it doesn't know, it retrieves the wrong context, its prompts are too vague,
+          and there is no way to tell if its answers are accurate. Fixing all four of those problems is
+          what this guide is about.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> Agent quality is mostly a function of data quality, retrieval
+            precision, and prompt clarity — not model size. A well-designed agent on a mid-tier model
+            consistently outperforms a poorly-designed agent on the best available model.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── 1. WHAT IS RAG ─────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Foundation</span>
+        <h2>What is RAG and why does every serious agent use it?</h2>
+        <p>
+          Retrieval-Augmented Generation (RAG) is the dominant pattern for grounding LLM responses in
+          accurate, current, organisation-specific knowledge. Instead of relying solely on what the model
+          learned during training, RAG adds a retrieval step: before generating a response, the agent
+          searches a knowledge store for the most relevant information, injects it into the prompt, and
+          generates a response grounded in that retrieved context.
+        </p>
+        <p>
+          The three-step loop at runtime:
+        </p>
+        <ol class="check-list" style="padding-left:1.35rem;">
+          <li><strong>Retrieve</strong> — the user's query is converted to a vector and used to search a knowledge index for semantically similar content.</li>
+          <li><strong>Augment</strong> — retrieved chunks are injected into the prompt alongside the user's question.</li>
+          <li><strong>Generate</strong> — the LLM produces a response grounded in the augmented context, not just its training data.</li>
+        </ol>
+        <p>
+          RAG solves three critical limitations of base LLM responses: knowledge cutoff (training data
+          becomes stale), hallucination risk (the model invents plausible-sounding facts), and lack of
+          organisation-specific context (the model has never seen your internal documents, cases, or
+          procedures).
+        </p>
+
+        <p class="mini-heading">Common RAG use cases</p>
+        <ul class="check-list">
+          <li>Answering questions using knowledge articles, documentation, and research papers</li>
+          <li>Generating summaries from call transcripts, emails, and meeting notes</li>
+          <li>Resolving support queries using historical case resolutions</li>
+          <li>Producing briefings from CRM notes, account history, and activity feeds</li>
+          <li>Triaging incoming requests by matching against known issue patterns</li>
+        </ul>
+      </section>
+
+      <!-- ─── 2. HOW RAG WORKS ────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>How RAG works: offline preparation and online retrieval</h2>
+        <p>
+          RAG has two distinct phases. Getting both right is the difference between accurate agents and
+          unreliable ones.
+        </p>
+
+        <p class="mini-heading">Offline preparation (indexing)</p>
+        <p>
+          Before the agent can retrieve anything, your content must be indexed. This involves:
+        </p>
+        <ol class="check-list" style="padding-left:1.35rem;">
+          <li><strong>Ingest</strong> — connect your content sources (documents, databases, object records, file stores) to the indexing pipeline.</li>
+          <li><strong>Chunk</strong> — break long documents into smaller, semantically coherent pieces. Each chunk should represent a self-contained factoid or set of related facts.</li>
+          <li><strong>Vectorize</strong> — convert each chunk to a numeric vector using an embedding model. This makes semantic similarity search possible.</li>
+          <li><strong>Store</strong> — write chunks and their vectors to a vector store or search index, alongside any metadata (source, date, category, language) needed for filtering.</li>
+        </ol>
+
+        <p class="mini-heading">Online retrieval (runtime)</p>
+        <p>
+          When a user sends a query, the pipeline:
+        </p>
+        <ol class="check-list" style="padding-left:1.35rem;">
+          <li>Vectorizes the query using the same embedding model used during indexing.</li>
+          <li>Performs a similarity search against the index to find the most relevant chunks.</li>
+          <li>Applies any pre-retrieval filters (language, date, category, record scope).</li>
+          <li>Injects the top-ranked chunks into the prompt template.</li>
+          <li>Submits the augmented prompt to the LLM for generation.</li>
+        </ol>
+
+        <div class="note-box">
+          <p style="margin:0;font-size:0.93rem;">
+            <strong>Key insight:</strong> The query is the most critical element of RAG retrieval. The
+            quality of retrieved chunks depends entirely on how well the query reflects user intent. A
+            vague, poorly formed query retrieves vague, poorly matched chunks — and no amount of prompt
+            engineering recovers from that upstream failure.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── 3. CONTENT QUALITY ────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Content Quality</span>
+        <h2>Curating content for accurate retrieval</h2>
+        <p>
+          RAG is only as good as the knowledge you put into it. Grounding an agent on inaccurate,
+          outdated, or poorly structured content produces inaccurate, confidently-wrong responses.
+          Content quality is the highest-leverage investment in any RAG system.
+        </p>
+
+        <p class="mini-heading">Structured vs. unstructured content</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>Type</th><th>Examples</th><th>RAG requirement</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Structured</strong></td>
+              <td>Database records, CRM objects, spreadsheets, picklist fields</td>
+              <td>Only long free-text fields (full sentences with semantic content) are useful for RAG. Categorical fields (IDs, status codes, short labels) should be used as metadata filters, not indexed content.</td>
+            </tr>
+            <tr>
+              <td><strong>Unstructured</strong></td>
+              <td>PDFs, Word docs, emails, call transcripts, HTML pages, audio/video</td>
+              <td>Chunked, vectorized, and indexed. Audio/video should be transcribed before indexing.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Content best practices</p>
+        <ul class="check-list">
+          <li><strong>Be thorough, not brief.</strong> LLMs work best with complete, detailed context. A one-line article answer is worse than a paragraph with examples, synonyms, and edge cases. More detail improves retrieval recall and generation accuracy.</li>
+          <li><strong>Use real-world examples.</strong> Describe scenarios conversationally — the way a user would actually phrase their question. This strengthens semantic alignment between the query and the stored content.</li>
+          <li><strong>Structure articles coherently.</strong> Ensure sentences within a paragraph are logically related. Use headings (H1–H6 in HTML content) — chunking pipelines often use heading boundaries as natural split points.</li>
+          <li><strong>Keep articles focused.</strong> One article, one topic. Mixing multiple topics in a single document dilutes retrieval precision — a query about topic A will retrieve a chunk that also contains unrelated content about topic B.</li>
+          <li><strong>Include titles, headings, and metadata.</strong> These provide context that helps both retrieval and generation. Storing titles as prepend fields (see Chunking section below) is even better.</li>
+          <li><strong>Add synonyms and abbreviations.</strong> If users might ask using informal language, jargon, or acronyms, include those in the content so semantic search can bridge the vocabulary gap.</li>
+          <li><strong>Annotate media with descriptive text.</strong> Charts, diagrams, and images are not vectorized. Add alt-text or prose descriptions so the information they contain is searchable.</li>
+          <li><strong>Perform regular content audits.</strong> Stale content produces stale answers. Establish governance: versioning, review cycles, expiry dates on time-sensitive content.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 4. CHUNKING ───────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Chunking Strategy</span>
+        <h2>How to optimise your chunking strategy</h2>
+        <p>
+          Chunking is the process of splitting source content into pieces that are small enough to be
+          semantically precise but large enough to carry meaningful context. It is one of the most
+          consequential decisions in any RAG system, and it is often treated as a configuration detail
+          rather than a design decision.
+        </p>
+
+        <p class="mini-heading">Four roles a field can play in a RAG index</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>Role</th><th>What it does</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Index field</strong></td>
+              <td>Content is chunked, vectorized, and used for semantic search</td>
+              <td>Case description, article body, call transcript</td>
+            </tr>
+            <tr>
+              <td><strong>Prepend field</strong></td>
+              <td>Value is prepended to every chunk, enriching it with context without being indexed separately</td>
+              <td>Article title, product name, document category</td>
+            </tr>
+            <tr>
+              <td><strong>Filter field</strong></td>
+              <td>Added to the index schema but not vectorized; used to pre-filter retrieval results</td>
+              <td>Language, status, date, product family</td>
+            </tr>
+            <tr>
+              <td><strong>Return field</strong></td>
+              <td>Retrieved and passed to the prompt but not used in search; provides additional context for generation</td>
+              <td>Source URL, record ID, author name</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Chunk size trade-offs</p>
+        <ul class="check-list">
+          <li><strong>Smaller chunks</strong> (100–200 tokens) — higher retrieval precision, less irrelevant content, but may lack enough context for the LLM to generate a complete answer.</li>
+          <li><strong>Larger chunks</strong> (400–512 tokens) — more context per chunk, better for complex reasoning, but reduces precision and increases prompt size and cost.</li>
+          <li><strong>Practical default</strong> — 256–512 tokens (~200–400 words) works well for most knowledge base and document use cases. Adjust based on information density and test results.</li>
+        </ul>
+
+        <p class="mini-heading">Field prepending — the underused optimisation</p>
+        <p>
+          Prepending a title or category to every chunk dramatically improves retrieval. Without it,
+          a chunk reading "Replace the filter every 6 months" is semantically opaque — the model has no
+          idea what product, procedure, or context it belongs to. With prepending, the same chunk reads
+          "Device X maintenance schedule: Replace the filter every 6 months" — now retrievable from any
+          question about Device X maintenance.
+        </p>
+
+        <p class="mini-heading">What NOT to index</p>
+        <ul class="check-list">
+          <li>Categorical fields, picklists, status codes — use these as filter fields, not index fields. Short chunks (1–2 words) have no semantic context and produce erratic vector rankings.</li>
+          <li>Duplicate or highly similar fields — if you have Summary, Title, and Description all covering the same content, index the most detailed one and prepend the shorter version. Multiple similar chunks from the same document can dominate retrieval results, crowding out other relevant documents.</li>
+          <li>Boilerplate and legal disclaimers — footer text, copyright notices, and standard terms add noise. Exclude them from indexing using pre-processing rules.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 5. HYBRID SEARCH ──────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Search Strategy</span>
+        <h2>Vector search, keyword search, and hybrid search</h2>
+        <p>
+          How you search your index is as important as what you put in it. Three retrieval modes exist,
+          and each fits different content and query patterns.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Mode</th><th>How it works</th><th>Strengths</th><th>Weaknesses</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Vector search</strong></td>
+              <td>Converts query to a vector; retrieves chunks by semantic similarity</td>
+              <td>Handles synonyms, paraphrasing, and intent — finds conceptually related content even if the exact words differ</td>
+              <td>Can miss specific product names, model numbers, or jargon that appear verbatim in the query</td>
+            </tr>
+            <tr>
+              <td><strong>Keyword search</strong></td>
+              <td>Matches exact or near-exact terms using inverted indexes (BM25 or similar)</td>
+              <td>Precise for known terms, SKUs, codes, and proper nouns</td>
+              <td>Fails on intent — "fix broken printer" won't match "printer troubleshooting guide" without the overlap</td>
+            </tr>
+            <tr>
+              <td><strong>Hybrid search</strong></td>
+              <td>Runs both in parallel; merges and reranks results using a combined score</td>
+              <td>Best of both — handles intent <em>and</em> exact terms; most robust for general-purpose agents</td>
+              <td>Higher latency; roughly double the index compute cost</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">When to use hybrid search</p>
+        <p>
+          Use hybrid search when your content contains specific terminology that users will query
+          verbatim — product names, model numbers, error codes, medical terms, legal clauses. Vector
+          search alone will miss exact-match lookups in these cases.
+        </p>
+        <p>
+          When your content is entirely conversational natural language with no specific jargon, vector
+          search alone may be sufficient and cheaper.
+        </p>
+
+        <div class="callout">
+          <p>
+            <strong>Common mistake:</strong> Don't use hybrid search as a substitute for categorical
+            filtering. If users filter by department, language, or product family, implement those as
+            pre-retrieval filters on metadata fields — not as keyword queries against indexed content.
+            Keyword search on categorical data produces single-word chunks with no semantic context and
+            unpredictable rankings.
+          </p>
+        </div>
+
+        <p class="mini-heading">Reranking and relevance signals</p>
+        <p>
+          After initial retrieval, a reranker can re-score results using additional signals beyond pure
+          similarity — recency (newer content ranks higher for time-sensitive queries), popularity (more
+          frequently accessed content ranks higher), and cross-encoder models (which evaluate query-chunk
+          pairs more accurately than bi-encoder similarity alone). Reranking adds latency but meaningfully
+          improves result quality for complex queries.
+        </p>
+      </section>
+
+      <!-- ─── 6. AGENT DESIGN ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Agent Architecture</span>
+        <h2>Designing agents for RAG: structure and scope</h2>
+        <p>
+          How you structure an agent's actions and knowledge sources has a larger effect on accuracy than
+          any prompt tweak. Two architectural patterns cover most use cases.
+        </p>
+
+        <p class="mini-heading">Pattern 1: One action, multiple retrievers</p>
+        <p>
+          A single agent action uses multiple retrievers — one per knowledge source — and an ensemble
+          reranker merges and re-scores results before augmenting the prompt. The LLM sees the top-ranked
+          chunks from across all sources and generates a unified response.
+        </p>
+        <p><strong>Use when:</strong> All knowledge sources are potentially relevant to any query. Users ask questions that may draw on multiple data sources simultaneously.</p>
+        <p><strong>Benefits:</strong> Simpler agent instruction set; single action call; ensemble reranking prevents any one source from dominating; reduces over-calling multiple actions.</p>
+
+        <p class="mini-heading">Pattern 2: Separate actions per knowledge domain</p>
+        <p>
+          Each knowledge domain gets its own dedicated agent action, with clear scope instructions
+          telling the agent's reasoning engine which action to call for which type of question.
+        </p>
+        <p><strong>Use when:</strong> Knowledge domains are cleanly separable and a single source can fully answer most questions. Example: defect queries always go to the defects database; pricing queries always go to the price book.</p>
+        <p><strong>Benefits:</strong> Clearer retrieval scope; lower cost per call; easier to debug when a specific domain produces wrong answers.</p>
+
+        <div class="callout">
+          <p>
+            <strong>Anti-pattern to avoid:</strong> Do not use multiple separate actions as a workaround
+            for Approach 1 by instructing the agent to call all of them in sequence. The agent's
+            reasoning engine may consider the task complete before all actions are called, and LLM
+            instructions for how to interpret context belong in the prompt template — not in the agent's
+            topic instructions.
+          </p>
+        </div>
+
+        <p class="mini-heading">Combining both patterns</p>
+        <p>
+          Both patterns can coexist in the same agent. A common design: one dedicated action for a
+          high-specificity domain (e.g., "Answer questions about known defects") plus one combined action
+          for all other knowledge sources. This gives you precision where it matters and breadth where
+          it doesn't.
+        </p>
+
+        <p class="mini-heading">Writing effective action descriptions</p>
+        <p>
+          The agent's reasoning engine uses action descriptions to decide which action to call. Write
+          descriptions that clearly define what the action can and cannot answer:
+        </p>
+        <ul class="check-list">
+          <li>Be specific about scope: "Use this action when the user asks about product defects or quality issues" — not "Use this action to answer questions."</li>
+          <li>Include negative scope: "Do not use this action for pricing, availability, or shipping questions."</li>
+          <li>Match the language of the action description to the language of user queries — use the same terminology your users use, not internal system names.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 7. FILTERS ────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Retrieval Precision</span>
+        <h2>Using filters to improve retrieval precision</h2>
+        <p>
+          Pre-retrieval filters are one of the most effective and underused tools for improving agent
+          accuracy. They constrain the search space before semantic similarity is computed — dramatically
+          improving result relevance when the eligible content is a subset of the full index.
+        </p>
+
+        <p class="mini-heading">Static pre-filters</p>
+        <p>
+          A fixed condition applied to every query. Examples: only retrieve published content (not drafts),
+          only retrieve content in the user's language, only retrieve content tagged to the current product
+          line. These are defined at design time and require no runtime input.
+        </p>
+
+        <p class="mini-heading">Dynamic pre-filters</p>
+        <p>
+          Filter values provided at runtime from the query context. Examples: the user's account ID narrows
+          retrieval to documents related to their account; the product category selected in the UI narrows
+          retrieval to that product's knowledge base; the detected language of the query filters results to
+          that language.
+        </p>
+        <p>
+          Dynamic filters are powerful because they effectively create personalised retrieval without
+          building separate indexes per user or context. The filter condition is defined at design time
+          (e.g., <code>product_family = $placeholder</code>); the value is resolved at runtime from the
+          conversation context.
+        </p>
+
+        <div class="note-box">
+          <p style="margin:0;font-size:0.93rem;">
+            <strong>Pre-filter vs. post-filter:</strong> A pre-filter narrows the candidate set before
+            retrieval — if you ask for 10 results, you get up to 10 results that satisfy the filter.
+            A post-filter retrieves 10 results then applies the filter — potentially leaving you with 0.
+            Always prefer pre-filters for mandatory constraints. Post-filters are useful only for
+            access-control checks that cannot be expressed in the index schema.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── 8. PROMPT ENGINEERING ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Prompt Engineering</span>
+        <h2>Writing effective RAG prompt templates</h2>
+        <p>
+          The prompt template is the final layer between good retrieval and a good response. A minimal
+          prompt that simply says "answer this question using this information" leaves too much to the
+          model's discretion and produces inconsistent, hallucination-prone responses.
+        </p>
+
+        <p class="mini-heading">What a good RAG prompt template contains</p>
+        <ul class="check-list">
+          <li><strong>Explicit instruction to use the provided context.</strong> Tell the model to base its answer on the retrieved information, not on general training knowledge. Without this, the model will freely mix retrieved context with remembered facts.</li>
+          <li><strong>A fallback instruction.</strong> What should the agent say when the retrieved context doesn't contain the answer? Define this explicitly: "If the provided context does not contain sufficient information to answer the question, say so clearly — do not guess."</li>
+          <li><strong>Output format instructions.</strong> Define the expected structure: length, tone, format (bullet list, paragraph, markdown table), and whether to include source references.</li>
+          <li><strong>Reasoning instructions for complex queries.</strong> For queries requiring synthesis across multiple chunks, instruct the model to "think through the context carefully before answering" or "consider the question from multiple angles before generating a response."</li>
+          <li><strong>Language and tone constraints.</strong> Specify the output language (especially for multilingual agents), formality level, and any domain-specific terminology preferences.</li>
+        </ul>
+
+        <p class="mini-heading">A minimal vs. a production-grade prompt</p>
+        <div class="note-box" style="font-family:Arial,Helvetica,sans-serif;font-size:0.88rem;">
+          <p style="margin:0 0 0.5rem;font-weight:700;color:#b91c1c;font-size:0.78rem;letter-spacing:0.06em;text-transform:uppercase;">Minimal (risky)</p>
+          <pre style="margin:0 0 1rem;padding:0.75rem 0.9rem;background:#0f172a;color:#e2e8f0;border-radius:10px;font-size:0.84rem;line-height:1.55;white-space:pre-wrap;"><code>Answer this question: {question}
+
+Using this information: {retrieved_context}</code></pre>
+          <p style="margin:0 0 0.5rem;font-weight:700;color:#166534;font-size:0.78rem;letter-spacing:0.06em;text-transform:uppercase;">Production-grade (explicit)</p>
+          <pre style="margin:0;padding:0.75rem 0.9rem;background:#0f172a;color:#e2e8f0;border-radius:10px;font-size:0.84rem;line-height:1.55;white-space:pre-wrap;"><code>INSTRUCTIONS
+1. Read the QUESTION carefully.
+2. Review the CONTEXT provided below.
+3. Base your answer strictly on the CONTEXT — do not use outside knowledge.
+4. If the CONTEXT does not contain enough information to answer, say:
+   "I couldn't find a definitive answer in the available knowledge."
+5. Be concise, professional, and direct.
+6. If relevant, cite which part of the context supports your answer.
+
+CONTEXT:
+{retrieved_context}
+
+QUESTION:
+{question}</code></pre>
+        </div>
+
+        <p class="mini-heading">Common prompt engineering mistakes</p>
+        <ul class="check-list">
+          <li><strong>No fallback instruction</strong> — the model invents an answer when context is insufficient. Always define what happens when context is missing.</li>
+          <li><strong>Vague context instructions</strong> — "use the information below" is weaker than "base your answer strictly on the CONTEXT — do not use outside knowledge." Precision reduces hallucination.</li>
+          <li><strong>Mixing agent-level and prompt-level instructions</strong> — instructions for how to interpret or synthesise retrieved content belong in the prompt template, not in the agent's topic instructions. Agent instructions define when to call the action; prompt instructions define how to use what was retrieved.</li>
+          <li><strong>Over-long prompts</strong> — every instruction token competes with context tokens for the model's attention. Keep instructions tight; use the context window for retrieved knowledge.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 9. QUERY QUALITY ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Query Quality</span>
+        <h2>Improving query quality before retrieval</h2>
+        <p>
+          The query sent to the retrieval system is not always the raw user message. For complex
+          conversational agents, transforming the user's input into a better-formed retrieval query
+          significantly improves result quality.
+        </p>
+
+        <p class="mini-heading">Query rewriting</p>
+        <p>
+          A small LLM call can rewrite the user's raw message into a retrieval-optimised query before
+          the search is performed. This is especially valuable when:
+        </p>
+        <ul class="check-list">
+          <li>The user's message is long and conversational ("Hi, I've been having this issue where my account seems to be showing the wrong balance and I'm not sure if it's a display bug or an actual error…") — the retrieval query should be "account balance display error troubleshooting."</li>
+          <li>The query references context from earlier in the conversation ("the same issue as before") — the rewriter resolves coreferences before searching.</li>
+          <li>The user uses informal language or abbreviations — the rewriter normalises vocabulary to match the knowledge base.</li>
+        </ul>
+
+        <p class="mini-heading">Iterative retrieval</p>
+        <p>
+          For complex queries, a single retrieval pass is sometimes insufficient. An iterative pattern
+          runs an initial retrieval, summarises the results, then uses the summary plus the original
+          query to rewrite and run a second retrieval. The final augmented prompt uses the second
+          retrieval's results. This adds latency but substantially improves answer quality for queries
+          requiring synthesis across multiple pieces of knowledge.
+        </p>
+
+        <p class="mini-heading">When the user's context shapes the query</p>
+        <p>
+          In many production agents, the retrieval query is not just the user's message — it is the
+          user's message plus context derived from the conversation or the active record. For a service
+          agent handling a support case, the query might combine the user's question with the case
+          description and product category. For a sales agent, the query might combine the user's
+          question with the account name and recent activity summary. This scoped querying dramatically
+          improves retrieval relevance without requiring separate indexes per account or product.
+        </p>
+      </section>
+
+      <!-- ─── 10. LLM SELECTION ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Model Selection</span>
+        <h2>Choosing the right LLM for your agent</h2>
+        <p>
+          For most RAG applications, the greatest complexity occurs in retrieval and augmentation —
+          not in generation. The LLM's primary job is to synthesise clearly presented context, not to
+          reason from scratch. This has practical implications for model choice.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Use case</th><th>Model tier needed</th><th>Rationale</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Simple Q&amp;A from a well-structured knowledge base</td>
+              <td>Smaller / faster model</td>
+              <td>If the relevant chunk is retrieved accurately, a smaller model can extract and present it cleanly. High reasoning capability is not required.</td>
+            </tr>
+            <tr>
+              <td>Multi-source synthesis, drawing conclusions from several chunks</td>
+              <td>Mid-tier model</td>
+              <td>The model needs to reconcile potentially conflicting information and identify the most relevant evidence across chunks.</td>
+            </tr>
+            <tr>
+              <td>Complex reasoning, ambiguous queries, or adversarial inputs</td>
+              <td>Frontier model</td>
+              <td>Strong reasoning capability, longer effective context window, and better instruction-following reduce hallucination risk for high-stakes use cases.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Context window matters more than benchmark scores</p>
+        <p>
+          For RAG, the effective context window is often the most important LLM parameter. Each
+          retrieved chunk consumes tokens. A model with a 16k token context window can handle
+          roughly 10–15 document chunks before running out of room. A model with a 128k–200k context
+          window can handle large document sets, long call transcripts, and multi-turn conversation
+          history simultaneously.
+        </p>
+        <p>
+          Rule of thumb: 1 token ≈ ¾ of a word. 512-token chunks are roughly 380 words each. If you
+          retrieve 10 chunks at 512 tokens, that's 5,120 tokens before the system prompt, conversation
+          history, or user message are counted.
+        </p>
+
+        <p class="mini-heading">Embedding model selection</p>
+        <p>
+          The embedding model converts text to vectors and directly determines retrieval quality. Two
+          practical considerations:
+        </p>
+        <ul class="check-list">
+          <li><strong>Consistency</strong> — use the same embedding model for both indexing and query vectorization. Switching models means re-indexing all content.</li>
+          <li><strong>Multilingual support</strong> — multilingual embedding models (e.g., multilingual E5) can retrieve across languages — a French query can surface German articles. Verify your target languages are well-represented in the model's training data before deploying.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 11. CITATIONS ─────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Trust &amp; Verifiability</span>
+        <h2>Building trust through citations and verifiable responses</h2>
+        <p>
+          Trust is the primary barrier to AI agent adoption. Users who cannot verify an agent's
+          answer treat it with suspicion — and they should. Citations are the mechanism that converts
+          a plausible-sounding response into a verifiable one.
+        </p>
+
+        <p class="mini-heading">Why citations matter</p>
+        <ul class="check-list">
+          <li><strong>Verifiability</strong> — users can check the source directly and confirm the answer is accurate.</li>
+          <li><strong>Accountability</strong> — citations make it clear the answer derives from a specific piece of documented knowledge, not from the model's memory.</li>
+          <li><strong>Discovery</strong> — a citation gives users a path to deeper reading, enabling self-service beyond the agent's answer.</li>
+          <li><strong>Debugging</strong> — when an answer is wrong, a citation immediately tells you which source document is the problem — a governance and content quality issue, not just an AI issue.</li>
+        </ul>
+
+        <p class="mini-heading">Two citation approaches</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>Approach</th><th>How it works</th><th>Best for</th><th>Trade-off</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Platform-managed citations</strong></td>
+              <td>The infrastructure automatically appends source references from retriever metadata</td>
+              <td>Standard knowledge base Q&amp;A; teams that want consistent formatting without prompt customisation</td>
+              <td>Less flexibility in citation format</td>
+            </tr>
+            <tr>
+              <td><strong>Prompt-based citations</strong></td>
+              <td>The prompt template instructs the LLM to include source references in its response</td>
+              <td>Custom formats, inline citations, domain-specific citation styles</td>
+              <td>Consumes context window; requires testing to prevent hallucinated source IDs</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Practical citation design</p>
+        <ul class="check-list">
+          <li>Ensure citation URLs point to content the end user can actually access. A citation to an internal document that requires elevated permissions — that the user doesn't have — is worse than no citation, because it creates friction and distrust.</li>
+          <li>For prompt-based citations, instruct the model to extract the source ID verbatim from the retrieved context rather than generating it. LLMs will confidently fabricate plausible-looking source IDs if asked to recall them.</li>
+          <li>When images or charts are part of the source material, include their descriptive text in the index so that visual information can be cited and traced back to the original document.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 12. DEBUGGING ─────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Debugging</span>
+        <h2>Diagnosing and fixing poor agent responses</h2>
+        <p>
+          When an agent gives a wrong or unhelpful answer, the root cause is almost always one of four
+          things. Debugging systematically is faster than tuning blindly.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Symptom</th><th>Likely root cause</th><th>Fix</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Answer is wrong but confident</td>
+              <td>Retrieved wrong chunks; or model used training knowledge instead of context</td>
+              <td>Inspect retrieved chunks for the failing query. Improve content quality or chunking. Strengthen prompt instruction to use only the provided context.</td>
+            </tr>
+            <tr>
+              <td>Answer is "I don't know" for a question that should be answerable</td>
+              <td>Retrieval failed to surface relevant content</td>
+              <td>Check if the content exists in the index. Check if filters are too restrictive. Check if chunk size is too small to carry sufficient context. Consider switching to hybrid search.</td>
+            </tr>
+            <tr>
+              <td>Answer is partially correct but incomplete</td>
+              <td>Relevant information is spread across multiple chunks; not all retrieved</td>
+              <td>Increase the number of chunks retrieved. Consider larger chunk sizes. Add an ensemble retriever if multiple sources contain relevant pieces.</td>
+            </tr>
+            <tr>
+              <td>Answer is correct but cites the wrong source</td>
+              <td>Hallucinated source ID in prompt-based citations</td>
+              <td>Switch to platform-managed citations, or instruct the model to extract source IDs verbatim — never recall or generate them.</td>
+            </tr>
+            <tr>
+              <td>Good answers in testing, poor answers in production</td>
+              <td>Content has become stale; or production queries differ from test queries</td>
+              <td>Audit knowledge base for outdated content. Build a representative production query benchmark and evaluate against it regularly.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Build a benchmark query set</p>
+        <p>
+          The single highest-value investment in long-term agent reliability is a maintained benchmark
+          set of representative queries with known correct answers. Run your agent against this set on
+          every significant change — prompt update, model upgrade, content change, chunk size adjustment.
+          Without a benchmark, you are flying blind: you cannot tell if a change improved or regressed
+          agent quality.
+        </p>
+      </section>
+
+      <!-- ─── 13. ORCHESTRATION ──────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Advanced Patterns</span>
+        <h2>Orchestration, pipelines, and non-generative RAG</h2>
+        <p>
+          Retrieval does not have to end in a generated text response. As agents become more
+          sophisticated, retrieval becomes an input to broader orchestration pipelines.
+        </p>
+
+        <p class="mini-heading">Using retrieval inside automation flows</p>
+        <p>
+          A retriever can be called mid-workflow as a classification or matching step — not to generate
+          an answer, but to look up similar past cases, check for existing knowledge, or tag an incoming
+          item against a taxonomy. In these scenarios, the retrieved chunk is used programmatically (e.g.,
+          routed to a specific team, used to pre-populate a form, or evaluated for a threshold match) rather
+          than surfaced to an end user.
+        </p>
+
+        <p class="mini-heading">Chained prompt pipelines</p>
+        <p>
+          Complex agent tasks can be decomposed into multi-step prompt chains: one step extracts intent,
+          a second step retrieves relevant content, a third step synthesises a draft, and a fourth step
+          evaluates and refines the draft before output. Each step uses a small, focused prompt. This is
+          more reliable than a single monolithic prompt attempting to do all four things at once.
+        </p>
+
+        <p class="mini-heading">Multilingual agents</p>
+        <p>
+          Modern multilingual embedding models preserve semantic similarity across languages — a query
+          in one language can retrieve content written in another. For global deployments:
+        </p>
+        <ul class="check-list">
+          <li>Detect the query language and pass it as a dynamic pre-filter if your index is monolingual and organised by language.</li>
+          <li>For cross-lingual retrieval, use a multilingual embedding model and verify its performance on your target language pairs — some languages are significantly better represented than others.</li>
+          <li>Specify the output language explicitly in the prompt template. Without this, the model may respond in the language of the retrieved chunks rather than the user's language.</li>
+        </ul>
+      </section>
+
+      <!-- ─── QUICK REFERENCE ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Quick Reference</span>
+        <h2>Best practices checklist</h2>
+        <ul class="check-list">
+          <li><strong>Content:</strong> Thorough, focused articles. One topic per document. Include synonyms, examples, and headings.</li>
+          <li><strong>Indexing:</strong> Only index long free-text fields. Use prepend fields for titles and categories. Exclude boilerplate and categorical short fields.</li>
+          <li><strong>Chunking:</strong> 256–512 tokens for most use cases. Adjust based on information density. Prepend context labels to every chunk.</li>
+          <li><strong>Search:</strong> Use hybrid search when queries contain specific terminology or product names. Use vector-only for purely conversational content.</li>
+          <li><strong>Filters:</strong> Apply static pre-filters for mandatory constraints (published status, language). Use dynamic pre-filters to scope retrieval to the current record or context.</li>
+          <li><strong>Agent structure:</strong> Scope action descriptions tightly. Prefer one combined action with ensemble retrieval over many actions called in sequence.</li>
+          <li><strong>Prompts:</strong> Always include a fallback instruction. Explicitly instruct the model to use only the provided context. Define output format and language.</li>
+          <li><strong>Citations:</strong> Include citations for every production agent. Point only to content the user can access. Never ask the LLM to recall or generate source IDs.</li>
+          <li><strong>Benchmarks:</strong> Maintain a representative query benchmark. Run it on every change to prompt, model, or content.</li>
+          <li><strong>Governance:</strong> Establish content review cycles. Stale knowledge produces stale answers regardless of how good the retrieval is.</li>
+        </ul>
+      </section>
+
+      <!-- ─── TAKEAWAY ───────────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Agent quality is primarily determined before the LLM sees a single token: by the quality of
+          your knowledge content, the precision of your retrieval strategy, and the clarity of your
+          prompt instructions. A well-designed retrieval pipeline with clear prompts on a mid-tier model
+          will consistently outperform a poorly-designed one on the most capable model available. Build
+          the foundation right, measure it with a benchmark, and iterate from data — not intuition.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

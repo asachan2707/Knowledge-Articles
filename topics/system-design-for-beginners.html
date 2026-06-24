@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>System Design for Beginners: Everything You Need in One Article | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks in a modern data center with blue lighting"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Beginners · 60 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@tvick" target="_blank" rel="noopener">Taylor Vick</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>System Design for Beginners: Everything You Need in One Article</h1>
+        <p class="summary">
+          A single, no-prerequisites deep-dive through everything a software engineer needs to
+          reason about large-scale systems — from servers and DNS all the way to Kafka, consistent
+          hashing, and a 3-step framework for solving any system design interview question.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Portal</span>
+            <span class="meta-value">Medium</span>
+          </div>
+          <div>
+            <span class="meta-label">Author</span>
+            <span class="meta-value">Shivam Bhadani</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">Dec 21, 2024</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Complete system design foundations — theory + interview prep</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ── INTRO ─────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <p class="lead">
+          Personal projects run fine on a single server with one database. Scale to millions of users
+          and everything breaks — not because the code is wrong, but because the architecture was never
+          designed for that load. This article builds the mental model that professional engineers use
+          to make those decisions: scaling, caching, databases, messaging, consistency, and
+          distributed systems — all in one place, from scratch.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> System design is the discipline of making deliberate
+            architectural trade-offs. There are no universally correct answers — only choices that
+            fit your scale, consistency needs, and failure tolerance.
+          </p>
+          <p>
+            <strong>Original source:</strong>
+            <a href="https://medium.com/@shivambhadani_/system-design-for-beginners-everything-you-need-in-one-article-c74eb702540b" target="_blank" rel="noopener">medium.com/@shivambhadani_ — System Design for Beginners</a>
+          </p>
+        </div>
+      </section>
+
+      <!-- ── STORY ─────────────────────────────────────────────────────────── -->
+      <section class="story-card">
+        <span class="section-label">Story · Why a single server always breaks at scale</span>
+        <p>
+          Every developer's first backend is one server talking to one database. It works. Then the
+          product grows, traffic spikes, and suddenly the single machine can't keep up — every request
+          competes for the same CPU and disk. The author's framing is blunt: most system design
+          knowledge isn't about clever code, it's about knowing which problems have already been solved
+          and which tool to reach for.
+        </p>
+        <p>
+          The article's strength is sequence. It starts with a literal web request (browser → DNS → IP
+          → port → server) and builds each layer of complexity on top — so by the time you reach Kafka
+          partitions and Raft consensus, you understand exactly why those abstractions exist.
+        </p>
+      </section>
+
+      <!-- ── SECTION 1: FOUNDATIONS ────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">The foundation</span>
+        <h2>Servers, DNS, and how a request actually works</h2>
+        <p>
+          A <strong>server</strong> is a physical or virtual machine running application code.
+          When a browser requests a URL:
+        </p>
+        <ol>
+          <li>The browser queries DNS to resolve the domain to an IP address.</li>
+          <li>The browser sends the HTTP request to that IP.</li>
+          <li>The server uses a <strong>port number</strong> to route the request to the right application process.</li>
+        </ol>
+        <p>
+          In production, you rent cloud VMs (e.g., AWS EC2) and push your code to them.
+          Understanding this baseline matters because every scaling decision is really a decision
+          about how to handle more of these request flows simultaneously.
+        </p>
+
+        <p class="mini-heading">Latency vs Throughput</p>
+        <p>
+          <strong>Latency</strong> is how long a single request takes (milliseconds).
+          <strong>Throughput</strong> is how many requests the system handles per second (RPS/TPS).
+          A highway analogy: latency = time for one car to drive A→B; throughput = cars per hour.
+          The goal is always high throughput <em>and</em> low latency simultaneously — they pull
+          in opposite directions under load.
+        </p>
+      </section>
+
+      <!-- ── SECTION 2: SCALING ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Scaling</span>
+        <h2>Vertical, horizontal, and auto-scaling</h2>
+
+        <p class="mini-heading">Vertical scaling (scale up/down)</p>
+        <p>
+          Add more RAM, CPU, or storage to the <em>same</em> machine. Simple — no code changes
+          required. Used for SQL databases and stateful services. Has a hard ceiling: you eventually
+          run out of hardware to add.
+        </p>
+
+        <p class="mini-heading">Horizontal scaling (scale out/in)</p>
+        <p>
+          Add more machines and distribute load across them. Requires a <strong>load balancer</strong>
+          as the single contact point for clients. The load balancer routes each incoming request to
+          whichever server is least busy. This is the dominant pattern in modern production systems.
+        </p>
+
+        <p class="mini-heading">Auto-scaling</p>
+        <p>
+          Dynamically adjusts server count based on real-time traffic. When CPU usage crosses a
+          threshold (e.g., 90%), new instances spin up automatically and are removed when traffic
+          drops. This avoids paying for idle capacity while surviving traffic spikes — but requires
+          <strong>load testing</strong> upfront to calibrate the thresholds correctly.
+        </p>
+      </section>
+
+      <!-- ── SECTION 3: ESTIMATION ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Interview skill</span>
+        <h2>Back-of-the-envelope estimation</h2>
+        <p>
+          Interviewers expect you to size a system before designing it. Three things to estimate:
+        </p>
+        <ul class="check-list">
+          <li><strong>Load:</strong> DAU × actions/day = writes/day. (100M users × 10 tweets = 1B writes/day)</li>
+          <li><strong>Storage:</strong> bytes per record × daily writes × retention. (Twitter example: ~1 PB/day including photos)</li>
+          <li><strong>Resources:</strong> req/sec × CPU time per request ÷ core capacity = cores needed → server count.</li>
+        </ul>
+        <p>
+          The memory powers-of-2 table is worth memorising: KB = 10³, MB = 10⁶, GB = 10⁹, TB = 10¹², PB = 10¹⁵.
+          Most estimation errors come from off-by-1000x mistakes, not arithmetic.
+        </p>
+      </section>
+
+      <!-- ── SECTION 4: CAP ────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Distributed systems theory</span>
+        <h2>CAP theorem</h2>
+        <p>
+          In a distributed system (data stored across multiple servers) you can only simultaneously
+          guarantee <strong>two</strong> of these three properties:
+        </p>
+        <ul class="check-list">
+          <li><strong>Consistency (C):</strong> Every read returns the same, most recent value from any node.</li>
+          <li><strong>Availability (A):</strong> The system responds even when some nodes fail.</li>
+          <li><strong>Partition Tolerance (P):</strong> The system keeps working despite network communication failures between nodes.</li>
+        </ul>
+        <p>
+          Because network partitions are inevitable in real distributed systems, P is non-negotiable.
+          The actual choice is always <strong>CP vs AP</strong>:
+        </p>
+        <ul class="check-list">
+          <li><strong>CP (consistency + partition tolerance):</strong> Banking, payments, stock trading — stale reads are unacceptable.</li>
+          <li><strong>AP (availability + partition tolerance):</strong> Social media likes, feeds — temporary inconsistency is fine.</li>
+        </ul>
+      </section>
+
+      <!-- ── SECTION 5: DATABASE SCALING ───────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Database scaling — step by step</span>
+        <h2>5-step database scaling playbook</h2>
+
+        <p class="mini-heading">Step 1 — Indexing</p>
+        <p>
+          Without an index, queries do a full table scan: O(N). With a B-tree index on the searched
+          column: O(log N). One SQL line enables it; the database handles the rest. Always index
+          before reaching for bigger solutions.
+        </p>
+
+        <p class="mini-heading">Step 2 — Partitioning</p>
+        <p>
+          Splits one large table into smaller sub-tables on the <em>same server</em>. Each partition
+          maintains its own index. The database engine routes queries automatically. Reduces scan size
+          without application-level changes.
+        </p>
+
+        <p class="mini-heading">Step 3 — Master-slave (read replicas)</p>
+        <p>
+          One <strong>master node</strong> handles all writes. Multiple <strong>slave nodes</strong>
+          handle reads. Writes replicate from master → slaves (synchronously or asynchronously).
+          Use this when read-heavy traffic saturates a single server.
+        </p>
+
+        <p class="mini-heading">Step 4 — Multi-master</p>
+        <p>
+          Multiple masters handle writes (e.g., one per geographic region). The challenge is
+          <strong>conflict resolution</strong>: when the same record has different values on two
+          masters, which wins? Common strategies: last-write-wins, merge, or accept-both.
+        </p>
+
+        <p class="mini-heading">Step 5 — Sharding</p>
+        <p>
+          Splits the table across <em>different servers</em> (shards). Unlike partitioning, routing
+          logic must live in application code. The <strong>sharding key</strong> must distribute data
+          evenly.
+        </p>
+        <ul class="check-list">
+          <li><strong>Range-based:</strong> Simple, but skewed if data isn't uniformly distributed.</li>
+          <li><strong>Hash-based:</strong> (<code>HASH(key) % num_shards</code>) — even distribution, hard to rebalance.</li>
+          <li><strong>Geographic:</strong> Good for geo-distributed systems, hotspot risk per region.</li>
+          <li><strong>Directory-based:</strong> Lookup table maps keys to shards — flexible, but the directory itself becomes a bottleneck.</li>
+        </ul>
+        <p>
+          Sharding downsides: complex routing code, expensive cross-shard JOINs, harder data consistency.
+          Decision rule: try vertical first → master-slave for reads → sharding for writes.
+        </p>
+      </section>
+
+      <!-- ── SECTION 6: SQL vs NoSQL ───────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Database selection</span>
+        <h2>SQL vs NoSQL — when to use which</h2>
+
+        <p class="mini-heading">SQL databases</p>
+        <p>
+          Tabular storage with a predefined schema. Follows <strong>ACID</strong> (Atomicity,
+          Consistency, Isolation, Durability). Scales primarily vertically.
+          Examples: MySQL, PostgreSQL, SQLite.
+        </p>
+
+        <p class="mini-heading">NoSQL database types</p>
+        <ul class="check-list">
+          <li><strong>Document</strong> (MongoDB) — JSON/BSON records, flexible schema.</li>
+          <li><strong>Key-value</strong> (Redis, DynamoDB) — blazing-fast lookups by key.</li>
+          <li><strong>Column-family</strong> (Cassandra) — optimized for write-heavy, wide-row access patterns.</li>
+          <li><strong>Graph</strong> (Neo4j) — relationships are first-class, ideal for social graphs.</li>
+        </ul>
+
+        <p class="mini-heading">The decision framework</p>
+        <ul class="check-list">
+          <li>Structured, fixed schema with complex joins → <strong>SQL</strong></li>
+          <li>Financial transactions, strict data integrity → <strong>SQL</strong></li>
+          <li>Flexible/unstructured data at high scale → <strong>NoSQL</strong></li>
+          <li>Social media posts, likes, activity feeds → <strong>NoSQL</strong></li>
+          <li>High availability with eventual consistency acceptable → <strong>NoSQL</strong></li>
+        </ul>
+      </section>
+
+      <!-- ── SECTION 7: MICROSERVICES ──────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Architecture patterns</span>
+        <h2>Microservices and the API gateway</h2>
+
+        <p class="mini-heading">Monolith vs microservices</p>
+        <p>
+          A <strong>monolith</strong> puts all functionality in one backend process. A
+          <strong>microservice</strong> architecture splits the system into independent services by
+          domain (User Service, Order Service, Payment Service). Each service has its own database,
+          can use its own tech stack, deploys independently, and fails in isolation.
+        </p>
+        <p>
+          Most startups begin with a monolith (simpler to build, test, and deploy) and migrate to
+          microservices as the team and scale grow. The trigger is usually team size: when one team
+          per domain makes organizational sense, microservices follow naturally.
+        </p>
+
+        <p class="mini-heading">API gateway</p>
+        <p>
+          Clients send all requests to a <strong>single API gateway endpoint</strong>, which routes
+          to the correct microservice. The gateway also handles cross-cutting concerns:
+          rate limiting, caching, authentication and authorisation. This keeps individual services
+          lean and prevents each one from reimplementing the same middleware.
+        </p>
+      </section>
+
+      <!-- ── SECTION 8: LOAD BALANCER ──────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Traffic distribution</span>
+        <h2>Load balancer algorithms</h2>
+        <ul class="check-list">
+          <li>
+            <strong>Round robin:</strong> Rotate requests sequentially (Server 1 → 2 → 3 → 1…).
+            Simple, assumes equal capacity. Ignores real-time server health.
+          </li>
+          <li>
+            <strong>Weighted round robin:</strong> Servers assigned static weights proportional to
+            capacity. Higher-weight servers receive more requests. Doesn't adapt to live load.
+          </li>
+          <li>
+            <strong>Least connections:</strong> Routes to whichever server has the fewest active
+            connections right now. Dynamically adapts to real traffic. Best for mixed request durations.
+          </li>
+          <li>
+            <strong>Hash-based:</strong> Hashes the client IP or user ID to determine server.
+            Guarantees <strong>session persistence</strong> (same user → same server). Disrupted
+            when servers are added or removed.
+          </li>
+        </ul>
+      </section>
+
+      <!-- ── SECTION 9: CACHING ────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Performance</span>
+        <h2>Caching and Redis</h2>
+        <p>
+          Caching stores precomputed or frequently accessed data in high-speed storage so future
+          requests skip the expensive DB query. A query taking 600ms (500ms DB + 100ms compute)
+          served from Redis takes ~60ms — a 10× improvement.
+        </p>
+
+        <p class="mini-heading">Where to cache</p>
+        <ul class="check-list">
+          <li><strong>Client-side:</strong> Browser cache (HTML, CSS, JS assets).</li>
+          <li><strong>Server-side:</strong> Redis or Memcached in server memory.</li>
+          <li><strong>CDN:</strong> Geographically distributed edge caches (CloudFront, Cloudflare).</li>
+          <li><strong>Application-level:</strong> In-process query result caching.</li>
+        </ul>
+
+        <p class="mini-heading">Cache invalidation</p>
+        <p>
+          Stale data must be evicted or updated. Two main strategies:
+        </p>
+        <ul class="check-list">
+          <li><strong>TTL (Time to Live):</strong> Data auto-expires after a set duration.</li>
+          <li><strong>Write-through:</strong> Update cache simultaneously when the database is written.</li>
+        </ul>
+
+        <p class="mini-heading">Redis fundamentals</p>
+        <p>
+          Redis is an in-memory key-value store. Because data lives in RAM, reads are orders of
+          magnitude faster than disk-based databases — but storage is limited by RAM size.
+          Key Redis data types:
+        </p>
+        <ul class="check-list">
+          <li><strong>String:</strong> <code>SET user:1 "Alice"</code> / <code>GET user:1</code></li>
+          <li><strong>List:</strong> LPUSH + RPOP = queue (FIFO); LPUSH + LPOP = stack (LIFO)</li>
+          <li><strong>Hash:</strong> Store object fields under one key (e.g., <code>user:1:email</code>)</li>
+        </ul>
+        <p>
+          A <strong>cache hit</strong> means the data was found in cache and served immediately.
+          A <strong>cache miss</strong> means it wasn't — the system falls back to the database,
+          then usually populates the cache for next time.
+        </p>
+      </section>
+
+      <!-- ── SECTION 10: BLOB + CDN ────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Static and media content</span>
+        <h2>Blob storage and CDNs</h2>
+
+        <p class="mini-heading">Blob storage (AWS S3, Cloudflare R2)</p>
+        <p>
+          A <strong>blob</strong> (Binary Large Object) is any file — video, image, PDF — stored
+          as raw binary. Files don't belong in relational databases: a single video can be 1GB+,
+          which makes queries painfully slow. Dedicated blob stores auto-scale, offer
+          11-nines (99.999999999%) durability, pay-as-you-go pricing, encryption at rest and in
+          transit, and fine-grained access control via pre-signed URLs or IAM policies.
+        </p>
+
+        <p class="mini-heading">CDN (CloudFront, Cloudflare)</p>
+        <p>
+          Files stored in one region are slow to serve globally because of physical distance.
+          A CDN caches content on <strong>edge servers</strong> distributed worldwide.
+        </p>
+        <ol>
+          <li>User requests a file → GeoDNS routes to nearest edge server.</li>
+          <li><strong>Cache hit:</strong> edge server returns file immediately.</li>
+          <li><strong>Cache miss:</strong> edge fetches from origin, caches it, serves the user. Future requests hit cache.</li>
+        </ol>
+        <p>
+          TTL controls how long edge servers hold content before refreshing from origin.
+          CDNs are the primary tool for making static assets (images, JS, CSS) fast globally.
+        </p>
+      </section>
+
+      <!-- ── SECTION 11: MESSAGE BROKERS ──────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Async communication</span>
+        <h2>Message brokers, Kafka, and event-driven architecture</h2>
+
+        <p class="mini-heading">Synchronous vs asynchronous</p>
+        <p>
+          In <strong>synchronous</strong> communication, the client waits for the server to fully
+          process the request before getting a response. For long-running tasks (video transcoding,
+          email sending, PDF generation) this means the client hangs for seconds or minutes.
+        </p>
+        <p>
+          In <strong>asynchronous</strong> communication, the server immediately returns
+          "task accepted" and a background worker handles the heavy work. The client is notified
+          later (webhook, email, WebSocket push).
+        </p>
+
+        <p class="mini-heading">Message queue vs message stream</p>
+        <ul class="check-list">
+          <li>
+            <strong>Message queue</strong> (RabbitMQ, AWS SQS): one consumer per message type.
+            Message is deleted once processed. Best for task delegation with one worker type.
+          </li>
+          <li>
+            <strong>Message stream</strong> (Kafka, AWS Kinesis): many consumers can read the same
+            message. Messages persist and are never auto-deleted. Best for "write once, read by many"
+            use cases like analytics, audit logs, and data pipelines.
+          </li>
+        </ul>
+
+        <p class="mini-heading">Apache Kafka internals</p>
+        <p>
+          Kafka is the standard for high-throughput message streaming. Key terms:
+        </p>
+        <ul class="check-list">
+          <li><strong>Topic:</strong> A named category of messages (like a database table).</li>
+          <li><strong>Partition:</strong> A topic split into parallel lanes for horizontal throughput.</li>
+          <li><strong>Consumer group:</strong> A set of consumers that collectively process a topic. Each partition is owned by exactly one consumer within a group.</li>
+          <li><strong>Producer:</strong> Publishes messages. <strong>Broker:</strong> Kafka server managing topics.</li>
+        </ul>
+        <p>
+          Rule: for horizontal consumer scaling, partitions ≥ consumers. Kafka auto-rebalances
+          assignments when consumers are added or removed. Example: 4 partitions + 3 consumers →
+          one consumer handles two partitions, the others handle one each.
+        </p>
+        <p>
+          Practical use case: Uber driver location updates every 2 seconds × thousands of drivers.
+          Writing each update directly to the database would overwhelm it. Buffer in Kafka,
+          batch-write to DB every 10 minutes.
+        </p>
+
+        <p class="mini-heading">Event-driven architecture (EDA)</p>
+        <p>
+          Non-critical downstream tasks (inventory update, email notification) shouldn't block
+          the response to the user. EDA pattern:
+        </p>
+        <ol>
+          <li>Order placed → Order Service confirms payment → immediately returns success to client.</li>
+          <li>Order Service publishes an event to the message broker.</li>
+          <li>Inventory Service and Notification Service consume the event asynchronously at their own pace.</li>
+        </ol>
+        <p>
+          EDA benefits: services are fully decoupled (producer doesn't know about consumers),
+          one service failure doesn't cascade, each service scales independently.
+        </p>
+      </section>
+
+      <!-- ── SECTION 12: DISTRIBUTED SYSTEMS ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Distributed systems</span>
+        <h2>Leader election and auto-recovery</h2>
+        <p>
+          A <strong>distributed system</strong> has work performed by multiple cooperating machines
+          that appear as one system to the client. Sharding, horizontal scaling, and big data
+          computation are all forms of distributed execution.
+        </p>
+
+        <p class="mini-heading">Leader + follower architecture</p>
+        <p>
+          A common pattern: one <strong>leader</strong> accepts client requests and coordinates
+          work; <strong>followers</strong> execute tasks and return results. The leader aggregates
+          and responds. Leader election runs at startup and on leader failure.
+        </p>
+
+        <p class="mini-heading">Leader election algorithms</p>
+        <ul class="check-list">
+          <li><strong>Bully:</strong> O(N) — the highest-ID live node wins.</li>
+          <li><strong>Gossip protocol:</strong> O(log N) — nodes exchange heartbeats to propagate state changes. Used by DynamoDB and Cassandra.</li>
+          <li><strong>Raft:</strong> Consensus algorithm requiring 50%+ nodes to agree on a leader. Used by Docker Swarm and etcd.</li>
+        </ul>
+
+        <p class="mini-heading">Auto-recoverable orchestrator hierarchy</p>
+        <p>
+          Manually restarting crashed servers doesn't scale. The solution is a hierarchy:
+        </p>
+        <ul class="check-list">
+          <li><strong>Worker-Orchestrators</strong> monitor application servers and restart them on crash.</li>
+          <li><strong>Leader-Orchestrator</strong> monitors worker-orchestrators and restarts them.</li>
+          <li>If the leader-orchestrator fails, a worker promotes itself via leader election.</li>
+        </ul>
+        <p>
+          The entire recovery chain is automated — no human intervention required at any level.
+        </p>
+      </section>
+
+      <!-- ── SECTION 13: CONSISTENCY ───────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Data consistency</span>
+        <h2>Strong consistency vs eventual consistency</h2>
+
+        <p class="mini-heading">Strong consistency</p>
+        <p>
+          Every read after a write returns the most recent data — all replicas agree before the
+          write is acknowledged. Behaves as if a single copy of data exists.
+          Implementation approaches:
+        </p>
+        <ul class="check-list">
+          <li><strong>Synchronous replication:</strong> All replicas updated before write acknowledged (Google Spanner).</li>
+          <li><strong>Quorum-based (W+R &gt; N):</strong> Majority acknowledgment required (DynamoDB, Cassandra configurable).</li>
+          <li><strong>Raft consensus:</strong> 50%+ nodes must agree (Docker Swarm, etcd).</li>
+        </ul>
+        <p>Use when: banking, payments, stock trading — stale reads are unacceptable.</p>
+
+        <p class="mini-heading">Eventual consistency</p>
+        <p>
+          All replicas will <em>eventually</em> converge to the same value, but short-term
+          inconsistency is acceptable in exchange for higher availability and lower write latency.
+          Implementation: async replication, relaxed quorum (R+W ≤ N), gossip protocol.
+          Use when: social media likes/comments, product catalogs, DNS records.
+        </p>
+      </section>
+
+      <!-- ── SECTION 14: CONSISTENT HASHING ───────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Routing strategy</span>
+        <h2>Consistent hashing</h2>
+        <p>
+          Simple hashing (<code>HASH(key) % num_servers</code>) has a fatal flaw: when you add or
+          remove a server, nearly every key remaps to a different server — causing massive data
+          movement and cache invalidation.
+        </p>
+        <p>
+          <strong>Consistent hashing</strong> solves this with a circular ring:
+        </p>
+        <ol>
+          <li>Hash each server's identity (IP or ID) onto a point on the ring.</li>
+          <li>Hash each data key onto the same ring using the same function.</li>
+          <li>Each key is assigned to its nearest clockwise server on the ring.</li>
+        </ol>
+        <p>
+          When a server is added or removed, only the keys immediately adjacent to that position
+          need to reassign — all other keys are unaffected. Used by AWS DynamoDB, Apache Cassandra,
+          and Riak.
+        </p>
+      </section>
+
+      <!-- ── SECTION 15: PROXY ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Network intermediaries</span>
+        <h2>Forward proxy vs reverse proxy</h2>
+
+        <p class="mini-heading">Forward proxy — acts on behalf of the client</p>
+        <p>
+          The server sees the proxy's IP, not the client's. The client's identity is hidden.
+          Use cases: VPNs, accessing geo-blocked content, corporate internet filtering,
+          caching frequently requested content organisation-wide.
+        </p>
+
+        <p class="mini-heading">Reverse proxy — acts on behalf of the server</p>
+        <p>
+          The client sees the proxy, not the actual backend servers. The server's identity is hidden.
+          Use cases: load balancing, SSL termination (handles encryption so backend servers don't have to),
+          caching static content, shielding backend services from direct internet exposure.
+        </p>
+        <p>
+          In production, <strong>Nginx</strong> and <strong>HAProxy</strong> are the standard
+          reverse proxy tools. They are far more efficient than a hand-rolled Node.js proxy —
+          with built-in SSL support, connection pooling, rate limiting, and caching.
+        </p>
+      </section>
+
+      <!-- ── SECTION 16: REDUNDANCY ────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Reliability</span>
+        <h2>Data redundancy and recovery</h2>
+        <p>
+          Physical disasters (floods, fires), disk corruption, and hardware failures are inevitable
+          at scale. Two approaches:
+        </p>
+        <ul class="check-list">
+          <li>
+            <strong>Periodic backup:</strong> Daily or weekly snapshots. Simple, but you lose
+            everything that happened since the last snapshot.
+          </li>
+          <li>
+            <strong>Continuous redundancy (modern standard):</strong> A live <strong>replica</strong>
+            server syncs all writes from the main database in real time (synchronously or
+            asynchronously). On main failure, the replica auto-promotes to main. Zero manual intervention.
+          </li>
+        </ul>
+        <p>
+          The replica only syncs — it doesn't serve client reads (that's what read replicas are
+          for in a master-slave setup). Its sole job is to be a warm standby.
+        </p>
+      </section>
+
+      <!-- ── SECTION 17: FRAMEWORK ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Interview framework</span>
+        <h2>How to solve any system design problem in 3 steps</h2>
+
+        <p class="mini-heading">Step 1 — Understand the problem</p>
+        <p>
+          Clarify functional requirements (what the system does) and non-functional requirements
+          (scale, latency, consistency, availability). Don't design before you know the constraints.
+        </p>
+
+        <p class="mini-heading">Step 2 — Break into sub-problems</p>
+        <p>
+          Decompose by domain. For an e-commerce system: Product Listing, Search, Orders, Payments.
+          Resist the urge to solve the whole thing at once.
+        </p>
+
+        <p class="mini-heading">Step 3 — Address 4 dimensions for each sub-problem</p>
+        <ul class="check-list">
+          <li><strong>Database:</strong> SQL or NoSQL? Which specific DB? Schema design?</li>
+          <li><strong>Caching:</strong> What to cache? TTL? Invalidation strategy?</li>
+          <li><strong>Scaling &amp; fault tolerance:</strong> Horizontal or vertical? Replication strategy?</li>
+          <li><strong>Communication:</strong> Synchronous REST API or asynchronous message broker?</li>
+        </ul>
+        <div class="callout">
+          <p>
+            <strong>The trap:</strong> Only create sub-sub-problems when genuinely necessary.
+            Over-engineering in an interview signals unclear thinking, not depth.
+          </p>
+        </div>
+      </section>
+
+      <!-- ── FAQ ───────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Common questions</span>
+        <h2>FAQ</h2>
+        <ul class="faq-list">
+          <li class="faq-item">
+            <p class="faq-question">Do I need to know all of this before I start building real systems?</p>
+            <p class="faq-answer">
+              No. Know the basics (servers, scaling, caching, databases) and learn the rest when a
+              real problem demands it. Most teams don't need Kafka or Raft until they're processing
+              millions of events per second. Build, hit the wall, then reach for the next tool.
+            </p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">When should I use NoSQL instead of PostgreSQL?</p>
+            <p class="faq-answer">
+              When your schema is genuinely unpredictable, your write throughput exceeds what a single
+              Postgres master can handle, or you need built-in horizontal sharding. For most
+              applications, Postgres with read replicas and proper indexing handles far more than
+              engineers expect.
+            </p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">What's the difference between partitioning and sharding?</p>
+            <p class="faq-answer">
+              Partitioning splits a table into sub-tables on the <em>same server</em> — the database
+              engine handles routing transparently. Sharding splits data across <em>different servers</em>
+              — your application code must know which shard to route each query to. Partitioning is
+              simpler; sharding is more powerful but far more complex to operate.
+            </p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">Should I start with microservices or a monolith?</p>
+            <p class="faq-answer">
+              Almost always start with a monolith. Microservices solve organisational and scaling
+              problems that don't exist at the beginning. Premature microservices add distributed
+              systems complexity (network calls, partial failures, data consistency) before you have
+              the team size or traffic that justifies it.
+            </p>
+          </li>
+        </ul>
+      </section>
+
+      <!-- ── RELATED ────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Related reading</span>
+        <h2>Go deeper on individual topics</h2>
+        <ul class="check-list">
+          <li><a href="./system-design-concepts.html">33 System Design Concepts Every Developer Should Know</a> — architect-level deep dives on each pattern</li>
+          <li><a href="./scaling-to-1-million-users.html">Scaling to 1 Million Users</a> — the phase-by-phase playbook with code</li>
+          <li><a href="./system-design-tradeoffs-l4-to-l7.html">7 System Design Tradeoffs (L4 → L7)</a> — the tradeoff fluency that decides your interview level</li>
+          <li><a href="./engineering-papers-behind-netflix-uber-amazon-google.html">10 Engineering Papers Behind Netflix, Uber, Amazon, Google</a> — foundational papers to internalize</li>
+          <li><a href="./interview/index.html">Interview Questions — System Design Bank</a> — practice problems with full solutions</li>
+        </ul>
+      </section>
+
+      <!-- ── TAKEAWAY ───────────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          System design is not about memorising components — it's about understanding why each
+          component exists, what problem it solves, and what trade-off it introduces. Start with
+          a single server, understand why it breaks, add the right abstraction, and repeat.
+          The engineer who can articulate the why behind every architectural decision is the one
+          who makes it through the interview and ships systems that last.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jest Testing | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Prereq · Quality · 90 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>JavaScript Testing with Jest</h1>
+        <p class="summary">
+          Jest is the de-facto JavaScript test framework. The freeCodeCamp crash course covers the runner,
+          matchers, mocks, and async patterns. This page focuses on the patterns you'll actually use to
+          unit-test Bolt for JS handlers — fake payloads, mocked Web API client, and asserting on
+          <code>chat.postMessage</code> arguments.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack prereq · Tech Stack 1</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Confidently unit-test Slack handlers</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~90 min crash course + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Refactor safety, CI, on-call confidence</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Without tests, every change to a Slack app handler is a small bet that no one will notice.
+          With tests, you can refactor a slash command, add a new modal field, or change an API call
+          and know the wiring is intact before you deploy.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Pragmatic target:</strong> 1 unit test per handler that confirms the right Web API
+            method gets called with the right arguments, plus a few integration tests for the OAuth
+            flow. You don't need 100% coverage; you need confidence on the hot paths.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Jest in 5 concepts</h2>
+        <ul>
+          <li><strong>Test runner:</strong> <code>describe</code>, <code>it</code> / <code>test</code>, <code>beforeEach</code>, <code>afterEach</code>.</li>
+          <li><strong>Matchers:</strong> <code>expect(x).toBe(y)</code>, <code>toEqual</code> (deep), <code>toContain</code>, <code>toThrow</code>, <code>resolves</code> / <code>rejects</code> for promises.</li>
+          <li><strong>Mocks:</strong> <code>jest.fn()</code> creates a callable mock; <code>jest.mock('module')</code> replaces an entire module.</li>
+          <li><strong>Spies:</strong> <code>jest.spyOn(obj, 'method')</code> replaces one method while keeping the rest.</li>
+          <li><strong>Snapshots:</strong> <code>toMatchSnapshot()</code> for stable structured output (Block Kit JSON).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Test a Bolt slash command (worked example)</h2>
+        <p class="code-caption">handler under test</p>
+        <pre class="code-block"><code>// src/commands/report.js
+export function registerReport(app) {
+  app.command('/report', async ({ command, ack, client }) =&gt; {
+    await ack();
+    await client.chat.postMessage({
+      channel: command.channel_id,
+      text: `Hello &lt;@${command.user_id}&gt;, here is your report.`,
+    });
+  });
+}</code></pre>
+
+        <p class="code-caption">jest test</p>
+        <pre class="code-block"><code>// src/commands/report.test.js
+import { registerReport } from './report.js';
+
+describe('/report command', () =&gt; {
+  it('acks and posts a message to the same channel', async () =&gt; {
+    const ack = jest.fn();
+    const postMessage = jest.fn();
+    const client = { chat: { postMessage } };
+
+    // capture the handler that registerReport registers
+    let handler;
+    const app = { command: (_name, h) =&gt; { handler = h; } };
+    registerReport(app);
+
+    await handler({
+      command: { channel_id: 'C1', user_id: 'U1' },
+      ack,
+      client,
+    });
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith({
+      channel: 'C1',
+      text: 'Hello &lt;@U1&gt;, here is your report.',
+    });
+  });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Mocking the Slack Web API client</h2>
+        <p>
+          For broader integration tests, you can mock <code>@slack/web-api</code> at the module level.
+          Every method becomes a <code>jest.fn()</code> that resolves to whatever you want.
+        </p>
+        <pre class="code-block"><code>jest.mock('@slack/web-api', () =&gt; ({
+  WebClient: jest.fn().mockImplementation(() =&gt; ({
+    chat:           { postMessage: jest.fn().mockResolvedValue({ ok: true, ts: '123' }) },
+    conversations:  { list:        jest.fn().mockResolvedValue({ ok: true, channels: [] }) },
+    users:          { info:        jest.fn().mockResolvedValue({ ok: true, user: { id: 'U1' } }) },
+  })),
+}));</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Snapshot-test your Block Kit</h2>
+        <p>
+          Block Kit JSON is stable structured output — perfect for snapshot tests. A snapshot tells you
+          when a UI change was intentional vs. an accident.
+        </p>
+        <pre class="code-block"><code>import { buildApprovalModal } from './blocks.js';
+
+it('approval modal blocks', () =&gt; {
+  const view = buildApprovalModal({ requesterId: 'U1', amount: 500 });
+  expect(view.blocks).toMatchSnapshot();
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Test pyramid for a Slack app</h2>
+        <ul>
+          <li><strong>Unit (lots):</strong> handler logic with mocked client + ack — fast.</li>
+          <li><strong>Integration (some):</strong> in-memory DB + mocked Web API; exercise OAuth flow.</li>
+          <li><strong>End-to-end (few):</strong> point a sandbox Slack workspace at a deployed staging app and run a smoke test.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Common Jest gotchas</h2>
+        <ul>
+          <li>Forgetting to <code>await</code> async expectations — the test passes silently.</li>
+          <li>Module-level mocks must be hoisted; declare them at the top of the file.</li>
+          <li><code>jest.clearAllMocks()</code> in <code>beforeEach</code> to avoid bleed-through.</li>
+          <li>For ESM projects, configure <code>"transform"</code> or use <code>--experimental-vm-modules</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Test handlers by capturing them at registration, then calling with fake payloads.</li>
+          <li>Mock <code>@slack/web-api</code> at the module level; assert on call args, not internals.</li>
+          <li>Snapshot Block Kit JSON to catch unintended UI drift.</li>
+          <li>Aim for fast unit tests on hot paths; one e2e smoke test against a sandbox workspace.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=IPiUDhwnZxA" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              JavaScript Testing with Jest – Crash Course
+            </a>
+          </li>
+          <li>
+            <a href="https://jestjs.io/docs/getting-started" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Jest official documentation
+            </a>
+          </li>
+          <li>
+            <a href="https://slack.dev/bolt-js/concepts/testing" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Bolt for JS — Testing concepts
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

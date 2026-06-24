@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Idempotency | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=1600&h=700&fit=crop&auto=format&q=80" alt="Safe and reliable operations" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 13 · 10 min</span></div>
+        </figure>
+        <h1>Idempotency</h1>
+        <p class="summary">Designing operations so that executing them multiple times produces the same result as executing them once. The property that makes retries safe — the foundation of reliable distributed systems where any call can fail and be retried.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">13 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design / Reliability</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Stripe, AWS, Twilio — every payment and messaging API</span></div>
+          <div><span class="meta-label">HTTP Methods</span><span class="meta-value">GET, PUT, DELETE are idempotent; POST is not by default</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">In a distributed system, any call can fail. Not "fail with an error" — fail ambiguously: the request left your server, the network timed out, and you don't know if the downstream service processed it or not. Without idempotency, retrying a failed payment doubles the charge. With idempotency, retrying is always safe — the second call detects the first was already processed and returns the same result.</p>
+        <div class="callout"><p><strong>The fundamental problem:</strong> Network calls have three outcomes: success, failure, and unknown (timeout). Without idempotency, "unknown" means "might have charged the user." With idempotency, "unknown" means "retry safely." Idempotency is what lets you build reliable systems on top of unreliable networks.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">HTTP Methods</span>
+        <h2>Which HTTP methods are idempotent — and why</h2>
+        <table class="data-table">
+          <thead><tr><th>Method</th><th>Idempotent?</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td><strong>GET</strong></td><td>Yes</td><td>Read-only. Calling 10 times = same as calling once.</td></tr>
+            <tr><td><strong>PUT</strong></td><td>Yes</td><td>Sets a resource to an absolute state. PUT /user/1 with name="Alice" 10 times = name is "Alice" after all 10.</td></tr>
+            <tr><td><strong>DELETE</strong></td><td>Yes (per RFC)</td><td>Deleting an already-deleted resource returns 404, not a second deletion. The final state is the same.</td></tr>
+            <tr><td><strong>POST</strong></td><td>No (by default)</td><td>Creates a new resource each time. POST /payments creates a new charge each call. Must be made idempotent explicitly via idempotency keys.</td></tr>
+            <tr><td><strong>PATCH</strong></td><td>It depends</td><td>PATCH with absolute values (set name="Alice") is idempotent. PATCH with relative values (increment balance by $10) is not.</td></tr>
+          </tbody>
+        </table>
+
+        <div class="diagram-box">
+<span class="step">Non-idempotent POST — dangerous with retries</span>
+
+Client ──▶ POST /payments { amount: 100 }  ──▶ <span class="warn">timeout</span>
+Client ──▶ POST /payments { amount: 100 }  ──▶ <span class="warn">timeout</span>  (retry)
+Client ──▶ POST /payments { amount: 100 }  ──▶ <span class="ok">200 OK</span>   (retry)
+
+Result: <span class="warn">3 payments charged</span>. Client only sees 1 success.
+
+<span class="step">Idempotent POST with idempotency key</span>
+
+Client ──▶ POST /payments { amount: 100 }
+           Idempotency-Key: pay_idem_abc123  ──▶ <span class="warn">timeout</span>
+Client ──▶ POST /payments { amount: 100 }
+           Idempotency-Key: pay_idem_abc123  ──▶ <span class="ok">200 OK</span>   (same key → returns cached result)
+Client ──▶ POST /payments { amount: 100 }
+           Idempotency-Key: pay_idem_abc123  ──▶ <span class="ok">200 OK</span>   (same key → returns cached result)
+
+Result: <span class="ok">1 payment charged</span>. All 3 calls return the same result.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Idempotency key pattern — server-side deduplication</h2>
+        <pre><code class="language-js">import { createClient } from 'redis';
+import { Pool } from 'pg';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+const db    = new Pool({ connectionString: process.env.DATABASE_URL });
+await redis.connect();
+
+// ─── SERVER-SIDE IDEMPOTENCY MIDDLEWARE ──────────────────────────────────
+// Intercepts requests with Idempotency-Key header
+// Returns cached result for duplicate keys, processes fresh keys once
+
+async function idempotencyMiddleware(req, res, next) {
+  const idempotencyKey = req.headers['idempotency-key'];
+
+  if (!idempotencyKey) return next(); // No key — pass through
+
+  const cacheKey = `idem:${req.method}:${req.path}:${idempotencyKey}`;
+
+  // Check if we've seen this key before
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    const result = JSON.parse(cached);
+    // Return exactly the same response as the original request
+    return res.status(result.statusCode).json(result.body);
+  }
+
+  // Mark key as in-progress (prevents concurrent duplicate requests)
+  const acquired = await redis.set(cacheKey + ':lock', '1', {
+    NX: true,   // Only set if not exists
+    EX: 30,     // Expire after 30s (handles crash during processing)
+  });
+
+  if (!acquired) {
+    // Another request with same key is in-flight — return 409
+    return res.status(409).json({
+      error: 'Request with this idempotency key is already being processed. Retry in a moment.'
+    });
+  }
+
+  // Capture the response to cache it
+  const originalJson = res.json.bind(res);
+  res.json = async (body) => {
+    // Cache the response for 24 hours (Stripe uses 24h retention)
+    const TTL_SECONDS = 86400;
+    await redis.setEx(cacheKey, TTL_SECONDS, JSON.stringify({
+      statusCode: res.statusCode,
+      body
+    }));
+    await redis.del(cacheKey + ':lock');
+    return originalJson(body);
+  };
+
+  next();
+}
+
+// ─── PAYMENT ENDPOINT WITH IDEMPOTENCY ───────────────────────────────────
+app.post('/payments', idempotencyMiddleware, async (req, res) => {
+  const { userId, amount, currency, paymentMethodId } = req.body;
+
+  // Validate
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'Invalid amount' });
+  }
+
+  // Process payment — this only runs ONCE per idempotency key
+  const charge = await stripeClient.paymentIntents.create({
+    amount,
+    currency,
+    customer:       userId,
+    payment_method: paymentMethodId,
+    confirm:        true,
+  });
+
+  // Record in DB
+  await db.query(
+    'INSERT INTO payments (id, user_id, amount, status) VALUES ($1, $2, $3, $4)',
+    [charge.id, userId, amount, charge.status]
+  );
+
+  res.status(201).json({ paymentId: charge.id, status: charge.status });
+});
+
+// ─── CLIENT-SIDE USAGE ────────────────────────────────────────────────────
+// Generate a stable idempotency key per payment attempt
+// Key must be unique per unique payment, not per retry
+
+async function processPayment(userId, amount, idempotencyKey) {
+  const MAX_RETRIES = 3;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch('/payments', {
+        method:  'POST',
+        headers: {
+          'Content-Type':    'application/json',
+          'Idempotency-Key': idempotencyKey, // Same key on every retry
+        },
+        body: JSON.stringify({ userId, amount, currency: 'usd' }),
+      });
+
+      if (response.ok) return response.json();
+
+      if (response.status === 409) {
+        // In-flight — wait and retry
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+
+      if (response.status >= 500) {
+        // Server error — retry with same idempotency key
+        await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt))); // exponential backoff
+        continue;
+      }
+
+      throw new Error(`Payment failed: ${response.status}`);
+    } catch (networkError) {
+      // Network timeout — safe to retry with same key
+      if (attempt < MAX_RETRIES - 1) continue;
+      throw networkError;
+    }
+  }
+}
+
+// KEY PRINCIPLE: Generate the idempotency key BEFORE the first attempt.
+// Never regenerate a new key for the same logical operation.
+// The key should represent the INTENT (this specific payment for this user at this time),
+// not the attempt (this specific HTTP call).
+const key = `payment:${userId}:${orderId}:${Date.now()}`; // Generate once, reuse on retries</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Database Patterns</span>
+        <h2>Idempotency at the database layer</h2>
+        <pre><code class="language-js">// Pattern 1: UPSERT — idempotent write using unique constraint
+// If the row exists (duplicate key), update it. If not, insert it.
+// Result is the same whether called once or ten times.
+
+await db.query(`
+  INSERT INTO user_events (event_id, user_id, event_type, created_at)
+  VALUES ($1, $2, $3, NOW())
+  ON CONFLICT (event_id) DO NOTHING  -- or DO UPDATE SET ... for upsert
+`, [eventId, userId, 'user.signed_up']);
+
+// Pattern 2: Check-then-act with optimistic locking
+async function transferFunds(fromAccount, toAccount, amount, transferId) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Idempotency check — was this transfer already processed?
+    const existing = await client.query(
+      'SELECT id, status FROM transfers WHERE id = $1',
+      [transferId]
+    );
+
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return existing.rows[0]; // Return the original result, not a new transfer
+    }
+
+    // Debit source account
+    const debitResult = await client.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE id = $2 AND balance >= $1 RETURNING balance',
+      [amount, fromAccount]
+    );
+    if (debitResult.rows.length === 0) throw new Error('Insufficient funds');
+
+    // Credit destination
+    await client.query(
+      'UPDATE accounts SET balance = balance + $1 WHERE id = $2',
+      [amount, toAccount]
+    );
+
+    // Record transfer with the provided transferId (unique constraint enforces idempotency)
+    const transfer = await client.query(
+      'INSERT INTO transfers (id, from_account, to_account, amount, status) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [transferId, fromAccount, toAccount, amount, 'completed']
+    );
+
+    await client.query('COMMIT');
+    return transfer.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How Stripe implements idempotency</h2>
+        <p><strong>Stripe:</strong> Every mutating API call accepts an <code>Idempotency-Key</code> header. Stripe stores the key and the full response for 24 hours. On a duplicate request (same key), Stripe returns the stored response immediately — the charge is not re-attempted. This is why Stripe explicitly tells developers to generate the key on the client before making the first attempt and reuse it on every retry. The key represents the intent, not the attempt.</p>
+        <p><strong>AWS SQS:</strong> At-least-once delivery means consumers receive duplicates. AWS recommends building idempotent consumers — check if the message was already processed before acting. SQS FIFO queues provide exactly-once processing within a 5-minute deduplication window using a message deduplication ID.</p>
+        <p><strong>Twilio:</strong> Uses idempotency keys for SMS and voice API calls. A duplicate SendMessage request with the same idempotency key returns the original MessageSid, not a new SMS send. Critical for reliability — a network timeout after sending an SMS should not result in the user receiving the message twice.</p>
+
+        <div class="insight-box"><strong>Idempotency keys must represent logical operations, not HTTP requests.</strong> If your checkout flow has a "Place Order" button, the idempotency key should be generated when the user clicks the button — before the first HTTP call. Every retry of that HTTP call uses the same key. If the user navigates away and tries again, that is a new logical operation — generate a new key.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Enables safe retries — eliminates double-charges, duplicate sends</li><li>Turns network unreliability into a solved problem</li><li>Required by every payment, messaging, and state-mutating API</li><li>Simplifies client retry logic (always retry, key handles dedup)</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Extra storage for key-result cache (24h × keys volume)</li><li>Concurrent requests with same key require locking (adds latency)</li><li>Key generation discipline required from clients</li><li>Does not help for side effects outside your system (emails already sent)</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Idempotency is the property that makes distributed systems trustworthy despite unreliable networks. Any call can fail with an ambiguous outcome — the only safe response is to retry. Without idempotency, retrying creates duplicate operations. With it, retrying is always safe. Implement it server-side via idempotency keys (unique key → cached result for 24 hours). Implement it at the database layer via UPSERT and check-before-act patterns. Generate keys on the client before the first attempt, and reuse the same key on every retry of the same logical operation — never generate a new key for a retry.</p>
+      </section>
+    </main>
+  </body>
+</html>

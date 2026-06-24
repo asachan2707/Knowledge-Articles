@@ -1,0 +1,1403 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Building AI Agents End-to-End | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1485827404703-89b55fcc595e?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Robotic arm and circuit board representing AI agent systems acting in the world"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · JavaScript · 25 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@possessedphotography" target="_blank" rel="noopener">Possessed Photography</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Building AI Agents End-to-End</h1>
+        <p class="summary">
+          A complete guide to how AI agents actually work under the hood — from the mental model and
+          four pillars, through memory, tools, actions, skills, reasoning, and environment design,
+          to a full working implementation in JavaScript. Every concept explained at the level of
+          what is happening behind the scenes, not just what to call.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Portal</span>
+            <span class="meta-value">Internal · Curated</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Agent architecture, implementation, JS code</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">Jun 10, 2026</span>
+          </div>
+          <div>
+            <span class="meta-label">Level</span>
+            <span class="meta-value">Beginner → Advanced</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ─── INTRO ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <p class="lead">
+          The easiest way to understand building AI agents is to understand the shift from models
+          that talk to systems that do. A standard LLM takes a question and predicts the next best
+          words. An agent is that same LLM wrapped in scaffolding that gives it a loop: it can think,
+          act, observe the result of that action, and adjust its approach based on what happened.
+          That loop is everything.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The right mental model:</strong> An agent is not a chatbot with more features —
+            it is a decision-making system that happens to speak natural language. The moment you
+            treat it as a chatbot, you start making the wrong design choices. Every agent interaction
+            bottoms out in a decision: route this request, answer this question, trigger this action,
+            ask for more information. If you cannot state that decision clearly, the agent will be vague.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── 1. THE AGENT LOOP ──────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Foundation</span>
+        <h2>The agent loop: think → act → observe → adjust</h2>
+        <p>
+          A standard LLM call is a straight line: input goes in, output comes out, done. An agent is
+          a loop. The same LLM sits at the centre, but it now has the ability to call external tools,
+          receive results back, and decide what to do next — over and over — until the task is complete
+          or a stopping condition is reached.
+        </p>
+
+        <p class="mini-heading">What the loop looks like in code</p>
+        <pre><code class="language-js">async function agentLoop(task, tools, memory) {
+  const history = [];
+  const MAX_ITERATIONS = 10; // always cap — never let the loop run forever
+  let iterations = 0;
+
+  while (iterations < MAX_ITERATIONS) {
+    iterations++;
+
+    // Build the prompt: system context + memory + tools + conversation so far
+    const response = await llm({
+      system: buildSystemPrompt(memory),
+      tools:  tools,
+      messages: [{ role: 'user', content: task }, ...history]
+    });
+
+    // Model decided it has enough to respond — done
+    if (response.type === 'text') {
+      return response.content;
+    }
+
+    // Model wants to use a tool — execute it and feed the result back
+    if (response.type === 'tool_call') {
+      const result = await executeTool(response.name, response.arguments);
+      history.push({ role: 'tool', name: response.name, content: result });
+      // Loop continues — model reads the result and decides again
+    }
+  }
+
+  return 'Task could not be completed within the allowed steps.'; // graceful fallback
+}</code></pre>
+        <p>
+          Notice the LLM is never "calling" the tool directly. It outputs a structured declaration
+          — <em>I want to call this tool with these arguments</em> — and your code executes the real
+          call. The model produces intent; your scaffolding produces action. This separation is
+          fundamental and matters enormously for debugging and safety.
+        </p>
+
+        <p class="mini-heading">Three questions that must have answers before you build any agent</p>
+        <ul class="check-list">
+          <li><strong>What decision is the agent making?</strong> Every interaction bottoms out in a decision. If you cannot state it clearly, the agent will be vague.</li>
+          <li><strong>What does it need to know to make that decision well?</strong> This is the context question — what data, history, and domain knowledge must be in the room before the model acts.</li>
+          <li><strong>What happens when it is wrong?</strong> A well-designed agent has a graceful failure mode. A poorly designed one either hallucinates confidently or goes silent.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 2. THE FOUR PILLARS ────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>The four pillars of an AI agent</h2>
+        <p>
+          To get an agent to execute a complex mission, you give it four core capabilities. These are
+          not optional extras — they are the components that transform an LLM from a text predictor
+          into a system that can pursue a goal across multiple steps.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Pillar</th><th>What it does</th><th>Without it</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Planning</strong></td>
+              <td>Takes a large, ambiguous goal and breaks it into sequential, manageable sub-tasks. Decides the order of operations.</td>
+              <td>Agent attempts the whole task in one shot and either produces a shallow answer or gets stuck on complexity.</td>
+            </tr>
+            <tr>
+              <td><strong>Memory</strong></td>
+              <td>Tracks what has happened — current context (short-term) and stored knowledge across sessions (long-term).</td>
+              <td>Agent forgets what it just did. Every turn starts cold. No continuity, no learning.</td>
+            </tr>
+            <tr>
+              <td><strong>Tool Use</strong></td>
+              <td>Lets the agent call external systems — search, databases, APIs, calculators, code execution. Its hands in the world.</td>
+              <td>Agent is trapped in its training data. Cannot access current information, cannot take action.</td>
+            </tr>
+            <tr>
+              <td><strong>Reflection</strong></td>
+              <td>Evaluates its own work. Recognises when an action failed or returned wrong data. Tries a different approach instead of propagating the error.</td>
+              <td>Agent treats every tool result as correct. Errors compound. Wrong answers delivered with confidence.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          The LLM is the brain that routes between these four capabilities continuously.
+          It is not generating an answer and stopping — it is operating in a loop, constantly
+          interacting with its environment and assessing results until the task is complete or
+          the iteration limit is reached.
+        </p>
+      </section>
+
+      <!-- ─── 3. MEMORY ──────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Pillar 1 · Memory</span>
+        <h2>Memory: the four layers and when to use each</h2>
+        <p>
+          Memory is the most misunderstood component in agent design because people treat it as one
+          thing. It is actually four distinct layers with different lifetimes, costs, and access
+          patterns. Conflating them leads to real design mistakes.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Layer</th><th>What it stores</th><th>Lifetime</th><th>Implementation</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>1. In-context (working)</strong></td>
+              <td>Everything currently in the prompt — conversation history, tool results, instructions, retrieved context</td>
+              <td>This turn only. Falls off when the context window fills.</td>
+              <td>The prompt itself — no extra code needed</td>
+            </tr>
+            <tr>
+              <td><strong>2. Session / state</strong></td>
+              <td>Facts collected during the current interaction: verified identity, confirmed order ID, user name, active record</td>
+              <td>The duration of the session</td>
+              <td>Key-value object attached to the session, injected into system prompt each turn</td>
+            </tr>
+            <tr>
+              <td><strong>3. Long-term / vector store</strong></td>
+              <td>Knowledge that must survive across sessions: user preferences, domain documents, historical interactions</td>
+              <td>Permanent until explicitly deleted</td>
+              <td>Embeddings + vector database (RAG). Retrieved at query time by semantic similarity.</td>
+            </tr>
+            <tr>
+              <td><strong>4. Episodic</strong></td>
+              <td>A log of what the agent did and what happened — past task outcomes, successful tool call patterns, errors encountered</td>
+              <td>Permanent. Grows over time.</td>
+              <td>Structured log database. Queried to inform future similar tasks.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">The design question for every piece of information</p>
+        <p>
+          Before storing anything, ask: <em>does this need to survive the turn? The session? Forever?</em>
+          Match the storage layer to the lifetime. Over-engineering memory — putting everything in a
+          vector store — is as common a mistake as under-engineering it — trusting the context window
+          to hold everything until it overflows.
+        </p>
+
+        <p class="mini-heading">Session memory implementation</p>
+        <pre><code class="language-js">// Session memory: key-value store that persists for the life of a conversation
+const sessionMemory = {};
+
+function remember(key, value) {
+  sessionMemory[key] = value;
+}
+
+function recall(key) {
+  return sessionMemory[key] ?? null;
+}
+
+// Injected into the system prompt at the start of every turn
+function buildMemoryBlock() {
+  const entries = Object.entries(sessionMemory);
+  if (entries.length === 0) return '';
+  return '\n\nKnown context:\n' + entries.map(([k, v]) => `- ${k}: ${v}`).join('\n');
+}
+
+// Usage: agent confirms user identity mid-conversation
+remember('userId', 'USR-4521');
+remember('authenticated', true);
+remember('activeOrderId', 'ORD-8833');
+
+// Next turn system prompt automatically includes:
+// Known context:
+// - userId: USR-4521
+// - authenticated: true
+// - activeOrderId: ORD-8833</code></pre>
+
+        <p class="mini-heading">Long-term memory (vector store) implementation</p>
+        <pre><code class="language-js">import { embed, vectorSearch } from './vector-store.js';
+
+// Store a memory (e.g. user preference learned from a past session)
+async function storeMemory(content, metadata = {}) {
+  const vector = await embed(content);
+  await vectorStore.insert({ content, vector, metadata, timestamp: Date.now() });
+}
+
+// Retrieve the most relevant memories for the current query
+async function recallMemories(query, topK = 5) {
+  const queryVector = await embed(query);
+  const results = await vectorSearch(queryVector, topK);
+  return results.map(r => r.content).join('\n');
+}
+
+// At the start of each turn, inject relevant long-term memories into the prompt
+async function buildLongTermContext(userQuery) {
+  const memories = await recallMemories(userQuery);
+  return memories ? `\n\nRelevant past context:\n${memories}` : '';
+}
+
+// KEY INSIGHT: retrieval quality is the ceiling for memory quality.
+// Storing a million embeddings is worthless if your query doesn't surface the right ones.</code></pre>
+      </section>
+
+      <!-- ─── 4. TOOLS ───────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Pillar 2 · Tool Use</span>
+        <h2>Tools: the agent's hands in the world</h2>
+        <p>
+          LLMs are inherently trapped in a text box. They were trained on text and they output text.
+          Tools are the mechanism that lets an agent escape that box — calling search engines,
+          databases, APIs, calculators, code execution environments, and any other external system.
+        </p>
+        <p>
+          The critical thing to understand: <strong>the LLM never executes a tool call.</strong>
+          It outputs a structured JSON object declaring which tool it wants to call and what
+          arguments to pass. Your code intercepts that, runs the real call, and feeds the result
+          back as an observation in the next turn. The model produces intent; your scaffolding
+          produces action.
+        </p>
+
+        <p class="mini-heading">What a tool call looks like at the protocol level</p>
+        <pre><code class="language-js">// What the LLM actually outputs when it decides to use a tool — pure JSON, no code runs
+{
+  "type": "tool_call",
+  "name": "lookupOrderStatus",
+  "arguments": {
+    "orderId": "ORD-4521",
+    "includeHistory": true
+  }
+}
+
+// Your scaffolding intercepts this and calls the real function:
+const result = await lookupOrderStatus({ orderId: "ORD-4521", includeHistory: true });
+
+// Result is appended to conversation history as an observation:
+history.push({ role: 'tool', name: 'lookupOrderStatus', content: JSON.stringify(result) });
+
+// Next LLM call now sees the result and decides what to do with it.</code></pre>
+
+        <p class="mini-heading">Tool definition — a UX problem, not a code problem</p>
+        <p>
+          The model picks tools based entirely on how you describe them. A well-written tool
+          definition produces consistent, predictable selection. A vague one produces random
+          behaviour. Three components make a good definition:
+        </p>
+
+        <pre><code class="language-js">const tools = [
+  {
+    name: "searchKnowledgeBase",
+    // Description = the selection signal. Write it for the model, not for humans.
+    // Include: when to use it, what it returns, and what NOT to use it for.
+    description: `Search internal company knowledge articles and documentation.
+Use for product FAQs, policy questions, procedure guides, and how-to content.
+Returns the most relevant article chunks with source references.
+Do NOT use for real-time data like current pricing, inventory, or live order status.`,
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The search query. Be specific — vague queries return noisy results."
+        },
+        maxResults: {
+          type: "number",
+          description: "Number of results to return. Default: 5. Max: 10.",
+          default: 5
+        }
+      },
+      required: ["query"]  // Only fields the model MUST provide — fewer is more reliable
+    }
+  },
+  {
+    name: "searchWeb",
+    description: `Search the live internet for current information.
+Use when the user asks about recent events, current prices, competitor news,
+or anything that may have changed since your training cutoff.
+Returns a list of snippets with source URLs.
+Do NOT use for internal company policies or procedures — use searchKnowledgeBase instead.`,
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "The search query." },
+        recency: {
+          type: "string",
+          enum: ["day", "week", "month", "any"],
+          description: "Filter results by recency. Use 'day' or 'week' for time-sensitive queries.",
+          default: "any"
+        }
+      },
+      required: ["query"]
+    }
+  }
+];
+
+// The "Do NOT use for X" lines are as important as "use for Y".
+// Without negative scope, overlapping tools produce random selection.</code></pre>
+
+        <p class="mini-heading">Too many tools is a real problem</p>
+        <p>
+          Research shows model tool-selection accuracy degrades significantly beyond 10–15 tools
+          in a single context. The solution is domain-scoping: give each agent only the tool set
+          it needs for its specific job. An order-management agent should not have access to HR
+          tools. The model cannot select what it cannot see — use this to your advantage.
+        </p>
+
+        <pre><code class="language-js">// Tool registry — all tools defined in one place
+const toolRegistry = {
+  searchKnowledgeBase, searchWeb, lookupOrderStatus,
+  updateShipping, processRefund, sendEmail,
+  lookupUserProfile, createSupportTicket, checkInventory
+};
+
+// Domain-scoped tool sets — each agent only sees what it needs
+const domainTools = {
+  orderSupport:    ['lookupOrderStatus', 'updateShipping', 'processRefund', 'searchKnowledgeBase'],
+  generalSupport:  ['searchKnowledgeBase', 'createSupportTicket', 'lookupUserProfile'],
+  salesAssistant:  ['searchWeb', 'lookupUserProfile', 'searchKnowledgeBase', 'checkInventory']
+};
+
+function getToolsForDomain(domain) {
+  return domainTools[domain].map(name => toolRegistry[name].definition);
+}</code></pre>
+      </section>
+
+      <!-- ─── 5. ACTIONS ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Pillar 2 · Actions</span>
+        <h2>Actions vs. tools: the write/read distinction that changes everything</h2>
+        <p>
+          People use "tools" and "actions" interchangeably. They are worth separating because the
+          design requirements are fundamentally different.
+        </p>
+        <ul class="check-list">
+          <li><strong>Tools</strong> are <em>read</em> operations — they retrieve information without changing state. Search, lookup, read a file. Safe to retry. If a tool returns the wrong result, call it again.</li>
+          <li><strong>Actions</strong> are <em>write</em> operations — they change something in the world. Send email, update a record, process a payment, deploy code, delete a file. Potentially irreversible.</li>
+        </ul>
+
+        <p class="mini-heading">The blast radius question</p>
+        <p>
+          Before building any action, ask: <em>what is the worst case if this action fires incorrectly?</em>
+          An incorrectly sent email is embarrassing. An incorrectly processed payment is a financial
+          incident. An incorrectly triggered deployment could cause an outage. Design the confirmation
+          and rollback strategy before you write the action code.
+        </p>
+
+        <pre><code class="language-js">// Action registry with risk metadata
+const actionRegistry = {
+  updateShippingAddress: {
+    risk: 'medium',
+    destructive: false,
+    reversible: true,
+    execute: async ({ orderId, newAddress }) => {
+      return await orderAPI.updateShipping(orderId, newAddress);
+    }
+  },
+  processRefund: {
+    risk: 'high',
+    destructive: false,
+    reversible: false,  // refunds can't be un-issued
+    execute: async ({ orderId, amount, reason }) => {
+      return await paymentAPI.issueRefund(orderId, amount, reason);
+    }
+  },
+  deleteAccount: {
+    risk: 'high',
+    destructive: true,
+    reversible: false,
+    dryRun: async ({ accountId }) => {
+      const account = await accountAPI.get(accountId);
+      return `Would permanently delete account: ${account.name} (${account.email}). This cannot be undone.`;
+    },
+    execute: async ({ accountId }) => {
+      return await accountAPI.delete(accountId);
+    }
+  }
+};
+
+// Action execution with risk gates
+async function executeAction(actionName, args, context) {
+  const action = actionRegistry[actionName];
+  if (!action) throw new Error(`Unknown action: ${actionName}`);
+
+  // High-risk actions require explicit human approval before executing
+  if (action.risk === 'high') {
+    const approved = await requestHumanApproval({
+      action: actionName,
+      args,
+      context,
+      message: `Agent wants to run "${actionName}" with: ${JSON.stringify(args)}`
+    });
+    if (!approved) return { status: 'cancelled', reason: 'Human approval denied' };
+  }
+
+  // Destructive actions show a dry-run preview first
+  if (action.destructive && action.dryRun) {
+    const preview = await action.dryRun(args);
+    return {
+      status: 'pending_confirmation',
+      preview,
+      message: `Preview: ${preview}. Confirm to proceed.`
+    };
+  }
+
+  try {
+    const result = await action.execute(args);
+    return { status: 'success', result };
+  } catch (err) {
+    return { status: 'error', error: err.message, retriable: !action.destructive };
+  }
+}</code></pre>
+      </section>
+
+      <!-- ─── 6. SKILLS ──────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Pillar 2 · Skills</span>
+        <h2>Skills: compound capabilities that keep the decision space manageable</h2>
+        <p>
+          Skills are one level above tools and actions. Where a tool does one atomic thing (search
+          the web), a skill does a whole job (research a competitor: search, extract key facts,
+          structure into a comparison). Skills combine multiple steps — possibly including multiple
+          tool calls, sub-LLM calls, and structured logic — into a single callable unit.
+        </p>
+        <p>
+          The value is cognitive load reduction. If the agent must choose between 40 individual
+          tools, selection accuracy drops. If it chooses between 8 skills — each of which handles
+          its own internal complexity — selection is cleaner, more predictable, and easier to debug.
+        </p>
+
+        <p class="mini-heading">Three types of skills</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>Type</th><th>What it does</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Cognitive</strong></td>
+              <td>Reasoning operations packaged as reusable functions — summarise, classify, extract, compare, evaluate. Internally an LLM call with a specific prompt.</td>
+              <td>summariseSkill(), classifyIntentSkill(), extractEntitiesSkill()</td>
+            </tr>
+            <tr>
+              <td><strong>Procedural</strong></td>
+              <td>Fixed, ordered sequences of steps. Deterministic. No model judgment involved — just execute A then B then C.</td>
+              <td>onboardCustomerSkill(): create record → send welcome email → assign account manager → log event</td>
+            </tr>
+            <tr>
+              <td><strong>Compositional</strong></td>
+              <td>Skills that call other skills or tools. The most powerful type — handles complex, multi-source tasks as a single unit.</td>
+              <td>competitorAnalysisSkill(): calls researchSkill() × 3 competitors, then calls compareAndSummariseSkill()</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-js">// COGNITIVE SKILL — an LLM call with a focused, reusable prompt
+async function summariseSkill(text, { length = 'short', tone = 'professional' } = {}) {
+  const lengthMap = {
+    short:  '2-3 concise sentences',
+    medium: 'one focused paragraph',
+    long:   '3-4 detailed paragraphs with key points'
+  };
+  return await llm(`
+    Summarise the following text in ${lengthMap[length]}.
+    Tone: ${tone}. Stick strictly to what is in the text — do not add outside information.
+
+    TEXT:
+    ${text}
+  `);
+}
+
+// COGNITIVE SKILL — extract structured data from unstructured text
+async function extractEntitiesSkill(text, entityTypes = ['person', 'company', 'date', 'amount']) {
+  const result = await llm(`
+    Extract the following entity types from the text below.
+    Return a JSON object with one key per entity type, each containing an array of found values.
+    Entity types: ${entityTypes.join(', ')}
+    If none found for a type, return an empty array.
+
+    TEXT: ${text}
+  `, { responseFormat: 'json' });
+  return JSON.parse(result);
+}
+
+// COMPOSITIONAL SKILL — calls tools + cognitive skills internally
+async function researchCompetitorSkill(competitorName) {
+  // Step 1: gather raw data using tools
+  const [productSearch, newsSearch] = await Promise.all([
+    searchWeb(`${competitorName} product features pricing 2026`),
+    searchWeb(`${competitorName} news announcements strategy`)
+  ]);
+
+  // Step 2: extract key entities
+  const entities = await extractEntitiesSkill(
+    productSearch.text + '\n' + newsSearch.text,
+    ['product', 'price', 'feature', 'date']
+  );
+
+  // Step 3: summarise into structured output
+  const summary = await summariseSkill(
+    productSearch.text + '\n' + newsSearch.text,
+    { length: 'medium', tone: 'analytical' }
+  );
+
+  return {
+    competitor: competitorName,
+    summary,
+    entities,
+    sources: [...productSearch.urls, ...newsSearch.urls]
+  };
+}
+
+// The agent calls researchCompetitorSkill() as one step — not 6 separate tool calls.</code></pre>
+      </section>
+
+      <!-- ─── 7. REASONING ───────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Pillar 3 · Reasoning</span>
+        <h2>Reasoning patterns: how the agent decides what to do next</h2>
+        <p>
+          Reasoning is how the agent determines its next move at each step of the loop. Different
+          patterns suit different tasks. Choosing the right one affects both response quality and cost.
+        </p>
+
+        <p class="mini-heading">Chain-of-Thought (CoT)</p>
+        <p>
+          The simplest reasoning upgrade. The model is prompted to think step by step before answering.
+          Forces it to surface its logic rather than jumping straight to a conclusion. Works well for
+          single-step analytical tasks. Implementation cost: near zero — one phrase in the system prompt.
+        </p>
+        <pre><code class="language-js">// Chain-of-Thought: instruct the model to reason before answering
+const systemPrompt = `
+  You are a helpful assistant.
+  Before responding to any question, think through your reasoning step by step
+  in a <thinking> block, then provide your final answer.
+  This ensures you catch errors in your reasoning before committing to an answer.
+`;</code></pre>
+
+        <p class="mini-heading">ReAct (Reason + Act) — the dominant agent pattern</p>
+        <p>
+          The model alternates between <em>Thought</em> (what do I know, what do I need) and
+          <em>Action</em> (call a tool). Each observation from a tool call feeds the next thought.
+          This is the pattern your architecture diagram shows — and it's what most production agents use.
+        </p>
+        <pre><code class="language-js">// ReAct loop — the model's internal monologue made visible
+// Each turn the model outputs either a Thought+Action pair OR a final Answer
+
+/*
+  TURN 1:
+  Thought: The user wants the current price of Product X.
+           My training data may be outdated. I should check the live pricing system.
+  Action:  lookupPrice({ productId: "PROD-X" })
+
+  OBSERVATION: { price: 299, currency: "USD", lastUpdated: "2026-06-10T08:00:00Z" }
+
+  TURN 2:
+  Thought: I now have the current price from the live system.
+           The data is fresh (updated today). I can answer directly.
+  Answer:  "Product X is currently priced at $299 USD as of today."
+*/
+
+async function reactLoop(userMessage, tools) {
+  const messages = [{ role: 'user', content: userMessage }];
+
+  for (let i = 0; i < 10; i++) {
+    const response = await llm({
+      system: `Think step by step. For each step, state your Thought,
+               then decide: call a tool OR provide a final Answer.`,
+      tools,
+      messages
+    });
+
+    if (response.type === 'text') return response.content;     // Final answer
+
+    if (response.type === 'tool_call') {
+      const observation = await executeTool(response.name, response.arguments);
+      messages.push(
+        { role: 'assistant', content: `Thought: ${response.thought}\nAction: ${response.name}` },
+        { role: 'tool',      content: `Observation: ${JSON.stringify(observation)}` }
+      );
+      // Loop — model reads observation and continues reasoning
+    }
+  }
+}</code></pre>
+
+        <p class="mini-heading">Reflection / Self-critique</p>
+        <p>
+          After generating an answer, a second pass evaluates it against a concrete rubric. If it
+          fails, the critique is fed back in as additional context and the agent tries again.
+          The key implementation detail: the critic needs <em>specific criteria</em>, not "is this
+          good?" — vague critique produces vague improvement.
+        </p>
+        <pre><code class="language-js">async function reasonWithReflection(task, tools, maxRetries = 3) {
+  let currentTask = task;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const result = await reactLoop(currentTask, tools);
+
+    // Critic evaluates against a specific rubric
+    const critique = await llm(`
+      Evaluate this response to the task: "${task}"
+
+      Response: "${result}"
+
+      Score it on THREE criteria. For each, answer YES or NO with one sentence of reasoning:
+      1. ACCURATE   — Is the answer factually correct based on the retrieved context?
+      2. COMPLETE   — Does it fully address what was asked, with no important parts missing?
+      3. GROUNDED   — Does every claim trace back to retrieved data, not model memory?
+
+      If all three are YES, respond: PASS
+      If any are NO, respond: FAIL - [state exactly what is wrong and what is missing]
+    `);
+
+    if (critique.startsWith('PASS')) return result;   // Passed — return the result
+
+    // Failed — inject the critique and retry with additional context
+    currentTask = `${task}
+
+    PREVIOUS ATTEMPT (rejected):
+    "${result}"
+
+    CRITIQUE:
+    ${critique.replace('FAIL - ', '')}
+
+    Address these specific issues in your next attempt.`;
+  }
+
+  return await reactLoop(task, tools); // Return best attempt after max retries
+}
+
+// Tree of Thoughts (for high-stakes decisions) — explore branches before committing
+async function treeOfThoughts(problem, branches = 3) {
+  // Generate N different reasoning approaches in parallel
+  const approaches = await Promise.all(
+    Array.from({ length: branches }, (_, i) =>
+      llm(`Approach ${i+1} of ${branches}: Solve this problem from a different angle:\n${problem}`)
+    )
+  );
+
+  // Evaluate each approach and select the best one
+  const evaluation = await llm(`
+    You have ${branches} proposed approaches to the problem: "${problem}"
+
+    ${approaches.map((a, i) => `Approach ${i+1}:\n${a}`).join('\n\n')}
+
+    Evaluate each approach. Which is most likely to produce a correct, complete answer?
+    State which approach number you select and why, then execute it fully.
+  `);
+
+  return evaluation;
+  // NOTE: Tree of Thoughts is expensive — reserve for high-stakes, low-volume decisions
+}</code></pre>
+      </section>
+
+      <!-- ─── 8. WHO DECIDES TOOL + PARAMS ─────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">The Critical Mechanic</span>
+        <h2>Who decides which tool to call — and how parameters are selected</h2>
+        <p>
+          This is where most agent bugs live, and most tutorials skip it entirely.
+          The answer to "who decides?" is: <strong>the LLM</strong>. But the <em>how</em>
+          determines everything about reliability.
+        </p>
+
+        <p class="mini-heading">How tool selection actually works</p>
+        <p>
+          When you call the LLM, you are not just sending the user's message. You are sending the
+          entire assembled context: system prompt, conversation history, memory, retrieved context,
+          AND the full definitions of every available tool. The model reads all of that simultaneously
+          and does something that looks like reasoning but is better understood as
+          <strong>pattern matching across the full context</strong>.
+        </p>
+        <p>
+          It matches the user's message and conversation context against each tool's description and
+          selects the one whose description best fits the inferred need.
+          <strong>This means your tool descriptions are not documentation — they are the selection logic.</strong>
+          There is no code path that chooses a tool. The model reads your words and decides.
+        </p>
+
+        <p class="mini-heading">How parameters are constructed</p>
+        <p>The model constructs arguments by scanning everything it can see and mapping values to the input schema. It pulls from three sources:</p>
+        <pre><code class="language-js">// SOURCE 1: Directly from the user's message
+// User: "Can you check order ORD-4521?"
+// Model extracts: orderId = "ORD-4521" ← verbatim, high confidence
+
+// SOURCE 2: From conversation history or session memory
+// Turn 1: user said "I'm calling about my account ACC-789"
+// Agent stored: remember('accountId', 'ACC-789')
+// Turn 4: user says "what's the balance?"
+// Model constructs: accountId = "ACC-789" ← from memory, not re-asked
+
+// SOURCE 3: Inferred from session context
+// System context includes: { currentUser: { locale: 'en-GB' } }
+// Model infers: currency = "GBP" ← never stated, inferred from context
+
+// THE PROBLEM: required fields with no clear source
+// If the schema requires 'orderId' but the user never mentioned one,
+// the model will INVENT a plausible-looking value: "ORD-0001"
+// It does not say "I don't know" — it fills the gap with a confident hallucination.</code></pre>
+
+        <p class="mini-heading">Fixing hallucinated parameters — the most important pattern in agent design</p>
+        <pre><code class="language-js">// BAD: vague parameter description — model will invent values
+{
+  name: "processRefund",
+  parameters: {
+    properties: {
+      orderId: { type: "string" }   // No instruction on what to do if unknown
+    },
+    required: ["orderId"]           // Model treats this as: "you MUST fill this"
+  }
+}
+
+// GOOD: explicit fallback instruction in the description
+{
+  name: "processRefund",
+  parameters: {
+    properties: {
+      orderId: {
+        type: "string",
+        description: `The order ID to refund. Format: ORD-XXXXX.
+                      If the user has not provided this, DO NOT guess or invent a value.
+                      Ask the user: "Could you provide your order ID?" before calling this action.`
+      },
+      amount: {
+        type: "number",
+        description: `Refund amount in the account currency. Must be positive.
+                      If not specified, ask the user how much they want refunded.`
+      }
+    },
+    required: ["orderId", "amount"]
+  }
+}
+
+// The sentence "DO NOT guess — ask the user first" is the single most
+// important line you can add to any required parameter description.</code></pre>
+
+        <p class="mini-heading">The validation layer — your safety net between intent and execution</p>
+        <pre><code class="language-js">// Intercept every tool call BEFORE executing it
+// Validate that required parameters are present and plausible
+function validateToolCall(toolCall) {
+  const toolDef = toolRegistry[toolCall.name];
+  if (!toolDef) {
+    return { valid: false, error: `Unknown tool: ${toolCall.name}` };
+  }
+
+  const required = toolDef.parameters.required ?? [];
+
+  for (const field of required) {
+    const value = toolCall.arguments[field];
+
+    // Missing entirely
+    if (value === undefined || value === null || value === '') {
+      return {
+        valid: false,
+        missingField: field,
+        // Feed this back to the model as context — it will ask the user
+        recoveryPrompt: `Before calling ${toolCall.name}, you need the field "${field}".
+                         Ask the user to provide it before proceeding.`
+      };
+    }
+
+    // Implausible value (basic sanity checks)
+    if (field === 'orderId' && !value.match(/^ORD-\d+$/)) {
+      return {
+        valid: false,
+        missingField: field,
+        recoveryPrompt: `The orderId "${value}" doesn't look right (expected format: ORD-XXXXX).
+                         Confirm the correct order ID with the user before proceeding.`
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+// Usage in the main loop
+async function executeToolSafely(toolCall, conversationHistory) {
+  const validation = validateToolCall(toolCall);
+
+  if (!validation.valid) {
+    // Instead of executing a bad call, inject the recovery prompt
+    conversationHistory.push({
+      role: 'system',
+      content: validation.recoveryPrompt
+    });
+    return null; // Signal to the loop: don't execute, re-run the LLM with recovery context
+  }
+
+  return await toolRegistry[toolCall.name].execute(toolCall.arguments);
+}</code></pre>
+
+        <p class="mini-heading">Forcing and constraining tool selection</p>
+        <pre><code class="language-js">// Most LLM APIs give you tool_choice controls — use them
+
+// Force a specific tool (for mandatory first steps like identity verification)
+const response = await llm({
+  messages, tools,
+  tool_choice: { type: 'function', function: { name: 'verifyIdentity' } }
+});
+
+// Prevent all tool use (for turns that should only generate a text response)
+const response = await llm({
+  messages, tools,
+  tool_choice: 'none'
+});
+
+// Let the model decide freely (default — most turns)
+const response = await llm({
+  messages, tools,
+  tool_choice: 'auto'
+});
+
+// The most powerful constraint: only include the tools relevant to the current state
+// If the user hasn't authenticated, processRefund simply doesn't appear in the context.
+// The model cannot select what it cannot see.
+function getAvailableTools(sessionState) {
+  const base = ['searchKnowledgeBase', 'lookupOrderStatus'];
+
+  if (sessionState.authenticated) {
+    base.push('updateShipping', 'createSupportTicket');
+  }
+  if (sessionState.authenticated && sessionState.orderConfirmed) {
+    base.push('processRefund'); // Only available after both gates pass
+  }
+
+  return base.map(name => toolRegistry[name].definition);
+}</code></pre>
+      </section>
+
+      <!-- ─── 9. ENVIRONMENT ─────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Pillar 4 · Environment</span>
+        <h2>Environment: what the agent perceives and what it can change</h2>
+        <p>
+          The environment is everything the agent can perceive and affect — the world it operates
+          within. It is the least discussed component and one of the most important for production
+          design. Get it wrong and you either have an agent that can't do its job (perception too
+          narrow) or one that can do far too much (affordances too broad).
+        </p>
+
+        <p class="mini-heading">Two sides of the environment</p>
+        <ul class="check-list">
+          <li><strong>Perception</strong> — what signals the agent receives. Not just the user's text. The current date and time, the user's account status, the active record, error codes from a previous tool call, retrieved memory, session state — everything the agent "sees" at the start of a turn constitutes its perception of the environment.</li>
+          <li><strong>Affordances</strong> — what the agent can change. The set of tools and actions available to it. An agent operating in a read-only environment has a very different risk profile to one that can send emails, update records, and trigger workflows.</li>
+        </ul>
+
+        <pre><code class="language-js">// Environment object — passed to the agent at the start of every turn
+function buildEnvironment(session, req) {
+  return {
+    // PERCEPTION: everything the agent should know about the current context
+    context: {
+      timestamp:      new Date().toISOString(),
+      currentUser: {
+        id:            session.userId,
+        name:          session.userName,
+        plan:          session.plan,
+        authenticated: session.isAuthenticated,
+        locale:        req.headers['accept-language'] ?? 'en-US'
+      },
+      activeRecord: session.activeRecord ?? null,   // e.g. { type: 'Order', id: 'ORD-456', status: 'pending' }
+      previousErrors: session.recentErrors ?? [],   // What failed on the last turn, if anything
+    },
+
+    // AFFORDANCES: scoped by environment type and session state
+    // In development: read-only. In production: write access after authentication.
+    availableTools: process.env.NODE_ENV === 'production' && session.isAuthenticated
+      ? getAvailableTools(session)     // Full scoped tool set
+      : getReadOnlyTools(),            // Read-only during dev or pre-auth
+
+    // FAILURE HANDLING: every tool call can fail — define the response
+    onToolError: (toolName, error) => ({
+      status: 'error',
+      tool: toolName,
+      message: error.message,
+      suggestion: `The ${toolName} tool failed. Consider asking the user to provide
+                   the information manually, or try an alternative approach.`
+    })
+  };
+}
+
+// Make environment state explicit in the system prompt
+// Don't make the agent infer what you can tell it directly
+function buildSystemPrompt(environment) {
+  const { context } = environment;
+  return `
+You are a customer support agent.
+
+CURRENT CONTEXT:
+- User: ${context.currentUser.name} (${context.currentUser.plan} plan)
+- Authenticated: ${context.currentUser.authenticated}
+- Active record: ${context.activeRecord ? JSON.stringify(context.activeRecord) : 'none'}
+- Current time: ${context.timestamp}
+${context.previousErrors.length > 0 ? `- Recent errors: ${context.previousErrors.join(', ')}` : ''}
+
+Implicit environment state causes hallucinated assumptions.
+Give the agent the context it needs rather than making it guess.
+  `.trim();
+}</code></pre>
+
+        <p class="mini-heading">Four environment design principles</p>
+        <ul class="check-list">
+          <li><strong>Minimise the affordance surface.</strong> Only expose the actions the agent needs for its specific job in its current state. An agent that can do anything is an agent you cannot trust with anything.</li>
+          <li><strong>Make environment state explicit in the prompt.</strong> If the user is authenticated, say so. If an order is in "pending" status, pass that. Implicit state leads to hallucinated assumptions.</li>
+          <li><strong>Design for environment failures.</strong> APIs go down. Databases return empty results. Files don't exist. Every tool call is an environment interaction that can fail — define the fallback before you need it.</li>
+          <li><strong>Sandbox before production.</strong> During development, agents should operate against read-only mirrors, test databases, and stubbed APIs. Production write access should only be enabled after the agent's behaviour is validated against a representative benchmark.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 10. MULTI-AGENT ────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Multi-Agent Systems</span>
+        <h2>Multi-agent orchestration: when one agent is not enough</h2>
+        <p>
+          A single agent with one context window cannot reliably handle tasks that require parallel
+          work, specialised expertise, or long sequential chains without losing coherence. Multi-agent
+          frameworks solve this by distributing the work across multiple agents — each with its own
+          context, tool set, and scope.
+        </p>
+
+        <p class="mini-heading">Pattern 1: Orchestrator → Workers (LangChain, CrewAI style)</p>
+        <p>
+          A supervisor agent receives the goal, breaks it into sub-tasks, delegates each to a
+          specialist worker agent, collects the results, and synthesises the final output. Workers
+          only see their slice of the problem — they do not need to hold the full context.
+        </p>
+        <pre><code class="language-js">// Orchestrator agent — breaks goal into sub-tasks and delegates
+async function orchestratorAgent(goal) {
+  // Step 1: planning — decompose the goal into parallelisable sub-tasks
+  const plan = await llm(`
+    Break the following goal into 3-5 specific, independent sub-tasks
+    that can be executed in parallel. Return as a JSON array of task strings.
+    Goal: ${goal}
+  `, { responseFormat: 'json' });
+
+  const subTasks = JSON.parse(plan);
+
+  // Step 2: dispatch sub-tasks to specialist workers in parallel
+  const results = await Promise.all(
+    subTasks.map(task => workerAgent(task, getToolsForTask(task)))
+  );
+
+  // Step 3: synthesise results into a final output
+  const synthesis = await llm(`
+    Synthesise the following research results into a coherent, structured response
+    to the original goal: "${goal}"
+
+    Results:
+    ${results.map((r, i) => `Task ${i+1}: ${subTasks[i]}\nResult: ${r}`).join('\n\n')}
+  `);
+
+  return synthesis;
+}
+
+// Worker agent — focused, scoped, unaware of the broader goal
+async function workerAgent(task, tools) {
+  return await reactLoop(task, tools); // Standard ReAct loop
+}
+
+// Usage
+const report = await orchestratorAgent(
+  "Research our top 3 competitors and summarise their pricing, key features, and recent news"
+);</code></pre>
+
+        <p class="mini-heading">Pattern 2: Peer-to-peer conversation (AutoGen style)</p>
+        <p>
+          Agents talk to each other directly. One proposes, another critiques, a third executes. The
+          conversation continues until a termination condition is met — consensus, task completion,
+          or a human approval step.
+        </p>
+        <pre><code class="language-js">// Peer-to-peer: two agents — one proposes, one critiques — iterate until PASS
+async function collaborativeAgents(task, maxRounds = 5) {
+  let proposal = await proposerAgent(task);
+  const conversation = [{ role: 'proposer', content: proposal }];
+
+  for (let round = 0; round < maxRounds; round++) {
+    // Critic reviews the current proposal
+    const critique = await criticAgent(task, proposal);
+    conversation.push({ role: 'critic', content: critique });
+
+    if (critique.includes('APPROVED')) {
+      return { result: proposal, rounds: round + 1, conversation };
+    }
+
+    // Proposer revises based on the critique
+    proposal = await proposerAgent(task, critique);
+    conversation.push({ role: 'proposer', content: proposal });
+  }
+
+  return { result: proposal, rounds: maxRounds, conversation }; // Best after max rounds
+}
+
+async function proposerAgent(task, previousCritique = null) {
+  const context = previousCritique
+    ? `Previous critique to address:\n${previousCritique}\n\nRevised proposal for: ${task}`
+    : `Create a proposal for: ${task}`;
+  return await llm(context);
+}
+
+async function criticAgent(task, proposal) {
+  return await llm(`
+    Review this proposal for the task: "${task}"
+    Proposal: "${proposal}"
+
+    Is it accurate, complete, and appropriate?
+    If yes: respond "APPROVED — [brief reason]"
+    If no:  respond "REVISE — [specific list of issues to fix]"
+  `);
+}</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>The honest truth about multi-agent frameworks:</strong> Orchestration frameworks
+            do not solve agent reliability — they distribute it. If individual agents are unreliable,
+            the multi-agent system is unreliable at scale. Fix individual agent quality first. Add
+            multi-agent coordination only when a single agent genuinely cannot handle the task scope.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── 11. FULL E2E BUILD ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">End-to-End Build</span>
+        <h2>Complete working agent in JavaScript</h2>
+        <p>
+          Everything above, assembled into a single, runnable agent. This is a customer support
+          agent that can look up orders, process refunds, and search a knowledge base — with memory,
+          validation, reflection, and environment scoping all wired together.
+        </p>
+        <pre><code class="language-js">import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic(); // Uses ANTHROPIC_API_KEY from env
+
+// ─── 1. TOOL DEFINITIONS ────────────────────────────────────────────────────
+const tools = [
+  {
+    name: 'lookupOrderStatus',
+    description: `Look up the current status and details of a customer order.
+                  Use when a customer asks about their order status, delivery date, or order details.
+                  Returns order status, items, shipping info, and estimated delivery.
+                  Do NOT use for refunds — use processRefund for that.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        orderId: {
+          type: 'string',
+          description: `The order ID. Format: ORD-XXXXX.
+                        If the user has not provided this, ask them before calling.`
+        }
+      },
+      required: ['orderId']
+    }
+  },
+  {
+    name: 'processRefund',
+    description: `Process a refund for a customer order.
+                  Use ONLY after confirming the order ID AND the amount with the customer.
+                  Do NOT call this without explicit customer confirmation.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        orderId: {
+          type: 'string',
+          description: 'The order ID to refund. Must be confirmed with the customer first.'
+        },
+        amount: {
+          type: 'number',
+          description: 'Refund amount in USD. If not specified, ask the customer.'
+        },
+        reason: {
+          type: 'string',
+          enum: ['damaged', 'not_received', 'wrong_item', 'changed_mind', 'other'],
+          description: 'Reason for the refund.'
+        }
+      },
+      required: ['orderId', 'amount', 'reason']
+    }
+  },
+  {
+    name: 'searchKnowledgeBase',
+    description: `Search the internal knowledge base for product information, policies, and FAQs.
+                  Use for policy questions, how-to guides, and general product information.
+                  Do NOT use for live order status or account-specific data.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query.' }
+      },
+      required: ['query']
+    }
+  }
+];
+
+// ─── 2. TOOL IMPLEMENTATIONS ─────────────────────────────────────────────────
+const toolExecutors = {
+  lookupOrderStatus: async ({ orderId }) => {
+    // In production: call your order management API
+    return { orderId, status: 'In Transit', estimatedDelivery: '2026-06-13', items: ['Blue Hoodie × 1'] };
+  },
+  processRefund: async ({ orderId, amount, reason }) => {
+    // In production: call your payment API with human approval gate first
+    return { success: true, refundId: `REF-${Date.now()}`, orderId, amount, reason };
+  },
+  searchKnowledgeBase: async ({ query }) => {
+    // In production: vector search against your knowledge store
+    return { results: [`Return policy: Items can be returned within 30 days of delivery.`] };
+  }
+};
+
+// ─── 3. VALIDATION LAYER ─────────────────────────────────────────────────────
+function validateToolCall(name, args) {
+  const tool = tools.find(t => t.name === name);
+  if (!tool) return { valid: false, error: `Unknown tool: ${name}` };
+
+  for (const field of tool.input_schema.required) {
+    if (!args[field]) {
+      return {
+        valid: false,
+        recoveryPrompt: `You need "${field}" before calling ${name}. Ask the user for it.`
+      };
+    }
+  }
+  return { valid: true };
+}
+
+// ─── 4. SESSION MEMORY ───────────────────────────────────────────────────────
+function createSession() {
+  const store = {};
+  return {
+    set: (k, v) => { store[k] = v; },
+    get: (k)    => store[k] ?? null,
+    toBlock: ()  => Object.keys(store).length === 0 ? '' :
+      '\n\nKnown context:\n' + Object.entries(store).map(([k,v]) => `- ${k}: ${v}`).join('\n')
+  };
+}
+
+// ─── 5. MAIN AGENT ───────────────────────────────────────────────────────────
+async function runAgent(userMessage, session) {
+  const messages = [];
+  const systemPrompt = `You are a helpful customer support agent.
+Assist customers with order status, refunds, and general questions.
+Always confirm order IDs and amounts before processing any refund.
+Be concise and professional.
+${session.toBlock()}`;
+
+  messages.push({ role: 'user', content: userMessage });
+
+  const MAX_STEPS = 8;
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const response = await client.messages.create({
+      model:      'claude-sonnet-4-6',
+      max_tokens: 1024,
+      system:     systemPrompt,
+      tools:      tools,
+      messages:   messages
+    });
+
+    // Final text response — done
+    if (response.stop_reason === 'end_turn') {
+      const text = response.content.find(b => b.type === 'text')?.text ?? '';
+      return text;
+    }
+
+    // Tool use requested
+    if (response.stop_reason === 'tool_use') {
+      const toolUseBlock = response.content.find(b => b.type === 'tool_use');
+      const { name, id, input } = toolUseBlock;
+
+      // Push the assistant's decision into history
+      messages.push({ role: 'assistant', content: response.content });
+
+      // Validate before executing
+      const validation = validateToolCall(name, input);
+      if (!validation.valid) {
+        // Don't execute — feed recovery prompt back to model
+        messages.push({
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: id, content: validation.recoveryPrompt }]
+        });
+        continue;
+      }
+
+      // Execute the tool
+      let result;
+      try {
+        result = await toolExecutors[name](input);
+        // Persist useful context to session memory
+        if (name === 'lookupOrderStatus') session.set('lastOrderId', input.orderId);
+      } catch (err) {
+        result = { error: err.message, suggestion: 'Try asking the user to verify the details.' };
+      }
+
+      // Feed the result back as an observation
+      messages.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) }]
+      });
+      // Loop — model reads the observation and decides next step
+    }
+  }
+
+  return 'I was unable to complete this request. Please contact support directly.';
+}
+
+// ─── 6. RUN IT ───────────────────────────────────────────────────────────────
+const session = createSession();
+
+const answer = await runAgent(
+  "Hi, I placed an order last week — ORD-4521 — can you tell me where it is?",
+  session
+);
+console.log(answer);
+// Agent loops: decides to call lookupOrderStatus → gets result → responds with status</code></pre>
+      </section>
+
+      <!-- ─── 12. WHEN NOT TO USE AN AGENT ─────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Decision Framework</span>
+        <h2>When NOT to use an agent</h2>
+        <p>
+          Agents are powerful but they add complexity, cost, and latency. Many tasks are better
+          served by simpler tools. Use this decision tree before reaching for an agent.
+        </p>
+        <table class="data-table">
+          <thead>
+            <tr><th>If your task is…</th><th>Use this instead</th><th>Why</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>A single transformation with known inputs and outputs (summarise, classify, extract, draft)</td>
+              <td>Prompt template (one LLM call)</td>
+              <td>No loop needed. Deterministic input → output. Agent adds overhead with no benefit.</td>
+            </tr>
+            <tr>
+              <td>A fixed, sequential process where every step is known in advance</td>
+              <td>Deterministic workflow (code, no LLM)</td>
+              <td>If the path never branches based on dynamic context, there is nothing for the agent to decide. Hard-code it.</td>
+            </tr>
+            <tr>
+              <td>A task requiring human judgment at every step</td>
+              <td>Human + LLM assistance (copilot mode)</td>
+              <td>An agent operating autonomously where humans are needed at every decision point will either stall waiting for approvals or make unsupervised mistakes.</td>
+            </tr>
+            <tr>
+              <td>A task with no external data needs and a stable, well-understood answer space</td>
+              <td>Fine-tuned model or retrieval + single LLM call</td>
+              <td>If the answer space is known and stable, a specialised model or RAG with a single generation is cheaper and faster than a reasoning loop.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>
+            <strong>The litmus test:</strong> Does completing this task require the system to make
+            decisions based on information it doesn't have at the start? Does the path change
+            depending on what it discovers? If yes — agent. If no — something simpler.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── 13. FAILURE MODES ──────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Debugging</span>
+        <h2>The five failure modes and how to fix each</h2>
+        <table class="data-table">
+          <thead>
+            <tr><th>Failure mode</th><th>What it looks like</th><th>Root cause</th><th>Fix</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Wrong tool selected</strong></td>
+              <td>Agent calls the knowledge base for a live order status query; returns stale or generic info</td>
+              <td>Overlapping tool descriptions — two tools sound similar enough that the model cannot reliably distinguish them</td>
+              <td>Add explicit negative scope to each description. "Do NOT use for X" is as important as "use for Y." Reduce total tool count.</td>
+            </tr>
+            <tr>
+              <td><strong>Hallucinated parameters</strong></td>
+              <td>Agent calls processRefund with an order ID the user never mentioned</td>
+              <td>Required field with no clear source in context — model fills the gap with a plausible-looking invented value</td>
+              <td>Add "do not guess — ask the user first" to required parameter descriptions. Add validation layer before execution.</td>
+            </tr>
+            <tr>
+              <td><strong>Correct tool, wrong timing</strong></td>
+              <td>Agent processes a refund before confirming the order ID with the user</td>
+              <td>No sequencing constraint. Model follows the action description but skips the context-gathering step.</td>
+              <td>Add explicit pre-condition to the action description ("only call after confirming X") or encode the sequence as a coded pre-step that runs before the tool is available.</td>
+            </tr>
+            <tr>
+              <td><strong>Context window overflow</strong></td>
+              <td>Agent loses track of earlier conversation details in long sessions; repeats questions already answered</td>
+              <td>All history is kept in-context. When the window fills, older content falls off.</td>
+              <td>Implement memory tiers. Summarise older conversation turns and store in session memory rather than keeping raw history. Move long-lived facts to the session store.</td>
+            </tr>
+            <tr>
+              <td><strong>Infinite loop / doom loop</strong></td>
+              <td>Agent keeps calling the same tool in a loop after getting an error, never escalating or stopping</td>
+              <td>No iteration cap. Error handling feeds back into the same tool call without a different strategy.</td>
+              <td>Always cap iterations (MAX_STEPS). Track which tools have been called and how many times. After N failures on the same tool, switch strategy or return a graceful failure message.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ─── TAKEAWAY ──────────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          An agent is not a chatbot with more features — it is a decision-making system that happens
+          to speak natural language. The loop is the agent: think, act, observe, adjust. The four
+          pillars — planning, memory, tool use, and reflection — are what make that loop useful. But
+          what actually determines reliability is the quality of your tool descriptions (the LLM's
+          selection logic), your parameter schemas (its extraction instructions), your validation layer
+          (your safety net), and your environment design (the affordances you allow). The model is the
+          brain. Everything else is your job to design well.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Generate Unlimited AI Images and Videos Locally | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .hw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin: 1rem 0; }
+      .hw-card { border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.2rem; background: var(--surface); }
+      .hw-card h4 { margin: 0 0 .4rem; font-size: 1rem; font-family: Arial, Helvetica, sans-serif; }
+      .hw-card p { margin: 0; font-size: .88rem; color: var(--muted); }
+      .tier-badge { display: inline-block; padding: .18rem .6rem; border-radius: 20px; font-size: .72rem; font-weight: 700; margin-bottom: .5rem; }
+      .tier-min { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+      .tier-rec { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+      .tier-pro { background: #fdf4ff; color: #7e22ce; border: 1px solid #e9d5ff; }
+      .tool-row { display: flex; gap: .5rem; flex-wrap: wrap; margin: .75rem 0; }
+      .tool-pill { background: #0f172a; color: #e2e8f0; padding: .25rem .75rem; border-radius: 20px; font-size: .8rem; font-family: 'Courier New', monospace; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1633412802994-5c058f151b66?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="AI-generated abstract art on a computer screen" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Local Models · Creative Tools · 22 min read</span>
+          </div>
+        </figure>
+        <h1>Generate Unlimited AI Images and Videos Locally — No Internet, No Limits</h1>
+        <p class="summary">
+          Cloud image APIs charge per generation and impose content filters. Running Stable Diffusion,
+          ComfyUI, and open video models locally gives you unlimited generation at the cost of GPU memory.
+          This guide covers the full stack: models, UIs, hardware requirements, and a JavaScript API
+          to drive it all programmatically.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Tools</span><span class="meta-value">ComfyUI · Automatic1111 · Ollama · Wan2.1 · AnimateDiff</span></div>
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate — assumes basic terminal comfort</span></div>
+          <div><span class="meta-label">Updated</span><span class="meta-value">June 2026</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The shift to local generation is not about avoiding cost alone — it is about removing the
+          middleman. Local models respond in seconds (on capable hardware), never refuse a creative
+          prompt for policy reasons, and produce consistent style because you control the exact model
+          checkpoint and sampler settings every time.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Local AI generation = model + UI/API + hardware. Get these three
+          right and you have an unlimited, private creative engine that runs entirely on your machine.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Hardware requirements</span>
+        <h2>What GPU you actually need</h2>
+        <div class="hw-grid">
+          <div class="hw-card">
+            <span class="tier-badge tier-min">Minimum</span>
+            <h4>8 GB VRAM</h4>
+            <p>RTX 3070, RTX 4060Ti, M2/M3 Mac (unified). SD 1.5 and SDXL in 512px–768px. ~4–10s/image. No video at full quality.</p>
+          </div>
+          <div class="hw-card">
+            <span class="tier-badge tier-rec">Recommended</span>
+            <h4>16–24 GB VRAM</h4>
+            <p>RTX 3090, RTX 4090, M3 Max/M4 Pro. SDXL 1024px, FLUX.1, short video clips (5s @ 480p). ~1–3s/image.</p>
+          </div>
+          <div class="hw-card">
+            <span class="tier-badge tier-pro">Power user</span>
+            <h4>48–80 GB VRAM</h4>
+            <p>RTX 6000 Ada, A100, H100, dual 4090, M4 Ultra. FLUX.1 Pro, full HD video, ControlNet + LoRA stacking. Sub-1s/image.</p>
+          </div>
+        </div>
+        <p>Apple Silicon note: unified memory counts as VRAM. An M3 Max with 48 GB handles most tasks that would require an RTX 4090.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Image generation stack</span>
+        <h2>The three tools and when to use each</h2>
+
+        <h3>1. Automatic1111 (stable-diffusion-webui)</h3>
+        <p>The original web UI — massive extension ecosystem, beginner-friendly, excellent for checkpoints and LoRAs.</p>
+        <div class="tool-row">
+          <span class="tool-pill">SD 1.5</span><span class="tool-pill">SDXL</span>
+          <span class="tool-pill">LoRA</span><span class="tool-pill">ControlNet</span>
+          <span class="tool-pill">Inpainting</span><span class="tool-pill">img2img</span>
+        </div>
+        <pre class="code-block"><code># Install and run Automatic1111
+git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui
+cd stable-diffusion-webui
+# Download a checkpoint into models/Stable-diffusion/
+wget -O models/Stable-diffusion/dreamshaper.safetensors \
+  "https://civitai.com/api/download/models/128713"
+
+# Launch (Mac)
+./webui.sh --api --listen
+# Launch (Windows/Linux)
+./webui.sh --api --listen --xformers</code></pre>
+
+        <h3>2. ComfyUI — node-based workflow engine</h3>
+        <p>Preferred for automation. Every operation is a node you can wire together and export as a JSON workflow, then drive via API.</p>
+        <pre class="code-block"><code>git clone https://github.com/comfyanonymous/ComfyUI
+cd ComfyUI
+pip install -r requirements.txt
+# Put models in models/checkpoints/
+python main.py --listen 0.0.0.0 --port 8188</code></pre>
+
+        <h3>3. FLUX.1 — state-of-the-art 2026 model</h3>
+        <p>FLUX.1 [dev] and [schnell] (distilled, 4-step) outperform SDXL on photorealism and prompt adherence.</p>
+        <pre class="code-block"><code># Via Ollama (easiest path for FLUX schnell)
+ollama pull flux1-schnell
+ollama run flux1-schnell "A cyberpunk city at rain, neon reflections, 8k"
+
+# Or load the raw weights in ComfyUI's FLUX workflow</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Video generation</span>
+        <h2>Open video models in 2026</h2>
+
+        <h3>Wan2.1 — best open-source video model</h3>
+        <p>
+          Released by Alibaba in 2025, Wan2.1 produces 5-second 720p clips from text or image prompts.
+          Runs on 16 GB VRAM with the quantised 14B variant.
+        </p>
+        <pre class="code-block"><code># Install via ComfyUI-WanVideoWrapper node
+# Or use the direct Python API:
+pip install wan2.1
+
+from wan.generate import VideoGenerator
+
+gen = VideoGenerator(model="wan2.1-14b-q4", device="cuda")
+video = gen.text_to_video(
+  prompt="A golden eagle soaring over mountain peaks at sunset, cinematic, slow motion",
+  num_frames=49,       # ~4.9s at 10fps
+  width=1280,
+  height=720,
+  guidance_scale=7.5,
+)
+video.save("eagle.mp4")</code></pre>
+
+        <h3>AnimateDiff — animate existing SD models</h3>
+        <p>Converts any SD 1.5 checkpoint into a video model using a motion LoRA adapter. Short clips (8–32 frames), excellent for stylised animation.</p>
+
+        <h3>CogVideoX — longer structured video</h3>
+        <p>6B and 13B open models from Zhipu AI. Best for structured scene progression and longer clips (up to 10s).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript API integration</span>
+        <h2>Driving ComfyUI from Node.js</h2>
+        <p>
+          ComfyUI exposes a REST + WebSocket API. This pattern queues a workflow, polls for completion,
+          and downloads the image:
+        </p>
+        <pre class="code-block"><code>// comfyui-client.js
+const COMFY_URL = 'http://localhost:8188';
+
+async function generateImage({ prompt, negative = '', steps = 20, cfg = 7 }) {
+  // Minimal workflow object (SD 1.5 text2img)
+  const workflow = {
+    "3": { class_type: "KSampler",         inputs: { seed: Math.floor(Math.random() * 1e15), steps, cfg, sampler_name: "euler", scheduler: "normal", denoise: 1, model: ["4", 0], positive: ["6", 0], negative: ["7", 0], latent_image: ["5", 0] } },
+    "4": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "dreamshaper_8.safetensors" } },
+    "5": { class_type: "EmptyLatentImage",  inputs: { width: 512, height: 512, batch_size: 1 } },
+    "6": { class_type: "CLIPTextEncode",    inputs: { text: prompt,   clip: ["4", 1] } },
+    "7": { class_type: "CLIPTextEncode",    inputs: { text: negative, clip: ["4", 1] } },
+    "8": { class_type: "VAEDecode",         inputs: { samples: ["3", 0], vae: ["4", 2] } },
+    "9": { class_type: "SaveImage",         inputs: { filename_prefix: "output", images: ["8", 0] } },
+  };
+
+  const clientId = crypto.randomUUID();
+
+  // Queue the prompt
+  const { prompt_id } = await fetch(`${COMFY_URL}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: workflow, client_id: clientId }),
+  }).then(r => r.json());
+
+  // Poll history until done
+  while (true) {
+    await new Promise(r => setTimeout(r, 500));
+    const history = await fetch(`${COMFY_URL}/history/${prompt_id}`).then(r => r.json());
+    if (history[prompt_id]) {
+      const outputs = history[prompt_id].outputs;
+      const images  = Object.values(outputs).flatMap(n => n.images ?? []);
+      // Download the first image
+      const img = images[0];
+      const blob = await fetch(
+        `${COMFY_URL}/view?filename=${img.filename}&subfolder=${img.subfolder}&type=${img.type}`
+      ).then(r => r.arrayBuffer());
+      return Buffer.from(blob);
+    }
+  }
+}
+
+// Usage
+const imageBuffer = await generateImage({ prompt: "astronaut on mars, epic lighting, 4k" });
+require('fs').writeFileSync('output.png', imageBuffer);
+console.log('Image saved!');</code></pre>
+
+        <h2>Automatic1111 REST API</h2>
+        <pre class="code-block"><code>// a1111-client.js
+async function txt2img({ prompt, negative_prompt = '', width = 512, height = 512, steps = 20 }) {
+  const res = await fetch('http://localhost:7860/sdapi/v1/txt2img', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, negative_prompt, width, height, steps, cfg_scale: 7, sampler_name: 'Euler a' }),
+  });
+  const { images } = await res.json();
+  // images[0] is base64-encoded PNG
+  return Buffer.from(images[0], 'base64');
+}
+
+const buf = await txt2img({ prompt: "a cozy coffee shop, rainy window, warm light, impressionist" });
+require('fs').writeFileSync('coffee.png', buf);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Models and checkpoints</span>
+        <h2>Where to find models</h2>
+        <ul class="check-list">
+          <li><strong>Civitai.com</strong> — largest checkpoint and LoRA repository. Community-rated. Download via API or browser.</li>
+          <li><strong>HuggingFace Hub</strong> — official model releases (FLUX.1, SDXL, CogVideoX, Wan2.1).</li>
+          <li><strong>Ollama registry</strong> — easiest install path for FLUX schnell and LLaVA-based vision models.</li>
+          <li><strong>SafeTensors format</strong> — always prefer <code>.safetensors</code> over <code>.ckpt</code> — safer, faster to load.</li>
+        </ul>
+
+        <h2>Key model families</h2>
+        <ul class="check-list">
+          <li><strong>SD 1.5</strong> — small (2 GB), fast, huge LoRA ecosystem, slightly dated quality.</li>
+          <li><strong>SDXL 1.0</strong> — 6.5 GB, 1024px native, much better composition and text rendering.</li>
+          <li><strong>FLUX.1 [schnell]</strong> — 4-step distilled, 12 GB, best prompt adherence as of 2026.</li>
+          <li><strong>FLUX.1 [dev]</strong> — full model, slower but richer detail, requires 24 GB VRAM at full precision.</li>
+          <li><strong>Wan2.1-14B-Q4</strong> — quantised video model, 16 GB VRAM, 720p clips.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Local AI image and video generation has crossed the usability threshold. FLUX.1 and Wan2.1
+          match or exceed cloud-API quality on capable hardware, ComfyUI's JSON workflow API lets you
+          integrate generation into any Node.js pipeline, and the cost per image after hardware amortises
+          rounds to zero. The barrier is VRAM, not skill.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Timeouts | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1501139083538-0139583c060f?w=1600&h=700&fit=crop&auto=format&q=80" alt="Clock representing time constraints" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Resilience · Concept 15 · 8 min</span></div>
+        </figure>
+        <h1>Timeouts</h1>
+        <p class="summary">Connection, read, and deadline timeouts are the fuses in your distributed system. Without them, one slow or hung downstream service blocks your threads indefinitely, exhausts your connection pool, and brings down your entire service. Timeouts are what prevent a single slow dependency from becoming a total outage.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">15 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Resilience</span></div>
+          <div><span class="meta-label">Pair With</span><span class="meta-value">Circuit Breaker, Retry Strategies</span></div>
+          <div><span class="meta-label">Key Rule</span><span class="meta-value">Every network call must have a timeout</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">A system without timeouts is a system with a latent single point of failure. Any service you call can become slow or unresponsive — database under load, upstream API degraded, network partition. Without a timeout, every thread waiting on that call is blocked forever. As traffic continues, you fill your thread pool, your connection pool, and your queue. Eventually your service stops accepting requests — not because anything is wrong with your code, but because you were waiting on something else.</p>
+        <div class="callout"><p><strong>The cascade:</strong> Service A calls B calls C. C becomes slow. Without timeouts on A→B and B→C, A's threads start piling up waiting for B (which is waiting for C). A's thread pool exhausts. A starts rejecting requests. The latency of C killed A — even though C is just slow, not down.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Timeout Types</span>
+        <h2>Three distinct timeouts every HTTP client needs</h2>
+        <div class="diagram-box">
+<span class="step">TCP lifecycle and where each timeout applies</span>
+
+Client                              Server
+  │                                   │
+  ├─── TCP SYN ──────────────────────▶│
+  │◀── SYN-ACK ────────────────────── │  <span class="hi">connection timeout</span> governs this phase
+  ├─── ACK ──────────────────────────▶│
+  │           (TCP established)        │
+  │                                   │
+  ├─── HTTP GET /resource ───────────▶│  connection timeout = 0 (already connected)
+  │                                   │  <span class="step">server is processing...</span>
+  │                                   │
+  │◀── HTTP 200 headers ─────────────  │  <span class="hi">read/response timeout</span> governs this phase
+  │◀── body chunk 1 ─────────────────  │
+  │◀── body chunk 2 ─────────────────  │
+  │              (done)               │
+  │                                   │
+<span class="note">Deadline / request timeout</span> = wall-clock budget for the ENTIRE operation
+  (connection + wait for first byte + full response body)
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Timeout type</th><th>What it limits</th><th>Typical value</th><th>What happens on trigger</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Connection timeout</strong></td><td>Time to establish TCP connection</td><td>1–5 seconds</td><td>ECONNREFUSED / ETIMEDOUT — server unreachable</td></tr>
+            <tr><td><strong>Read / response timeout</strong></td><td>Time to receive first byte after sending request</td><td>5–30 seconds</td><td>ECONNRESET / socket hang up</td></tr>
+            <tr><td><strong>Deadline / request timeout</strong></td><td>Total wall-clock time for the whole operation</td><td>10–60 seconds</td><td>AbortError — entire operation cancelled</td></tr>
+            <tr><td><strong>Idle / keep-alive timeout</strong></td><td>How long an idle pooled connection stays open</td><td>60–120 seconds</td><td>Connection closed, pool re-establishes on demand</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Timeout patterns in Node.js</h2>
+        <pre><code class="language-js">import http from 'http';
+
+// ─── fetch() with AbortController deadline ───────────────────────────────
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
+    return await response.json();
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw Object.assign(new Error(`Request to ${url} timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT' });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── HTTP agent with connection + socket timeout ─────────────────────────
+// Node's built-in fetch doesn't expose connection-level timeouts.
+// Use http.Agent for full control.
+const agent = new http.Agent({
+  keepAlive:          true,
+  maxSockets:         100,
+  keepAliveMsecs:     30_000,  // Idle keep-alive timeout (30s)
+  timeout:            5_000,   // Socket inactivity timeout — no bytes for 5s → destroy
+});
+
+// ─── Database timeouts (PostgreSQL via pg) ───────────────────────────────
+import { Pool } from 'pg';
+const pool = new Pool({
+  connectionString:         process.env.DATABASE_URL,
+  connectionTimeoutMillis:  3_000,   // Max time to get a connection from pool
+  idleTimeoutMillis:        30_000,  // How long idle connections stay in pool
+  query_timeout:            10_000,  // pg query-level timeout (statement_timeout)
+  statement_timeout:        10_000,  // Equivalent PostgreSQL server-side timeout
+});
+
+// Run any query with a per-query deadline
+async function queryWithTimeout(sql, params, timeoutMs = 5000) {
+  const client = await pool.connect();
+  try {
+    await client.query(`SET statement_timeout = ${timeoutMs}`);
+    return await client.query(sql, params);
+  } finally {
+    client.release();
+  }
+}
+
+// ─── Cascading deadline: propagate parent deadline to child calls ─────────
+// When request A (deadline 10s) calls service B, pass the REMAINING time
+// so B's timeout is bounded by A's remaining budget, not a fresh N seconds.
+
+async function handleRequest(req, res) {
+  const requestDeadlineMs = 10_000;
+  const startedAt = Date.now();
+
+  function remainingMs() {
+    return requestDeadlineMs - (Date.now() - startedAt);
+  }
+
+  const user = await fetchWithTimeout(
+    `http://user-service/users/${req.params.id}`,
+    {},
+    Math.min(3000, remainingMs())  // At most 3s, but less if budget is low
+  );
+
+  const orders = await fetchWithTimeout(
+    `http://order-service/orders?userId=${user.id}`,
+    {},
+    Math.min(5000, remainingMs())  // Remaining budget for this call
+  );
+
+  res.json({ user, orders });
+}
+
+// ─── Redis with timeout ───────────────────────────────────────────────────
+import { createClient } from 'redis';
+const redis = createClient({
+  url:           process.env.REDIS_URL,
+  socket: {
+    connectTimeout: 2000,   // 2s to establish connection
+    commandTimeout: 1000,   // 1s per command (reads/writes)
+    keepAlive:      5000,
+  },
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How Netflix and Google set timeouts</h2>
+        <p><strong>Netflix:</strong> Uses the "p99.9 × 2" heuristic for setting timeouts. Measure the 99.9th percentile latency of your downstream service. Set your timeout to 2× that value. This means fewer than 0.1% of legitimate slow-but-valid requests get cut off, while runaway calls are reliably terminated. Netflix's Hystrix library enforces timeouts on every command wrapping a downstream call.</p>
+        <p><strong>Google SRE:</strong> Propagates deadlines through every call in a request chain via context objects. When the root deadline expires, every in-progress call in the chain immediately aborts. This prevents the "orphaned work" problem where a child call completes successfully long after its parent has already returned an error to the user — wasting CPU and I/O on work whose result will never be used.</p>
+        <p><strong>The "no timeout" failure mode:</strong> Amazon's famous 2013 DynamoDB incident was partially driven by retry storms from clients without proper timeouts — clients kept requests open for minutes, eventually filling every available socket in the fleet. Timeouts are the first line of defence against this class of failure.</p>
+
+        <div class="insight-box"><strong>Propagate deadlines, not fresh timeouts.</strong> If the user has a 10-second budget and you've already spent 7 seconds, don't give your downstream call a fresh 5-second timeout — give it 3 seconds (the remaining budget). Otherwise your total call chain latency silently exceeds what the user is waiting for. This is called "deadline propagation" and is the standard in gRPC, Google's RPC framework, and well-designed microservices.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Prevents thread pool exhaustion from hung calls</li><li>Limits blast radius of a slow downstream service</li><li>Makes latency predictable — users get an error in N seconds, not infinity</li><li>Enables circuit breakers to open (need timeout counts as a failure)</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Timeout too short → false positives on legitimately slow operations</li><li>Timeout too long → too slow to protect under real degradation</li><li>Without deadline propagation, child work continues after parent times out (wasted resources)</li><li>Requires tuning per-downstream-service, not one-size-fits-all</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Every network call must have a timeout — this is non-negotiable. Set a connection timeout (how long to wait to establish TCP), a read timeout (how long to wait for first byte), and a deadline (total operation budget). Use the p99.9 × 2 heuristic as a starting point for read timeouts. Propagate deadlines through your call chain so child calls never outlive their parent budget. Pair timeouts with circuit breakers so that once a downstream starts timing out consistently, you stop trying and return fallbacks immediately rather than waiting out every timeout.</p>
+      </section>
+    </main>
+  </body>
+</html>

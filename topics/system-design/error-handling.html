@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Error Handling | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=1600&h=700&fit=crop&auto=format&q=80" alt="Error messages and debugging" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 29 · 8 min</span></div>
+        </figure>
+        <h1>Error Handling</h1>
+        <p class="summary">Consistent, structured error responses that help API consumers understand what went wrong and what to do next. The difference between errors that reduce support tickets and errors that generate them — and the RFC 7807 Problem Details standard that most teams don't know exists.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">29 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design</span></div>
+          <div><span class="meta-label">Standard</span><span class="meta-value">RFC 7807 Problem Details for HTTP APIs</span></div>
+          <div><span class="meta-label">Key rule</span><span class="meta-value">4xx = client error (they can fix it), 5xx = server error (you fix it)</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">A well-designed error response is a form of documentation. When an API returns <code>{"error": "invalid"}</code>, the developer opens a support ticket. When it returns a structured error with the field that failed, the validation rule that was violated, and a link to the docs, they fix their code in 2 minutes without contacting anyone. Error quality directly impacts developer experience and support load.</p>
+        <div class="callout"><p><strong>The two categories of errors:</strong> 4xx errors are the client's fault — wrong data, missing fields, invalid permissions, resource not found. 5xx errors are your fault — database down, code bug, dependency failure. 4xx errors should be descriptive enough for the client to self-serve a fix. 5xx errors should leak no internal details (don't expose stack traces or SQL errors) but should log everything internally.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Status Codes</span>
+        <h2>HTTP status codes — the right code for the right situation</h2>
+        <table class="data-table">
+          <thead><tr><th>Status</th><th>Meaning</th><th>Use when</th></tr></thead>
+          <tbody>
+            <tr><td><strong>400</strong> Bad Request</td><td>Malformed request syntax</td><td>Invalid JSON, wrong content-type, schema validation failed</td></tr>
+            <tr><td><strong>401</strong> Unauthorized</td><td>Not authenticated</td><td>Missing or invalid auth token (authentication failed)</td></tr>
+            <tr><td><strong>403</strong> Forbidden</td><td>Authenticated but not authorized</td><td>Valid token but insufficient permissions for this resource</td></tr>
+            <tr><td><strong>404</strong> Not Found</td><td>Resource doesn't exist</td><td>GET /users/999 and user 999 doesn't exist</td></tr>
+            <tr><td><strong>409</strong> Conflict</td><td>State conflict</td><td>Duplicate email on signup, optimistic lock version mismatch</td></tr>
+            <tr><td><strong>410</strong> Gone</td><td>Permanently removed</td><td>Resource existed but was deleted — clients should remove their reference</td></tr>
+            <tr><td><strong>422</strong> Unprocessable Entity</td><td>Semantically invalid</td><td>Valid JSON, valid format, but business rule violated (e.g. insufficient balance)</td></tr>
+            <tr><td><strong>429</strong> Too Many Requests</td><td>Rate limited</td><td>Client exceeded rate limit — include Retry-After header</td></tr>
+            <tr><td><strong>500</strong> Internal Server Error</td><td>Unexpected server error</td><td>Unhandled exception, database error — log internally, return generic message</td></tr>
+            <tr><td><strong>502</strong> Bad Gateway</td><td>Upstream returned invalid response</td><td>Reverse proxy couldn't get valid response from backend</td></tr>
+            <tr><td><strong>503</strong> Service Unavailable</td><td>Temporarily unavailable</td><td>Overloaded, maintenance mode, circuit breaker open</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>RFC 7807 Problem Details + consistent error middleware</h2>
+        <pre><code class="language-js">import express from 'express';
+
+const app = express();
+
+// ─── RFC 7807 PROBLEM DETAILS FORMAT ──────────────────────────────────────
+// Standardised error format: application/problem+json
+// Fields: type (URI), title, status, detail, instance
+// Custom extensions allowed (traceId, errors array, etc.)
+
+// Example response:
+// HTTP 422 Unprocessable Entity
+// Content-Type: application/problem+json
+// {
+//   "type":     "https://api.example.com/errors/insufficient-balance",
+//   "title":    "Insufficient Balance",
+//   "status":   422,
+//   "detail":   "Account balance of $10.00 is insufficient for transfer of $50.00",
+//   "instance": "/transfers/txn_abc123",
+//   "traceId":  "4bf92f3577b34da6a3ce929d0e0e4736"
+// }
+
+// Custom error classes for each error category
+class AppError extends Error {
+  constructor(message, status, code, details = {}) {
+    super(message);
+    this.status  = status;
+    this.code    = code;     // Machine-readable code for client switch/case
+    this.details = details;
+  }
+}
+
+class ValidationError extends AppError {
+  constructor(errors) {
+    super('Validation failed', 400, 'VALIDATION_FAILED', { errors });
+  }
+}
+
+class NotFoundError extends AppError {
+  constructor(resource, id) {
+    super(`${resource} not found`, 404, 'NOT_FOUND', { resource, id });
+  }
+}
+
+class ConflictError extends AppError {
+  constructor(message, field) {
+    super(message, 409, 'CONFLICT', { field });
+  }
+}
+
+class BusinessRuleError extends AppError {
+  constructor(message, details = {}) {
+    super(message, 422, 'BUSINESS_RULE_VIOLATION', details);
+  }
+}
+
+// ─── GLOBAL ERROR HANDLER ─────────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  const traceId = req.headers['x-trace-id'] ?? 'unknown';
+
+  // Known application errors — safe to expose details to client
+  if (err instanceof AppError) {
+    const body = {
+      type:     `https://api.example.com/errors/${err.code.toLowerCase().replace(/_/g, '-')}`,
+      title:    err.message,
+      status:   err.status,
+      instance: req.path,
+      traceId,
+      ...err.details,
+    };
+
+    // Log 4xx at warn level, 5xx would be at error level
+    console.warn({ msg: 'Client error', ...body, path: req.path, method: req.method });
+    return res.status(err.status).json(body);
+  }
+
+  // Unexpected errors — log full details, return generic message
+  console.error({
+    msg:    'Unhandled error',
+    error:  err.message,
+    stack:  err.stack,
+    traceId,
+    path:   req.path,
+    method: req.method,
+  });
+
+  // Never leak stack traces or internal error messages to clients
+  res.status(500).json({
+    type:     'https://api.example.com/errors/internal-error',
+    title:    'An unexpected error occurred',
+    status:   500,
+    instance: req.path,
+    traceId,  // Client can include this in a support ticket for correlation
+  });
+});
+
+// ─── USAGE IN ROUTE HANDLERS ───────────────────────────────────────────────
+app.post('/transfers', async (req, res, next) => {
+  try {
+    const { fromAccountId, toAccountId, amountCents } = req.validatedBody;
+
+    const account = await accountService.findById(fromAccountId);
+    if (!account) throw new NotFoundError('Account', fromAccountId);
+
+    if (account.balanceCents < amountCents) {
+      throw new BusinessRuleError('Insufficient balance', {
+        available: account.balanceCents,
+        required:  amountCents,
+        currency:  'USD',
+      });
+    }
+
+    const transfer = await transferService.execute({ fromAccountId, toAccountId, amountCents });
+    res.status(201).json(transfer);
+  } catch (err) {
+    next(err); // Passes to error handler middleware
+  }
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Stripe and Twilio error design</h2>
+        <p><strong>Stripe:</strong> Every Stripe error has a <code>type</code> (card_error, api_error, idempotency_error), a <code>code</code> (card_declined, expired_card, insufficient_funds), and a human <code>message</code>. The code is machine-readable so client code can switch on it. The message is human-readable for display. This design means: no guessing at the cause from a status code, no parsing error message strings to determine the code path.</p>
+        <p><strong>Twilio:</strong> Every error has a numeric code (e.g. 21211 for invalid To number), a message, and a URL to the documentation page for that specific error code. Developers can go directly from the error response to the exact explanation and fix — without searching the docs.</p>
+
+        <div class="insight-box"><strong>The traceId is your lifeline in production.</strong> Every error response should include a trace ID that links to the full request trace, logs, and span. When a user reports "I got an error," you give them the traceId from the response and you can immediately find the exact error, the full stack trace, the SQL query, and the upstream call that failed — without asking "what were you doing?" The traceId closes the loop between client-visible errors and server-side observability.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Consistent, structured errors are a first-class API feature. Use RFC 7807 Problem Details format (type, title, status, detail, instance) with a machine-readable code field. Use the right HTTP status code: 400 for malformed requests, 401 for unauthenticated, 403 for unauthorized, 422 for business rule violations, 429 for rate limiting, 5xx for server failures. Always include a traceId in error responses so support can correlate client reports to server logs. Never leak stack traces or SQL errors to clients in production — log them server-side and return a generic message with the trace ID.</p>
+      </section>
+    </main>
+  </body>
+</html>

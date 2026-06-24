@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stop Designing REST APIs Like a Mid-Level Dev: 4 Advanced Patterns | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Network servers and cables representing API infrastructure"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · APIs · Advanced · 12 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgixhq" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Stop Designing REST APIs Like a Mid-Level Dev: 4 Advanced Patterns Senior Engineers Use Instead</h1>
+        <p class="summary">
+          The four API design patterns that separate senior engineers from mid-level ones — not syntax, but structural decisions around resource modelling, versioning, evolvability, and client performance that prevent costly migrations later.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Portal</span>
+            <span class="meta-value">Internal · Curated</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">REST API advanced patterns: resource design, versioning, HATEOAS, batch/async operations</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">May 2026</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Mid-level REST API design is correct but rigid: resources mapped directly to database tables, versions bumped with every breaking change, pagination bolted on afterwards, and error responses that give clients no information about what to do next. Senior API design is also correct — but built to evolve, survive client diversity, and remain usable as the system scales. The four patterns below are where that gap lives.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> The cost of a bad API decision is not immediate — it appears eighteen months later when you need to change something, and the change is now a migration that breaks every existing client. Senior API design front-loads that thinking.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The versioning trap</span>
+        <p>
+          The pattern is nearly universal: a team builds <code>/v1/users</code>, ships it, then realises the response shape needs to change. So they build <code>/v2/users</code>. Then <code>/v3</code>. Two years later they are maintaining four parallel implementations of the same endpoint, with mobile clients still pinned to <code>/v1</code> that cannot be force-upgraded. This is not a versioning problem — it is a resource design and evolvability problem that versioning was expected to solve.
+        </p>
+      </section>
+
+      <!-- PATTERN 1 -->
+      <section class="content-card">
+        <span class="section-label">Pattern 1 — Resource design</span>
+        <h2>Design resources around client needs, not database shape</h2>
+        <p>
+          The mid-level instinct is to expose a REST resource for every database table: <code>GET /orders</code>, <code>GET /line-items</code>, <code>GET /products</code>. This is correct from a REST purity standpoint and actively harmful for client performance and evolvability.
+        </p>
+
+        <p class="mini-heading">The N+1 API problem</p>
+        <p>
+          A mobile client building an order summary screen needs the order, its line items, and the product name and image for each item. With table-mapped resources, that requires:
+        </p>
+        <ol>
+          <li><code>GET /orders/42</code> — 1 request</li>
+          <li><code>GET /orders/42/line-items</code> — 1 request</li>
+          <li><code>GET /products/{id}</code> for each line item — N requests</li>
+        </ol>
+        <p>
+          That is N+2 round trips on a mobile network. A senior engineer asks: what does the client actually need, and can we deliver it in one response?
+        </p>
+
+        <p class="mini-heading">Compound documents and sparse fieldsets</p>
+        <p>
+          The solution is not collapsing everything into one giant response — it is designing resources that serve use cases. A <code>GET /orders/42?include=line_items,products&amp;fields[products]=id,name,image_url</code> request returns the order with embedded line items and lightweight product stubs — one round trip, exactly the data the screen needs.
+        </p>
+        <p>
+          This is the JSON:API pattern: compound documents (embed related resources) and sparse fieldsets (request only needed fields). It keeps the API RESTful while serving clients efficiently.
+        </p>
+
+        <p class="mini-heading">Intent-based resources for writes</p>
+        <p>
+          Write endpoints that map to intents, not state changes: <code>POST /orders/42/confirm</code>, <code>POST /orders/42/cancel</code>, <code>POST /orders/42/ship</code> are clearer, safer, and more evolvable than <code>PATCH /orders/42 {status: "confirmed"}}</code>. Intent-based endpoints can enforce business rules at the route level and produce domain events naturally.
+        </p>
+      </section>
+
+      <!-- PATTERN 2 -->
+      <section class="content-card">
+        <span class="section-label">Pattern 2 — Evolvability without versioning</span>
+        <h2>Additive changes and Postel's Law</h2>
+        <p>
+          Most breaking API changes are not actually breaking — they are just not designed to be additive. Senior engineers design APIs to evolve without major versions by following a strict discipline: only add, never remove or rename.
+        </p>
+
+        <p class="mini-heading">Additive-only changes</p>
+        <ul class="check-list">
+          <li><strong>Add fields, never remove:</strong> Mark deprecated fields with a <code>deprecated_at</code> header or field annotation and keep them in responses for 12+ months.</li>
+          <li><strong>Add optional parameters, never make existing ones required:</strong> Clients that don't send a parameter should get a reasonable default, not a 400.</li>
+          <li><strong>Add new endpoints for new behaviour:</strong> If the semantics of an existing endpoint need to change, add a new endpoint and deprecate the old one.</li>
+        </ul>
+
+        <p class="mini-heading">Tolerant reader, conservative writer</p>
+        <p>
+          Postel's Law applied to APIs: be conservative in what your API sends and liberal in what it accepts. Clients following the inverse (strict parsers, flexible generators) break on every new field. Design clients that ignore unknown fields — this alone eliminates most "breaking change" situations.
+        </p>
+
+        <p class="mini-heading">When versioning is actually required</p>
+        <p>
+          Version the API when the semantic contract changes fundamentally — a different authentication model, a completely different resource structure, a protocol change. That is maybe once every few years for a stable API. Every other change should be backwards-compatible. If your team is versioning monthly, the problem is not the versioning — it is the upfront design.
+        </p>
+      </section>
+
+      <!-- PATTERN 3 -->
+      <section class="content-card">
+        <span class="section-label">Pattern 3 — HATEOAS and discoverability</span>
+        <h2>Links, not hardcoded paths</h2>
+        <p>
+          Hypermedia As The Engine Of Application State (HATEOAS) is the REST constraint that most APIs skip. It means responses include links to related actions — so clients discover what they can do next from the response, rather than hardcoding paths.
+        </p>
+        <pre><code class="language-json">{
+  "id": 42,
+  "status": "pending",
+  "total": 59.99,
+  "_links": {
+    "self":    { "href": "/orders/42" },
+    "confirm": { "href": "/orders/42/confirm", "method": "POST" },
+    "cancel":  { "href": "/orders/42/cancel",  "method": "POST" },
+    "items":   { "href": "/orders/42/line-items" }
+  }
+}</code></pre>
+        <p>
+          The practical payoff: when URLs change (and they do), clients that follow links from responses update automatically. When new actions become available based on state, they appear in the links — the client's UI can enable/disable buttons based on link presence without hardcoding business logic about which states allow which actions.
+        </p>
+        <p class="mini-heading">Pragmatic HATEOAS</p>
+        <p>
+          Full HATEOAS adoption is a high bar. The pragmatic minimum: include a <code>_links</code> object with <code>self</code> and the primary actions available for this resource in its current state. That 20% of the pattern delivers 80% of the benefit.
+        </p>
+      </section>
+
+      <!-- PATTERN 4 -->
+      <section class="content-card">
+        <span class="section-label">Pattern 4 — Batch and async operations</span>
+        <h2>Designing for operations that take longer than an HTTP request</h2>
+        <p>
+          Mid-level API design treats every operation as synchronous: request in, response out, done. Senior API design recognises two classes of operation that this breaks: batch operations (one request affecting many resources) and long-running operations (processing time exceeds connection timeout).
+        </p>
+
+        <p class="mini-heading">Batch endpoints</p>
+        <p>
+          Instead of requiring 500 individual <code>DELETE /items/{id}</code> calls to clear a cart, provide: <code>POST /items/batch-delete</code> with an array of IDs in the body. Return a bulk result: how many succeeded, which failed and why.
+        </p>
+        <pre><code class="language-json">// Request
+POST /items/batch-delete
+{ "ids": [1, 2, 3, 4, 5] }
+
+// Response
+{
+  "succeeded": [1, 3, 4, 5],
+  "failed": [
+    { "id": 2, "reason": "item_locked", "message": "Item is in a pending order" }
+  ]
+}</code></pre>
+        <p>
+          Batch endpoints require partial success semantics — returning both what worked and what failed rather than all-or-nothing, because client code needs to handle partial failures.
+        </p>
+
+        <p class="mini-heading">Async operations with job resources</p>
+        <p>
+          For operations that take more than a few seconds, return a job resource immediately and let the client poll:
+        </p>
+        <pre><code class="language-http">POST /reports/generate
+→ 202 Accepted
+{
+  "job_id": "rpt_abc123",
+  "_links": {
+    "status": { "href": "/jobs/rpt_abc123" },
+    "cancel":  { "href": "/jobs/rpt_abc123", "method": "DELETE" }
+  }
+}
+
+GET /jobs/rpt_abc123
+→ { "status": "running", "progress": 0.4, "eta_seconds": 12 }
+
+GET /jobs/rpt_abc123
+→ {
+    "status": "complete",
+    "_links": { "result": { "href": "/reports/rpt_abc123" } }
+  }</code></pre>
+        <p>
+          The 202 Accepted + job resource pattern keeps HTTP semantics clean, gives clients visibility into progress, and enables cancellation. Add a webhook option for clients that prefer push over poll.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Common questions</span>
+        <h2>FAQ</h2>
+        <ul class="faq-list">
+          <li class="faq-item">
+            <p class="faq-question">Should I use GraphQL instead to avoid these problems?</p>
+            <p class="faq-answer">GraphQL solves the N+1 API problem and sparse fieldsets elegantly — but introduces complexity in caching, rate limiting, and query security (cost analysis, depth limiting). For a public API or a single team consuming it, REST with these patterns works well. For multiple internal teams with diverse data needs, GraphQL is worth the complexity. Both require the same underlying thinking about intent-based mutations and async operations.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">How do I convince my team to adopt HATEOAS when it adds response size?</p>
+            <p class="faq-answer">Start with intent-based write endpoints and the job resource pattern — these have obvious, immediate value that teams can see. HATEOAS on read responses is a harder sell. Frame it as: "links make our URL structure a private implementation detail" — when a senior engineer on the team has had to fix a client because a URL changed, that argument lands.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">What is the most common mistake teams make when adding versioning?</p>
+            <p class="faq-answer">Versioning the whole API instead of a specific resource. When one endpoint's contract needs to change, bumping from /v1 to /v2 requires migrating every client across every endpoint simultaneously. Version individual resources (or use content negotiation headers) to limit the migration surface to what actually changed.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The four patterns that separate senior API design from mid-level API design: resources built around client use cases (not tables), additive-only changes that avoid versioning debt, HATEOAS links that decouple clients from URL structure, and async job resources for long-running operations. The investment pays off 18 months later when the system needs to change and the change doesn't break everything.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

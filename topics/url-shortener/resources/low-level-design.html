@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL Shortener LLD | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to URL Shortener</a>
+        <h1>URL Shortener: Low-Level Design</h1>
+        <p class="summary">
+          This page turns the architecture into concrete building blocks: APIs, schemas, entities, validation rules,
+          cache keys, short-code strategies, and redirect behavior.
+        </p>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Low-level design is where a clean high-level diagram either becomes implementable or falls apart. The goal is
+          to define the data and request contracts so clearly that multiple engineers can build the service without
+          conflicting assumptions.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Primary entities</span>
+        <h2>Core data model</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Entity</th>
+              <th>Important fields</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>ShortLink</td>
+              <td><code>short_code</code>, <code>long_url</code>, <code>created_by</code>, <code>created_at</code>, <code>expires_at</code>, <code>status</code></td>
+            </tr>
+            <tr>
+              <td>LinkMetadata</td>
+              <td><code>domain</code>, <code>is_custom_alias</code>, <code>title</code>, <code>tags</code>, <code>tenant_id</code></td>
+            </tr>
+            <tr>
+              <td>ClickEvent</td>
+              <td><code>short_code</code>, <code>timestamp</code>, <code>ip_hash</code>, <code>user_agent</code>, <code>referrer</code>, <code>geo</code></td>
+            </tr>
+            <tr>
+              <td>SafetyStatus</td>
+              <td><code>short_code</code>, <code>scan_state</code>, <code>risk_level</code>, <code>block_reason</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">API design</span>
+        <h2>Recommended endpoints</h2>
+        <pre><code>POST /api/v1/links
+GET  /r/{shortCode}
+GET  /api/v1/links/{shortCode}
+PATCH /api/v1/links/{shortCode}
+DELETE /api/v1/links/{shortCode}
+GET  /api/v1/links/{shortCode}/analytics</code></pre>
+        <p class="mini-heading">Example create request</p>
+        <pre><code>{
+  "longUrl": "https://example.com/products/very/long/path",
+  "customAlias": "launch-2026",
+  "expiresAt": "2026-12-31T00:00:00Z"
+}</code></pre>
+        <p class="mini-heading">Example create response</p>
+        <pre><code>{
+  "shortCode": "aZ91Kd",
+  "shortUrl": "https://sho.rt/aZ91Kd",
+  "status": "ACTIVE"
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Key generation</span>
+        <h2>Short-code generation options</h2>
+        <p class="mini-heading">Option 1: Global sequence + Base62 encoding</p>
+        <p>
+          This is simple and predictable. Generate a monotonically increasing numeric ID, then encode it in Base62.
+          This works well when a central or partitioned sequence service is acceptable.
+        </p>
+        <p class="mini-heading">Option 2: Preallocated ID ranges per node</p>
+        <p>
+          This reduces central bottlenecks. A coordinator assigns ranges to nodes, and each node generates codes within
+          its own range.
+        </p>
+        <p class="mini-heading">Option 3: Randomized collision-checked tokens</p>
+        <p>
+          Simpler to start with but less attractive at large scale because collision checks add cost and unpredictability.
+        </p>
+        <div class="note-box">
+          <p>
+            <strong>Senior recommendation:</strong> choose sequence or range allocation when predictable uniqueness and
+            operational clarity matter more than token randomness.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Storage model</span>
+        <h2>Example schema</h2>
+        <pre><code>CREATE TABLE short_links (
+  short_code VARCHAR(16) PRIMARY KEY,
+  long_url TEXT NOT NULL,
+  created_by VARCHAR(64),
+  tenant_id VARCHAR(64),
+  domain VARCHAR(128) NOT NULL,
+  is_custom_alias BOOLEAN NOT NULL DEFAULT FALSE,
+  status VARCHAR(16) NOT NULL,
+  created_at TIMESTAMP NOT NULL,
+  expires_at TIMESTAMP NULL
+);</code></pre>
+        <p>
+          A relational database is often sufficient early because lookup by <code>short_code</code> is straightforward,
+          constraints are helpful, and operational maturity is high. NoSQL becomes more attractive when scale, regional
+          distribution, or write patterns justify it.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Redirect path</span>
+        <h2>Lookup and cache behavior</h2>
+        <ol>
+          <li>Normalize and validate the incoming short code.</li>
+          <li>Check cache using a key like <code>link:{short_code}</code>.</li>
+          <li>If cached, verify status and expiration, then issue redirect.</li>
+          <li>If not cached, fetch durable storage, evaluate status, then cache the result.</li>
+          <li>Publish click analytics asynchronously.</li>
+        </ol>
+        <p>
+          Cache value should include target URL, status, expiration metadata, and possibly domain rules so the redirect
+          service does not need extra database reads for common cases.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Validation rules</span>
+        <h2>Low-level checks that prevent bad production behavior</h2>
+        <ul class="check-list">
+          <li>Reject malformed or unsupported URLs.</li>
+          <li>Block disallowed schemes such as unsafe protocol usage.</li>
+          <li>Protect custom aliases with uniqueness checks and reserved-word rules.</li>
+          <li>Support soft-delete or disabled status instead of immediate destructive deletion.</li>
+          <li>Validate expiration semantics and time-zone handling consistently.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Good low-level design for a URL shortener means more than defining tables and endpoints. It means making the
+          redirect lookup predictable, the short-code strategy reliable, and every validation rule explicit enough to
+          avoid ambiguity across the engineering team.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

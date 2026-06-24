@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Event-Driven APIs | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1563986768494-4dee2763ff3f?w=1600&h=700&fit=crop&auto=format&q=80" alt="Event streams and async notifications" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 21 · 10 min</span></div>
+        </figure>
+        <h1>Event-Driven APIs</h1>
+        <p class="summary">APIs that notify consumers when something happens, rather than making consumers poll to check if something changed. Webhooks, Server-Sent Events, and async request-reply patterns — the right tool depends on who initiates, how real-time it must be, and whether the consumer can receive connections.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">21 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design</span></div>
+          <div><span class="meta-label">Patterns</span><span class="meta-value">Webhooks, SSE, async request-reply, outbox</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Stripe, GitHub, Twilio, Slack, Shopify</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Polling is the default when you don't know better: check every 5 seconds whether the order shipped, whether the payment cleared, whether the import job finished. It wastes 99% of requests, adds artificial latency, and scales linearly with the number of polling clients. Event-driven APIs invert this: the system tells you when something happens, not the other way around.</p>
+        <div class="callout"><p><strong>Three approaches:</strong> Webhooks (server calls your server), SSE (server streams to your browser), async request-reply (you fire a request, get a job ID, receive a callback when done). Each solves a different problem. Choosing the wrong one creates miserable developer experience.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Patterns</span>
+        <h2>Webhook vs SSE vs async request-reply</h2>
+        <div class="diagram-box">
+<span class="step">Webhook: server calls client's endpoint when event occurs</span>
+
+Stripe ──▶ POST https://your-server.com/webhooks/stripe
+           { "type": "payment_intent.succeeded", "data": {...} }
+           ← your server returns 200 OK within 30s
+
+<span class="dim">Requirements: your server must have a public HTTPS URL, be available 24/7.</span>
+<span class="dim">Good for: server-to-server notifications (payment events, repo push events).</span>
+
+<span class="step">SSE: server streams events to browser over persistent HTTP connection</span>
+
+Browser ──▶ GET /events  (long-lived connection, EventSource API)
+Server  ──▶ data: {"type":"order.updated","status":"shipped"}\n\n
+Server  ──▶ data: {"type":"message.new","text":"Hello"}\n\n
+
+<span class="dim">One-directional: server → browser. Works through proxies. Reconnects automatically.</span>
+<span class="dim">Good for: live dashboards, job progress, notifications to browser clients.</span>
+
+<span class="step">Async request-reply: fire job, get notified when done</span>
+
+Client ──▶ POST /reports/generate  { filters: {...} }
+         ← 202 Accepted { "jobId": "job_abc123" }
+
+         [server processes in background: 30 seconds]
+
+Server ──▶ POST https://client.com/callbacks  (webhook)
+           { "jobId": "job_abc123", "status": "completed", "downloadUrl": "..." }
+
+<span class="dim">OR: client polls GET /reports/job_abc123 until status=completed</span>
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Pattern</th><th>Direction</th><th>Requires</th><th>Best for</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Webhook</strong></td><td>Server → Server</td><td>Public endpoint on consumer</td><td>Payment events, CI/CD triggers, repo events</td></tr>
+            <tr><td><strong>SSE</strong></td><td>Server → Browser</td><td>Persistent HTTP connection</td><td>Live dashboards, progress bars, browser notifications</td></tr>
+            <tr><td><strong>WebSocket</strong></td><td>Bidirectional</td><td>WebSocket support</td><td>Chat, collaborative editing, games</td></tr>
+            <tr><td><strong>Async request-reply</strong></td><td>Client initiates, server notifies</td><td>Webhook or polling</td><td>Long-running jobs (ML inference, report generation)</td></tr>
+            <tr><td><strong>Polling</strong></td><td>Client → Server</td><td>Nothing extra</td><td>Fallback when no other option available</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Reliable webhook delivery with outbox pattern + SSE</h2>
+        <pre><code class="language-js">import express from 'express';
+import crypto from 'crypto';
+import { Pool } from 'pg';
+
+const db  = new Pool({ connectionString: process.env.DATABASE_URL });
+const app = express();
+
+// ─── WEBHOOK DELIVERY (reliable, via outbox pattern) ─────────────────────
+// Problem: if you call the webhook inside a transaction and the webhook fails,
+// do you roll back the DB write? Separate concerns with an outbox table.
+
+// In the business transaction, write to outbox table (atomic with the business data)
+async function processOrder(orderData, webhookUrl) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const order = await client.query(
+      'INSERT INTO orders (user_id, total) VALUES ($1, $2) RETURNING id',
+      [orderData.userId, orderData.total]
+    );
+
+    // Write webhook delivery task to outbox — same transaction as the order
+    await client.query(
+      `INSERT INTO webhook_outbox (event_type, payload, endpoint_url, status)
+       VALUES ($1, $2, $3, 'pending')`,
+      ['order.created', JSON.stringify({ orderId: order.rows[0].id, ...orderData }), webhookUrl]
+    );
+
+    await client.query('COMMIT');
+    return order.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Background worker: poll outbox table, deliver webhooks with retry
+async function processWebhookOutbox() {
+  while (true) {
+    const { rows: pending } = await db.query(
+      `SELECT * FROM webhook_outbox
+       WHERE status = 'pending' AND next_attempt_at <= NOW()
+       ORDER BY created_at
+       LIMIT 10
+       FOR UPDATE SKIP LOCKED`  // SKIP LOCKED prevents multiple workers grabbing same row
+    );
+
+    for (const item of pending) {
+      await deliverWebhook(item);
+    }
+
+    await new Promise(r => setTimeout(r, 1000)); // Poll every 1s
+  }
+}
+
+async function deliverWebhook(item) {
+  const secret    = process.env.WEBHOOK_SECRET;
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const body      = JSON.stringify(item.payload);
+
+  // HMAC-SHA256 signature — receiver validates to prevent spoofing
+  const signature = crypto.createHmac('sha256', secret)
+    .update(`${timestamp}.${body}`)
+    .digest('hex');
+
+  try {
+    const response = await fetch(item.endpoint_url, {
+      method:  'POST',
+      headers: {
+        'Content-Type':       'application/json',
+        'X-Webhook-Signature': `t=${timestamp},v1=${signature}`,
+        'X-Webhook-ID':        item.id,
+      },
+      body,
+      signal: AbortSignal.timeout(15_000), // 15s delivery timeout
+    });
+
+    if (response.ok) {
+      await db.query("UPDATE webhook_outbox SET status='delivered', delivered_at=NOW() WHERE id=$1", [item.id]);
+    } else {
+      await scheduleRetry(item, `HTTP ${response.status}`);
+    }
+  } catch (err) {
+    await scheduleRetry(item, err.message);
+  }
+}
+
+async function scheduleRetry(item, errorMessage) {
+  const RETRY_DELAYS = [60, 300, 3600, 86400]; // 1min, 5min, 1hr, 24hr
+  const attempt = (item.attempt_count ?? 0) + 1;
+
+  if (attempt >= RETRY_DELAYS.length) {
+    await db.query("UPDATE webhook_outbox SET status='failed', error=$1 WHERE id=$2", [errorMessage, item.id]);
+    return;
+  }
+
+  const nextAttempt = new Date(Date.now() + RETRY_DELAYS[attempt - 1] * 1000);
+  await db.query(
+    "UPDATE webhook_outbox SET attempt_count=$1, next_attempt_at=$2, last_error=$3 WHERE id=$4",
+    [attempt, nextAttempt, errorMessage, item.id]
+  );
+}
+
+// ─── WEBHOOK RECEIVER (validate signature) ────────────────────────────────
+app.post('/webhooks/inbound', express.raw({ type: '*/*' }), (req, res) => {
+  const sig       = req.headers['x-webhook-signature'];
+  const [tPart, vPart] = (sig ?? '').split(',');
+  const timestamp = tPart?.replace('t=', '');
+  const provided  = vPart?.replace('v1=', '');
+
+  // Replay attack prevention: reject if timestamp > 5 minutes old
+  if (Math.abs(Date.now() / 1000 - parseInt(timestamp)) > 300) {
+    return res.status(400).json({ error: 'Timestamp too old — possible replay attack' });
+  }
+
+  const expected = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET)
+    .update(`${timestamp}.${req.body.toString()}`)
+    .digest('hex');
+
+  if (!crypto.timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'))) {
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  const event = JSON.parse(req.body.toString());
+  processWebhookEvent(event);
+  res.json({ received: true }); // Respond 200 fast — do processing async
+});
+
+// ─── SERVER-SENT EVENTS ────────────────────────────────────────────────────
+app.get('/events', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders(); // Send headers immediately to establish stream
+
+  const userId     = req.user.id;
+  const sendEvent  = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+
+  // Subscribe to Redis pub/sub for this user's events
+  const sub = redis.duplicate();
+  await sub.connect();
+  await sub.subscribe(`user:${userId}:events`, (message) => {
+    const event = JSON.parse(message);
+    sendEvent(event.type, event.data);
+  });
+
+  // Send initial heartbeat
+  sendEvent('connected', { userId });
+
+  // Clean up on disconnect
+  req.on('close', async () => {
+    await sub.unsubscribe();
+    await sub.disconnect();
+  });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Stripe webhooks, GitHub events, and the outbox pattern</h2>
+        <p><strong>Stripe webhooks:</strong> Deliver events with exponential backoff retries for up to 3 days. Each delivery includes a Stripe-Signature header — an HMAC-SHA256 computed from the payload and a timestamp using your signing secret. Stripe's dashboard shows every delivery attempt, the response received, and lets you manually retry. The timestamp in the signature prevents replay attacks: reject events older than 5 minutes.</p>
+        <p><strong>GitHub webhooks:</strong> Configured per-repo or per-org. Every push, PR, issue, deployment gets sent to your URL. GitHub includes an X-Hub-Signature-256 header. Failed deliveries show up in the repo settings "Recent Deliveries" tab with full request/response details — invaluable for debugging receiver code.</p>
+        <p><strong>The outbox pattern:</strong> Writing a webhook event in the same database transaction as the business data guarantees exactly-once delivery of the notification. Without it, you can crash between writing to the DB and calling the webhook — the event is never delivered. With it, a separate worker picks up the outbox entry even after a crash and delivers it.</p>
+
+        <div class="warn-box"><strong>Return 200 immediately, process async.</strong> Webhook senders expect a 200 response within their timeout (typically 5–30 seconds). If your handler does slow processing before responding, you'll time out and the sender will retry — creating duplicates. Respond 200 first, then process the event asynchronously. Design your handler to be idempotent so retries are safe.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Event-driven APIs eliminate polling waste by notifying consumers when state changes rather than making them ask. Use webhooks for server-to-server notifications, SSE for server-to-browser streams, and async request-reply for long-running jobs. For reliable webhook delivery, use the outbox pattern — write the delivery task transactionally with the business data, then deliver asynchronously with retry. Always validate webhook signatures to prevent spoofing and check timestamps to prevent replay attacks. Respond 200 immediately and process async to prevent delivery timeouts.</p>
+      </section>
+    </main>
+  </body>
+</html>

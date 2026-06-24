@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Build an AI Agent Step by Step | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1677442135703-1787eea5ce01?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract visualization of a neural network and step-by-step decision path"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · JavaScript · Step by Step · 30 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@googledeepmind" target="_blank" rel="noopener">Google DeepMind</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Build an AI Agent Step by Step</h1>
+        <p class="summary">
+          A hands-on path from a plain LLM call to a production-ready, tool-using agent — built
+          incrementally, one layer at a time. Every step includes the code, the reasoning behind
+          the design choice, and the failure it prevents. JavaScript throughout.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Portal</span>
+            <span class="meta-value">Internal · Curated</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Practical build, step-by-step with JS code</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">Jun 10, 2026</span>
+          </div>
+          <div>
+            <span class="meta-label">Level</span>
+            <span class="meta-value">Beginner → Production-ready</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ─── INTRO ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <p class="lead">
+          Building an AI agent is not about finding the right framework and calling it. It is about
+          adding capability one layer at a time — each layer solving a concrete problem the previous
+          one created. Start with a plain LLM call. Add a tool when you need external data. Add a
+          loop when one tool call isn't enough. Add memory when context falls off. Add safety when
+          actions have consequences. That progression is this guide.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The most important thing to understand first:</strong> An agent is a
+            decision-making system that speaks natural language — not a chatbot with extra features.
+            Every interaction bottoms out in a decision. Design the decision before you design the agent.
+            If you cannot state in one sentence what decision the agent is making, you are not ready to build it yet.
+          </p>
+        </div>
+
+        <p class="mini-heading">The three foundation questions</p>
+        <ul class="check-list">
+          <li><strong>What decision is the agent making?</strong> Route this request, answer this question, trigger this action, ask for more information. State it exactly.</li>
+          <li><strong>What does it need to know to make that decision well?</strong> What data, history, and context must be present before it acts?</li>
+          <li><strong>What happens when it is wrong?</strong> What is the blast radius? How does the user recover? Design the failure mode before you build the happy path.</li>
+        </ul>
+      </section>
+
+      <!-- ─── STEP 0 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 0</span>
+        <h2>Define the job before writing any code</h2>
+        <p>
+          The most common agent failure is a vague brief. "Build a customer support agent" is not a
+          brief — it is a category. A brief is: "Given an authenticated user's message about an
+          order, look up the order status and respond with the current status and estimated delivery
+          date. Escalate to human if the order is flagged disputed." That sentence defines the input,
+          the tools needed, the output shape, and the escalation path.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Question</th><th>Bad answer</th><th>Good answer</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>What is the agent's one job?</td>
+              <td>"Help customers"</td>
+              <td>"Answer order-status questions using live order data"</td>
+            </tr>
+            <tr>
+              <td>What is the success condition?</td>
+              <td>"The user is happy"</td>
+              <td>"Correct status returned in &lt;2 s, zero hallucinated order IDs"</td>
+            </tr>
+            <tr>
+              <td>What is the acceptable error rate?</td>
+              <td>"Low"</td>
+              <td>"&lt;1% wrong order data; 0% unauthorized refunds"</td>
+            </tr>
+            <tr>
+              <td>What happens when it fails?</td>
+              <td>"Try again"</td>
+              <td>"After 2 failed tool calls, escalate to live agent with full transcript"</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>
+            Decisions made vaguely at Step 0 will haunt you at Steps 4, 5, and 6. Write the brief
+            down. Every system-prompt instruction and tool description you write later is a translation
+            of this brief into machine-readable form.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── STEP 1 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 1</span>
+        <h2>Start with a plain LLM call — no agent yet</h2>
+        <p>
+          Before adding any agent machinery, get a working single-turn LLM call. This forces you to
+          write a system prompt that is correct and test the model's baseline behaviour on your task.
+          Many things people want to build as agents should stay here permanently.
+        </p>
+
+        <pre><code class="language-js">import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic(); // reads ANTHROPIC_API_KEY from env
+
+async function singleTurnAgent(userMessage) {
+  const response = await client.messages.create({
+    model:      'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: `You are a customer support assistant for an e-commerce company.
+You help customers with questions about their orders, returns, and products.
+Be concise and professional. If you do not know the answer, say so — do not guess.`,
+    messages: [
+      { role: 'user', content: userMessage }
+    ]
+  });
+
+  return response.content[0].text;
+}
+
+// Test it
+const answer = await singleTurnAgent("What is your return policy?");
+console.log(answer);
+
+// AT THIS POINT:
+// - The model answers from its system prompt context only
+// - No live data, no external tools, no memory
+// - This is correct for static policy questions
+// - Add tools only when the answer requires LIVE or USER-SPECIFIC data</code></pre>
+
+        <p>
+          The question to ask before proceeding: <em>"Can the model answer this correctly from the
+          information already in the system prompt?"</em> If yes — stay here. Adding agent machinery
+          to a single-prompt task adds latency, cost, and failure points with no benefit.
+        </p>
+      </section>
+
+      <!-- ─── STEP 2 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 2</span>
+        <h2>Add your first tool — and design it properly</h2>
+        <p>
+          You add a tool when you need something the model cannot produce from training data alone:
+          the user's live order status, current pricing, a database record, a calculation. The tool
+          definition — not the function body — is where most tool bugs live.
+        </p>
+        <p>
+          The model selects tools by reading their descriptions. <strong>Your description is the
+          selection logic.</strong> There is no code path that chooses a tool — the model pattern-matches
+          the user's message against every tool description in the context. Write it for the model,
+          not for humans.
+        </p>
+
+        <p class="mini-heading">Three things every tool definition needs</p>
+        <ul class="check-list">
+          <li><strong>Name:</strong> a verb phrase that states what the tool does. <code>lookupOrderStatus</code>, not <code>orders</code> or <code>getOrder</code>.</li>
+          <li><strong>Description:</strong> when to use it, what it returns, and crucially what NOT to use it for. The negative scope prevents selection collisions between similar tools.</li>
+          <li><strong>Parameters:</strong> strict types. Required fields only where truly mandatory. For any required field: include "do not guess — ask the user" in the description.</li>
+        </ul>
+
+        <pre><code class="language-js">// GOOD tool definition — selection signal is clear, negative scope is set,
+// required parameter has a fallback instruction
+const lookupOrderStatusTool = {
+  name: 'lookupOrderStatus',
+  description: `Look up the real-time status and details of a customer order.
+Use when a customer asks about where their order is, when it will arrive,
+what items are in it, or its current status.
+Returns: order status, item list, shipping carrier, and estimated delivery date.
+Do NOT use for refunds or cancellations — use the processRefund tool instead.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      orderId: {
+        type: 'string',
+        description: `The order ID. Expected format: ORD-XXXXX.
+If the customer has not provided their order ID, ask for it before calling this tool.
+Do NOT invent or guess an order ID.`
+      }
+    },
+    required: ['orderId']
+  }
+};
+
+// The tool executor — your actual business logic lives here
+async function lookupOrderStatus({ orderId }) {
+  // In production: call your order management API
+  const order = await orderAPI.getById(orderId);
+  if (!order) return { error: 'Order not found', orderId };
+  return {
+    orderId:           order.id,
+    status:            order.status,
+    items:             order.lineItems.map(i => `${i.name} × ${i.qty}`),
+    carrier:           order.shipping.carrier,
+    trackingNumber:    order.shipping.trackingNumber,
+    estimatedDelivery: order.shipping.estimatedDelivery
+  };
+}</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>The "Do NOT use for X" line is as important as "use for Y."</strong>
+            Without negative scope, when you add a second tool later that sounds similar,
+            the model will randomly pick between them. Negative scope is how you draw clean
+            boundaries between tools.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── STEP 3 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 3</span>
+        <h2>Wire the agent loop — think → act → observe → adjust</h2>
+        <p>
+          A single LLM call with a tool definition does not make an agent. The agent is the loop:
+          the model declares a tool call → your code executes it → the result goes back into the
+          conversation → the model reads the result and decides what to do next. That cycle repeats
+          until the model generates a text response (task complete) or the iteration limit is reached.
+        </p>
+        <p>
+          The critical thing: <strong>the model never executes a tool.</strong> It outputs a
+          structured JSON intent — which tool, which arguments — and your scaffolding makes the
+          real call. Model produces intent; your code produces action.
+        </p>
+
+        <pre><code class="language-js">import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+// All tool definitions in one place
+const tools = [lookupOrderStatusTool /*, ...more tools later */];
+
+// All tool executors mapped by name
+const toolExecutors = {
+  lookupOrderStatus
+  // add more as you add tools
+};
+
+async function agentLoop(userMessage) {
+  const messages = [{ role: 'user', content: userMessage }];
+  const MAX_STEPS = 8; // ALWAYS cap — a loop without a ceiling is a bug waiting to fire
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const response = await client.messages.create({
+      model:      'claude-sonnet-4-6',
+      max_tokens: 1024,
+      system: `You are a customer support assistant.
+Help customers with order status, refunds, and product questions.
+Think step by step. Use tools when you need live data.
+If you need information the customer hasn't provided, ask for it.`,
+      tools,
+      messages
+    });
+
+    // Model finished — return the final text answer
+    if (response.stop_reason === 'end_turn') {
+      const textBlock = response.content.find(b => b.type === 'text');
+      return textBlock?.text ?? 'No response generated.';
+    }
+
+    // Model wants to use a tool
+    if (response.stop_reason === 'tool_use') {
+      // Push the model's full response (may include thinking text + tool call) into history
+      messages.push({ role: 'assistant', content: response.content });
+
+      // Process every tool call in this response (model can call multiple at once)
+      const toolResults = [];
+      for (const block of response.content) {
+        if (block.type !== 'tool_use') continue;
+
+        let result;
+        try {
+          const executor = toolExecutors[block.name];
+          if (!executor) throw new Error(`Unknown tool: ${block.name}`);
+          result = await executor(block.input);
+        } catch (err) {
+          result = { error: err.message };
+        }
+
+        toolResults.push({
+          type:        'tool_result',
+          tool_use_id: block.id,
+          content:     JSON.stringify(result)
+        });
+      }
+
+      // Feed all results back as the next user turn — model reads and continues
+      messages.push({ role: 'user', content: toolResults });
+      // Loop continues — model sees the observation and decides next step
+    }
+  }
+
+  return 'I was unable to complete this request within the allowed steps. Please contact support directly.';
+}
+
+// Test it
+const reply = await agentLoop("Hi, where is my order ORD-4521?");
+console.log(reply);
+// Loop:
+// 1. Model reads message, decides to call lookupOrderStatus({ orderId: "ORD-4521" })
+// 2. Your code calls the real API, gets status data
+// 3. Model reads the data, generates a natural-language answer
+// 4. stop_reason = 'end_turn' → returns the answer</code></pre>
+
+        <p class="mini-heading">What happens at the protocol level</p>
+        <pre><code class="language-js">// What the model OUTPUTS when it decides to call a tool — pure structured intent, no code runs
+{
+  "type": "tool_use",
+  "id": "toolu_01X...",
+  "name": "lookupOrderStatus",
+  "input": { "orderId": "ORD-4521" }
+}
+
+// Your code intercepts this, runs the real call, gets:
+{ orderId: "ORD-4521", status: "In Transit", estimatedDelivery: "2026-06-13" }
+
+// This is appended to history as a tool_result observation
+// The model reads it in the next iteration and decides: "I have the data — I can answer now"
+// It then outputs a text response → loop ends</code></pre>
+      </section>
+
+      <!-- ─── STEP 4 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 4</span>
+        <h2>Add memory — don't make the agent ask twice</h2>
+        <p>
+          Without memory, every turn starts cold. The agent re-confirms the user's identity, re-asks
+          for the order ID, re-retrieves data it already has. Memory is the mechanism that makes a
+          multi-turn conversation feel coherent rather than amnesiac.
+        </p>
+        <p>
+          Memory is actually four distinct layers. Using the wrong one is a common design mistake.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Layer</th><th>Lifetime</th><th>Use for</th><th>Implementation</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>In-context</strong></td>
+              <td>This turn only</td>
+              <td>Current conversation history, tool results this session</td>
+              <td>The <code>messages</code> array — already handled by the loop</td>
+            </tr>
+            <tr>
+              <td><strong>Session / state</strong></td>
+              <td>Duration of the session</td>
+              <td>Verified identity, confirmed order ID, active record, user name</td>
+              <td>Key-value object injected into system prompt each turn</td>
+            </tr>
+            <tr>
+              <td><strong>Long-term / vector</strong></td>
+              <td>Permanent</td>
+              <td>User preferences, past issue history, domain knowledge</td>
+              <td>Embeddings + vector search (RAG) — retrieved per query</td>
+            </tr>
+            <tr>
+              <td><strong>Episodic</strong></td>
+              <td>Permanent, grows over time</td>
+              <td>Log of what the agent did and what happened in past sessions</td>
+              <td>Structured log DB — queried to inform future similar tasks</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Session memory implementation — the most immediately useful layer</p>
+        <pre><code class="language-js">// Session store — lives in memory for the duration of a conversation
+function createSession() {
+  const store = {};
+  return {
+    set: (key, value) => { store[key] = value; },
+    get: (key)        => store[key] ?? null,
+    has: (key)        => key in store,
+    // Renders the store as a block of context to inject into the system prompt
+    toContextBlock: () => {
+      const entries = Object.entries(store);
+      if (entries.length === 0) return '';
+      return '\n\nKnown context this session:\n' +
+        entries.map(([k, v]) => `- ${k}: ${v}`).join('\n');
+    }
+  };
+}
+
+// Updated agent loop — now carries session state across turns
+async function agentWithMemory(userMessage, session) {
+  const systemPrompt = `You are a customer support assistant.
+Help customers with order status, refunds, and product questions.
+${session.toContextBlock()}
+
+Use the context above when it is relevant — do not ask for information
+you already have.`;
+
+  const messages = [{ role: 'user', content: userMessage }];
+
+  for (let step = 0; step < 8; step++) {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6', max_tokens: 1024,
+      system: systemPrompt, tools, messages
+    });
+
+    if (response.stop_reason === 'end_turn') {
+      return response.content.find(b => b.type === 'text')?.text;
+    }
+
+    if (response.stop_reason === 'tool_use') {
+      messages.push({ role: 'assistant', content: response.content });
+      const toolResults = [];
+
+      for (const block of response.content) {
+        if (block.type !== 'tool_use') continue;
+        const result = await toolExecutors[block.name](block.input);
+
+        // Persist useful facts to session memory so they survive the turn
+        if (block.name === 'lookupOrderStatus' && result.orderId) {
+          session.set('lastLookedUpOrderId', result.orderId);
+          session.set('lastOrderStatus', result.status);
+        }
+
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
+      }
+
+      messages.push({ role: 'user', content: toolResults });
+    }
+  }
+}
+
+// Usage across multiple turns in a conversation
+const session = createSession();
+session.set('userId',        'USR-4521');
+session.set('authenticated', 'true');
+session.set('userName',      'Abhinav');
+
+// Turn 1: user asks about an order
+await agentWithMemory("Where is my order ORD-8833?", session);
+// Agent calls lookupOrderStatus, stores lastLookedUpOrderId = ORD-8833
+
+// Turn 2: user asks a follow-up — agent already knows the order ID
+await agentWithMemory("When will it be delivered?", session);
+// System prompt now includes: lastLookedUpOrderId: ORD-8833, lastOrderStatus: In Transit
+// Agent answers directly without re-calling lookupOrderStatus</code></pre>
+
+        <p class="mini-heading">Design rule: match storage layer to the fact's lifetime</p>
+        <p>
+          Ask for every piece of information: does this need to survive the turn? The session? Forever?
+          Session memory for the order ID confirmed this conversation. Long-term store for the
+          user's preference to always receive tracking links. Do not default everything to in-context
+          — when the context window fills, older facts fall off silently.
+        </p>
+      </section>
+
+      <!-- ─── STEP 5 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 5</span>
+        <h2>Add a validation layer — stop hallucinated parameters before they execute</h2>
+        <p>
+          This is the step most agent tutorials skip, and it is where the most dangerous bugs live.
+          When the model constructs tool call arguments, it pulls values from three sources: the
+          user's direct message, the conversation and memory context, and inference from surrounding
+          context. If a required field has no clear source in any of these, the model invents a
+          plausible-looking value. It does not say "I don't know" — it fills the gap confidently.
+        </p>
+
+        <pre><code class="language-js">// The hallucination scenario — without validation
+// User: "Can you process a refund?"
+// Required: orderId, amount, reason
+// orderId was never mentioned → model generates: "ORD-0001" (invented)
+// amount was never specified → model generates: 99.99 (invented)
+// Both wrong values reach the payment API
+
+// THE FIX — two parts working together
+
+// PART 1: Description-level instruction in the tool schema
+const processRefundTool = {
+  name: 'processRefund',
+  description: `Process a refund for a customer order.
+ONLY call this tool after you have EXPLICITLY confirmed the order ID AND
+the refund amount with the customer in this conversation.
+Do NOT call this tool if either value has not been provided by the customer.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      orderId: {
+        type: 'string',
+        description: `The order ID to refund (format ORD-XXXXX).
+Must be confirmed by the customer. If not provided, ask for it — do not guess.`
+      },
+      amount: {
+        type: 'number',
+        description: `Refund amount in USD. Must be stated by the customer.
+If not specified, ask: "How much would you like refunded?" before calling this tool.`
+      },
+      reason: {
+        type: 'string',
+        enum: ['damaged', 'not_received', 'wrong_item', 'changed_mind', 'other'],
+        description: 'Reason for the refund. Infer from the conversation if clear, otherwise ask.'
+      }
+    },
+    required: ['orderId', 'amount', 'reason']
+  }
+};
+
+// PART 2: Code-level validation layer — intercept every tool call before it fires
+function validateToolCall(toolName, args) {
+  const tool = tools.find(t => t.name === toolName);
+  if (!tool) return { valid: false, error: `Unknown tool: ${toolName}` };
+
+  for (const field of (tool.input_schema.required ?? [])) {
+    const value = args[field];
+
+    // Missing field
+    if (value === undefined || value === null || value === '') {
+      return {
+        valid: false,
+        field,
+        recoveryInstruction: `You are missing the required field "${field}" for ${toolName}.
+Ask the user to provide it before calling this tool.`
+      };
+    }
+
+    // Plausibility checks for known patterns
+    if (field === 'orderId' && typeof value === 'string' && !value.match(/^ORD-\d+$/i)) {
+      return {
+        valid: false,
+        field,
+        recoveryInstruction: `The orderId value "${value}" doesn't match the expected format (ORD-XXXXX).
+Confirm the correct order ID with the customer before proceeding.`
+      };
+    }
+
+    if (field === 'amount' && (typeof value !== 'number' || value <= 0)) {
+      return {
+        valid: false,
+        field,
+        recoveryInstruction: `The refund amount must be a positive number.
+Ask the customer to confirm the exact amount they want refunded.`
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+// Updated loop — validation sits between the model's intent and your execution
+for (const block of response.content) {
+  if (block.type !== 'tool_use') continue;
+
+  const validation = validateToolCall(block.name, block.input);
+
+  if (!validation.valid) {
+    // Don't execute the bad call — inject recovery instruction back to the model
+    toolResults.push({
+      type:        'tool_result',
+      tool_use_id: block.id,
+      content:     validation.recoveryInstruction,
+      is_error:    true
+    });
+    // The model reads this and asks the user for the missing information
+    continue;
+  }
+
+  const result = await toolExecutors[block.name](block.input);
+  toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
+}</code></pre>
+      </section>
+
+      <!-- ─── STEP 6 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 6</span>
+        <h2>Add actions — and design risk gates before you ship write operations</h2>
+        <p>
+          Up to this point everything has been read-only: look up data, return information. The
+          moment the agent can change state in the world — send an email, process a payment, update
+          a record, delete data — the design requirements change fundamentally.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th></th><th>Tools (read)</th><th>Actions (write)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Effect on world state</td><td>None — safe to retry freely</td><td>Changes something — may be irreversible</td></tr>
+            <tr><td>Error recovery</td><td>Call again</td><td>May need rollback or human intervention</td></tr>
+            <tr><td>Design priority</td><td>Accuracy of result</td><td>Accuracy + blast radius + approval gate</td></tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Design the blast radius before writing any action code</p>
+        <p>
+          For every action, ask: <em>what is the worst case if this fires on wrong data?</em>
+          A wrongly-sent email is embarrassing. A wrongly-triggered refund is a financial incident.
+          A wrongly-triggered account deletion is a crisis. The risk classification dictates the gate.
+        </p>
+
+        <pre><code class="language-js">// Action registry — risk metadata lives here, not in the executor
+const actionRegistry = {
+  updateShippingAddress: {
+    risk:        'medium',
+    reversible:  true,
+    description: 'Updates the shipping address on a pending order',
+    execute: async ({ orderId, newAddress }) =>
+      orderAPI.updateShipping(orderId, newAddress)
+  },
+
+  processRefund: {
+    risk:        'high',
+    reversible:  false, // issued refunds can't be recalled
+    description: 'Issues a monetary refund for an order',
+    execute: async ({ orderId, amount, reason }) =>
+      paymentAPI.issueRefund(orderId, amount, reason)
+  },
+
+  cancelOrder: {
+    risk:        'high',
+    reversible:  false,
+    destructive: true,
+    dryRun: async ({ orderId }) => {
+      const order = await orderAPI.getById(orderId);
+      return `Would cancel order ${orderId} (${order.items.join(', ')}). This cannot be undone.`;
+    },
+    execute: async ({ orderId }) => orderAPI.cancel(orderId)
+  }
+};
+
+// Action executor with risk gates
+async function executeAction(actionName, args, context) {
+  const action = actionRegistry[actionName];
+  if (!action) throw new Error(`Unknown action: ${actionName}`);
+
+  // Gate 1: high-risk actions require explicit human approval
+  if (action.risk === 'high') {
+    const approved = await requestHumanApproval({
+      action: actionName,
+      args,
+      context,
+      description: action.description,
+      message: `Agent requests permission to run "${actionName}" with: ${JSON.stringify(args, null, 2)}`
+    });
+
+    if (!approved) {
+      return { status: 'cancelled', reason: 'Approval denied. No changes were made.' };
+    }
+  }
+
+  // Gate 2: destructive actions show a preview before executing
+  if (action.destructive && action.dryRun) {
+    const preview = await action.dryRun(args);
+    return {
+      status:  'preview',
+      preview,
+      message: `Preview of what would happen:\n${preview}\n\nConfirm to proceed.`
+    };
+  }
+
+  try {
+    const result = await action.execute(args);
+    return { status: 'success', result };
+  } catch (err) {
+    return {
+      status:    'error',
+      error:     err.message,
+      retriable: action.reversible
+    };
+  }
+}</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>Blast radius principle:</strong> Design the confirmation strategy and rollback
+            path before writing the action code. The moment you ship an action without these, you
+            are one bad tool call away from a production incident.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── STEP 7 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 7</span>
+        <h2>Package compound work into skills — keep the decision space manageable</h2>
+        <p>
+          When the agent's tool list grows past roughly 10–12 entries, selection accuracy starts
+          to degrade. The model faces too many choices with overlapping descriptions and starts
+          making inconsistent picks. The solution is skills: compound, reusable capabilities that
+          combine multiple tools and LLM calls into a single callable unit.
+        </p>
+        <p>
+          The value is cognitive load reduction — the agent chooses between 6 skills, not 30 tools.
+          Each skill manages its own internal complexity.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Skill type</th><th>What it does</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Cognitive</strong></td>
+              <td>LLM reasoning packaged as a reusable function: summarise, classify, extract, compare</td>
+              <td><code>summariseSkill(text, length)</code></td>
+            </tr>
+            <tr>
+              <td><strong>Procedural</strong></td>
+              <td>Fixed ordered sequence of steps — deterministic, no model judgment in the middle</td>
+              <td><code>onboardCustomerSkill()</code>: create → send email → assign manager → log</td>
+            </tr>
+            <tr>
+              <td><strong>Compositional</strong></td>
+              <td>Skills calling other skills or tools — handles complex multi-source tasks as one unit</td>
+              <td><code>researchCompetitorSkill(name)</code>: search × 2 + extract + summarise</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-js">// COGNITIVE SKILL — an LLM call with a focused, reusable prompt
+async function summariseSkill(text, length = 'short') {
+  const lengthMap = {
+    short:  '2-3 concise sentences',
+    medium: 'one focused paragraph',
+    long:   '3-4 detailed paragraphs'
+  };
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001', // cheaper model is fine for focused cognitive tasks
+    max_tokens: 512,
+    messages: [{
+      role: 'user',
+      content: `Summarise the following in ${lengthMap[length]}.
+Stick strictly to what is in the text — do not add outside information.
+
+TEXT:
+${text}`
+    }]
+  });
+  return response.content[0].text;
+}
+
+// COGNITIVE SKILL — extract structured entities from free text
+async function extractEntitiesSkill(text, entityTypes = ['person', 'company', 'date', 'amount']) {
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 512,
+    messages: [{
+      role: 'user',
+      content: `Extract the following entity types from the text below.
+Return a JSON object with one key per entity type, each containing an array of found values.
+Types: ${entityTypes.join(', ')}. Return empty arrays for types not found.
+Respond with valid JSON only.
+
+TEXT: ${text}`
+    }]
+  });
+  return JSON.parse(response.content[0].text);
+}
+
+// COMPOSITIONAL SKILL — search + extract + summarise in one callable unit
+// The agent calls this as a single step instead of managing 4 individual tool calls
+async function researchCompetitorSkill(competitorName) {
+  // Step 1: gather raw data using search tools
+  const [productInfo, newsInfo] = await Promise.all([
+    searchWeb(`${competitorName} product features pricing 2026`),
+    searchWeb(`${competitorName} recent news announcements`)
+  ]);
+
+  const rawText = productInfo.text + '\n\n' + newsInfo.text;
+
+  // Step 2: extract key entities from the raw data
+  const entities = await extractEntitiesSkill(rawText, ['product', 'price', 'feature', 'date']);
+
+  // Step 3: summarise into a readable output
+  const summary = await summariseSkill(rawText, 'medium');
+
+  return {
+    competitor: competitorName,
+    summary,
+    entities,
+    sources:    [...productInfo.urls, ...newsInfo.urls]
+  };
+}
+
+// From the agent's perspective: one clean call, one structured result
+const report = await researchCompetitorSkill('Acme Corp');
+// Internally ran: 2 searches + entity extraction + summarisation
+// Agent never needed to manage those 4 steps individually</code></pre>
+      </section>
+
+      <!-- ─── STEP 8 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 8</span>
+        <h2>Add reflection — catch errors before they become answers</h2>
+        <p>
+          Without reflection, the agent treats every tool result as correct and every generated
+          answer as complete. In the real world: APIs return empty results, data is stale, the
+          model misses half of what was asked. Reflection is a second pass that evaluates the output
+          against a concrete rubric before returning it to the user.
+        </p>
+        <p>
+          The key implementation detail: the critic needs <em>specific criteria</em>, not "is this
+          good?" — vague critique produces vague improvement. Three concrete questions are enough:
+          accurate? complete? grounded?
+        </p>
+
+        <pre><code class="language-js">async function agentWithReflection(userMessage, session, maxRetries = 2) {
+  let currentMessage = userMessage;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const result = await agentWithMemory(currentMessage, session);
+
+    // On the final retry, return whatever we have
+    if (attempt === maxRetries) return result;
+
+    // Critic evaluates the result against three specific criteria
+    const critique = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 256,
+      messages: [{
+        role: 'user',
+        content: `Evaluate this response to the original request: "${userMessage}"
+
+Response to evaluate:
+"${result}"
+
+Answer YES or NO for each criterion:
+1. ACCURATE   — Is every factual claim in the response correct based on the retrieved data?
+2. COMPLETE   — Does the response fully address what was asked, with no important parts missing?
+3. GROUNDED   — Does every claim trace back to retrieved tool data, not model assumptions?
+
+If all three are YES: respond exactly: PASS
+If any are NO: respond exactly: FAIL - [one sentence per failed criterion stating what is wrong]`
+      }]
+    });
+
+    const evaluation = critique.content[0].text.trim();
+
+    if (evaluation.startsWith('PASS')) return result; // Passed — return it
+
+    // Failed — inject the critique and the original ask, retry with the issues in context
+    currentMessage = `${userMessage}
+
+Your previous response was reviewed and rejected:
+"${result}"
+
+Issues found:
+${evaluation.replace('FAIL - ', '')}
+
+Retry addressing these specific issues. Be precise and grounded in the retrieved data.`;
+  }
+}</code></pre>
+      </section>
+
+      <!-- ─── STEP 9 ──────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 9</span>
+        <h2>Scope the environment — control what the agent perceives and can change</h2>
+        <p>
+          The environment is everything the agent sees and everything it can affect.
+          Get it wrong and you have either a blind agent (perception too narrow) or a dangerous
+          one (affordances too broad). Both are design failures, not model failures.
+        </p>
+
+        <pre><code class="language-js">// Build the agent's environment explicitly — pass it at the start of every turn
+function buildEnvironment(session, request) {
+  const isAuthenticated = session.get('authenticated') === 'true';
+  const orderConfirmed  = session.has('confirmedOrderId');
+
+  return {
+    // PERCEPTION — what the agent knows about the current context
+    // Make this explicit in the system prompt: don't make the agent guess its own context
+    contextBlock: `
+CURRENT SESSION CONTEXT:
+- User: ${session.get('userName') ?? 'unknown'} (${session.get('userPlan') ?? 'standard'} plan)
+- Authenticated: ${isAuthenticated}
+- Active order: ${session.get('confirmedOrderId') ?? 'none'}
+- Session started: ${session.get('sessionStart') ?? 'unknown'}
+- Recent errors: ${session.get('lastError') ?? 'none'}`,
+
+    // AFFORDANCES — scoped by session state
+    // The model cannot select tools it cannot see — use this as a security boundary
+    availableTools: isAuthenticated
+      ? (orderConfirmed
+          ? [lookupOrderStatusTool, processRefundTool, updateShippingTool]  // Full set
+          : [lookupOrderStatusTool, searchKnowledgeBaseTool])                // Pre-confirmation: read-only
+      : [searchKnowledgeBaseTool],                                           // Pre-auth: knowledge only
+
+    // FAILURE HANDLING — every tool call can fail, define the response before it happens
+    onToolError: (toolName, error) => ({
+      status:     'error',
+      tool:       toolName,
+      message:    error.message,
+      suggestion: `The ${toolName} tool is unavailable. Ask the user to provide the information manually, or suggest they try again in a moment.`
+    })
+  };
+}
+
+// PRINCIPLE: Sandbox during development, expand affordances only after validation
+// In dev/staging: only read tools (lookupOrderStatus, searchKnowledgeBase)
+// In production: full scoped set based on session state
+const affordanceSet = process.env.NODE_ENV === 'production'
+  ? buildEnvironment(session, request).availableTools
+  : [lookupOrderStatusTool, searchKnowledgeBaseTool]; // Read-only during dev</code></pre>
+
+        <p class="mini-heading">Four environment design rules</p>
+        <ul class="check-list">
+          <li><strong>Minimise affordances.</strong> Only expose the tools the agent needs for its current state. Unauthenticated users get read-only tools. The model cannot call what it cannot see.</li>
+          <li><strong>Make context explicit in the prompt.</strong> If the user is authenticated, say so. If an order is "pending," include that. Implicit state becomes hallucinated assumptions.</li>
+          <li><strong>Design every tool's failure path.</strong> APIs go down. Databases return null. Define the fallback before the failure happens, not after.</li>
+          <li><strong>Sandbox before production.</strong> During development, agents should only see read-only tools against test data. Gate write access to after the agent's behaviour is validated against a representative benchmark.</li>
+        </ul>
+      </section>
+
+      <!-- ─── STEP 10 ─────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Step 10</span>
+        <h2>Wire it all together — the complete agent</h2>
+        <p>
+          All nine layers assembled. This is the production pattern: environment scoping, session
+          memory, tool definitions, validation, action risk gates, and the ReAct loop — in one
+          coherent implementation.
+        </p>
+
+        <pre><code class="language-js">import Anthropic from '@anthropic-ai/sdk';
+const client = new Anthropic();
+
+// ─── TOOL DEFINITIONS ────────────────────────────────────────────────────────
+const allTools = {
+  lookupOrderStatus: {
+    definition: {
+      name: 'lookupOrderStatus',
+      description: `Look up the real-time status of a customer order.
+Use for order status, delivery estimate, and item list questions.
+Do NOT use for refunds — use processRefund instead.`,
+      input_schema: {
+        type: 'object',
+        properties: {
+          orderId: { type: 'string', description: 'Order ID (ORD-XXXXX). Ask if not provided.' }
+        },
+        required: ['orderId']
+      }
+    },
+    execute: async ({ orderId }) => {
+      const order = await orderAPI.getById(orderId);
+      return order ?? { error: 'Order not found', orderId };
+    }
+  },
+
+  processRefund: {
+    definition: {
+      name: 'processRefund',
+      description: `Issue a monetary refund. Only call after EXPLICITLY confirming
+order ID AND amount with the customer. Never guess these values.`,
+      input_schema: {
+        type: 'object',
+        properties: {
+          orderId: { type: 'string', description: 'Confirmed order ID. Ask if not stated.' },
+          amount:  { type: 'number', description: 'Confirmed refund amount in USD. Ask if not stated.' },
+          reason:  { type: 'string', enum: ['damaged','not_received','wrong_item','changed_mind','other'] }
+        },
+        required: ['orderId', 'amount', 'reason']
+      }
+    },
+    risk:    'high',
+    execute: async ({ orderId, amount, reason }) => paymentAPI.issueRefund(orderId, amount, reason)
+  },
+
+  searchKnowledgeBase: {
+    definition: {
+      name: 'searchKnowledgeBase',
+      description: `Search company knowledge articles, policies, and FAQs.
+Use for return policies, product questions, and how-to guides.
+Do NOT use for live order status or account data.`,
+      input_schema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The search query.' }
+        },
+        required: ['query']
+      }
+    },
+    execute: async ({ query }) => knowledgeBaseAPI.search(query)
+  }
+};
+
+// ─── VALIDATION ──────────────────────────────────────────────────────────────
+function validate(toolName, args) {
+  const tool = allTools[toolName];
+  if (!tool) return { ok: false, msg: `Unknown tool: ${toolName}` };
+  for (const field of (tool.definition.input_schema.required ?? [])) {
+    if (!args[field]) return {
+      ok:  false,
+      msg: `Missing required field "${field}" for ${toolName}. Ask the user to provide it.`
+    };
+  }
+  return { ok: true };
+}
+
+// ─── FULL AGENT ───────────────────────────────────────────────────────────────
+async function runAgent(userMessage, session) {
+  // Scope tools based on session state
+  const isAuth   = session.get('authenticated') === 'true';
+  const hasOrder = session.has('confirmedOrderId');
+  const toolKeys = isAuth
+    ? (hasOrder ? ['lookupOrderStatus','processRefund','searchKnowledgeBase'] : ['lookupOrderStatus','searchKnowledgeBase'])
+    : ['searchKnowledgeBase'];
+
+  const tools = toolKeys.map(k => allTools[k].definition);
+
+  const systemPrompt = `You are a customer support assistant.
+Help with order status, refunds, and product questions.
+Think step by step. Use tools when you need live data.
+Do NOT guess order IDs or amounts — ask the customer.
+${session.toContextBlock()}`;
+
+  const messages = [{ role: 'user', content: userMessage }];
+
+  for (let step = 0; step < 8; step++) {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6', max_tokens: 1024,
+      system: systemPrompt, tools, messages
+    });
+
+    if (response.stop_reason === 'end_turn') {
+      return response.content.find(b => b.type === 'text')?.text;
+    }
+
+    if (response.stop_reason === 'tool_use') {
+      messages.push({ role: 'assistant', content: response.content });
+      const results = [];
+
+      for (const block of response.content) {
+        if (block.type !== 'tool_use') continue;
+        const { name, id, input } = block;
+
+        // Validation gate
+        const check = validate(name, input);
+        if (!check.ok) {
+          results.push({ type: 'tool_result', tool_use_id: id, content: check.msg, is_error: true });
+          continue;
+        }
+
+        // Risk gate for high-risk actions
+        if (allTools[name]?.risk === 'high') {
+          const approved = await requestHumanApproval(name, input);
+          if (!approved) {
+            results.push({ type: 'tool_result', tool_use_id: id, content: 'Action cancelled — approval denied.' });
+            continue;
+          }
+        }
+
+        // Execute
+        let result;
+        try {
+          result = await allTools[name].execute(input);
+          // Persist useful facts to session
+          if (name === 'lookupOrderStatus') session.set('confirmedOrderId', input.orderId);
+        } catch (err) {
+          result = { error: err.message };
+        }
+
+        results.push({ type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) });
+      }
+
+      messages.push({ role: 'user', content: results });
+    }
+  }
+
+  return 'Unable to complete this request. Please contact support directly.';
+}
+
+// ─── RUN ─────────────────────────────────────────────────────────────────────
+const session = createSession();
+session.set('authenticated', 'true');
+session.set('userName', 'Abhinav');
+session.set('userPlan', 'premium');
+
+const answer = await runAgent("Hi, I need a refund for order ORD-4521.", session);
+console.log(answer);
+// Loop:
+// 1. No confirmedOrderId yet → only lookupOrderStatus and searchKnowledgeBase available
+// 2. Agent calls lookupOrderStatus({ orderId: "ORD-4521" }) → session stores confirmedOrderId
+// 3. processRefund now appears in the next turn's tool set
+// 4. Agent asks: "How much would you like refunded?"
+// 5. User replies with amount → agent calls processRefund with human approval gate</code></pre>
+      </section>
+
+      <!-- ─── FAILURE MODES ────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Common Failure Modes</span>
+        <h2>Five failure modes and exactly how to fix each</h2>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>Failure</th><th>What you see</th><th>Root cause</th><th>Fix</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Wrong tool selected</strong></td>
+              <td>Agent searches the knowledge base for a live order status; returns stale generic info</td>
+              <td>Two tools with overlapping descriptions — model can't distinguish them</td>
+              <td>Add negative scope to both: "Do NOT use for X." Reduce tool count per context. Separate tools clearly by return type (live data vs. static docs).</td>
+            </tr>
+            <tr>
+              <td><strong>Hallucinated parameters</strong></td>
+              <td>Agent calls processRefund with an order ID the user never mentioned</td>
+              <td>Required field with no source in context — model invents a plausible value</td>
+              <td>Add "do not guess — ask the user" to every required parameter description. Add a validation layer that checks required fields before any tool fires.</td>
+            </tr>
+            <tr>
+              <td><strong>Correct tool, wrong timing</strong></td>
+              <td>Agent processes a refund before confirming the amount with the user</td>
+              <td>No pre-condition enforced. Model follows the action description but skips the gathering step.</td>
+              <td>Add explicit pre-condition in the tool description ("only call after confirming X"). Use session-state-based tool scoping to make the action unavailable until the pre-condition is met.</td>
+            </tr>
+            <tr>
+              <td><strong>Context window overflow</strong></td>
+              <td>In long sessions: agent repeats questions, forgets earlier confirmations</td>
+              <td>All history kept in-context. When the window fills, old content falls off silently.</td>
+              <td>Summarise older conversation turns and move to session memory. Persist confirmed facts (order ID, user name) to the session store so they survive the turn-off.</td>
+            </tr>
+            <tr>
+              <td><strong>Infinite loop / doom loop</strong></td>
+              <td>Agent calls the same failing tool over and over; never escalates</td>
+              <td>No iteration cap. Error handling re-feeds into the same tool call without a different strategy.</td>
+              <td>Always set MAX_STEPS. Track which tools have been tried. After N failures on the same tool, switch strategy or return a graceful fallback message with escalation to a human.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ─── WHEN NOT TO USE AN AGENT ───────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Decision Framework</span>
+        <h2>When NOT to use an agent</h2>
+        <p>
+          Agents add latency, cost, and failure points. Many things people reach for an agent to
+          solve are better served by something simpler. Use this test before committing to agent architecture.
+        </p>
+
+        <table class="data-table">
+          <thead>
+            <tr><th>If your task is…</th><th>Use this instead</th><th>Why</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>A single transformation with fixed inputs and outputs (summarise, classify, draft)</td>
+              <td>One LLM call with a prompt template</td>
+              <td>No loop needed. Straight line in → out. Adding a loop adds overhead with no benefit.</td>
+            </tr>
+            <tr>
+              <td>A fixed, ordered process where every step is known in advance</td>
+              <td>Deterministic workflow (code, no LLM in the loop)</td>
+              <td>If the path never branches dynamically, there is nothing for the agent to decide. Hard-code it.</td>
+            </tr>
+            <tr>
+              <td>A question answerable purely from training knowledge or static docs</td>
+              <td>RAG + single LLM call</td>
+              <td>Retrieve the relevant documents, generate one response. No reasoning loop needed.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>
+            <strong>The litmus test:</strong> Does completing this task require the system to make
+            decisions based on information it doesn't have at the start? Does the path change depending
+            on what it discovers at runtime? If yes — agent. If no — something simpler.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── TAKEAWAY ──────────────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          An agent is not "just prompting harder." It is a product: a loop with typed tools, a
+          validation layer, memory tiers, risk-gated actions, and quality gates wrapped around a
+          model. The model is the brain — it reads your tool descriptions, matches them to context,
+          and declares intent. Your scaffolding is everything else: executing the calls, validating
+          the arguments, persisting the state, scoping the affordances, and catching the failures
+          before they reach the user. Build that scaffolding with the same rigour you would give
+          any production system — because that is exactly what an agent is.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

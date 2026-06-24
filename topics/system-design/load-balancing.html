@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Load Balancing | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Server infrastructure" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Distributed Systems · Concept 01 · 12 min</span></div>
+        </figure>
+        <h1>Load Balancing</h1>
+        <p class="summary">Distributes incoming traffic across a pool of servers so no single node is overwhelmed. The mechanism that makes horizontal scaling actually work — without it, adding more servers changes nothing.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">01 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Distributed Systems</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Every web-scale system</span></div>
+          <div><span class="meta-label">Code</span><span class="meta-value">Node.js / JavaScript</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Before load balancers, scaling meant buying a bigger server — vertical scaling. You hit a hard wall when one machine couldn't keep up. The solution was to spread load across many smaller machines, but that required something to decide which machine each request goes to. That something is a load balancer.</p>
+        <div class="callout"><p><strong>Mental model:</strong> A load balancer is a traffic cop standing in front of your server pool. Every incoming request arrives at the cop, who decides which server handles it, then forwards the request. The client never knows which server responded — it only ever talks to the cop.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">How It Works</span>
+        <h2>Request flow and internal mechanics</h2>
+        <p>When a request arrives at the load balancer, three things happen: the LB selects a backend server using its configured algorithm, it forwards the request (either terminating the TCP connection itself or passing it through), and it tracks health of the pool to route around failures.</p>
+        <div class="diagram-box">
+<span class="dim">Client</span>         <span class="dim">Load Balancer</span>              <span class="dim">Server Pool</span>
+   │                     │                        │
+   │  GET /api/orders    │                        │
+   │────────────────────▶│                        │
+   │                     │  <span class="step">1. select server</span>       │
+   │                     │     algorithm: round-robin
+   │                     │  <span class="step">2. health check</span>        │
+   │                     │     Server-2 is DOWN ✗  │
+   │                     │     Server-3 is UP  ✓   │
+   │                     │  <span class="step">3. forward request</span>     │
+   │                     │────────────────────────▶│ <span class="ok">Server-3</span>
+   │                     │                         │ processes
+   │                     │◀────────────────────────│ responds
+   │◀────────────────────│                         │
+   │   200 OK            │                         │
+        </div>
+
+        <p class="mini-heading">Layer 4 vs Layer 7 load balancing</p>
+        <p>This is the most important distinction architects make. Layer 4 (transport) balancers operate on IP and TCP — they forward packets without reading the application payload. Layer 7 (application) balancers read the HTTP request fully, enabling content-based routing.</p>
+        <table class="data-table">
+          <thead><tr><th></th><th>Layer 4 (TCP/UDP)</th><th>Layer 7 (HTTP/HTTPS)</th></tr></thead>
+          <tbody>
+            <tr><td>Reads</td><td>IP, port, TCP flags</td><td>Full HTTP: URL, headers, body, cookies</td></tr>
+            <tr><td>Routing basis</td><td>IP:port only</td><td>Path, host, header, cookie value</td></tr>
+            <tr><td>Latency</td><td>Extremely low</td><td>Slightly higher (must parse HTTP)</td></tr>
+            <tr><td>SSL termination</td><td>Pass-through</td><td>Can terminate and re-encrypt</td></tr>
+            <tr><td>Examples</td><td>AWS NLB, HAProxy (TCP mode)</td><td>AWS ALB, Nginx, HAProxy (HTTP mode)</td></tr>
+            <tr><td>Use when</td><td>Raw TCP, gaming, low latency critical</td><td>HTTP microservices, path-based routing</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Algorithms</span>
+        <h2>Load balancing algorithms — when to use each</h2>
+
+        <p class="mini-heading">Round Robin</p>
+        <p>Requests are distributed sequentially: server 1, server 2, server 3, server 1... Simple and effective when all servers have identical capacity and requests take similar time. Breaks down when servers have different specs or request durations vary widely.</p>
+
+        <p class="mini-heading">Weighted Round Robin</p>
+        <p>Same as round robin, but each server gets a weight. A server with weight 3 receives 3× the traffic of a weight-1 server. Use when your pool is heterogeneous — e.g., some nodes are c5.4xlarge and some are c5.2xlarge.</p>
+
+        <p class="mini-heading">Least Connections</p>
+        <p>Routes each new request to the server with the fewest active connections. Better than round robin when request duration varies significantly (some requests take 10ms, others take 2s). The LB must track in-flight connection counts.</p>
+
+        <p class="mini-heading">IP Hash (Sticky Sessions)</p>
+        <p>Hashes the client IP and always routes that client to the same server. Provides session affinity — useful when server-side session state exists. Problem: uneven distribution if many users share one IP (NAT), and if a server goes down, those sessions are lost.</p>
+
+        <p class="mini-heading">Least Response Time</p>
+        <p>Routes to the server with the lowest combination of active connections and response time. Most accurate but requires the LB to continuously measure response times. Used in premium LBs like AWS ALB with target group metrics.</p>
+
+        <pre><code class="language-js">// Implementing Round Robin and Least Connections in Node.js
+
+class RoundRobinBalancer {
+  constructor(servers) {
+    this.servers = servers.filter(s => s.healthy);
+    this.index = 0;
+  }
+
+  next() {
+    const healthy = this.servers.filter(s => s.healthy);
+    if (healthy.length === 0) throw new Error('No healthy servers');
+    const server = healthy[this.index % healthy.length];
+    this.index = (this.index + 1) % healthy.length;
+    return server;
+  }
+}
+
+class LeastConnectionsBalancer {
+  constructor(servers) {
+    this.servers = servers;
+    // Track active connection count per server
+    this.connections = new Map(servers.map(s => [s.id, 0]));
+  }
+
+  next() {
+    const healthy = this.servers.filter(s => s.healthy);
+    if (healthy.length === 0) throw new Error('No healthy servers');
+
+    // Pick server with fewest active connections
+    return healthy.reduce((best, s) =>
+      (this.connections.get(s.id) < this.connections.get(best.id)) ? s : best
+    );
+  }
+
+  // Call when a request starts and ends
+  increment(serverId) { this.connections.set(serverId, (this.connections.get(serverId) || 0) + 1); }
+  decrement(serverId) { this.connections.set(serverId, Math.max(0, (this.connections.get(serverId) || 1) - 1)); }
+}
+
+// Health check loop — runs independently every 5 seconds
+async function healthCheckLoop(servers, intervalMs = 5000) {
+  async function checkServer(server) {
+    try {
+      const resp = await fetch(`http://${server.host}:${server.port}/health`, { signal: AbortSignal.timeout(2000) });
+      server.healthy = resp.ok;
+    } catch {
+      server.healthy = false;
+    }
+  }
+
+  setInterval(() => Promise.all(servers.map(checkServer)), intervalMs);
+}
+
+// Proxy implementation using the balancer
+import http from 'http';
+import httpProxy from 'http-proxy';
+
+const servers = [
+  { id: 's1', host: '10.0.0.1', port: 8080, healthy: true },
+  { id: 's2', host: '10.0.0.2', port: 8080, healthy: true },
+  { id: 's3', host: '10.0.0.3', port: 8080, healthy: true },
+];
+
+const balancer = new LeastConnectionsBalancer(servers);
+const proxy = httpProxy.createProxyServer({});
+
+healthCheckLoop(servers);
+
+http.createServer((req, res) => {
+  const server = balancer.next();
+  balancer.increment(server.id);
+
+  proxy.web(req, res, { target: `http://${server.host}:${server.port}` }, (err) => {
+    balancer.decrement(server.id);
+    res.writeHead(502); res.end('Bad Gateway');
+  });
+
+  res.on('finish', () => balancer.decrement(server.id));
+}).listen(80);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>What you gain and what you give up</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros">
+            <h4>Pros</h4>
+            <ul>
+              <li>Horizontal scalability — add servers to add capacity</li>
+              <li>High availability — one server down, traffic reroutes automatically</li>
+              <li>SSL termination in one place</li>
+              <li>DDoS absorption surface</li>
+              <li>Zero-downtime deployments (drain, deploy, re-add)</li>
+            </ul>
+          </div>
+          <div class="trade-col cons">
+            <h4>Cons</h4>
+            <ul>
+              <li>Single point of failure if LB itself has no redundancy</li>
+              <li>Session affinity breaks stateful servers</li>
+              <li>Adds one network hop + latency</li>
+              <li>Sticky sessions cause uneven load</li>
+              <li>Layer 7 inspection costs CPU under high TLS load</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="warn-box"><strong>The sticky session trap:</strong> IP hash routes a client to the same server, but if that server is deployed or crashes, the session is gone. The real fix is to not store session state on the server — use Redis or a shared token (JWT). Then any server can handle any request.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How production systems implement this</h2>
+        <p><strong>AWS:</strong> ALB (Layer 7) for HTTP microservices with path-based and host-based routing. NLB (Layer 4) for high-throughput, ultra-low-latency workloads like gaming or IoT. Global Accelerator for cross-region routing using anycast IPs.</p>
+        <p><strong>Cloudflare:</strong> Uses anycast routing — all Cloudflare IPs are announced from every PoP globally. The BGP network routes your request to the nearest PoP automatically, before any application-layer balancing happens. This is why Cloudflare absorbs 100Tbps+ DDoS attacks: the attack traffic is spread across 250+ PoPs.</p>
+        <p><strong>Netflix:</strong> Uses Zuul (their open-source API gateway/LB) in front of all microservices. Zuul integrates with Eureka (service registry) and Ribbon (client-side load balancing) so each service instance knows about every other service and load-balances requests itself, without a central LB for internal traffic.</p>
+
+        <div class="insight-box"><strong>Client-side vs server-side load balancing:</strong> Traditional load balancing is server-side — one central LB. Kubernetes and Netflix use client-side — each service has a list of target instances and balances requests itself. Client-side removes the central bottleneck but requires service discovery to keep instance lists fresh.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Common Mistakes</span>
+        <h2>What goes wrong in production</h2>
+        <ul class="check-list">
+          <li><strong>Single LB with no redundancy:</strong> The LB is the new single point of failure. Always run LBs in HA pairs with a VIP (Virtual IP) that floats between them.</li>
+          <li><strong>Health check endpoint that doesn't represent real health:</strong> A health check that returns 200 even when the database connection pool is exhausted is worse than useless — the LB sends traffic to a broken server.</li>
+          <li><strong>Too-aggressive health check timeouts:</strong> A 500ms health check timeout causes servers under load to be marked unhealthy, reducing pool size exactly when you need capacity most.</li>
+          <li><strong>Ignoring connection draining:</strong> Removing a server immediately drops all in-flight requests. Use connection draining (deregister with a drain timeout) so existing requests complete before the instance is removed.</li>
+          <li><strong>Not accounting for slow backends:</strong> Round robin can pile up thousands of connections on a slow server. Least connections handles this better — but only if you measure active connections, not just request count.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A load balancer is the prerequisite for horizontal scaling — without it, additional servers are invisible to clients. Choose Layer 7 for HTTP services where content-based routing matters; Layer 4 for raw TCP where latency is critical. Use least-connections over round-robin for services with variable request duration. And always make your servers stateless — session affinity is a workaround for a design problem, not a feature.</p>
+      </section>
+    </main>
+  </body>
+</html>

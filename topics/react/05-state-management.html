@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>State Management | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Data flow and state management" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 5 of 11 · ~35 min</span>
+          </div>
+        </figure>
+        <h1>State Management</h1>
+        <p class="summary">When Context API is enough, when to reach for Redux Toolkit, and the modern alternatives — Zustand, Jotai, and TanStack Store. Plus the global state design principles that keep large apps maintainable.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">5 of 11</span></div>
+          <div><span class="meta-label">Libraries</span><span class="meta-value">Context · Redux Toolkit · Zustand · Jotai · TanStack Store</span></div>
+          <div><span class="meta-label">Rule of thumb</span><span class="meta-value">Start local, lift when needed, go global only when you must</span></div>
+        </div>
+      </header>
+
+      <!-- ─── CONTEXT API ──────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>Context API — built-in React state sharing</h2>
+        <p class="lead">Context solves prop drilling — passing props through many layers to reach a deeply nested child. It is best for low-frequency updates like theme, locale, and auth state. It is NOT a high-performance global store.</p>
+        <pre><code class="language-jsx">// ─── Theme context — typical Context API use case ─────────────────────────
+import { createContext, useContext, useState, useCallback } from 'react';
+
+const ThemeContext = createContext(null);
+
+export function ThemeProvider({ children }) {
+  const [theme, setTheme] = useState('light');
+
+  const toggle = useCallback(() =>
+    setTheme(t => t === 'light' ? 'dark' : 'light'), []);
+
+  return (
+    &lt;ThemeContext.Provider value={{ theme, toggle }}&gt;
+      {children}
+    &lt;/ThemeContext.Provider&gt;
+  );
+}
+
+export const useTheme = () => {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme must be inside ThemeProvider');
+  return ctx;
+};
+
+// ─── The performance problem with Context ─────────────────────────────────
+// Every consumer re-renders when ANY value in the context changes
+// Solution: split into multiple contexts by update frequency
+
+const UserContext     = createContext(null);  // changes: login/logout only
+const NotifContext    = createContext(null);  // changes: every new notification
+const SettingsContext = createContext(null);  // changes: user preferences
+
+// Now a component consuming UserContext won't re-render when a notification arrives
+</code></pre>
+        <div class="warn-box"><strong>Context is not a state management solution for frequent updates.</strong> A cart with 100 items that changes on every keystroke will re-render every consumer on every change. Use Zustand or Redux Toolkit for high-frequency mutable global state.</div>
+      </section>
+
+      <!-- ─── REDUX TOOLKIT ──────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Redux Toolkit — the modern Redux</h2>
+        <p>Redux Toolkit (RTK) is the official, opinionated way to write Redux. It eliminates the boilerplate of vanilla Redux — no more action type strings, action creators, or immutable update patterns. Use it when you need a centralized, debuggable, serialisable state store.</p>
+        <pre><code class="language-jsx">// npm install @reduxjs/toolkit react-redux
+import { createSlice, createAsyncThunk, configureStore } from '@reduxjs/toolkit';
+import { Provider, useSelector, useDispatch } from 'react-redux';
+
+// ─── Slice — combines reducer + actions in one ────────────────────────────
+const cartSlice = createSlice({
+  name: 'cart',
+  initialState: { items: [], status: 'idle', error: null },
+  reducers: {
+    addItem(state, action) {
+      // RTK uses Immer — you CAN mutate directly here (it produces a new state)
+      const existing = state.items.find(i => i.id === action.payload.id);
+      if (existing) { existing.qty += 1; }
+      else { state.items.push({ ...action.payload, qty: 1 }); }
+    },
+    removeItem(state, action) {
+      state.items = state.items.filter(i => i.id !== action.payload);
+    },
+    clearCart(state) {
+      state.items = [];
+    },
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(checkoutCart.pending,   (state) => { state.status = 'loading'; })
+      .addCase(checkoutCart.fulfilled, (state) => { state.items = []; state.status = 'idle'; })
+      .addCase(checkoutCart.rejected,  (state, action) => { state.error = action.error.message; state.status = 'idle'; });
+  },
+});
+
+// ─── Async thunk for API calls ─────────────────────────────────────────
+const checkoutCart = createAsyncThunk('cart/checkout', async (cartItems) => {
+  const res = await fetch('/api/checkout', {
+    method: 'POST',
+    body: JSON.stringify({ items: cartItems }),
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error('Checkout failed');
+  return res.json();
+});
+
+export const { addItem, removeItem, clearCart } = cartSlice.actions;
+
+// ─── Store ────────────────────────────────────────────────────────────────
+const store = configureStore({
+  reducer: { cart: cartSlice.reducer },
+});
+
+// ─── In components ────────────────────────────────────────────────────────
+function CartSummary() {
+  const items    = useSelector(state => state.cart.items);
+  const dispatch = useDispatch();
+
+  const total = items.reduce((s, i) => s + i.priceCents * i.qty, 0);
+
+  return (
+    &lt;div&gt;
+      {items.map(item =&gt; (
+        &lt;div key={item.id}&gt;
+          {item.name} × {item.qty}
+          &lt;button onClick={() =&gt; dispatch(removeItem(item.id))}&gt;×&lt;/button&gt;
+        &lt;/div&gt;
+      ))}
+      &lt;p&gt;Total: ${(total / 100).toFixed(2)}&lt;/p&gt;
+      &lt;button onClick={() =&gt; dispatch(checkoutCart(items))}&gt;Checkout&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+function AppRoot() {
+  return &lt;Provider store={store}&gt;&lt;App /&gt;&lt;/Provider&gt;;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── ZUSTAND ──────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>Zustand — minimal, boilerplate-free global state</h2>
+        <p>Zustand is a tiny state management library (8kb) that combines the best ideas from Redux (external store, selectors) with the simplicity of Context. No providers, no reducers, no action creators.</p>
+        <pre><code class="language-jsx">// npm install zustand
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+
+// ─── Cart store ───────────────────────────────────────────────────────────
+const useCartStore = create(
+  persist(
+    (set, get) => ({
+      items: [],
+
+      addItem: (product) => set(state => {
+        const existing = state.items.find(i => i.id === product.id);
+        if (existing) {
+          return { items: state.items.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i) };
+        }
+        return { items: [...state.items, { ...product, qty: 1 }] };
+      }),
+
+      removeItem: (id) => set(state => ({
+        items: state.items.filter(i => i.id !== id),
+      })),
+
+      clearCart: () => set({ items: [] }),
+
+      get total() {
+        return get().items.reduce((s, i) => s + i.priceCents * i.qty, 0);
+      },
+    }),
+    { name: 'cart-storage' }  // persist to localStorage automatically
+  )
+);
+
+// ─── Usage — subscribe only to what you need ─────────────────────────────
+function CartIcon() {
+  const count = useCartStore(state => state.items.length);  // only re-renders when count changes
+  return &lt;span&gt;🛒 {count}&lt;/span&gt;;
+}
+
+function CartPage() {
+  const items     = useCartStore(state => state.items);
+  const addItem   = useCartStore(state => state.addItem);
+  const clearCart = useCartStore(state => state.clearCart);
+
+  return (
+    &lt;div&gt;
+      {items.map(item =&gt; (
+        &lt;CartRow key={item.id} item={item} /&gt;
+      ))}
+      &lt;button onClick={clearCart}&gt;Clear&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Multiple stores is fine — Zustand encourages domain separation ───────
+const useAuthStore = create((set) => ({
+  user: null,
+  setUser: (user) => set({ user }),
+  logout: () => set({ user: null }),
+}));
+
+const useUIStore = create((set) => ({
+  sidebarOpen: false,
+  toggleSidebar: () => set(s => ({ sidebarOpen: !s.sidebarOpen })),
+}));
+</code></pre>
+      </section>
+
+      <!-- ─── JOTAI ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>Jotai — atomic state management</h2>
+        <p>Jotai is inspired by Recoil. Instead of one big store, state is broken into small atoms. Components subscribe only to the atoms they need — no unnecessary re-renders. Great for fine-grained reactivity.</p>
+        <pre><code class="language-jsx">// npm install jotai
+import { atom, useAtom, useAtomValue, useSetAtom } from 'jotai';
+import { atomWithStorage } from 'jotai/utils';
+
+// ─── Define atoms ─────────────────────────────────────────────────────────
+const userAtom         = atom(null);
+const themeAtom        = atomWithStorage('theme', 'light');  // auto-persisted
+const cartItemsAtom    = atom([]);
+
+// Derived atom — computed from other atoms, no setter needed
+const cartCountAtom = atom(get => get(cartItemsAtom).length);
+const cartTotalAtom = atom(get =>
+  get(cartItemsAtom).reduce((s, i) => s + i.priceCents * i.qty, 0)
+);
+
+// Write atom — derived atom with a custom setter
+const addToCartAtom = atom(
+  get => get(cartItemsAtom),
+  (get, set, product) => {
+    const items = get(cartItemsAtom);
+    const existing = items.find(i => i.id === product.id);
+    if (existing) {
+      set(cartItemsAtom, items.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i));
+    } else {
+      set(cartItemsAtom, [...items, { ...product, qty: 1 }]);
+    }
+  }
+);
+
+// ─── Usage ────────────────────────────────────────────────────────────────
+function CartBadge() {
+  const count = useAtomValue(cartCountAtom);  // read only, no setter overhead
+  return &lt;span&gt;{count}&lt;/span&gt;;
+}
+
+function AddToCartButton({ product }) {
+  const addToCart = useSetAtom(addToCartAtom);  // setter only, no re-render on value change
+  return &lt;button onClick={() =&gt; addToCart(product)}&gt;Add to cart&lt;/button&gt;;
+}
+
+function ThemeToggle() {
+  const [theme, setTheme] = useAtom(themeAtom);
+  return &lt;button onClick={() =&gt; setTheme(t =&gt; t === 'light' ? 'dark' : 'light')}&gt;{theme}&lt;/button&gt;;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── TANSTACK STORE ─────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>TanStack Store — framework-agnostic reactive store</h2>
+        <p>TanStack Store is the headless state management solution from the TanStack ecosystem. It is framework-agnostic (React, Vue, Solid, Angular) and very lightweight.</p>
+        <pre><code class="language-jsx">// npm install @tanstack/store @tanstack/react-store
+import { Store } from '@tanstack/store';
+import { useStore } from '@tanstack/react-store';
+
+// ─── Define the store ─────────────────────────────────────────────────────
+const cartStore = new Store({
+  items: [],
+});
+
+// Actions are just functions that call store.setState
+function addToCart(product) {
+  cartStore.setState(state => {
+    const existing = state.items.find(i => i.id === product.id);
+    if (existing) {
+      return { items: state.items.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i) };
+    }
+    return { items: [...state.items, { ...product, qty: 1 }] };
+  });
+}
+
+function clearCart() {
+  cartStore.setState(() => ({ items: [] }));
+}
+
+// ─── Usage ────────────────────────────────────────────────────────────────
+function CartCount() {
+  // Second arg is a selector — component only re-renders when this value changes
+  const count = useStore(cartStore, state => state.items.length);
+  return &lt;span&gt;{count} items&lt;/span&gt;;
+}
+
+function CartPage() {
+  const items = useStore(cartStore, state => state.items);
+  return (
+    &lt;div&gt;
+      {items.map(i =&gt; &lt;div key={i.id}&gt;{i.name}&lt;/div&gt;)}
+      &lt;button onClick={clearCart}&gt;Clear&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── GLOBAL STATE DESIGN ───────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Global State Design — principles for large apps</h2>
+        <div class="diagram-box">
+<span class="step">State type → where it belongs</span>
+
+<span class="hi">Server state</span>  (data from APIs, loading/error status)
+  → TanStack Query or SWR — they are purpose-built for this
+  → NOT in Redux/Zustand — you're reinventing what Query already does
+
+<span class="hi">Global UI state</span>  (theme, sidebar open, modal open)
+  → Zustand or Context (low frequency)
+  → Small, rarely needs time-travel debugging
+
+<span class="hi">Form state</span>  (input values, validation errors)
+  → React Hook Form + local state
+  → Keep it local — forms rarely need to be global
+
+<span class="hi">URL state</span>  (filters, pagination, search query)
+  → URL search params via React Router
+  → Free: shareable, bookmarkable, back-button works
+
+<span class="hi">Local component state</span>  (open/closed, hover, focus)
+  → useState inside the component
+  → Don't lift it if nothing else needs it
+
+<span class="step">Decision tree</span>
+
+Does only one component need it?          → useState
+Do multiple sibling components need it?   → lift to parent
+Do deeply nested components need it?      → Context or Zustand
+Is it server data?                        → TanStack Query
+Is it form state?                         → React Hook Form
+Does it need undo/redo or time travel?    → Redux Toolkit
+        </div>
+        <pre><code class="language-jsx">// ─── Combining TanStack Query with Zustand ─────────────────────────────────
+// TanStack Query handles server state, Zustand handles UI state
+// They complement each other perfectly
+
+// Server state — TanStack Query
+function useUser(userId) {
+  return useQuery({
+    queryKey: ['user', userId],
+    queryFn: () => fetch(`/api/users/${userId}`).then(r => r.json()),
+    staleTime: 5 * 60 * 1000, // 5 min
+  });
+}
+
+// UI state — Zustand
+const useUIStore = create(set => ({
+  editingUserId: null,
+  openEditModal: (id) => set({ editingUserId: id }),
+  closeEditModal: () => set({ editingUserId: null }),
+}));
+
+// Component uses both cleanly
+function UserRow({ userId }) {
+  const { data: user } = useUser(userId);
+  const openEdit = useUIStore(s => s.openEditModal);
+
+  return (
+    &lt;tr&gt;
+      &lt;td&gt;{user?.name}&lt;/td&gt;
+      &lt;td&gt;&lt;button onClick={() =&gt; openEdit(userId)}&gt;Edit&lt;/button&gt;&lt;/td&gt;
+    &lt;/tr&gt;
+  );
+}
+</code></pre>
+        <div class="insight-box"><strong>The single biggest state management mistake</strong> in React apps is putting server data (users, products, orders) into Redux/Zustand and manually managing loading/error/stale state. TanStack Query does this in 10 lines of code. Separate server state from UI state and your state management becomes dramatically simpler.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 5 Takeaway</h2>
+        <p>Choose the simplest state solution that works: local state first, Context for low-frequency sharing, Zustand for global UI state, TanStack Query for server data. Redux Toolkit is overkill for most apps today but is the right choice when you need strict action-history, time-travel debugging, or a very large team with coordination needs. Jotai and TanStack Store are excellent modern alternatives if you want fine-grained reactivity or framework portability.</p>
+      </section>
+    </main>
+  </body>
+</html>

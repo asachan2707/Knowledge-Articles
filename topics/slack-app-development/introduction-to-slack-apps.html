@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Introduction to Slack Apps | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Slack messaging app open on laptop and phone"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Core · Concepts · 30 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@austindistel" target="_blank" rel="noopener">Austin Distel</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Introduction to Slack Apps</h1>
+        <p class="summary">
+          Slack's "Start" guide explains the lifecycle of a Slack app: create it in the developer
+          console, choose features, pick a hosting/transport path, and install it to a workspace. This
+          page expands each step with the decisions you'll regret skipping later.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack core</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Create &amp; install your first Slack app</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~30 min read + 30 min hands-on</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Authentication, Bolt quickstart</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every Slack app starts the same way: register at <code>api.slack.com/apps</code>, pick a name
+          and a workspace, then enable the <em>features</em> you need (slash commands, event
+          subscriptions, interactivity, OAuth, App Home). The decisions you make here —
+          transport, scopes, distribution — shape the rest of the project.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Two big choices upfront:</strong> 1) <em>Transport</em> — HTTP receiver (public URL)
+            vs. Socket Mode (no public URL needed). 2) <em>Distribution</em> — internal (one workspace,
+            single bot token) vs. distributed (any workspace, full OAuth + installation store).
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 1 — Create the app</h2>
+        <ol>
+          <li>Go to <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → "Create New App".</li>
+          <li>Pick "From scratch" or "From an app manifest" (YAML/JSON). Manifests are reproducible.</li>
+          <li>Choose your development workspace (a sandbox you own; never your prod workspace).</li>
+        </ol>
+        <p class="code-caption">A minimal manifest</p>
+        <pre class="code-block"><code>display_information:
+  name: My Slack App
+features:
+  bot_user:
+    display_name: my-app
+  slash_commands:
+    - command: /hello
+      description: Say hi
+      usage_hint: "[name]"
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - commands
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 2 — Choose a transport</h2>
+        <h3>HTTP receiver</h3>
+        <p>
+          Your app exposes an HTTPS URL (e.g., <code>https://example.com/slack/events</code>). Slack
+          POSTs events and interactivity payloads to it. Requires a public URL — locally you'll use
+          ngrok or Cloudflare Tunnel during development.
+        </p>
+        <h3>Socket Mode</h3>
+        <p>
+          Your app opens a WebSocket to Slack and receives events that way. No public URL required —
+          ideal for local dev, behind-the-firewall apps, and demos. Not recommended for production
+          distributed apps.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 3 — Pick features</h2>
+        <ul>
+          <li><strong>Bot user</strong> — almost always yes; this is your app's identity.</li>
+          <li><strong>Slash commands</strong> — global verbs your users invoke (<code>/standup</code>, <code>/report</code>).</li>
+          <li><strong>Event subscriptions</strong> — react to messages, mentions, channel changes.</li>
+          <li><strong>Interactivity &amp; shortcuts</strong> — buttons, menus, modals, global &amp; message shortcuts.</li>
+          <li><strong>App Home</strong> — your app's own tab inside Slack (great for state &amp; settings).</li>
+          <li><strong>OAuth &amp; permissions</strong> — declare scopes; mandatory for distribution.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 4 — Internal vs. distributed</h2>
+        <p>
+          An <strong>internal app</strong> only installs in your own workspace. You can copy the bot
+          token from the install page and run with it. A <strong>distributed app</strong> supports
+          installation by any workspace via OAuth — you must run an install URL endpoint, an OAuth
+          redirect endpoint, and an installation store keyed by team/enterprise.
+        </p>
+        <p>
+          Going from internal to distributed later is doable but not free. Decide early; if there's
+          any chance another team will use your app, make it distributed from day one.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 5 — Install &amp; verify</h2>
+        <ol>
+          <li>Install to your workspace from the app management page (or via your OAuth install URL for distributed apps).</li>
+          <li>Copy the <strong>bot token</strong> (<code>xoxb-…</code>) and <strong>signing secret</strong> into your <code>.env</code>.</li>
+          <li>Run your Bolt app and post <code>/hello</code> from the workspace — round-trip success is your "hello world".</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Common first-app mistakes</h2>
+        <ul>
+          <li>Skipping the manifest — makes your app non-reproducible across environments.</li>
+          <li>Asking for too many scopes upfront — scares users and triggers re-consent.</li>
+          <li>Using your prod workspace as the dev workspace — recipe for embarrassing accidents.</li>
+          <li>Forgetting to enable interactivity when you want buttons / modals.</li>
+          <li>Using Socket Mode for production distributed apps.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Always create the app with a manifest — reproducible across dev/staging/prod.</li>
+          <li>Pick transport based on environment: Socket Mode for dev, HTTP for prod.</li>
+          <li>Pick distribution based on intent: internal for one team, distributed for many.</li>
+          <li>Smallest scope set that works; add more only when forced.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://api.slack.com/start/apps" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Introduction to Slack apps
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/reference/manifests" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              App Manifests reference
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/apis/connections/socket" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Socket Mode
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

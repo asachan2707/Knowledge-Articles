@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL Shortener HLD | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to URL Shortener</a>
+        <h1>URL Shortener: High-Level Design</h1>
+        <p class="summary">
+          This page explains the high-level design the way a senior architect would frame it: starting with workload
+          shape, then mapping components to the hottest paths, then deciding which guarantees must be strict and which
+          can be eventually consistent.
+        </p>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          At high level, a URL shortener is a read-optimized distributed lookup system with a write path for creating
+          aliases and a side pipeline for analytics. The redirect path is the business-critical path, so the design
+          should keep it short, cache-friendly, and isolated from slow secondary workloads.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>Start with realistic assumptions</h2>
+        <ul class="check-list">
+          <li>Redirect traffic is far larger than creation traffic.</li>
+          <li>Some links will become hot and receive extreme skewed traffic.</li>
+          <li>Custom alias requests are rarer but need conflict checks.</li>
+          <li>Analytics is valuable but can be asynchronous.</li>
+          <li>Malicious or abusive links must be detectable and blockable.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Core components</span>
+        <h2>Primary architecture</h2>
+        <pre><code>Client
+  -> API Gateway / Edge
+      -> URL Creation Service
+          -> Key Generation Service
+          -> Primary Metadata Store
+          -> Cache Invalidation / Warmup
+
+Client
+  -> Redirect Endpoint
+      -> Cache
+      -> Redirect Service
+          -> Read Replica / Primary Store
+          -> Async Analytics Event Stream
+
+Admin / Moderation
+  -> Safety and Abuse Service
+  -> Link Management APIs</code></pre>
+        <p>
+          The simplest clean split is between three concerns: creation, redirection, and asynchronous analytics. This
+          avoids contaminating the redirect path with nonessential work.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Request flows</span>
+        <h2>Creation flow vs redirect flow</h2>
+        <p class="mini-heading">Creation flow</p>
+        <ol>
+          <li>User submits a long URL and optional custom alias.</li>
+          <li>Service validates URL format, policy, and tenant or user limits.</li>
+          <li>Key generation service issues a unique short code if no custom alias is used.</li>
+          <li>Metadata is stored in the durable database.</li>
+          <li>Cache can be pre-warmed or lazily filled on first redirect.</li>
+        </ol>
+        <p class="mini-heading">Redirect flow</p>
+        <ol>
+          <li>User opens the short URL.</li>
+          <li>Redirect service looks up the short code in cache first.</li>
+          <li>If cache misses, service reads durable storage and backfills the cache.</li>
+          <li>Service returns HTTP redirect and publishes a click event asynchronously.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Architectural tradeoffs</span>
+        <h2>What a senior architect optimizes here</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Concern</th>
+              <th>Architectural decision</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Redirect latency</td>
+              <td>Use cache-first lookup and keep the redirect handler very thin.</td>
+            </tr>
+            <tr>
+              <td>Key uniqueness</td>
+              <td>Centralize ID generation or use collision-resistant distributed allocation.</td>
+            </tr>
+            <tr>
+              <td>Hot keys</td>
+              <td>Plan for very hot cache entries, edge caching, and read replication.</td>
+            </tr>
+            <tr>
+              <td>Analytics scalability</td>
+              <td>Push click events to a queue or stream instead of blocking the redirect response.</td>
+            </tr>
+            <tr>
+              <td>Abuse mitigation</td>
+              <td>Introduce rate limiting, safety scanning, takedown support, and link status flags.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling guidance</span>
+        <h2>How the design evolves</h2>
+        <p>
+          At small scale, one service plus one relational database is enough. At medium scale, cache and read replicas
+          become necessary. At larger scale, you introduce better key-generation strategies, dedicated analytics
+          pipelines, moderation workflows, and multi-region routing. The progression matters because many weak designs
+          jump to global complexity too early.
+        </p>
+        <div class="note-box">
+          <p>
+            <strong>Rule of thumb:</strong> scale the read path first, isolate analytics second, and globalize only when
+            latency, availability, or regulatory needs justify it.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The best high-level design for a URL shortener is a read-optimized lookup architecture with strict uniqueness
+          on the write path and asynchronous handling for every secondary concern that does not belong in the redirect
+          critical path.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

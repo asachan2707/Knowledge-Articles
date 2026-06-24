@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Architecture Patterns | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Design · 10 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Top 5 Architecture Patterns</h1>
+        <p class="summary">
+          Layered, microservices, event-driven, microkernel, and pipe-and-filter — the five patterns
+          most teams pick from. For a Slack app, the practical mix is usually <em>layered</em> inside
+          an <em>event-driven</em> shell.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Pick the right shape for the right scale</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~10 min</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">How a Bolt app grows from script to system</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every architecture pattern is an answer to the question "where do the seams go?" Picking the
+          wrong shape early forces expensive rewrites; picking the wrong shape <em>too</em> early
+          (overengineering) wastes the same time. This page is a quick map.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>1 · Layered (n-tier)</h2>
+        <p>
+          Code organized into stacked layers — typically presentation → application → domain → data.
+          Each layer talks only to the one below.
+        </p>
+        <p><strong>Pros:</strong> easy to learn, easy to test, low ceremony. <strong>Cons:</strong> can ossify into a "lasagna" with too many layers.</p>
+        <p><strong>Slack fit:</strong> <em>command/view handler → service → repository → DB</em>. The default for any Bolt app under ~50k LOC.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>2 · Microservices</h2>
+        <p>
+          Independent services, each owning one bounded context, communicating over HTTP/gRPC/queues.
+        </p>
+        <p><strong>Pros:</strong> independent deploys; scale services independently; tech freedom per service.</p>
+        <p><strong>Cons:</strong> distributed system tax — networking, observability, deployment cost multiplied.</p>
+        <p><strong>Slack fit:</strong> only when one feature dominates load (e.g., a heavy analytics service). Most Slack apps stay a monolith and split off a worker or two.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>3 · Event-driven</h2>
+        <p>
+          Components communicate by emitting and consuming events on a broker (Kafka, SQS, Redis Streams).
+        </p>
+        <p><strong>Pros:</strong> loose coupling; great for async workflows; easy to add consumers.</p>
+        <p><strong>Cons:</strong> harder to reason about end-to-end; eventual consistency surprises.</p>
+        <p><strong>Slack fit:</strong> the Events API <em>is</em> event-driven. For your own internal pipelines, an event bus pays off when you need fan-out (e.g., a "PR opened" event triggering both notification and metrics).</p>
+      </section>
+
+      <section class="content-card">
+        <h2>4 · Microkernel (plugin)</h2>
+        <p>
+          A tiny core + a set of plugins that extend it. The core knows how to load plugins; plugins
+          know nothing about each other.
+        </p>
+        <p><strong>Pros:</strong> ideal for products that vary per customer (dev tools, IDEs, ETL platforms).</p>
+        <p><strong>Cons:</strong> the plugin API itself becomes the hardest thing to design.</p>
+        <p><strong>Slack fit:</strong> rare. A customer-extensible Slack app could load per-workspace plugins this way.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>5 · Pipe-and-filter</h2>
+        <p>
+          Data flows through a series of independent transformations, each one consuming from one pipe
+          and writing to the next.
+        </p>
+        <p><strong>Pros:</strong> simple, composable, easy to parallelize.</p>
+        <p><strong>Cons:</strong> not a great fit for interactive systems; better for batch / streaming pipelines.</p>
+        <p><strong>Slack fit:</strong> a digest pipeline (<em>fetch → enrich → format → post</em>) is a textbook pipe-and-filter, even if it's just three function calls.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>How a Slack app evolves</h2>
+        <ol>
+          <li><strong>Phase 1 (script):</strong> one file, layered loosely. 300 LOC.</li>
+          <li><strong>Phase 2 (real app):</strong> layered with feature folders. <code>command → service → repo</code>. 5–20k LOC.</li>
+          <li><strong>Phase 3 (heavy work):</strong> add a queue + worker process. Mostly still a monolith.</li>
+          <li><strong>Phase 4 (multi-team):</strong> split off the heaviest service (analytics, billing). Microservices show up here.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Anti-patterns</h2>
+        <ul>
+          <li><strong>Microservices on day one</strong> — the network calls between services dwarf any benefit until you've earned the complexity.</li>
+          <li><strong>Layer obsession</strong> — ten layers between the request and the DB. Keep it to four.</li>
+          <li><strong>Event-driven without idempotency</strong> — duplicate events break the world. Always dedupe.</li>
+          <li><strong>"Hexagonal-clean-DDD-everything" upfront</strong> — start simple; extract patterns when pain demands them.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Default to layered + feature folders for a Bolt app.</li>
+          <li>Add an event bus only when fan-out becomes painful.</li>
+          <li>Defer microservices until you have measured pain that justifies them.</li>
+          <li>Patterns are tools to solve specific pains, not goals to achieve.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=f6zXyq4VPP8" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Top 5 Most Used Architecture Patterns
+            </a>
+          </li>
+          <li>
+            <a href="https://martinfowler.com/architecture/" target="_blank" rel="noopener">
+              <span class="resource-kind guide">Guide</span>
+              Martin Fowler — Architecture
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Express.js Framework | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Prereq · Web framework · 4 hours</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Express.js Web Framework</h1>
+        <p class="summary">
+          Express is the minimalist HTTP framework most Node services are built on — including the HTTP
+          receiver inside Bolt for JS. Master middleware, routing, error handling, and request validation
+          here, and Bolt becomes "Express with Slack-shaped niceties on top."
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack prereq · Tech Stack 1</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Build, secure, and operate an Express service</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~3–4 hours playlist + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Bolt receiver, custom routes, OAuth callback</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Express is two ideas: <strong>routes</strong> map an HTTP method + URL pattern to a handler,
+          and <strong>middleware</strong> are functions chained in order that can read/modify the
+          request, short-circuit the response, or pass control to the next handler. That's the entire
+          mental model.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Slack tie-in:</strong> Bolt's <code>HttpReceiver</code> is an Express app under the
+            hood. When you mount a Bolt app at <code>/slack/events</code> alongside your own dashboard
+            routes, you're using exactly the patterns this video teaches.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The middleware pattern in one example</h2>
+        <pre class="code-block"><code>import express from 'express';
+
+const app = express();
+
+// 1. Built-in middleware: parse JSON bodies
+app.use(express.json());
+
+// 2. Custom middleware: timing
+app.use((req, res, next) =&gt; {
+  const start = Date.now();
+  res.on('finish', () =&gt; {
+    console.log(`${req.method} ${req.url} - ${Date.now() - start}ms`);
+  });
+  next();
+});
+
+// 3. Route
+app.get('/health', (req, res) =&gt; res.json({ ok: true }));
+
+// 4. Error-handling middleware (4 args)
+app.use((err, req, res, next) =&gt; {
+  console.error(err);
+  res.status(500).json({ error: 'internal' });
+});
+
+app.listen(3000);</code></pre>
+        <p>
+          Order matters. Middleware runs top-to-bottom; whichever one calls
+          <code>res.send()</code>/<code>res.json()</code> wins. Error-handling middleware (the one with
+          four arguments) only runs when something <code>throw</code>s or calls <code>next(err)</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Routing patterns you'll use</h2>
+        <ul>
+          <li><code>app.get('/api/users/:id', handler)</code> — route params via <code>req.params.id</code>.</li>
+          <li><code>app.post('/api/users', handler)</code> — JSON body via <code>req.body</code>.</li>
+          <li><code>app.use('/admin', requireAuth, adminRouter)</code> — group routes under a router.</li>
+          <li><code>app.all('*', notFoundHandler)</code> — catch-all 404.</li>
+        </ul>
+        <p>
+          For organization, split routes into <code>express.Router()</code> modules and mount them. A
+          Slack app commonly has <code>/slack/events</code> (Bolt), <code>/slack/oauth/callback</code>,
+          <code>/health</code>, and <code>/admin</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Body parsing — and why Slack is special</h2>
+        <p>
+          Slack's request signing requires the <em>raw</em> request body to verify HMAC. If you call
+          <code>express.json()</code> before the Slack route, you'll lose the raw bytes and signature
+          checks will fail. Bolt handles this internally if you let it own the route. If you mount your
+          own Express around Bolt, register Bolt <em>first</em> and JSON parsing only on your other
+          routes.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Error handling that doesn't lie</h2>
+        <p>
+          Three rules:
+        </p>
+        <ol>
+          <li>Wrap async route handlers so thrown errors hit your error middleware
+            (<code>express-async-errors</code> or <code>asyncHandler</code> wrapper).</li>
+          <li>Never leak stack traces to clients — return a stable error code and log the detail server-side.</li>
+          <li>Have one final error handler that returns JSON for API routes and HTML for HTML routes.</li>
+        </ol>
+        <pre class="code-block"><code>const asyncHandler = fn =&gt; (req, res, next) =&gt;
+  Promise.resolve(fn(req, res, next)).catch(next);
+
+app.get('/users/:id', asyncHandler(async (req, res) =&gt; {
+  const user = await db.users.findById(req.params.id);
+  if (!user) return res.status(404).json({ error: 'not_found' });
+  res.json(user);
+}));</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Security middleware checklist</h2>
+        <ul>
+          <li><code>helmet()</code> — sets ~15 security headers.</li>
+          <li><code>cors()</code> — explicit allowlist, never <code>*</code> in production.</li>
+          <li><code>express-rate-limit</code> — protects against brute force and accidental loops.</li>
+          <li><code>compression()</code> — gzip responses, free latency win.</li>
+          <li>Validate every input with <code>zod</code> or <code>joi</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>How Bolt sits on top</h2>
+        <p>
+          Bolt for JS exposes <code>app.receiver.router</code> (when using <code>ExpressReceiver</code>)
+          so you can attach your own Express routes alongside Slack handlers. This is how you add an
+          install URL, a privacy policy page, or an admin dashboard inside the same Node process as your
+          Slack app.
+        </p>
+        <pre class="code-block"><code>import { App, ExpressReceiver } from '@slack/bolt';
+
+const receiver = new ExpressReceiver({ signingSecret: process.env.SLACK_SIGNING_SECRET });
+const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver });
+
+receiver.router.get('/health', (req, res) =&gt; res.send('ok'));
+receiver.router.get('/install', (req, res) =&gt; res.redirect(await app.installer.generateInstallUrl(...)));
+
+await app.start(3000);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Express = routes + middleware in order. That's it.</li>
+          <li>Order matters: register Slack/Bolt first if you need raw body for signing.</li>
+          <li>Always wrap async handlers; always have a final JSON error handler.</li>
+          <li>Bolt's <code>ExpressReceiver</code> lets you mix Slack and your own HTTP routes.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=39znK--Yo1o&list=PL_cUvD4qzbkwp6pxx27pqgohrsP8v1Wj2" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              ExpressJS Course (full playlist)
+            </a>
+          </li>
+          <li>
+            <a href="https://expressjs.com/" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Express.js official documentation
+            </a>
+          </li>
+          <li>
+            <a href="https://slack.dev/bolt-js/concepts/receiver" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Bolt for JS — Receivers (Express + custom)
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

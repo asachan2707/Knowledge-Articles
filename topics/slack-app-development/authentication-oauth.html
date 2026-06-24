@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Authentication &amp; OAuth | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Slack messaging app open on laptop and phone"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Core · Security · 60 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@austindistel" target="_blank" rel="noopener">Austin Distel</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Authentication &amp; OAuth</h1>
+        <p class="summary">
+          Slack auth has three pillars: OAuth 2.0 for installation, scopes for least-privilege
+          permissions, and signed requests for verifying inbound webhooks. Get any of them wrong and
+          your app is either insecure or broken — usually both.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack core</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Securely install, persist, and verify</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~60 min read</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Distributed apps, multi-workspace, production</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          OAuth is how a workspace says "yes, this app can act on my behalf with these specific
+          permissions." Signing secrets are how Slack proves that a webhook really came from Slack.
+          Both are non-negotiable for a production app.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Three rules to live by:</strong> 1) Verify every inbound request signature.
+            2) Encrypt tokens at rest. 3) Ask for the smallest scope set that works.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The OAuth v2 flow (visual)</h2>
+        <pre class="code-block"><code>User in Slack workspace
+  │
+  │  clicks "Add to Slack" button → 
+  ▼
+Your /install endpoint
+  │
+  │  redirects to slack.com/oauth/v2/authorize?client_id=…&scope=…&redirect_uri=…
+  ▼
+Slack consent screen ("This app wants to: post messages, read channels...")
+  │
+  │  user approves → Slack redirects to your /oauth/callback?code=...
+  ▼
+Your /oauth/callback
+  │
+  │  POST oauth.v2.access with { code, client_id, client_secret, redirect_uri }
+  ▼
+Slack returns { access_token: 'xoxb-...', team: { id }, scope, ... }
+  │
+  ▼
+You persist installation to your installation store
+  │
+  ▼
+Redirect user back into Slack (deep link to your app)</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Token types &amp; when to use each</h2>
+        <ul>
+          <li><strong>Bot token (<code>xoxb-…</code>)</strong> — most common. Your app acts as the bot user. Use for posting messages, opening modals, listing channels the bot is in.</li>
+          <li><strong>User token (<code>xoxp-…</code>)</strong> — your app acts <em>as</em> the installing user. Use only when bot scopes can't do the job (e.g., reading DMs of the user, certain admin actions).</li>
+          <li><strong>App-level token (<code>xapp-…</code>)</strong> — used for Socket Mode and certain admin endpoints. Generated separately, never user-scoped.</li>
+          <li><strong>Refresh tokens</strong> — opt-in via token rotation. Bot tokens become short-lived (12 h) and you exchange a refresh token for a new bot token before expiry.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Request signing — the mandatory check</h2>
+        <p>
+          Every request Slack sends to your app includes
+          <code>X-Slack-Request-Timestamp</code> and <code>X-Slack-Signature</code>. You must verify
+          the signature using your signing secret, or attackers can forge requests.
+        </p>
+        <pre class="code-block"><code>import crypto from 'node:crypto';
+
+function verifySlackRequest(req, signingSecret) {
+  const timestamp = req.headers['x-slack-request-timestamp'];
+  const signature = req.headers['x-slack-signature'];
+
+  // 1. Reject anything older than 5 minutes (replay protection)
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) &gt; 60 * 5) return false;
+
+  // 2. Compute the expected signature
+  const baseString = `v0:${timestamp}:${req.rawBody}`;
+  const hmac = crypto.createHmac('sha256', signingSecret).update(baseString).digest('hex');
+  const expected = `v0=${hmac}`;
+
+  // 3. Constant-time compare
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+}</code></pre>
+        <p>
+          Bolt does this for you. If you ever build a custom receiver, this is the code.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The installation store</h2>
+        <p>
+          For distributed apps you must persist installations. Bolt's <code>InstallProvider</code>
+          accepts a custom <code>InstallationStore</code> with three methods:
+        </p>
+        <pre class="code-block"><code>const installationStore = {
+  storeInstallation: async (installation) =&gt; {
+    // upsert keyed by enterpriseId + teamId
+    await db.installations.upsert({
+      enterpriseId: installation.enterprise?.id ?? null,
+      teamId: installation.team?.id ?? null,
+      installation: encrypt(installation),  // encrypt at rest
+    });
+  },
+  fetchInstallation: async (query) =&gt; {
+    const row = await db.installations.findOne({
+      enterpriseId: query.enterpriseId ?? null,
+      teamId: query.teamId ?? null,
+    });
+    return decrypt(row.installation);
+  },
+  deleteInstallation: async (query) =&gt; {
+    await db.installations.delete(query);
+  },
+};</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Scopes — declare deliberately</h2>
+        <p>
+          Slack uses <strong>granular bot scopes</strong>. Each scope grants one capability. Examples:
+        </p>
+        <ul>
+          <li><code>chat:write</code> — post messages as the bot.</li>
+          <li><code>commands</code> — receive slash command invocations.</li>
+          <li><code>app_mentions:read</code> — see <code>@bot</code> mentions.</li>
+          <li><code>channels:history</code> — read messages in public channels the bot is in.</li>
+          <li><code>users:read</code> — read user profiles.</li>
+          <li><code>files:write</code> — upload and manage files.</li>
+        </ul>
+        <p>
+          When you add a scope after install, every existing workspace must re-consent. Plan scope
+          changes carefully.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Common auth bugs</h2>
+        <ul>
+          <li><strong>Body parsed too early</strong> — Express's <code>json()</code> consumed the raw body and signature verification fails. Fix: parse only after Bolt, or use <code>verify</code> hook to capture raw body.</li>
+          <li><strong>Tokens stored in plaintext</strong> — encrypt at rest. Slack tokens are credentials.</li>
+          <li><strong>No replay protection</strong> — always reject requests with an old timestamp.</li>
+          <li><strong>One global token in distributed apps</strong> — silently uses Workspace A's token in Workspace B. Always look up by team/enterprise.</li>
+          <li><strong>Token rotation ignored</strong> — if you opt in, you must persist refresh tokens and rotate before expiry.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>OAuth v2 = code exchange → persisted installation per workspace.</li>
+          <li>Verify every signature. Reject old timestamps. Constant-time compare.</li>
+          <li>Encrypt tokens at rest. Treat them like passwords.</li>
+          <li>Smallest scope set that works; expand only when forced.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://api.slack.com/authentication" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Authentication overview
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/authentication/verifying-requests-from-slack" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Verifying requests from Slack
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/authentication/oauth-v2" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              OAuth v2 reference
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/authentication/token-types" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Token types reference
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

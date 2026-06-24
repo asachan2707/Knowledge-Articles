@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MongoDB (NoSQL) | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Prereq · Database · 4 hours</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>MongoDB — Document Database for Slack Apps</h1>
+        <p class="summary">
+          MongoDB is the document database most JS-stack tutorials reach for. Net Ninja's "Complete
+          MongoDB Tutorial" playlist walks you from CRUD through Mongoose. This page focuses on the data
+          models and operations a Slack app actually needs: installations, settings, audit logs.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack prereq · Tech Stack 1</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Model and persist Slack app state</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~4 hour playlist + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Installation store, OAuth persistence, settings</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Mongo stores JSON-like documents in collections. There's no enforced schema by default, so
+          modeling discipline matters more, not less. For Slack apps, Mongo shines for variable-shape
+          per-workspace settings, OAuth installation records, and high-cardinality event logs.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Decision rule:</strong> use Mongo for documents that vary in shape across tenants
+            (per-workspace settings, audit events). Use SQL for things with strict relations
+            (users → roles, orders → line items).
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Concepts the playlist covers</h2>
+        <ul>
+          <li><strong>Documents &amp; collections:</strong> BSON, <code>_id</code>, ObjectId.</li>
+          <li><strong>CRUD:</strong> <code>insertOne</code>/<code>insertMany</code>,
+            <code>find</code>/<code>findOne</code>, <code>updateOne</code>/<code>updateMany</code>,
+            <code>deleteOne</code>/<code>deleteMany</code>.</li>
+          <li><strong>Query operators:</strong> <code>$eq</code>, <code>$gt</code>, <code>$in</code>,
+            <code>$and</code>/<code>$or</code>, <code>$exists</code>, <code>$regex</code>.</li>
+          <li><strong>Update operators:</strong> <code>$set</code>, <code>$unset</code>, <code>$inc</code>,
+            <code>$push</code>, <code>$pull</code>, <code>$addToSet</code>.</li>
+          <li><strong>Indexes:</strong> single, compound, partial, TTL, text — and
+            <code>explain('executionStats')</code>.</li>
+          <li><strong>Aggregation pipelines:</strong> <code>$match</code> → <code>$group</code> →
+            <code>$sort</code> → <code>$project</code> → <code>$lookup</code>.</li>
+          <li><strong>Mongoose:</strong> schemas, models, validation, middleware (pre/post hooks),
+            populate, virtuals.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>A real Slack installation store</h2>
+        <p>
+          The official <code>InstallationStore</code> for distributed Slack apps maps cleanly to a Mongo
+          collection. Each document holds an enterprise / team install, the tokens, and metadata.
+        </p>
+        <pre class="code-block"><code>// installations collection schema
+{
+  _id: ObjectId,
+  enterpriseId: 'E1' | null,
+  teamId: 'T1',
+  userId: 'U1',           // installer
+  bot: {
+    token: 'xoxb-...',     // encrypt at rest!
+    userId: 'UBOT',
+    scopes: ['chat:write', 'commands'],
+  },
+  appId: 'A1',
+  installedAt: ISODate('2026-05-11T...'),
+  isEnterpriseInstall: false,
+}
+
+// indexes
+db.installations.createIndex({ teamId: 1, enterpriseId: 1 }, { unique: true });
+db.installations.createIndex({ installedAt: -1 });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Mongoose vs. native driver</h2>
+        <p>
+          The official <code>mongodb</code> driver is the most direct path. Mongoose adds schema
+          validation, hooks, and population (Mongo's pseudo-join). For a Slack app, Mongoose is usually
+          worth it — schemas catch shape drift before it bites.
+        </p>
+        <pre class="code-block"><code>import mongoose, { Schema } from 'mongoose';
+
+const InstallationSchema = new Schema({
+  teamId: { type: String, required: true, index: true },
+  enterpriseId: { type: String, default: null },
+  bot: {
+    token: { type: String, required: true },
+    scopes: [String],
+  },
+  installedAt: { type: Date, default: Date.now },
+});
+
+InstallationSchema.index({ teamId: 1, enterpriseId: 1 }, { unique: true });
+
+export const Installation = mongoose.model('Installation', InstallationSchema);
+
+// Usage
+await Installation.create({ teamId: 'T1', bot: { token: 'xoxb-...', scopes: ['chat:write'] } });
+const found = await Installation.findOne({ teamId: 'T1' });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>The two modeling decisions</h2>
+        <h3>1. Embed vs. reference</h3>
+        <p>
+          Embed when the child data is owned by the parent and small/bounded (e.g., a user's notification
+          settings). Reference when the child is large, shared, or grows unbounded (e.g., audit events
+          per workspace).
+        </p>
+
+        <h3>2. Indexes you cannot skip</h3>
+        <ul>
+          <li>Every field you filter on in a hot query path.</li>
+          <li>Compound indexes that match your most common filter+sort.</li>
+          <li>TTL indexes for ephemeral data (event dedup keys, OTP tokens).</li>
+          <li>Unique indexes for natural keys (<code>teamId</code> + <code>enterpriseId</code>).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Aggregation: a practical example</h2>
+        <p>"Top 10 channels by message volume in the last 7 days":</p>
+        <pre class="code-block"><code>db.events.aggregate([
+  { $match: { type: 'message', ts: { $gt: new Date(Date.now() - 7*24*60*60*1000) } } },
+  { $group: { _id: '$channelId', count: { $sum: 1 } } },
+  { $sort: { count: -1 } },
+  { $limit: 10 },
+]);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Operational essentials</h2>
+        <ul>
+          <li><strong>Connection pooling:</strong> the driver does it; one client per process is enough.</li>
+          <li><strong>Retries:</strong> Mongo retryable writes are on by default; rely on them.</li>
+          <li><strong>Backups:</strong> Atlas continuous backup or <code>mongodump</code> to S3 daily.</li>
+          <li><strong>Encryption at rest:</strong> Atlas does it; verify in your provider docs.</li>
+          <li><strong>Token storage:</strong> Slack tokens are credentials — encrypt before storing.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Mongo fits Slack apps for installations, settings, and event logs.</li>
+          <li>Define schemas with Mongoose to catch shape drift early.</li>
+          <li>Index every field you filter on; <code>explain()</code> any slow query.</li>
+          <li>Encrypt Slack tokens at rest; always have backup + restore tested.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=ExcRbA7fy_A&list=PL4cUxeGkcC9h77dJ-QJlwGlZlTd4ecZOA" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Complete MongoDB Tutorial (Net Ninja playlist)
+            </a>
+          </li>
+          <li>
+            <a href="https://www.mongodb.com/docs/manual/" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              MongoDB Manual
+            </a>
+          </li>
+          <li>
+            <a href="https://mongoosejs.com/docs/" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Mongoose documentation
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

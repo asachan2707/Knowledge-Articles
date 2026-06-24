@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TypeScript Basics | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Prereq · Language · 90 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>TypeScript Basics</h1>
+        <p class="summary">
+          TypeScript is JavaScript with a static type system bolted on. The Programming with Mosh tutorial
+          walks through the type system and tooling; this page focuses on the patterns you'll actually use
+          inside a Bolt for JS Slack app.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack prereq · Tech Stack 1</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Type a Bolt app and a typed Web API client</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~90 min video + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Bolt SDK, Block Kit typing, refactor safety</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The Slack JavaScript SDK ships first-class TypeScript definitions. That means in a TS Slack app,
+          you get autocomplete on every Web API method, every payload field, every Block Kit element, and
+          you catch shape mismatches at <em>build time</em> instead of inside a 3-second ack window.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Why bother:</strong> Slack payloads are deeply nested JSON. Without types, every field
+            access is a guess. With types, your editor tells you that <code>body.actions[0].selected_option</code>
+            is real and <code>body.actions[0].selected_user</code> is not.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The type system in one screen</h2>
+        <h3>Primitive types</h3>
+        <pre class="code-block"><code>let userId: string = 'U123';
+let count: number = 5;
+let isAdmin: boolean = false;
+let payload: unknown = JSON.parse(raw); // safer than `any`</code></pre>
+
+        <h3>Object types &amp; interfaces</h3>
+        <pre class="code-block"><code>interface InstallStore {
+  workspaceId: string;
+  botToken: string;
+  installedAt: Date;
+  scopes: string[];
+}
+
+const install: InstallStore = {
+  workspaceId: 'T1',
+  botToken: 'xoxb-...',
+  installedAt: new Date(),
+  scopes: ['chat:write', 'commands'],
+};</code></pre>
+
+        <h3>Union &amp; literal types</h3>
+        <pre class="code-block"><code>type SlackTokenPrefix = 'xoxb' | 'xoxp' | 'xapp';
+type Status = 'pending' | 'approved' | 'rejected';</code></pre>
+
+        <h3>Generics</h3>
+        <pre class="code-block"><code>function first&lt;T&gt;(arr: T[]): T | undefined {
+  return arr[0];
+}
+const channel = first(channels); // type inferred as Channel | undefined</code></pre>
+
+        <h3>Type narrowing &amp; discriminated unions</h3>
+        <p>
+          Slack action types are a textbook discriminated union — the <code>type</code> field tells you
+          which payload shape you have.
+        </p>
+        <pre class="code-block"><code>type Action =
+  | { type: 'button';      action_id: string; value: string }
+  | { type: 'static_select'; selected_option: { value: string } }
+  | { type: 'users_select';  selected_user: string };
+
+function handle(a: Action) {
+  if (a.type === 'button') return a.value;            // narrowed
+  if (a.type === 'static_select') return a.selected_option.value;
+  return a.selected_user;                              // exhaustively narrowed
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>tsconfig.json — the dial that matters</h2>
+        <p>
+          The compiler reads <code>tsconfig.json</code>. The one setting that changes your life is
+          <code>"strict": true</code>. Turn it on; fix the errors. Modern Slack samples use it by default.
+        </p>
+        <pre class="code-block"><code>{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Bolt + TypeScript example</h2>
+        <pre class="code-block"><code>import { App, BlockAction, ButtonAction } from '@slack/bolt';
+
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN!,
+  signingSecret: process.env.SLACK_SIGNING_SECRET!,
+});
+
+app.action&lt;BlockAction&lt;ButtonAction&gt;&gt;('approve_button', async ({ ack, body, client }) =&gt; {
+  await ack();
+  await client.chat.postMessage({
+    channel: body.channel!.id,
+    text: `Approved by &lt;@${body.user.id}&gt;`,
+  });
+});</code></pre>
+        <p>
+          Notice how the generic on <code>app.action</code> tells TypeScript exactly what shape
+          <code>body</code> is — including the typed <code>actions</code> array.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Common pitfalls (and fixes)</h2>
+        <ul>
+          <li><strong>Reaching for <code>any</code>:</strong> use <code>unknown</code> + a type guard instead.</li>
+          <li><strong>Using <code>!</code> everywhere:</strong> non-null assertion bypasses the compiler. Validate or narrow instead.</li>
+          <li><strong>Wide function signatures:</strong> a function that takes <code>object</code> tells you nothing. Define an interface.</li>
+          <li><strong>Skipping <code>strictNullChecks</code>:</strong> the single biggest bug-prevention setting.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Always start a new Slack app project in TypeScript with <code>strict: true</code>.</li>
+          <li>Lean on interfaces for installation stores, settings, and persisted models.</li>
+          <li>Use discriminated unions to model Slack actions and event types.</li>
+          <li>Generics on <code>app.action&lt;...&gt;</code> unlock typed payloads — use them.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=d56mG7DezGs" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              TypeScript Tutorial for Beginners (Programming with Mosh)
+            </a>
+          </li>
+          <li>
+            <a href="https://www.typescriptlang.org/docs/handbook/intro.html" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              TypeScript Handbook
+            </a>
+          </li>
+          <li>
+            <a href="https://slack.dev/bolt-js/concepts" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Bolt for JS concepts (typed examples)
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Webhooks | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1563986768494-4dee2763ff3f?w=1600&h=700&fit=crop&auto=format&q=80" alt="Server notifications and push events" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 25 · 8 min</span></div>
+        </figure>
+        <h1>Webhooks</h1>
+        <p class="summary">Reverse APIs: instead of your server polling for changes, the external service calls your server when something happens. Signature verification, reliable delivery, idempotent receivers — the design of a webhook system that doesn't lose events and doesn't process them twice.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">25 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Stripe, GitHub, Shopify, Twilio, PagerDuty</span></div>
+          <div><span class="meta-label">Pair With</span><span class="meta-value">Event-Driven APIs (Concept 21), Idempotency (Concept 13)</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Polling asks "did anything change?" every N seconds. Webhooks tell you "something changed" the moment it happens. For payment systems, repository events, and any state change that drives downstream actions, webhooks are the right model — lower latency, lower API cost, simpler logic. The design challenge is on the receiver side: every webhook will be retried on failure, so receivers must be idempotent.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Design</span>
+        <h2>Webhook delivery lifecycle</h2>
+        <div class="diagram-box">
+<span class="step">Sender side: reliable delivery with retry</span>
+
+Event occurs (payment.succeeded)
+  │
+  ▼
+Write to outbox table (atomic with business event)
+  │
+  ▼
+Background worker picks up outbox entry
+  │
+  ├── POST https://receiver.com/webhooks  ──▶ <span class="ok">200 OK</span>  → mark delivered
+  │
+  ├── POST https://receiver.com/webhooks  ──▶ <span class="warn">timeout</span> → retry after 1 min
+  ├── POST https://receiver.com/webhooks  ──▶ <span class="warn">503</span>     → retry after 5 min
+  ├── POST https://receiver.com/webhooks  ──▶ <span class="warn">500</span>     → retry after 1 hr
+  └── POST https://receiver.com/webhooks  ──▶ <span class="warn">fail</span>    → mark failed, alert
+
+<span class="step">Receiver side: idempotent processing</span>
+
+POST /webhooks  { event_id: "evt_123", type: "payment.succeeded" }
+  │
+  ├── Verify signature  (reject if invalid)
+  ├── Check timestamp   (reject if > 5 min old)
+  ├── Check if evt_123 already processed  (idempotency check)
+  │   → if yes: return 200 immediately (duplicate, already handled)
+  │   → if no:  process event, record evt_123 as processed
+  └── Return 200 quickly, process async
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Webhook sender and receiver in Node.js</h2>
+        <pre><code class="language-js">import crypto from 'crypto';
+import express from 'express';
+
+// ─── WEBHOOK SENDER ────────────────────────────────────────────────────────
+async function sendWebhook(endpoint, eventType, payload, secret) {
+  const eventId   = `evt_${crypto.randomBytes(12).toString('hex')}`;
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const body      = JSON.stringify({ id: eventId, type: eventType, data: payload, created: timestamp });
+
+  const signature = crypto
+    .createHmac('sha256', secret)
+    .update(`${timestamp}.${body}`)
+    .digest('hex');
+
+  const response = await fetch(endpoint, {
+    method:  'POST',
+    headers: {
+      'Content-Type':       'application/json',
+      'Webhook-ID':          eventId,
+      'Webhook-Timestamp':   timestamp,
+      'Webhook-Signature':  `v1,${signature}`,
+    },
+    body,
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  return response.ok;
+}
+
+// ─── WEBHOOK RECEIVER ──────────────────────────────────────────────────────
+const app = express();
+
+app.post('/webhooks', express.raw({ type: 'application/json' }), async (req, res) => {
+  // 1. Verify signature
+  const webhookId   = req.headers['webhook-id'];
+  const timestamp   = req.headers['webhook-timestamp'];
+  const sigHeader   = req.headers['webhook-signature'];
+
+  if (!webhookId || !timestamp || !sigHeader) {
+    return res.status(400).json({ error: 'Missing webhook headers' });
+  }
+
+  // Replay prevention: reject if timestamp > 5 minutes old
+  if (Math.abs(Date.now() / 1000 - parseInt(timestamp)) > 300) {
+    return res.status(400).json({ error: 'Timestamp out of tolerance' });
+  }
+
+  const body     = req.body.toString();
+  const expected = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET)
+    .update(`${timestamp}.${body}`).digest('hex');
+  const provided = sigHeader.replace('v1,', '');
+
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'))) {
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+  } catch {
+    return res.status(401).json({ error: 'Invalid signature format' });
+  }
+
+  // 2. Parse and validate shape
+  const event = JSON.parse(body);
+
+  // 3. Idempotency check — have we already processed this event?
+  const exists = await db.query(
+    'SELECT id FROM processed_webhook_events WHERE event_id = $1',
+    [event.id]
+  );
+  if (exists.rows.length > 0) {
+    return res.json({ received: true, duplicate: true }); // Already handled
+  }
+
+  // 4. Respond 200 IMMEDIATELY — do not block on processing
+  res.json({ received: true });
+
+  // 5. Process async (after response sent)
+  setImmediate(async () => {
+    try {
+      // Record as processed first (idempotency key)
+      await db.query(
+        'INSERT INTO processed_webhook_events (event_id, event_type, processed_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING',
+        [event.id, event.type]
+      );
+      await processWebhookEvent(event);
+    } catch (err) {
+      // Log error — event was already recorded so won't double-process on next delivery attempt
+      console.error({ msg: 'Webhook processing error', eventId: event.id, error: err.message });
+    }
+  });
+});
+
+async function processWebhookEvent(event) {
+  switch (event.type) {
+    case 'payment.succeeded':
+      await fulfillOrder(event.data.orderId);
+      break;
+    case 'payment.failed':
+      await notifyUserPaymentFailed(event.data.userId);
+      break;
+    default:
+      console.log({ msg: 'Unknown webhook type', type: event.type });
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Stripe webhook design — the gold standard</h2>
+        <p><strong>Stripe:</strong> Retries failed deliveries over 3 days with exponential backoff (immediately, 1 min, 5 min, 30 min, 1 hr, 6 hr, 12 hr, 24 hr × 3). Each event has a stable ID (evt_xxx). Stripe recommends always fetching the canonical object from the API after receiving a webhook rather than trusting the payload data — the payload may be stale if retried after the object changed.</p>
+        <p><strong>GitHub webhooks:</strong> Show full delivery history (request headers, body, response) in the repo settings. You can redeliver any past event manually. This makes debugging webhook receivers far easier than guessing at what was sent.</p>
+
+        <div class="warn-box"><strong>Design your receiver to handle out-of-order and duplicate events.</strong> Webhook retries mean you will receive the same event multiple times. Network delays mean events can arrive out of order — a payment.failed can arrive before payment.created. Use the event ID as an idempotency key, store it, and skip processing if already seen. Use timestamps from the event payload (not arrival time) to order events correctly.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Real-time notification — no polling latency</li><li>Lower API quota usage vs polling</li><li>Simple mental model: event happens → you get called</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Receiver must be publicly accessible (HTTPS endpoint)</li><li>Duplicate delivery requires idempotent receivers</li><li>Order not guaranteed — receivers must handle out-of-order events</li><li>Receiver downtime = missed events unless sender retries for long enough</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Webhooks are server-to-server push notifications over HTTP. Always verify the HMAC signature before processing any webhook payload — reject unsigned or replayed requests. Respond 200 immediately and process asynchronously — slow handlers get retried and create duplicates. Record each event ID after processing to prevent duplicate execution on retry. Design your entire handler assuming every event will be delivered at least twice and may arrive out of order. The outbox pattern on the sender side ensures no events are lost even if the sender crashes mid-delivery.</p>
+      </section>
+    </main>
+  </body>
+</html>

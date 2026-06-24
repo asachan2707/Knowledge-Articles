@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Uber Architecture: Why Tracking 5 Million Drivers Every Second Is One of Tech's Hardest Problems | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1568605117036-5fe5e7bab0b7?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="City streets at night with car lights and traffic, representing urban ride-sharing"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Distributed Systems · Advanced · 25 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@aleksandr_m" target="_blank" rel="noopener">Aleksandr Mikhailovich</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Uber Architecture – Part 1: Why Tracking 5 Million Drivers Every Second Is One of Tech's Hardest Problems</h1>
+        <p class="summary">
+          The complete end-to-end technical use case for Uber's real-time driver location tracking system — from the phone GPS ping to the matched ride, covering location ingestion, geospatial indexing, proximity search, surge pricing, dispatch, and the specific distributed systems problems that emerge at Uber's scale.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Portal</span>
+            <span class="meta-value">Internal · Curated</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Uber's driver tracking system: geospatial indexing, real-time ingestion, proximity search, dispatch, surge pricing</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">Jun 2026</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every time a rider opens Uber and sees cars moving on the map, a data pipeline is running that is more complex than it looks: 5 million driver phones emitting GPS coordinates every 4 seconds, 1.25 million location updates per second funnelled through Kafka, stored in geospatial indexes, queried in milliseconds by the dispatch system, and aggregated in real time to compute surge pricing by city zone. This is the complete end-to-end story.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Scale reference:</strong> 5M drivers × 15 GPS updates/minute = 75M location events/minute = 1.25M events/second sustained, 24/7, globally. Each event triggers reads across proximity search, driver availability, zone calculations, and demand forecasting. The write throughput is the easy part.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The problem that broke Monolith Uber</span>
+        <p>
+          Early Uber ran on a Python/PostgreSQL monolith. This worked until driver density in major cities hit a threshold where the location update queries started competing with booking queries for database connections. A surge of booking requests during rush hour would slow down location updates; stale location data degraded matching quality; degraded matching caused retries; retries increased write load. The feedback loop collapsed the service.
+        </p>
+        <p>
+          The solution was not "more database." It was a complete rearchitecture around the insight that location tracking is a fundamentally different workload from booking: high-write, spatial, time-series, with completely different read patterns. Separating them was the founding act of Uber's microservices architecture.
+        </p>
+      </section>
+
+      <!-- SECTION 1: END-TO-END FLOW -->
+      <section class="content-card">
+        <span class="section-label">The complete use case</span>
+        <h2>End-to-end: GPS ping to matched ride</h2>
+        <p>
+          The full journey of a location update from driver phone to matched rider:
+        </p>
+        <ol>
+          <li><strong>GPS emit:</strong> The driver app samples GPS every 4 seconds and sends a location update to Uber's servers. Payload: driver ID, latitude, longitude, bearing, speed, timestamp, accuracy radius.</li>
+          <li><strong>Mobile gateway:</strong> The update hits a regional API gateway (WebSocket for active drivers, HTTPS POST for background updates). The gateway authenticates, rate-limits per driver, and forwards to the location ingestion pipeline.</li>
+          <li><strong>Kafka ingestion:</strong> Location events are written to a Kafka topic partitioned by driver ID (consistent hashing ensures all updates for one driver land on one partition, maintaining order). Kafka provides durability and decouples the downstream consumers from the write rate.</li>
+          <li><strong>Location service consumers:</strong> Multiple services consume the Kafka topic independently: the Location Store (persists current driver position), the Zone Aggregator (updates supply/demand counts per geospatial cell), the ETA Calculator (updates routing graph edge weights), and the Telemetry Store (time-series data for analytics).</li>
+          <li><strong>Location Store:</strong> Writes the driver's current position to a fast in-memory data structure (Redis with geospatial indexes). The write path is a simple Redis GEOADD: <code>GEOADD drivers:available {longitude} {latitude} {driver_id}</code>.</li>
+          <li><strong>Proximity query (rider-side):</strong> When a rider opens the app, a GEORADIUS query retrieves all available drivers within N km: <code>GEORADIUS drivers:available {longitude} {latitude} 5 km ASC COUNT 50</code>. Redis executes this in O(N+log(M)) time — sub-millisecond at scale.</li>
+          <li><strong>Dispatch:</strong> When a rider requests a trip, the dispatch system runs a matching algorithm against available drivers in the rider's proximity, considering ETA, driver rating, vehicle type, and surge state. It sends a trip offer to the top-ranked driver.</li>
+          <li><strong>Offer/Accept loop:</strong> The dispatch system sends an offer to the driver app (push notification via APNS/FCM). If accepted, the booking is confirmed. If rejected or timed out, the next driver in the ranking receives an offer.</li>
+        </ol>
+      </section>
+
+      <!-- SECTION 2: GEOSPATIAL INDEXING -->
+      <section class="content-card">
+        <span class="section-label">Geospatial indexing</span>
+        <h2>How Uber represents location at scale: H3 and geohash</h2>
+        <p>
+          A naive approach to proximity search is: for each rider query, calculate the distance from the rider to every available driver. At 5M drivers, this is 5M distance calculations per query. Unacceptable. The solution is spatial indexing: partition the earth into cells, assign drivers to cells, and limit proximity queries to adjacent cells.
+        </p>
+
+        <p class="mini-heading">Geohash (Redis native)</p>
+        <p>
+          A geohash encodes latitude/longitude into a Base32 string. Adjacent areas share geohash prefixes. Redis's GEOADD/GEORADIUS commands use geohash internally. For Uber's real-time use case (sub-second queries), Redis geospatial commands are the standard solution — they trade small precision errors (±0.6m at precision 12) for O(1) write and O(log N) read.
+        </p>
+
+        <p class="mini-heading">H3 (Uber's hexagonal grid)</p>
+        <p>
+          Uber open-sourced H3 — a hexagonal hierarchical geospatial indexing system. Hexagons have a critical property that squares don't: all six neighbours are equidistant from the center. This makes aggregation at hex-cell level more accurate for demand forecasting and surge zone calculation. Uber uses H3 for:
+        </p>
+        <ul class="check-list">
+          <li><strong>Surge pricing zones:</strong> Each H3 cell at resolution 7 (~5 km²) has a real-time supply/demand ratio. Surge multiplier is computed per cell.</li>
+          <li><strong>Demand forecasting:</strong> ML models predict demand by H3 cell + time horizon. Drivers on the app see demand heat maps based on H3 cell density.</li>
+          <li><strong>Driver positioning:</strong> The in-app "move here" nudge is calculated by comparing current cell demand to adjacent cell demand — again using H3's uniform-distance neighbours.</li>
+        </ul>
+      </section>
+
+      <!-- SECTION 3: KAFKA -->
+      <section class="content-card">
+        <span class="section-label">The messaging backbone</span>
+        <h2>Why Kafka is central to the location pipeline</h2>
+        <p>
+          At 1.25M location updates/second, no single downstream service can keep up synchronously. Kafka solves this by decoupling write speed from processing speed:
+        </p>
+        <ul class="check-list">
+          <li><strong>Durability:</strong> Location updates are written to disk in Kafka before any consumer processes them. No update is lost even if a consumer crashes.</li>
+          <li><strong>Fan-out:</strong> Multiple independent consumers (Location Store, Zone Aggregator, ETA Calculator, Telemetry) each process the same event stream at their own pace without interfering with each other or with the write path.</li>
+          <li><strong>Replay:</strong> Kafka retains events for a configurable period (typically 7 days). If a consumer needs to reprocess data (bug fix, backfill, new analytics model), it can replay from any offset without touching the write path.</li>
+          <li><strong>Backpressure handling:</strong> If one consumer falls behind, Kafka queues its events independently. The write path is unaffected. The consumer catches up when capacity frees up.</li>
+        </ul>
+        <p class="mini-heading">Partitioning strategy</p>
+        <p>
+          Location topic partitioned by driver_id mod N_partitions. This guarantees that all location updates for one driver land on one partition, which guarantees ordering within a driver's update stream. The Location Store consumer can maintain monotonic location state per driver without distributed locks.
+        </p>
+      </section>
+
+      <!-- SECTION 4: DISPATCH -->
+      <section class="content-card">
+        <span class="section-label">Dispatch system</span>
+        <h2>Matching 5 million drivers to ride requests in real time</h2>
+        <p>
+          The dispatch problem: a rider requests a trip. The system must select the optimal driver and have them accept within seconds. The constraints: low ETA, high acceptance probability, efficient routing, fair distribution across drivers, surge zone awareness.
+        </p>
+
+        <p class="mini-heading">Dispatch algorithm</p>
+        <ol>
+          <li><strong>Proximity retrieval:</strong> GEORADIUS query fetches available drivers within configurable radius (starts at 2 km, expands if insufficient supply).</li>
+          <li><strong>ETA calculation:</strong> For each candidate driver, compute estimated pickup time using current road graph + driver bearing. Uber's routing engine (based on OSRM or similar) computes these in parallel using precomputed contraction hierarchies.</li>
+          <li><strong>Scoring:</strong> Rank drivers by a composite score: ETA weight + driver rating weight + acceptance rate weight + distance-to-zone-boundary weight. The weights are tuned by market (city, time of day, surge state).</li>
+          <li><strong>Sequential offer:</strong> Offer to top-ranked driver. If rejected/timeout (15s default), move to next. Track rejection rate per driver — chronic high rejection rate affects scoring.</li>
+          <li><strong>Batch dispatch (high surge):</strong> During very high demand, use batch dispatch: simultaneously offer to multiple drivers and accept the first response. Reduces rider wait time at the cost of higher driver notification volume.</li>
+        </ol>
+
+        <p class="mini-heading">The matching graph problem</p>
+        <p>
+          At peak, Uber runs thousands of concurrent matching operations per city, each with overlapping candidate driver sets. Naive sequential matching creates conflict: the same top-ranked driver could be offered multiple concurrent trips. The solution is a matching graph with reservation locks: when a driver enters the offer stage, they are "soft-locked" in the driver availability index — excluded from other concurrent matches until the offer resolves.
+        </p>
+      </section>
+
+      <!-- SECTION 5: SURGE PRICING -->
+      <section class="content-card">
+        <span class="section-label">Surge pricing</span>
+        <h2>Real-time supply/demand balance at city block granularity</h2>
+        <p>
+          Surge pricing is not a business decision made per city — it is a continuous computation made per H3 cell every 30–60 seconds, driven by real-time supply (available drivers in the cell) and demand (unfulfilled trip requests in the cell).
+        </p>
+
+        <p class="mini-heading">Surge computation pipeline</p>
+        <ol>
+          <li><strong>Supply signal:</strong> The Zone Aggregator consumes the location Kafka topic and maintains a count of available drivers per H3 cell in Redis. Updated continuously.</li>
+          <li><strong>Demand signal:</strong> Every trip request is assigned to its origin H3 cell. Unfulfilled requests older than N seconds constitute demand. Demand count per cell is maintained in Redis.</li>
+          <li><strong>Surge ratio:</strong> <code>surge_ratio = demand_count / supply_count</code>. When above 1 (more demand than supply), surge multiplier activates. The multiplier is a step function of the ratio (1.0x below threshold, 1.25x, 1.5x, 2.0x at discrete thresholds).</li>
+          <li><strong>Smoothing:</strong> Raw ratios spike during single large events (concerts, airports). An exponential moving average smooths the ratio over a rolling 2-minute window to avoid aggressive flicker.</li>
+          <li><strong>Distribution:</strong> Surge multiplier per cell is published to the rider and driver apps via a push channel. Driver app heat maps show which cells have the highest multiplier — incentivising driver repositioning.</li>
+        </ol>
+
+        <p class="mini-heading">The feedback loop and equilibrium</p>
+        <p>
+          Surge pricing is a feedback mechanism: high prices incentivise more drivers to enter the area, increasing supply, which lowers the ratio, which reduces the surge multiplier. The system reaches equilibrium when supply meets demand at the market-clearing price. The speed of this equilibrium depends on how quickly drivers can reposition — typically 5–15 minutes in dense urban areas.
+        </p>
+      </section>
+
+      <!-- SECTION 6: DISTRIBUTED SYSTEMS CHALLENGES -->
+      <section class="content-card">
+        <span class="section-label">Distributed systems challenges</span>
+        <h2>The specific hard problems at Uber's scale</h2>
+
+        <p class="mini-heading">Clock skew and event ordering</p>
+        <p>
+          Driver GPS timestamps come from device clocks, which drift and can be backdated. A location update received at server time T+5s with device timestamp T-2s creates ordering ambiguity. Solution: server-side ingestion timestamp overrides device timestamp for ordering purposes. Device timestamp is preserved for display but not used for sequencing.
+        </p>
+
+        <p class="mini-heading">GPS signal loss and stale positions</p>
+        <p>
+          Tunnels, parking structures, and radio interference cause GPS dropout. A driver that hasn't sent an update in 30+ seconds may have moved significantly from their last known position. The Location Store marks drivers as "stale" after a configurable timeout and adjusts their probability weighting in dispatch — a stale driver is de-prioritised but not excluded until they've been absent for 5+ minutes.
+        </p>
+
+        <p class="mini-heading">Hotspot partitions</p>
+        <p>
+          During major events (stadium concerts, NYE), thousands of drivers concentrate in one area. If location updates are partitioned by driver_id, the Kafka partitions are uniformly loaded. But if they were partitioned by geohash, the event cell's partition would receive 1000× normal load. Uber partitions by driver_id precisely to avoid geographic hotspot concentration in Kafka.
+        </p>
+
+        <p class="mini-heading">CAP theorem in practice</p>
+        <p>
+          Uber accepts eventual consistency for driver positions: a rider may see a driver's position that is a few seconds old. This is an acceptable UX tradeoff. What Uber cannot accept is booking inconsistency: a driver accepting two simultaneous trips, or a trip being lost during a handoff. Booking data is stored in strongly-consistent datastores (originally MySQL, later sharded with Schemaless and eventually CockroachDB) with two-phase commit for the critical accept/assign state transition.
+        </p>
+
+        <p class="mini-heading">Global vs. regional architecture</p>
+        <p>
+          Location data is inherently regional — a driver in São Paulo has no relevance to a rider in Singapore. Uber runs independent regional clusters (APAC, EMEA, Americas) with no cross-region replication for location data. Global services (accounts, payments, analytics) replicate cross-region with CRDT-based conflict resolution. The boundary between regional and global is enforced at the service layer.
+        </p>
+      </section>
+
+      <!-- SECTION 7: SYSTEM DIAGRAM -->
+      <section class="content-card">
+        <span class="section-label">Architecture summary</span>
+        <h2>The complete system at a glance</h2>
+        <pre><code class="language-text">Driver Phone
+    │ GPS ping every 4s (lat, lon, bearing, speed)
+    ▼
+Mobile Gateway (WebSocket / HTTPS)
+    │ Auth, rate-limit, enrich
+    ▼
+Kafka — topic: location.updates (partitioned by driver_id)
+    │
+    ├──▶ Location Service → Redis GEOADD (driver → lat/lon)
+    │                      Available for GEORADIUS queries
+    │
+    ├──▶ Zone Aggregator → Redis (H3 cell → supply count)
+    │                      Feeds surge pricing
+    │
+    ├──▶ ETA Calculator → Routing service (road graph updates)
+    │
+    └──▶ Telemetry Store → ClickHouse / Pinot (time-series analytics)
+
+Rider App
+    │ "Show nearby drivers" request
+    ▼
+Location Query Service
+    │ GEORADIUS drivers:available {lat} {lon} 3 km
+    ▼
+Available drivers list → rendered on map
+
+Rider App
+    │ "Request trip"
+    ▼
+Dispatch Service
+    │ 1. GEORADIUS (nearby drivers)
+    │ 2. ETA calculation (parallel, per driver)
+    │ 3. Score + rank
+    │ 4. Send offer → Driver app (push notification)
+    │ 5. Accept/reject loop
+    ▼
+Trip Booking Service (MySQL/CockroachDB)
+    │ 2-phase commit: driver.status = "on_trip", trip.status = "active"
+    ▼
+Trip begins</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Common questions</span>
+        <h2>FAQ</h2>
+        <ul class="faq-list">
+          <li class="faq-item">
+            <p class="faq-question">Why Redis for location storage and not a PostGIS database?</p>
+            <p class="faq-answer">PostGIS is excellent for persistent geospatial data — historical trip paths, city boundary definitions, permanent geographic objects. Driver location is ephemeral, volatile, and write-heavy: 1.25M updates/second with sub-millisecond read requirements. Redis's in-memory geospatial commands deliver sub-millisecond GEORADIUS queries and handle the write throughput. PostGIS would require significant sharding and hardware to match Redis's performance here. Many production systems use both: Redis for current location (real-time), PostGIS for historical queries (analytics, dispute resolution).</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">How does Uber handle the dispatch problem when the "best" driver keeps rejecting offers?</p>
+            <p class="faq-answer">Driver acceptance rate is a first-class signal in the dispatch scoring function. Drivers who chronically reject offers are scored lower in ranking — they still receive offers, but less frequently. This creates natural incentive alignment: a driver who consistently rejects rides loses priority and earns less. Additionally, the dispatch system tracks rejection reasons: a driver who rejected because they were about to end their shift is treated differently from a driver who rejected for no reason.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">What happens during a network partition between regional data centres?</p>
+            <p class="faq-answer">Uber's regional architecture means most partition events are fully contained. A partition that isolates one data centre within a region falls back to the other data centres in that region — location data and dispatch continue operating. A partition that isolates an entire region is more severe: riders and drivers in that region experience degraded service (stale maps, slower dispatch) but the service does not go down completely because the regional cluster is self-contained. Global services (payments, accounts) use eventual consistency with conflict resolution for cross-region scenarios.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related reading</span>
+        <h2>Go deeper on these topics</h2>
+        <ul class="resource-links">
+          <li>
+            <a href="system-design-for-beginners.html">System Design for Beginners: Everything You Need in One Article</a>
+            — Covers consistent hashing, CAP theorem, and distributed databases
+          </li>
+          <li>
+            <a href="scaling-to-1-million-users.html">Scaling to 1 Million Users: A Step-by-Step Guide</a>
+            — The progression from single server to horizontally scaled architecture
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Uber's driver tracking system is a case study in separating workloads by their read/write characteristics: high-frequency ephemeral writes go to Kafka → Redis; durable transactional state goes to strongly-consistent SQL; aggregated analytics go to columnar stores. The geospatial layer (H3 for aggregation, Redis GEORADIUS for proximity) solves the spatial query problem at scale. The dispatch system is a constrained optimisation problem running continuously in parallel across millions of concurrent matching operations. The complexity exists because the naive solutions break at exactly the scale Uber operates at.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

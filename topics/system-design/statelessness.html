@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Statelessness | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Scalable horizontally-distributed services" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Architecture · Concept 32 · 8 min</span></div>
+        </figure>
+        <h1>Statelessness</h1>
+        <p class="summary">A service is stateless when any instance can handle any request — no request depends on what a previous request stored in local memory. The prerequisite for horizontal scaling: you can't add a second server if the first one holds session state that the second one doesn't have.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">32 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Architecture</span></div>
+          <div><span class="meta-label">Anti-pattern</span><span class="meta-value">Sticky sessions, in-memory session stores</span></div>
+          <div><span class="meta-label">Solution</span><span class="meta-value">Externalise state to Redis, database, JWTs</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">When you start a web server, it handles one request at a time. When traffic grows, you add a second server behind a load balancer. But if your first server stored the user's session in its local memory, the second server can't find it — the user gets logged out. This is the stateful anti-pattern: state that lives in a single service instance, making that instance un-replaceable and un-scalable. Statelessness means externalising that state so any instance can pick up any request.</p>
+        <div class="callout"><p><strong>The 12-Factor App principle:</strong> "Store session state in a backing service such as Memcached or Redis." Twelve-factor apps share nothing between instances. Any state that needs to persist across requests must live in an external store, not in the process.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The Pattern</span>
+        <h2>Stateful vs stateless — what changes</h2>
+        <div class="diagram-box">
+<span class="step">Stateful: session stored in-memory on server 1</span>
+
+User logs in ──▶ Server 1 stores { userId: 123, cart: [...] } in memory
+User request ──▶ Load Balancer ──▶ <span class="warn">Server 2</span> — has no session — <span class="warn">user sees logged-out state</span>
+
+Scale Server 1 down for maintenance → <span class="warn">all active sessions lost</span>
+Deploy new version → <span class="warn">rolling restart loses all in-flight sessions</span>
+
+<span class="step">Stateless: session stored externally in Redis</span>
+
+User logs in ──▶ Server 1 stores { userId: 123, cart: [...] } in <span class="hi">Redis</span> with sessionId
+               Returns sessionId cookie to client
+
+User request ──▶ Load Balancer ──▶ <span class="ok">Server 2</span>
+               Server 2 reads sessionId cookie → fetches session from <span class="hi">Redis</span>
+               <span class="ok">Full session available — request succeeds</span>
+
+Scale to 10 servers → <span class="ok">all see same session state via Redis</span>
+Deploy new version → <span class="ok">rolling restart is safe — sessions survive</span>
+
+<span class="step">JWTs: externalize auth state into the token itself</span>
+
+Session store: look up userId 123 → is it valid? → DB/Redis query per request
+JWT:           decode token → userId 123, roles=[admin], exp=1700003600
+               → <span class="ok">No lookup needed. State carried in the token. Stateless verification.</span>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Externalising session state with Redis</h2>
+        <pre><code class="language-js">import express from 'express';
+import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { createClient } from 'redis';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+const app = express();
+
+// ─── EXTERNALIZED SESSION STORE ────────────────────────────────────────────
+// Sessions live in Redis — any server instance reads them
+app.use(session({
+  store: new RedisStore({ client: redis }),
+  secret:            process.env.SESSION_SECRET,
+  resave:            false,
+  saveUninitialized: false,
+  cookie: {
+    secure:   process.env.NODE_ENV === 'production', // HTTPS only in prod
+    httpOnly: true,     // Not accessible via JavaScript (XSS protection)
+    sameSite: 'strict', // CSRF protection
+    maxAge:   24 * 60 * 60 * 1000, // 24h
+  },
+}));
+
+// ─── STATELESS AUTH WITH JWT ───────────────────────────────────────────────
+// No server-side state at all — token carries user identity
+// Downside: can't revoke individual tokens without a blocklist (server-side state)
+
+function issueTokens(userId) {
+  const accessToken = jwt.sign(
+    { sub: userId, roles: ['user'] },
+    process.env.JWT_PRIVATE_KEY,
+    { algorithm: 'RS256', expiresIn: '15m' }
+  );
+
+  const refreshToken = jwt.sign(
+    { sub: userId, type: 'refresh' },
+    process.env.JWT_PRIVATE_KEY,
+    { algorithm: 'RS256', expiresIn: '7d' }
+  );
+
+  return { accessToken, refreshToken };
+}
+
+// ─── STATELESS SERVICE: no process-level state ────────────────────────────
+// Wrong: caching in module-level variable (shared between requests but not instances)
+let userCache = {}; // ← WRONG: each server instance has its own cache
+
+// Right: cache in Redis (shared across all instances)
+async function getCachedUser(userId) {
+  const cached = await redis.get(`user:${userId}`);
+  if (cached) return JSON.parse(cached);
+
+  const user = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
+  if (user.rows.length) {
+    await redis.setEx(`user:${userId}`, 300, JSON.stringify(user.rows[0]));
+  }
+  return user.rows[0];
+}
+
+// ─── IDENTIFYING STATEFUL PATTERNS IN YOUR CODEBASE ──────────────────────
+// These patterns create server-instance-level state:
+const ANTI_PATTERNS = [
+  'let sessionData = {}',       // Module-level session storage
+  'global.userSessions',        // Global state
+  'app.locals.pendingJobs',     // Express app.locals for mutable state
+  'setInterval for in-memory cache refresh', // Each instance caches independently
+];
+
+// ─── GRACEFUL HANDLING OF STATEFUL WORKLOADS ──────────────────────────────
+// Some things ARE stateful by nature (WebSocket connections, streaming, upload progress).
+// Solution: use a consistent hash or sticky routing for those specific endpoints only.
+// Don't make your entire service stateful because one endpoint needs it.
+
+// Example: WebSocket connections are stateful — sticky route only the WS endpoint
+const wsRouter = express.Router();
+wsRouter.ws('/ws', (ws, req) => {
+  // This endpoint is routed via consistent hash on userId to the same server
+  // All other endpoints remain stateless
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>The 12-Factor App and Kubernetes pod scheduling</h2>
+        <p><strong>Kubernetes expects statelessness:</strong> Kubernetes can restart, move, or scale your pods at any time. If your pod stores session state in memory, a pod restart (triggered by a deploy, OOM kill, or node failure) silently logs out all active users. Kubernetes' design assumes stateless pods — any pod in a deployment can be replaced by any other. Statelessness is not optional for Kubernetes-native services.</p>
+        <p><strong>Sticky sessions as a crutch:</strong> Load balancers can route the same client to the same server ("sticky sessions" via IP hash or cookie). This lets a stateful service scale temporarily. It is not a solution — it prevents full horizontal scaling, makes rolling deploys harder, and doesn't survive server crashes. Sticky sessions are a migration aid, not an architecture.</p>
+        <p><strong>The cloud-native implication:</strong> Every major cloud hosting model — Lambda, Cloud Run, App Engine, Kubernetes — assumes stateless instances that can be started, stopped, and replicated on demand. If your service is stateful, it can't leverage elastic scaling, can't run on these platforms correctly, and has a hidden single point of failure in every server instance holding live session data.</p>
+
+        <div class="warn-box"><strong>In-memory caches are a form of state.</strong> A module-level <code>let cache = {}</code> is state. Each server instance builds its own cache from scratch. When you add a second instance, it cold-starts with an empty cache, causing a load spike on your database. Externalise caches to Redis. A brief window of duplicate DB queries is acceptable; an unbounded cache-miss spike on every new instance is not.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Stateless pros</h4><ul><li>Horizontal scaling: add instances freely</li><li>Rolling deploys are safe — sessions survive restarts</li><li>Load balancer can route any request to any instance</li><li>Crash recovery: new instance starts clean, users unaffected</li></ul></div>
+          <div class="trade-col cons"><h4>Stateless cons</h4><ul><li>External state store (Redis) becomes a dependency — must be HA</li><li>Redis call per request for session adds ~0.5ms latency</li><li>JWT revocation requires a server-side blocklist (re-introducing state)</li><li>Some workloads (streaming, WebSockets) are inherently stateful</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Statelessness is the prerequisite for horizontal scaling. Any state stored in a service instance's memory — sessions, caches, counters, in-flight state — breaks the assumption that any instance can handle any request. Externalise session state to Redis (connect-redis or equivalent). Use JWTs for stateless authentication. Move in-memory caches to Redis or a shared cache. The only things a stateless service should store in memory are immutable config and read-only data loaded at startup. Sticky sessions are a migration aid, not a solution — they prevent true horizontal scaling and don't survive crashes.</p>
+      </section>
+    </main>
+  </body>
+</html>

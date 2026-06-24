@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Component Architecture | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558655146-9f40138edfeb?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Architecture planning and design patterns" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 3 of 11 · ~30 min</span>
+          </div>
+        </figure>
+        <h1>Component Architecture</h1>
+        <p class="summary">How to design components you can actually reuse — functional composition, children props, layout shell components, and the design patterns (Container/Presenter, Compound, Render Props) that experienced React developers use in large codebases.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">3 of 11</span></div>
+          <div><span class="meta-label">Concepts</span><span class="meta-value">Functional · Reusable · Composition · Children · Layout · Patterns</span></div>
+          <div><span class="meta-label">Principle</span><span class="meta-value">Composition over inheritance — build complex UI from simple parts</span></div>
+        </div>
+      </header>
+
+      <!-- ─── FUNCTIONAL COMPONENTS ──────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>Functional Components — the only component type you need</h2>
+        <p class="lead">Prior to hooks (React 16.8), you needed class components for state and lifecycle. Today, functional components handle everything — and they are simpler to read, test, and compose.</p>
+        <pre><code class="language-jsx">// Modern functional component — the standard
+function UserCard({ user, onEdit }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    &lt;article className="user-card"&gt;
+      &lt;header&gt;
+        &lt;img src={user.avatarUrl} alt={user.name} /&gt;
+        &lt;h2&gt;{user.name}&lt;/h2&gt;
+      &lt;/header&gt;
+
+      {expanded &amp;&amp; &lt;p className="bio"&gt;{user.bio}&lt;/p&gt;}
+
+      &lt;footer&gt;
+        &lt;button onClick={() =&gt; setExpanded(e =&gt; !e)}&gt;
+          {expanded ? 'Less' : 'More'}
+        &lt;/button&gt;
+        &lt;button onClick={() =&gt; onEdit(user.id)}&gt;Edit&lt;/button&gt;
+      &lt;/footer&gt;
+    &lt;/article&gt;
+  );
+}
+
+// Compare with old class component — same behaviour, much more boilerplate
+class UserCardClass extends React.Component {
+  state = { expanded: false };
+
+  render() {
+    const { user, onEdit } = this.props;
+    const { expanded } = this.state;
+
+    return (
+      &lt;article&gt;
+        {/* same JSX */}
+        &lt;button onClick={() =&gt; this.setState({ expanded: !expanded })}&gt;
+          Toggle
+        &lt;/button&gt;
+      &lt;/article&gt;
+    );
+  }
+}
+
+// ─── Typing functional components with TypeScript ─────────────────────────
+interface UserCardProps {
+  user: { id: string; name: string; bio: string; avatarUrl: string; };
+  onEdit: (id: string) =&gt; void;
+}
+function UserCardTyped({ user, onEdit }: UserCardProps) { /* ... */ }
+
+// Arrow function style (identical behaviour — personal preference)
+const UserCardArrow = ({ user, onEdit }: UserCardProps) =&gt; {
+  return &lt;article&gt;{/* ... */}&lt;/article&gt;;
+};
+</code></pre>
+      </section>
+
+      <!-- ─── REUSABLE COMPONENTS ─────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Reusable Components — building a component library</h2>
+        <p>A reusable component does one thing well, accepts the right props to cover its use cases, and doesn't assume where it will be used. The test: can you use this component in two completely different contexts without changing it?</p>
+        <pre><code class="language-jsx">// ─── Reusable Button ─────────────────────────────────────────────────────
+// Covers: variants, sizes, loading state, icon, disabled, all native button props
+function Button({
+  children,
+  variant = 'primary',   // primary | secondary | ghost | danger
+  size = 'md',           // sm | md | lg
+  loading = false,
+  leftIcon,
+  rightIcon,
+  className,
+  ...rest                // passes through type, onClick, disabled, aria-*, etc.
+}) {
+  return (
+    &lt;button
+      className={['btn', `btn--${variant}`, `btn--${size}`, className].filter(Boolean).join(' ')}
+      disabled={loading || rest.disabled}
+      {...rest}
+    &gt;
+      {loading &amp;&amp; &lt;Spinner size={16} /&gt;}
+      {!loading &amp;&amp; leftIcon}
+      {children}
+      {!loading &amp;&amp; rightIcon}
+    &lt;/button&gt;
+  );
+}
+
+// Usage in many different contexts:
+&lt;Button variant="primary" onClick={handleSubmit}&gt;Save Changes&lt;/Button&gt;
+&lt;Button variant="danger" size="sm" onClick={handleDelete}&gt;Delete&lt;/Button&gt;
+&lt;Button variant="ghost" loading={isSaving}&gt;Saving...&lt;/Button&gt;
+&lt;Button variant="secondary" leftIcon={&lt;DownloadIcon /&gt;}&gt;Export CSV&lt;/Button&gt;
+
+// ─── Reusable Input ───────────────────────────────────────────────────────
+function Input({
+  label,
+  error,
+  helperText,
+  id,
+  required,
+  className,
+  ...rest
+}) {
+  const inputId = id ?? `input-${label?.toLowerCase().replace(/\s/g, '-')}`;
+
+  return (
+    &lt;div className={`form-field ${error ? 'form-field--error' : ''} ${className ?? ''}`}&gt;
+      {label &amp;&amp; (
+        &lt;label htmlFor={inputId}&gt;
+          {label} {required &amp;&amp; &lt;span aria-hidden&gt;*&lt;/span&gt;}
+        &lt;/label&gt;
+      )}
+      &lt;input id={inputId} aria-describedby={`${inputId}-helper`} {...rest} /&gt;
+      &lt;span id={`${inputId}-helper`} className={error ? 'error-text' : 'helper-text'}&gt;
+        {error ?? helperText}
+      &lt;/span&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Reusable Badge ───────────────────────────────────────────────────────
+const BADGE_COLORS = {
+  green: 'bg-green-100 text-green-800',
+  red:   'bg-red-100 text-red-800',
+  blue:  'bg-blue-100 text-blue-800',
+  gray:  'bg-gray-100 text-gray-700',
+};
+
+function Badge({ children, color = 'gray' }) {
+  return (
+    &lt;span className={`badge ${BADGE_COLORS[color]}`}&gt;{children}&lt;/span&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── COMPOSITION ─────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>Composition — building complex UI from simple parts</h2>
+        <p>Composition means assembling complex behavior by combining small, focused components. This is React's answer to inheritance in OOP — instead of extending components, you wrap them.</p>
+        <pre><code class="language-jsx">// ─── Composition vs inheritance ───────────────────────────────────────────
+// Bad: inheriting from another component (React doesn't recommend this)
+class SpecialButton extends Button { /* can't easily do this cleanly */ }
+
+// Good: composing components
+function IconButton({ icon, label, ...props }) {
+  return (
+    &lt;Button {...props}&gt;
+      {icon}
+      &lt;span&gt;{label}&lt;/span&gt;
+    &lt;/Button&gt;
+  );
+}
+
+// ─── Slot-based composition (common in UI libraries) ─────────────────────
+// Card with named slots for header, body, footer
+function Card({ header, footer, children, className }) {
+  return (
+    &lt;div className={`card ${className ?? ''}`}&gt;
+      {header &amp;&amp; &lt;div className="card__header"&gt;{header}&lt;/div&gt;}
+      &lt;div className="card__body"&gt;{children}&lt;/div&gt;
+      {footer &amp;&amp; &lt;div className="card__footer"&gt;{footer}&lt;/div&gt;}
+    &lt;/div&gt;
+  );
+}
+
+// Usage — caller controls what goes in each slot
+&lt;Card
+  header={&lt;h2&gt;User Settings&lt;/h2&gt;}
+  footer={&lt;Button onClick={save}&gt;Save&lt;/Button&gt;}
+&gt;
+  &lt;SettingsForm user={user} /&gt;
+&lt;/Card&gt;
+
+// ─── Containment + specialization ────────────────────────────────────────
+// Base Dialog component
+function Dialog({ title, children, actions }) {
+  return (
+    &lt;div role="dialog" aria-modal="true" className="dialog"&gt;
+      &lt;h2&gt;{title}&lt;/h2&gt;
+      &lt;div className="dialog__content"&gt;{children}&lt;/div&gt;
+      &lt;div className="dialog__actions"&gt;{actions}&lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// Specialized confirmation dialog built by composing Dialog
+function ConfirmDialog({ title, message, onConfirm, onCancel }) {
+  return (
+    &lt;Dialog
+      title={title}
+      actions={
+        &lt;&gt;
+          &lt;Button variant="ghost" onClick={onCancel}&gt;Cancel&lt;/Button&gt;
+          &lt;Button variant="danger" onClick={onConfirm}&gt;Confirm&lt;/Button&gt;
+        &lt;/&gt;
+      }
+    &gt;
+      &lt;p&gt;{message}&lt;/p&gt;
+    &lt;/Dialog&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── CHILDREN PROPS ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>Children Props — the most powerful prop</h2>
+        <p><code>children</code> is a special prop that contains whatever you put between a component's opening and closing tags. It enables the most flexible composition patterns in React.</p>
+        <pre><code class="language-jsx">// children is the JSX between opening and closing tags
+function Panel({ children, title }) {
+  return (
+    &lt;div className="panel"&gt;
+      &lt;h3&gt;{title}&lt;/h3&gt;
+      &lt;div className="panel__body"&gt;{children}&lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// Usage — anything between the tags becomes children
+&lt;Panel title="Settings"&gt;
+  &lt;Input label="Name" /&gt;
+  &lt;Input label="Email" /&gt;
+  &lt;Button&gt;Save&lt;/Button&gt;
+&lt;/Panel&gt;
+
+// ─── children as a function (render props) ─────────────────────────────
+// The child is a function that receives data from the parent
+function Toggle({ children }) {
+  const [on, setOn] = useState(false);
+  return children({ on, toggle: () => setOn(o => !o) });
+}
+
+// Usage — caller controls the rendering completely
+&lt;Toggle&gt;
+  {({ on, toggle }) =&gt; (
+    &lt;div&gt;
+      &lt;p&gt;The toggle is {on ? 'on' : 'off'}&lt;/p&gt;
+      &lt;button onClick={toggle}&gt;Toggle&lt;/button&gt;
+    &lt;/div&gt;
+  )}
+&lt;/Toggle&gt;
+
+// ─── Inspecting children ──────────────────────────────────────────────────
+// React.Children utilities for working with children programmatically
+function Tabs({ children }) {
+  const [active, setActive] = useState(0);
+
+  const tabs = React.Children.map(children, (child, i) =>
+    React.cloneElement(child, { isActive: i === active, onSelect: () => setActive(i) })
+  );
+
+  return &lt;div className="tabs"&gt;{tabs}&lt;/div&gt;;
+}
+
+// ─── Guarding against unexpected children ─────────────────────────────────
+// React.Children.count for conditional rendering
+function Grid({ children, minCols = 2 }) {
+  const count = React.Children.count(children);
+  const cols = Math.min(count, minCols);
+  return (
+    &lt;div style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }} className="grid"&gt;
+      {children}
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── LAYOUT COMPONENTS ───────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>Layout Components — shells for consistent page structure</h2>
+        <p>Layout components control the structural skeleton of a page — the header, sidebar, footer, and content area — without caring about what content goes inside. They are essential for consistent spacing and navigation across pages.</p>
+        <pre><code class="language-jsx">// ─── App shell layout ─────────────────────────────────────────────────────
+function AppShell({ children }) {
+  return (
+    &lt;div className="app-shell"&gt;
+      &lt;TopNav /&gt;
+      &lt;div className="app-shell__body"&gt;
+        &lt;Sidebar /&gt;
+        &lt;main className="app-shell__content"&gt;
+          {children}
+        &lt;/main&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Page layout with header and actions ─────────────────────────────────
+function PageLayout({ title, breadcrumbs, actions, children }) {
+  return (
+    &lt;div className="page"&gt;
+      &lt;header className="page-header"&gt;
+        {breadcrumbs &amp;&amp; &lt;Breadcrumbs items={breadcrumbs} /&gt;}
+        &lt;div className="page-header__row"&gt;
+          &lt;h1&gt;{title}&lt;/h1&gt;
+          {actions &amp;&amp; &lt;div className="page-header__actions"&gt;{actions}&lt;/div&gt;}
+        &lt;/div&gt;
+      &lt;/header&gt;
+      &lt;div className="page-body"&gt;{children}&lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// Usage
+&lt;AppShell&gt;
+  &lt;PageLayout
+    title="Users"
+    breadcrumbs={[{ label: 'Home', href: '/' }, { label: 'Users' }]}
+    actions={&lt;Button onClick={openInviteModal}&gt;Invite User&lt;/Button&gt;}
+  &gt;
+    &lt;UserTable users={users} /&gt;
+  &lt;/PageLayout&gt;
+&lt;/AppShell&gt;
+
+// ─── Responsive layout with React Router Outlet ───────────────────────────
+// (Used in React Router v6 — see Chapter 6)
+function DashboardLayout() {
+  return (
+    &lt;AppShell&gt;
+      &lt;Outlet /&gt;  {/* React Router renders matched child route here */}
+    &lt;/AppShell&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── DESIGN PATTERNS ─────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Design Patterns — proven solutions to common React problems</h2>
+        <pre><code class="language-jsx">// ─── Pattern 1: Container / Presenter (Smart / Dumb) ────────────────────
+// Container handles data fetching and state
+function UserListContainer() {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() =&gt; {
+    fetchUsers().then(setUsers).finally(() =&gt; setLoading(false));
+  }, []);
+
+  if (loading) return &lt;Spinner /&gt;;
+  return &lt;UserList users={users} /&gt;;  // pass data to presenter
+}
+
+// Presenter handles only rendering — no data logic, easy to test
+function UserList({ users }) {
+  return (
+    &lt;ul&gt;
+      {users.map(u =&gt; &lt;li key={u.id}&gt;{u.name}&lt;/li&gt;)}
+    &lt;/ul&gt;
+  );
+}
+
+// ─── Pattern 2: Compound Components ──────────────────────────────────────
+// Related components that share implicit state via context
+// e.g. &lt;Select&gt; with &lt;Select.Option&gt; children
+const SelectContext = React.createContext(null);
+
+function Select({ value, onChange, children }) {
+  return (
+    &lt;SelectContext.Provider value={{ value, onChange }}&gt;
+      &lt;div className="select"&gt;{children}&lt;/div&gt;
+    &lt;/SelectContext.Provider&gt;
+  );
+}
+
+function Option({ value, children }) {
+  const { value: selected, onChange } = useContext(SelectContext);
+  return (
+    &lt;div
+      className={`option ${selected === value ? 'option--selected' : ''}`}
+      onClick={() =&gt; onChange(value)}
+    &gt;
+      {children}
+    &lt;/div&gt;
+  );
+}
+
+Select.Option = Option;  // Attach as static property
+
+// Usage — clean, self-documenting API
+&lt;Select value={role} onChange={setRole}&gt;
+  &lt;Select.Option value="admin"&gt;Admin&lt;/Select.Option&gt;
+  &lt;Select.Option value="editor"&gt;Editor&lt;/Select.Option&gt;
+  &lt;Select.Option value="viewer"&gt;Viewer&lt;/Select.Option&gt;
+&lt;/Select&gt;
+
+// ─── Pattern 3: HOC — Higher Order Component ─────────────────────────────
+// A function that takes a component and returns an enhanced component
+// Common in auth guards, analytics, logging
+function withAuth(WrappedComponent) {
+  return function AuthenticatedComponent(props) {
+    const { user, loading } = useAuth();
+    if (loading) return &lt;Spinner /&gt;;
+    if (!user)   return &lt;Navigate to="/login" /&gt;;
+    return &lt;WrappedComponent {...props} user={user} /&gt;;
+  };
+}
+const ProtectedDashboard = withAuth(Dashboard);
+
+// ─── Pattern 4: Custom Hook (preferred over HOC in modern React) ──────────
+// Extracts logic into a reusable function — simpler than HOC
+function useAuth() {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() =&gt; {
+    getCurrentUser().then(setUser).finally(() =&gt; setLoading(false));
+  }, []);
+
+  return { user, loading, isAuthenticated: !!user };
+}
+
+// Usage — cleaner than HOC, works with any component
+function Dashboard() {
+  const { user, loading } = useAuth();
+  if (loading) return &lt;Spinner /&gt;;
+  return &lt;h1&gt;Welcome, {user.name}&lt;/h1&gt;;
+}
+</code></pre>
+        <div class="insight-box"><strong>Prefer custom hooks over HOCs</strong> in modern React. HOCs wrap your component tree (harder to debug), can cause props name collisions, and are harder to type in TypeScript. Custom hooks extract logic while keeping your component tree flat. HOCs still appear in older codebases — know both.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 3 Takeaway</h2>
+        <p>Component architecture is fundamentally about separation of concerns. Layout components own structure. Container components own data. Presenter components own appearance. Compound components provide ergonomic APIs. The goal is small, focused components that can be combined without fighting each other. When you find yourself copy-pasting JSX, that is the signal to extract a reusable component.</p>
+      </section>
+    </main>
+  </body>
+</html>

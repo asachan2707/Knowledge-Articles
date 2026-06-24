@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bolt for JavaScript | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Slack messaging app open on laptop and phone"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Core · Framework · 90 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@austindistel" target="_blank" rel="noopener">Austin Distel</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Bolt for JavaScript</h1>
+        <p class="summary">
+          Bolt for JS is Slack's official Node framework. It abstracts request signing, the 3-second
+          ack, OAuth, the Web API client, and gives you ergonomic listeners. This page covers the
+          framework's mental model, listener types, middleware, and the ship-ready patterns.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack core</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Build production Slack apps with Bolt</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~90 min docs + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Every real Slack app on the JS stack</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Bolt is one class — <code>App</code> — and a set of listeners.
+          <code>app.command(...)</code> handles slash commands, <code>app.action(...)</code> handles
+          block actions, <code>app.view(...)</code> handles modal submissions, <code>app.event(...)</code>
+          handles Events API events, <code>app.shortcut(...)</code> handles global &amp; message
+          shortcuts. That's the entire surface.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The promise of Bolt:</strong> you only write what's unique to your app. Signing,
+            ack timing, OAuth flow, retry logic, the Web API typing — all handled by the framework.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Hello world</h2>
+        <pre class="code-block"><code>import 'dotenv/config';
+import { App } from '@slack/bolt';
+
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  port: 3000,
+});
+
+app.command('/hello', async ({ command, ack, client }) =&gt; {
+  await ack();
+  await client.chat.postMessage({
+    channel: command.channel_id,
+    text: `Hi &lt;@${command.user_id}&gt;!`,
+  });
+});
+
+await app.start();
+console.log('⚡ Bolt app is running');</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Listener types — full surface</h2>
+        <pre class="code-block"><code>// Slash command
+app.command('/standup',          async ({ command, ack, client })           =&gt; { ... });
+
+// Global shortcut (callback_id from your manifest)
+app.shortcut('open_feedback',    async ({ shortcut, ack, client })          =&gt; { ... });
+
+// Message shortcut (also via app.shortcut, type === 'message_action')
+app.shortcut('save_message',     async ({ shortcut, ack, client })          =&gt; { ... });
+
+// Block action — button click, select change
+app.action('approve_button',     async ({ ack, body, client, action })      =&gt; { ... });
+
+// Modal submission
+app.view('feedback_modal',       async ({ ack, body, view, client })        =&gt; { ... });
+
+// Events API event
+app.event('app_mention',         async ({ event, client })                  =&gt; { ... });
+app.message('hello',             async ({ message, say })                   =&gt; { say('Hi!'); });
+
+// Options request (dynamic dropdowns)
+app.options('approver_select',   async ({ ack, options })                   =&gt; { ... });
+
+// Errors
+app.error(async (error) =&gt; { console.error(error); });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>The receiver</h2>
+        <p>
+          Bolt routes everything through a <strong>receiver</strong>. The defaults:
+        </p>
+        <ul>
+          <li><strong>HTTPReceiver</strong> — built on Node's <code>http</code>; the default.</li>
+          <li><strong>ExpressReceiver</strong> — uses Express so you can mount your own routes alongside Slack handlers.</li>
+          <li><strong>SocketModeReceiver</strong> — opens a WebSocket; activated by passing <code>socketMode: true</code>.</li>
+          <li><strong>AwsLambdaReceiver</strong> — for serverless deployments.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Middleware — the secret weapon</h2>
+        <p>
+          Bolt's middleware runs before each listener. You can add global middleware
+          (<code>app.use(fn)</code>) that runs for every event, or scoped middleware on a single
+          listener.
+        </p>
+        <pre class="code-block"><code>// Global: log every incoming event
+app.use(async ({ next, body }) =&gt; {
+  console.log(`[in] ${body.type} ${body.api_app_id ?? ''}`);
+  await next();
+});
+
+// Scoped: only run if the user is an admin
+const adminOnly = async ({ context, body, next }) =&gt; {
+  const userId = body.user.id ?? body.user_id;
+  if (!isAdmin(userId)) return;  // do not call next() — short-circuit
+  await next();
+};
+
+app.command('/admin', adminOnly, async ({ command, ack }) =&gt; { ... });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>OAuth + InstallProvider for distributed apps</h2>
+        <pre class="code-block"><code>const app = new App({
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  clientId:      process.env.SLACK_CLIENT_ID,
+  clientSecret:  process.env.SLACK_CLIENT_SECRET,
+  stateSecret:   process.env.SLACK_STATE_SECRET,
+  scopes: ['chat:write', 'commands', 'app_mentions:read'],
+  installationStore: {
+    storeInstallation:  async (i)  =&gt; db.installations.upsert(i),
+    fetchInstallation:  async (q)  =&gt; db.installations.findOne(q),
+    deleteInstallation: async (q)  =&gt; db.installations.delete(q),
+  },
+  installerOptions: {
+    directInstall: true,           // skip the consent landing page
+    redirectUriPath: '/slack/oauth_redirect',
+  },
+});</code></pre>
+        <p>
+          Bolt automatically mounts <code>/slack/install</code>, <code>/slack/oauth_redirect</code>,
+          and <code>/slack/events</code>. You write the installation store; Bolt calls it.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Project structure that scales</h2>
+        <pre class="code-block"><code>src/
+  app.ts                 # boot Bolt + register modules
+  install-store.ts       # InstallationStore impl
+  middleware/
+    log.ts
+    require-admin.ts
+  features/
+    standup/
+      command.ts         # app.command('/standup', ...)
+      modal.ts           # views.open + view handlers
+      blocks.ts          # builder functions returning blocks
+      service.ts         # business logic (no Slack imports!)
+    feedback/
+      ...
+  shared/
+    db.ts
+    redis.ts
+    secrets.ts</code></pre>
+        <p>
+          The discipline: pure business logic in <code>service.ts</code>, Slack-aware glue in
+          <code>command.ts</code>/<code>modal.ts</code>. This makes services unit-testable without Bolt.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Testing &amp; observability</h2>
+        <ul>
+          <li>Unit-test handlers by capturing them at registration; mock <code>ack</code> + <code>client</code>.</li>
+          <li>Add request/response logging middleware in dev; structured logs in prod.</li>
+          <li>Send errors to Sentry/Datadog from <code>app.error</code>.</li>
+          <li>Deploy with at least 2 replicas behind a load balancer; Bolt is stateless if you push state to Mongo/Redis.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>One <code>App</code> + per-feature listener files = clean structure that scales.</li>
+          <li>Middleware short-circuits with "don't call <code>next()</code>"; use it for auth and gating.</li>
+          <li>For distributed apps, write a real installation store from day one.</li>
+          <li>Keep business logic free of Slack imports — testable without the framework.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://api.slack.com/start/building/bolt-js" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Building an app with Bolt for JavaScript
+            </a>
+          </li>
+          <li>
+            <a href="https://slack.dev/bolt-js/concepts" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Bolt for JS — concepts &amp; sample code
+            </a>
+          </li>
+          <li>
+            <a href="https://github.com/slackapi/bolt-js" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Source</span>
+              slackapi/bolt-js (GitHub)
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

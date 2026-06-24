@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Node.js Runtime | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Prereq · Runtime · 60 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Node.js Runtime</h1>
+        <p class="summary">
+          Node.js is the JavaScript runtime your Slack app runs on. Programming with Mosh's "Node in 1
+          Hour" covers the runtime, modules, npm, and the file system. This page focuses on the bits a
+          Bolt for JS app actually uses.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack prereq · Tech Stack 1</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Run, debug, and ship a Node service</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~1 hour video + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Express, Bolt, deployment</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Node.js is V8 (the JavaScript engine inside Chrome) repackaged to run on a server. It gives you
+          a non-blocking I/O model, a module system, a package manager (npm), and a standard library for
+          files, networking, crypto, and processes. A Bolt Slack app is just a Node process that listens
+          for HTTP webhooks (or holds a WebSocket open in Socket Mode).
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Mental model:</strong> Node = single-threaded event loop + libuv for I/O + V8 for
+            executing your JS. Long synchronous work blocks <em>everything</em>. Push CPU-heavy work to
+            worker threads or background queues.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Core modules every Slack app touches</h2>
+        <ul>
+          <li><code>http</code> / <code>https</code> — under the hood of Express and Bolt's HTTP receiver.</li>
+          <li><code>process</code> — environment variables (<code>process.env.SLACK_BOT_TOKEN</code>), exit codes, signals.</li>
+          <li><code>fs</code> / <code>fs/promises</code> — reading config, writing logs.</li>
+          <li><code>crypto</code> — verifying Slack request signatures (HMAC-SHA256).</li>
+          <li><code>events</code> — the <code>EventEmitter</code> pattern Bolt builds on.</li>
+          <li><code>util</code> — <code>promisify</code>, <code>inspect</code> for debugging.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>npm essentials</h2>
+        <p>
+          npm (Node Package Manager) is how you install dependencies and run scripts. The two files
+          you'll edit constantly are <code>package.json</code> (declared deps + scripts) and
+          <code>package-lock.json</code> (resolved versions — commit it!).
+        </p>
+        <pre class="code-block"><code># Init a new app
+npm init -y
+
+# Install Bolt + dotenv
+npm install @slack/bolt dotenv
+
+# Add a TypeScript dev dep
+npm install -D typescript @types/node
+
+# Run a defined script
+npm run dev</code></pre>
+
+        <p class="code-caption">A minimal package.json for a Bolt app</p>
+        <pre class="code-block"><code>{
+  "name": "my-slack-app",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/app.js",
+    "start": "node src/app.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.21.0",
+    "dotenv": "^16.4.0"
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>The event loop (the part Slack devs <em>must</em> know)</h2>
+        <p>
+          Node's event loop has phases: timers → pending callbacks → poll (I/O) → check (setImmediate) →
+          close. Microtasks (resolved promises) run between every phase. The practical rule for Slack:
+          if a function takes more than ~50ms of pure CPU work, the event loop stops processing other
+          requests during that time — including your <code>ack()</code>.
+        </p>
+        <p>
+          Heavy CPU work (PDF generation, image processing, big regexes) belongs in:
+        </p>
+        <ul>
+          <li>A <strong>background queue</strong> (Bull / BullMQ on Redis, or SQS) consumed by a worker.</li>
+          <li>A <strong>worker thread</strong> (<code>node:worker_threads</code>) for in-process parallelism.</li>
+          <li>A <strong>separate microservice</strong> when it's hot enough to deserve its own scaling.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Modules: CommonJS vs. ESM</h2>
+        <p>
+          Older Node code uses <code>require()</code>/<code>module.exports</code> (CommonJS). New code
+          uses <code>import</code>/<code>export</code> (ESM) with <code>"type": "module"</code> in
+          <code>package.json</code> and <code>.js</code> file extensions inside imports. Bolt for JS
+          supports both; pick one and stick with it.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Environment &amp; secrets</h2>
+        <p>
+          A Slack app has at least four secrets: <code>SLACK_BOT_TOKEN</code>,
+          <code>SLACK_SIGNING_SECRET</code>, <code>SLACK_CLIENT_ID</code>,
+          <code>SLACK_CLIENT_SECRET</code> (plus an app-level token for Socket Mode). Locally, store them
+          in a <code>.env</code> file and load with <code>dotenv</code>. In production, use AWS Secrets
+          Manager / SSM, never <code>.env</code> on a server.
+        </p>
+        <pre class="code-block"><code>import 'dotenv/config';
+import { App } from '@slack/bolt';
+
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  port: Number(process.env.PORT) || 3000,
+});
+
+await app.start();
+console.log('⚡ Bolt app is running');</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Practice plan</h2>
+        <ol>
+          <li>Build a tiny HTTP server using only the built-in <code>http</code> module.</li>
+          <li>Refactor it to Express (next prereq) and feel the difference.</li>
+          <li>Write a script that loads a <code>.env</code> file and prints a redacted version.</li>
+          <li>Wrap a CPU-heavy function in a worker thread and prove the event loop stays responsive.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Node = single-threaded event loop. Don't block it.</li>
+          <li>npm scripts are your dev/test/build/deploy entry points.</li>
+          <li>ESM modules + <code>strict</code> TypeScript is the modern default.</li>
+          <li>Secrets live in env vars locally and a real secrets manager in production.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=TlB_eWDSMt4" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Node.js Tutorial for Beginners: Learn Node in 1 Hour (Programming with Mosh)
+            </a>
+          </li>
+          <li>
+            <a href="https://nodejs.org/en/docs" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Node.js official documentation
+            </a>
+          </li>
+          <li>
+            <a href="https://nodejs.org/en/docs/guides/event-loop-timers-and-nexttick" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Node Event Loop, Timers, and process.nextTick
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>I'm a Software Architect and I'm Terrified of Your Vibe-Coding | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .risk-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:.85rem; margin:1rem 0; }
+      .risk-card { border-left:4px solid; border-radius:0 10px 10px 0; padding:.8rem 1rem; }
+      .risk-h    { border-color:#ef4444; background:#fef2f2; }
+      .risk-m    { border-color:#f97316; background:#fff7ed; }
+      .risk-l    { border-color:#22c55e; background:#f0fdf4; }
+      .risk-card h4 { margin:0 0 .25rem; font-family:Arial,Helvetica,sans-serif; font-size:.93rem; }
+      .risk-card p  { margin:0; font-size:.84rem; color:var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Code on screen representing AI-generated software" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Architecture · Career · 15 min read</span>
+          </div>
+        </figure>
+        <h1>I'm a Software Architect, and I'm Terrified of Your "Vibe-Coding"</h1>
+        <p class="summary">
+          Vibe-coding — prompting an AI to generate code without deeply understanding what it produces —
+          is a real and growing risk in production systems. This is not an argument against AI-assisted
+          development. It is an argument for knowing what "responsible AI-assisted development" actually
+          means, and what the failure modes look like from an architect's perspective.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Perspective</span><span class="meta-value">Software architect with 15+ years, AI tools adopter</span></div>
+          <div><span class="meta-label">Audience</span><span class="meta-value">Developers using AI tools for real production code</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The author uses AI tools every day. Claude Code is open in a terminal pane right now. The concern
+          is not AI-generated code — it is code deployed without the developer understanding what it does,
+          why it does it, or what happens when it fails. That used to be the definition of "bad code from
+          a contractor." In 2026 it is becoming the default output of well-meaning, fast-moving developers.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Vibe-coding creates an understanding debt, not just technical debt.
+          Technical debt can be refactored. Understanding debt means nobody knows what the system does —
+          which makes every outage, every security audit, and every new hire harder than it should be.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">The incident that prompted this</span>
+        <p>
+          A team inherited a Node.js service that had been "vibe-coded" into production over six weeks.
+          3,400 lines. The developer who wrote it (or rather, prompted it) had left the company. The
+          service handled payment webhooks. Nobody on the new team could explain: why was there a 200ms
+          setTimeout in the webhook handler? Why were some events processed twice? Why did the error
+          handler re-throw in some branches but swallow in others? Every question led to "let me ask
+          Claude" — which was fine for the original developer but useless for debugging a production
+          incident at 2am.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The real risks</span>
+        <h2>What vibe-coding breaks that isn't obvious</h2>
+        <div class="risk-grid">
+          <div class="risk-card risk-h">
+            <h4>Security vulnerabilities you can't audit</h4>
+            <p>AI generates secure-looking code that has subtle injection, auth bypass, or race conditions. If you don't understand the code, you can't spot them in review.</p>
+          </div>
+          <div class="risk-card risk-h">
+            <h4>Incident response without a mental model</h4>
+            <p>At 3am, you need to understand your system faster than you can re-prompt an AI. Vibe-coded systems produce on-call engineers who are helpless without AI access.</p>
+          </div>
+          <div class="risk-card risk-h">
+            <h4>Compounding complexity</h4>
+            <p>Each AI-generated addition makes the next one harder to verify. Eventually the system has emergent behaviour nobody designed and nobody understands.</p>
+          </div>
+          <div class="risk-card risk-m">
+            <h4>Knowledge silos become knowledge voids</h4>
+            <p>When the developer who vibe-coded a service leaves, the institutional knowledge of "ask Claude" leaves with them. New team members have nothing to build on.</p>
+          </div>
+          <div class="risk-card risk-m">
+            <h4>Testing that doesn't test the right things</h4>
+            <p>AI-generated tests often test implementation details rather than behaviour. You get 90% coverage and a system that breaks in production in obvious ways.</p>
+          </div>
+          <div class="risk-card risk-l">
+            <h4>Over-engineered solutions</h4>
+            <p>AI models solve problems at the level of complexity they've seen. A 10-line problem often becomes a 200-line "pattern-complete" solution nobody asked for.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The code problem illustrated</span>
+        <h2>What vibe-coded vs understood code looks like</h2>
+        <pre class="code-block"><code>// Vibe-coded webhook handler — "it works, I don't know why"
+app.post('/webhooks/payment', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Why is this here? The original dev doesn't know. Claude suggested it.
+  await new Promise(r => setTimeout(r, 200));
+
+  if (event.type === 'payment_intent.succeeded') {
+    const paymentIntent = event.data.object;
+    try {
+      await db.orders.update({ where: { stripeId: paymentIntent.id }, data: { status: 'paid' } });
+      await emailService.send(paymentIntent.metadata.userId, 'payment_success');
+    } catch (error) {
+      // Swallows error — order may not be updated but Stripe gets 200
+      console.error('Error processing webhook:', error);
+    }
+  }
+
+  res.json({ received: true });
+});</code></pre>
+
+        <pre class="code-block"><code>// Understood webhook handler — every line has a reason
+app.post('/webhooks/payment',
+  express.raw({ type: 'application/json' }), // Must be raw buffer for signature verification
+  async (req, res) => {
+    // Verify the event came from Stripe, not an attacker
+    const sig = req.headers['stripe-signature'];
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+      logger.warn('Invalid Stripe webhook signature', { err: err.message });
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+
+    // Respond immediately — Stripe expects 200 within 5s or it retries
+    // Processing happens asynchronously to avoid timeout
+    res.json({ received: true });
+
+    // Process after responding
+    try {
+      await processWebhookEvent(event);
+    } catch (err) {
+      // Log but don't crash — Stripe will retry if we return non-200, but we already returned 200
+      // For critical failures, use a dead-letter queue and alert
+      logger.error('Webhook processing failed', { eventId: event.id, err: err.message });
+      await deadLetterQueue.add('failed-webhook', { event });
+    }
+  }
+);
+
+async function processWebhookEvent(event) {
+  // Idempotency: Stripe may send the same event multiple times (at-least-once delivery)
+  const alreadyProcessed = await db.webhookLog.findUnique({ where: { stripeEventId: event.id } });
+  if (alreadyProcessed) return;
+
+  if (event.type === 'payment_intent.succeeded') {
+    await handlePaymentSuccess(event.data.object);
+  }
+
+  // Record that we processed this event
+  await db.webhookLog.create({ data: { stripeEventId: event.id, processedAt: new Date() } });
+}
+
+async function handlePaymentSuccess(paymentIntent) {
+  // Both updates must succeed together — wrap in transaction
+  await db.$transaction([
+    db.orders.update({ where: { stripeId: paymentIntent.id }, data: { status: 'paid' } }),
+    db.webhookLog.create({ data: { stripeId: paymentIntent.id, event: 'payment_success' } }),
+  ]);
+
+  // Email is best-effort — failure here should not roll back the order update
+  await emailService.send(paymentIntent.metadata.userId, 'payment_success').catch(err =>
+    logger.warn('Email send failed after payment', { err: err.message })
+  );
+}</code></pre>
+        <p>The difference is not length — it is intent. Every decision in the second version has a reason a new engineer can read. The first version can only be understood by re-running the AI session that produced it.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">What responsible AI-assisted development looks like</span>
+        <h2>The architect's rules of thumb</h2>
+        <ul class="check-list">
+          <li><strong>You own every line.</strong> If you can't explain why a line is there, it doesn't ship. Use AI to draft — use your understanding to approve.</li>
+          <li><strong>Read, don't just run.</strong> Reading AI-generated code before running it takes 5 minutes. Debugging unknown code in production takes hours.</li>
+          <li><strong>Name the decisions.</strong> When AI suggests an approach, name it: "this is a saga pattern," "this is optimistic locking." Naming forces understanding.</li>
+          <li><strong>Test the behaviour, not the code.</strong> Write tests for what the system should do for users — not for implementation details the AI chose.</li>
+          <li><strong>Document the why.</strong> A one-line comment explaining the WHY (not the what) is worth three times its weight in review.</li>
+          <li><strong>Resist over-engineering.</strong> When AI generates a factory/builder/strategy pattern for a 10-line problem, delete it and ask for something simpler.</li>
+          <li><strong>Pair AI with architecture review.</strong> Have a senior review AI-generated systems architecture before it gets load-tested by production traffic.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The positive case</span>
+        <h2>What AI-assisted development does well</h2>
+        <ul class="check-list">
+          <li><strong>Boilerplate elimination:</strong> Express route setup, CRUD scaffolding, test file creation — AI is excellent at this because understanding is not required.</li>
+          <li><strong>Pattern suggestion:</strong> "Should I use a queue or a cron job here?" — AI explains trade-offs well when you provide context.</li>
+          <li><strong>Code review assistance:</strong> AI spots missing edge cases and missing error handling faster than most code reviewers.</li>
+          <li><strong>Documentation drafts:</strong> Generating a first-pass JSDoc or README is fast and then easily edited.</li>
+          <li><strong>Refactoring toward known patterns:</strong> "Refactor this to use the strategy pattern" — excellent use of AI when you know what you want.</li>
+        </ul>
+        <p>The common thread: AI is valuable when you know enough to evaluate its output. Vibe-coding removes that evaluation step and ships the evaluation debt to production.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Vibe-coding is not about AI being bad. It is about understanding debt — deploying code
+          nobody can reason about at 3am, in a security audit, or when onboarding a new hire.
+          AI makes you faster at writing code. It does not make you faster at understanding systems.
+          That asymmetry is exactly where architectural risk accumulates. The fix is not to use less AI.
+          The fix is to use it for drafting and own every approval.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

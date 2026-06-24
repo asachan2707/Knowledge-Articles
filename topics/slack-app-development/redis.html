@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Redis | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Datastore · 60 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Redis — In-Memory Data Structures</h1>
+        <p class="summary">
+          Redis is a single-threaded in-memory data structure server. The Net Ninja playlist walks
+          strings, hashes, lists, sets, sorted sets, streams, and pub/sub. This page maps each one to
+          a concrete Slack-app pattern.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Use Redis as cache, queue, lock, dedup</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~60 min playlist + practice</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">Cache <code>users.info</code>, dedup events, rate limit, queues</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Redis isn't just a cache — it's a Swiss army datastore. Once you understand sorted sets and
+          streams, half of what you'd otherwise build with a custom DB schema becomes a one-line Redis
+          command.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Mental model:</strong> Redis is a single-threaded server (commands run atomically,
+            in order) that holds named typed values in memory. Keys are strings; values can be strings,
+            hashes, lists, sets, sorted sets, streams, bitmaps, or HyperLogLogs.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The data types you'll use</h2>
+        <ul>
+          <li><strong>String</strong> — key/value cache, counters (<code>INCR</code>), TTL-flagged tokens.</li>
+          <li><strong>Hash</strong> — small object stored at one key (<code>HSET user:U1 name "Amy" tz "UTC"</code>).</li>
+          <li><strong>List</strong> — FIFO/LIFO queue (<code>LPUSH</code>/<code>RPOP</code>).</li>
+          <li><strong>Set</strong> — uniqueness, dedup, set algebra.</li>
+          <li><strong>Sorted Set (ZSET)</strong> — leaderboards, time-windowed counters, priority queues.</li>
+          <li><strong>Stream</strong> — append-only log with consumer groups (Kafka-lite).</li>
+          <li><strong>Bitmap</strong> — boolean flags by user ID at huge scale.</li>
+          <li><strong>HyperLogLog</strong> — approximate cardinality (unique-counts) in 12KB.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Slack-app recipes</h2>
+        <h3>Cache <code>users.info</code></h3>
+        <pre class="code-block"><code>// Save with 5-minute TTL
+await redis.setex(`user:${id}`, 300, JSON.stringify(user));
+
+// Read
+const cached = await redis.get(`user:${id}`);
+return cached ? JSON.parse(cached) : null;</code></pre>
+
+        <h3>Event dedup</h3>
+        <pre class="code-block"><code>// SETNX returns 1 if key was set, 0 if it already existed
+const isNew = await redis.set(`event:${eventId}`, '1', 'NX', 'EX', 86400);
+if (isNew !== 'OK') return; // already processed</code></pre>
+
+        <h3>Per-user rate limit (token bucket)</h3>
+        <pre class="code-block"><code>const key = `rate:${userId}`;
+const count = await redis.incr(key);
+if (count === 1) await redis.expire(key, 60); // 1-minute window
+if (count &gt; 30) throw new Error('rate_limited');</code></pre>
+
+        <h3>Distributed lock (one process at a time)</h3>
+        <pre class="code-block"><code>const lock = await redis.set('lock:standup-cron', '1', 'NX', 'EX', 30);
+if (lock !== 'OK') return; // someone else has it
+try { await runStandupCron(); }
+finally { await redis.del('lock:standup-cron'); }</code></pre>
+
+        <h3>Priority job queue</h3>
+        <pre class="code-block"><code>// Add a job with priority = run-at timestamp
+await redis.zadd('jobs', Date.now() + delayMs, JSON.stringify(job));
+
+// Worker pops the next-due job
+const [[job, ts]] = await redis.zpopmin('jobs', 1);
+if (Number(ts) &gt; Date.now()) {
+  await redis.zadd('jobs', Number(ts), job); // not yet
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Operational essentials</h2>
+        <ul>
+          <li><strong>Persistence:</strong> RDB snapshots (point-in-time) + AOF (write-ahead log). Use both.</li>
+          <li><strong>Eviction:</strong> set <code>maxmemory</code> + <code>maxmemory-policy</code> (usually <code>allkeys-lru</code> for cache).</li>
+          <li><strong>Replication:</strong> primary + replicas; managed services give this out of the box.</li>
+          <li><strong>Cluster:</strong> for &gt; ~25 GB; uses key-slot hashing across nodes.</li>
+          <li><strong>Pipelining:</strong> batch commands in one round-trip — huge throughput gain.</li>
+          <li><strong>Lua scripts</strong> (or <code>MULTI</code>/<code>EXEC</code>) for atomic multi-command operations.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>When NOT to use Redis</h2>
+        <ul>
+          <li>As your only durable store — use Postgres/Mongo for source-of-truth data.</li>
+          <li>For data that doesn't fit in memory — Redis is RAM-bound.</li>
+          <li>For complex queries — Redis is key/value-shaped, not relational.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Redis is the default Slack-app sidekick: cache, dedup, rate limit, lock, queue.</li>
+          <li>Always set TTLs and a <code>maxmemory-policy</code>.</li>
+          <li>Use <code>SETNX</code>/<code>NX</code> for dedup &amp; locks; <code>INCR</code>+<code>EXPIRE</code> for rate limits.</li>
+          <li>Don't make Redis your source of truth — pair it with a durable DB.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=8sHCdz_tOjk&list=PL4cUxeGkcC9h3V2eqhi8rRdIDJshP-b4P" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Redis Tutorial for Beginners (Net Ninja playlist)
+            </a>
+          </li>
+          <li>
+            <a href="https://redis.io/docs/" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Redis documentation
+            </a>
+          </li>
+          <li>
+            <a href="https://redis.io/docs/manual/patterns/" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Redis patterns (rate limit, lock, etc.)
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Uber Driver Matching System Design | Interview | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Interview Questions</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1449965408869-eaa3f722e40d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Night aerial view of city streets with moving car lights — urban traffic patterns"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Interview · System Design · 35 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@jake_givens" target="_blank" rel="noopener">Jake Givens</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>How Uber Matches You to a Driver in Seconds Across Millions of Users</h1>
+        <p class="summary">
+          A production-grade system design covering geospatial indexing with H3, WebSocket pipelines at
+          5 million concurrent connections, the ETA engine, real-time surge pricing, distributed locking
+          and every schema, algorithm and code detail needed to build a competitive ride-hailing platform from
+          scratch. Asked at Google, Meta, Microsoft and Salesforce.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Companies</span>
+            <span class="meta-value">Google · Meta · Microsoft · Salesforce</span>
+          </div>
+          <div>
+            <span class="meta-label">Level</span>
+            <span class="meta-value">L5 – L7 / Senior – Staff</span>
+          </div>
+          <div>
+            <span class="meta-label">Interview slot</span>
+            <span class="meta-value">45 minutes (system design)</span>
+          </div>
+          <div>
+            <span class="meta-label">Difficulty</span>
+            <span class="meta-value">Hard — real-time + geospatial + distributed state</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ─── TABLE OF CONTENTS ──────────────────────────────────────── -->
+      <nav class="toc-nav" aria-label="Sections on this page">
+        <p class="toc-nav-title">On this page</p>
+        <ol>
+          <li><a href="#requirements">1 · Requirements &amp; Scale Numbers</a></li>
+          <li><a href="#hld">2 · High-Level Design (HLD)</a></li>
+          <li><a href="#geospatial">3 · Geospatial Indexing — H3 Hexagons</a></li>
+          <li><a href="#websocket">4 · WebSocket Location Pipeline</a></li>
+          <li><a href="#matching">5 · Matching Algorithm — Dispatch Protocol</a></li>
+          <li><a href="#eta">6 · ETA Engine — Road Graph + A*</a></li>
+          <li><a href="#surge">7 · Surge Pricing — Real-Time Streaming</a></li>
+          <li><a href="#datastores">8 · Data Stores &amp; Schemas</a></li>
+          <li><a href="#fault">9 · Fault Tolerance &amp; Distributed Locks</a></li>
+          <li><a href="#api">10 · API Contracts</a></li>
+          <li><a href="#interview">11 · What Interviewers Actually Look For</a></li>
+          <li><a href="#takeaway">Key Takeaway</a></li>
+        </ol>
+      </nav>
+
+      <!-- ─── LEAD ───────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <p class="lead">
+          Every time you open Uber and tap "Request", the app has found you a nearby driver, computed their
+          ETA accounting for live traffic, priced your fare with a real-time supply-demand ratio, and sent
+          you both a confirmation — in under two seconds. Behind that moment is a system that handles
+          100 million riders, 5 million drivers, and 1.25 million location writes per second globally.
+          It is not magic; it is a sequence of smart engineering decisions.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> The speed comes from three layered optimisations — spatial filtering
+            that cuts 5 million drivers down to 50, permanent push connections that eliminate polling, and
+            parallel ETA computation that scores each candidate simultaneously rather than sequentially.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Why this question matters</span>
+        <p>
+          This problem sits at the intersection of real-time systems, distributed state, and geospatial
+          algorithms — exactly the combination that separates senior engineers from the rest. It has been
+          asked in virtually every FAANG-level system design loop since 2021. Answering it well requires
+          knowing not just the components, but which tools to pick and why you would reject the alternatives.
+        </p>
+        <p>
+          Your interviewer already knows the happy-path diagram. What they are probing is whether you
+          surface failure modes, quantify the bottlenecks, and design the failure-recovery logic without
+          being prompted.
+        </p>
+      </section>
+
+      <!-- ─── 1. REQUIREMENTS ────────────────────────────────────────── -->
+      <section class="content-card" id="requirements">
+        <span class="section-label">Step 1</span>
+        <h2>Requirements &amp; Scale Numbers</h2>
+        <p>
+          Always anchor the design in concrete scale before drawing anything. Numbers force trade-offs
+          to become visible.
+        </p>
+
+        <h3>Functional requirements</h3>
+        <ul class="check-list">
+          <li>Rider opens app → sees available drivers on map in real time.</li>
+          <li>Rider requests a ride → system finds the best available driver nearby.</li>
+          <li>Driver receives an offer → accepts or rejects within a timeout.</li>
+          <li>Once matched, both sides see each other's live location until trip ends.</li>
+          <li>Fare estimated upfront; surge pricing applied based on local demand.</li>
+          <li>Trip status flows: <code>requesting → accepted → driver_arrived → in_progress → completed</code>.</li>
+        </ul>
+
+        <h3>Non-functional requirements</h3>
+        <ul class="check-list">
+          <li>Matching latency p99 &lt; 200 ms.</li>
+          <li>Location update delivery &lt; 2 s end-to-end.</li>
+          <li>Availability 99.99% (≈ 52 min downtime/year).</li>
+          <li>Zero double-matches — one driver per trip, guaranteed.</li>
+          <li>Surge price updates &lt; 10 s lag behind actual demand shift.</li>
+        </ul>
+
+        <h3>Scale envelope</h3>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Metric</th><th>Value</th><th>Derived from</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Active riders</td><td>100 M</td><td>Baseline requirement</td></tr>
+              <tr><td>Active drivers</td><td>5 M</td><td>~1:20 driver-to-rider ratio</td></tr>
+              <tr><td>Trips per day</td><td>10 M</td><td>~115 trips/sec avg, 400/sec peak</td></tr>
+              <tr><td>Driver GPS updates</td><td>1 update / 4 sec per driver</td><td>Smooth map animation</td></tr>
+              <tr><td>Location writes/sec</td><td>1.25 M</td><td>5 M drivers ÷ 4 sec</td></tr>
+              <tr><td>WebSocket connections</td><td>5 M+</td><td>One persistent conn per online driver</td></tr>
+              <tr><td>Redis memory needed</td><td>~128 GB cluster</td><td>26 KB per driver record</td></tr>
+              <tr><td>Matching latency target</td><td>&lt; 200 ms p99</td><td>Non-functional requirement</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── 2. HIGH-LEVEL DESIGN ───────────────────────────────────── -->
+      <section class="content-card" id="hld">
+        <span class="section-label">Step 2</span>
+        <h2>High-Level Design (HLD)</h2>
+        <p>
+          Five services collaborate to handle every trip. Each owns a clear slice of the problem.
+        </p>
+
+        <div class="code-block">
+          <pre><code>
+┌──────────────┐     HTTPS/WSS      ┌────────────────────┐
+│  Rider App   │◄───────────────────►│  API Gateway       │
+└──────────────┘                    │  (Load Balancer)   │
+                                    └─────────┬──────────┘
+┌──────────────┐     HTTPS/WSS               │
+│  Driver App  │◄────────────────────────────┤
+└──────────────┘                             │
+                                    ┌────────▼──────────────────────────────────────────┐
+                                    │                  Core Services                    │
+                                    │                                                   │
+                                    │  ┌─────────────────┐   ┌──────────────────────┐  │
+                                    │  │ Location Service │   │  Matching Service    │  │
+                                    │  │  (WebSocket GW)  │   │  (Supply Pool +      │  │
+                                    │  │  Kafka Producer  │   │   ETA Engine +       │  │
+                                    │  └────────┬────────┘   │   Dispatch Protocol) │  │
+                                    │           │             └──────────┬───────────┘  │
+                                    │           │                        │               │
+                                    │  ┌────────▼────────┐   ┌──────────▼───────────┐  │
+                                    │  │   Kafka Topics  │   │   Pricing Service    │  │
+                                    │  │  driver-locations│   │   (Flink Streaming   │  │
+                                    │  │  ride-requests  │   │    Surge per H3 cell)│  │
+                                    │  └────────┬────────┘   └──────────────────────┘  │
+                                    │           │                                        │
+                                    │  ┌────────▼────────────────────────────────────┐ │
+                                    │  │              Data Layer                      │ │
+                                    │  │  Redis Cluster  │ Cassandra │ PostgreSQL     │ │
+                                    │  │  (hot locations)│ (loc log) │ (trips/users)  │ │
+                                    │  └─────────────────────────────────────────────┘ │
+                                    └───────────────────────────────────────────────────┘
+          </code></pre>
+          <p class="code-caption">System overview — five concerns separated into discrete services</p>
+        </div>
+
+        <h3>Service responsibilities</h3>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Service</th><th>Owns</th><th>Key tech</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Location Service</td><td>Ingest + store driver positions</td><td>WebSocket gateway, Kafka, Redis GEOADD</td></tr>
+              <tr><td>Matching Service</td><td>Find best driver, dispatch offers</td><td>H3, Redis GEOSEARCH, A* ETA, Redis lock</td></tr>
+              <tr><td>Pricing Service</td><td>Real-time surge per H3 cell</td><td>Flink streaming, Kafka, Redis SETEX</td></tr>
+              <tr><td>Trip Service</td><td>Trip lifecycle, payments</td><td>PostgreSQL, state machine</td></tr>
+              <tr><td>Notification Service</td><td>Push events to apps</td><td>WebSocket push, APNs/FCM fallback</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── 3. GEOSPATIAL ──────────────────────────────────────────── -->
+      <section class="content-card" id="geospatial">
+        <span class="section-label">Deep Dive 1</span>
+        <h2>Geospatial Indexing — Why Uber Uses H3 Hexagons</h2>
+
+        <h3>The naive approach and why it fails</h3>
+        <p>
+          A straight <code>SELECT * FROM drivers WHERE distance(lat, lng, :rider_lat, :rider_lng) &lt; 5000</code>
+          requires a full table scan of 5 million rows and runs the Haversine formula on every row.
+          Even with a PostGIS R-tree index it cannot sustain 400 ride requests/sec at p99 &lt; 200 ms.
+          You need a lookup structure, not a search.
+        </p>
+
+        <h3>Geohash (legacy — do not use for production)</h3>
+        <ul>
+          <li>Interleaves latitude and longitude bits into a base-32 string.</li>
+          <li>Nearby strings share a common prefix — but only approximately. Two points 10 m apart
+              can have completely different hashes if they straddle a grid boundary.</li>
+          <li>Cell shapes are rectangular, so neighbours are not equidistant from the centre.</li>
+          <li>Longitude precision varies: 111 km per degree at the equator, 0 km at the poles.</li>
+          <li><strong>Red flag in interviews:</strong> proposing Geohash without mentioning its
+              boundary discontinuity problem signals you have not thought this through.</li>
+        </ul>
+
+        <h3>S2 Geometry (Google's choice)</h3>
+        <ul>
+          <li>Projects the Earth onto a cube face, then applies a Hilbert space-filling curve.</li>
+          <li>Handles poles naturally; great for coverage algorithms and exact region queries.</li>
+          <li>Computationally heavier and harder to reason about than H3.</li>
+          <li>Best fit: static geofencing, map tile coverage. Overkill for real-time driver lookup.</li>
+        </ul>
+
+        <h3>H3 — Uber's production choice</h3>
+        <p>
+          H3 divides the Earth into a hierarchy of regular hexagons at 16 resolution levels.
+          Hexagons have one key property that rectangles and triangles lack: every neighbour of a
+          hexagon shares a full edge and is equidistant from the centre. That makes radius expansion
+          (searching progressively larger rings of cells) both fast and spatially uniform.
+        </p>
+
+        <div class="code-block">
+          <pre><code>
+H3 Resolution  |  Avg cell area   |  Practical use
+---------------|------------------|-------------------------------
+Res 4          |  1,770 km²       |  Country-level surge zones
+Res 7          |  5.16 km²        |  City neighbourhood supply
+Res 10         |  0.0296 km²      |  Driver-level matching (~170 m)
+Res 12         |  0.0007 km²      |  Precise pickup pin
+          </code></pre>
+          <p class="code-caption">H3 resolution levels — Uber uses res 10 for driver lookup</p>
+        </div>
+
+        <h3>How the lookup works</h3>
+        <ul class="check-list">
+          <li><strong>Driver comes online:</strong> GPS coordinates → H3 cell index at res 10 (e.g.
+              <code>8a2a1072b59ffff</code>) in O(1). Stored in Redis as a sorted set keyed by cell ID.</li>
+          <li><strong>Rider requests:</strong> rider's GPS → H3 cell index. Query Redis for drivers in
+              that cell + its 6 immediate neighbours (ring 1).</li>
+          <li><strong>No drivers in ring 1:</strong> expand to ring 2 (18 additional cells), then ring 3,
+              up to ring 5 (~max 5 km at res 10). This is the progressive radius expansion — O(1) per ring
+              because neighbour lookup is a constant-time bitwise operation.</li>
+          <li><strong>Result:</strong> instead of scanning 5 million global drivers, you examine 50–100
+              drivers in adjacent cells. That is the source of the speed.</li>
+        </ul>
+
+        <div class="code-block">
+          <pre><code>
+// Node.js — H3 lookup (h3-js library)
+import * as h3 from 'h3-js';
+
+const RESOLUTION = 10;
+
+// Convert GPS to H3 cell
+function getH3Cell(lat, lng) {
+  return h3.latLngToCell(lat, lng, RESOLUTION);
+}
+
+// Get all cells within k rings
+function getSearchCells(lat, lng, rings = 1) {
+  const center = getH3Cell(lat, lng);
+  return h3.gridDisk(center, rings); // returns center + all cells in k rings
+}
+
+// Example: rider at (40.7128, -74.0060), search ring 1
+const cells = getSearchCells(40.7128, -74.0060, 1);
+// → 7 cells (center + 6 neighbours)
+// Use these cell IDs to query Redis
+          </code></pre>
+          <p class="code-caption">H3 lookup — convert coordinates to searchable cell set</p>
+        </div>
+      </section>
+
+      <!-- ─── 4. WEBSOCKET PIPELINE ──────────────────────────────────── -->
+      <section class="content-card" id="websocket">
+        <span class="section-label">Deep Dive 2</span>
+        <h2>WebSocket Location Pipeline — 5 Million Concurrent Connections</h2>
+
+        <h3>Why WebSockets, not HTTP polling</h3>
+        <p>
+          An HTTP poll every 4 seconds from 5 million drivers means 1.25 million TCP connections opened and
+          closed per second, each with a full TLS handshake. That is an order of magnitude more CPU overhead
+          than maintaining persistent connections. WebSockets also eliminate the latency of connection setup
+          per message: a location update becomes a single frame on an already-open socket.
+        </p>
+
+        <h3>Architecture of the gateway layer</h3>
+        <ul class="check-list">
+          <li><strong>Gateway nodes:</strong> Each handles 10,000–50,000 concurrent WebSocket connections.
+              At 5 million connections you need ~100–500 gateway pods behind a load balancer.</li>
+          <li><strong>Sticky sessions:</strong> All frames from driver ID X always route to the same gateway
+              node. This keeps the routing state local and avoids cross-node fan-out on every message.</li>
+          <li><strong>Heartbeat:</strong> Ping/pong every 30 seconds. If no pong, close connection and remove
+              driver from Redis within 35 seconds to avoid stale location data.</li>
+          <li><strong>Message format:</strong> Binary frames (MessagePack or Protobuf), not JSON text.
+              Saves ~40% bandwidth at scale.</li>
+        </ul>
+
+        <h3>Full data flow — from GPS chip to map</h3>
+        <div class="code-block">
+          <pre><code>
+Driver phone GPS (every 4 sec)
+  │
+  │  WSS frame: {lat, lng, heading, speed, ts}
+  ▼
+WebSocket Gateway (sticky session, binary frame)
+  │
+  │  Kafka produce: topic "driver-locations"
+  │  partition key = driver_id (guarantees ordering per driver)
+  ▼
+Kafka Broker (replication factor 3, acks=all)
+  │
+  ├──► Redis Pipeline (hot path, &lt;1 ms)
+  │     GEOADD drivers:active WITHCH
+  │       {lng} {lat} "driver:{id}"
+  │     EXPIRE driver:{id}:meta 300  (5 min TTL)
+  │
+  └──► Flink Stream Processor (warm path, 5-sec window)
+        Aggregate demand/supply per H3 cell → surge topic
+        │
+        └──► Cassandra append: driver_locations table (cold log, 90-day TTL)
+          </code></pre>
+          <p class="code-caption">Location update data flow — hot path to Redis completes in under 1 ms</p>
+        </div>
+
+        <h3>Redis GEO commands</h3>
+        <div class="code-block">
+          <pre><code>
+# Store driver position (O(log N), N = drivers in the sorted set)
+GEOADD drivers:active -74.0060 40.7128 "driver:d001"
+
+# Find all drivers within 5 km, sorted by distance, max 50 results
+GEOSEARCH drivers:active
+  FROMLONLAT -74.0060 40.7128
+  BYRADIUS 5 km
+  ASC
+  COUNT 50
+  WITHCOORD WITHDIST
+
+# Result:
+# 1) "driver:d001"
+#    1) "0.12"     (distance km)
+#    2) 1) "-74.0060" 2) "40.7128"   (coordinates)
+
+# Remove driver when they go offline
+ZREM drivers:active "driver:d001"
+          </code></pre>
+          <p class="code-caption">Redis GEO — the exact commands used in the matching hot path</p>
+        </div>
+
+        <h3>Reconnect logic — circuit breaker</h3>
+        <div class="code-block">
+          <pre><code>
+States: CONNECTED → RECONNECTING → CONNECTED (or FAILED)
+
+On connection drop:
+  attempt = 1
+  backoff  = 1s
+
+while not connected:
+  wait(backoff)
+  try connect()
+  if success:
+    replay queued location updates (stored locally)
+    break
+  else:
+    attempt++
+    backoff = min(backoff × 2, 30)   // cap at 30 s
+
+After 5 consecutive failures:
+  notify user via push notification
+  fall back to HTTP polling every 30 s
+          </code></pre>
+          <p class="code-caption">Exponential backoff reconnect — prevents thundering herd on gateway restart</p>
+        </div>
+      </section>
+
+      <!-- ─── 5. MATCHING ALGORITHM ─────────────────────────────────── -->
+      <section class="content-card" id="matching">
+        <span class="section-label">Deep Dive 3</span>
+        <h2>Matching Algorithm — The Full Dispatch Protocol</h2>
+        <p>
+          Uber does not simply assign the geographically closest driver. It assigns the driver likely to
+          arrive soonest, weighted by rating and penalised for high-surge zones. The full protocol is a
+          supply pool search → parallel ETA scoring → ranked offer wave dispatch.
+        </p>
+
+        <div class="code-block">
+          <pre><code>
+Rider taps "Request ride"
+  │
+  ▼
+Step 1 — Supply Pool Search
+  Redis GEOSEARCH around rider (H3 ring 1 → ring 5 if needed)
+  Returns: [driver:d001, driver:d002, ... driver:d047]
+  Target: 10–20 candidate drivers
+  │
+  ▼
+Step 2 — Parallel ETA Computation (100 ms budget)
+  For each candidate (all in parallel):
+    Call ETA engine with (driver_pos, rider_pos)
+    Returns: estimated arrival time in seconds
+  Filter: discard ETA > 15 min
+  Result: [(d001, 3m20s), (d004, 4m05s), (d009, 5m12s), ...]
+  │
+  ▼
+Step 3 — Scoring
+  score(driver) =
+    0.5 × (1 - ETA / max_ETA_in_pool)   // lower ETA → higher score
+  + 0.3 × (driver.rating / 5.0)          // higher rating → higher score
+  + 0.2 × (1 - surge_multiplier / 10.0)  // lower surge → higher score
+  │
+  ▼
+Step 4 — Wave Dispatch (Timeout Chain)
+  Wave 1: Offer sent to top-1 driver      — 30 sec timeout
+  Wave 2: Offer sent to top 2–3 drivers   — 20 sec timeout (if wave 1 no response)
+  Wave 3: Offer sent to top 4–8 drivers   — 15 sec timeout
+  Wave 4: Expand search radius, restart from Step 1
+  │
+  ▼
+Step 5 — Allocation (Distributed Lock)
+  First driver to accept:
+    1. Acquire Redis lock: SET rider:{id}:lock {token} EX 10 NX
+    2. Verify rider state is still "requesting" (not cancelled)
+    3. INSERT INTO trips (...) ON CONFLICT DO NOTHING
+    4. Release lock via Lua script (atomic check-and-delete)
+    5. Publish "offer_expired" to all other candidate drivers
+          </code></pre>
+          <p class="code-caption">Full dispatch protocol — from rider tap to confirmed match</p>
+        </div>
+
+        <h3>Distributed lock — preventing double-match</h3>
+        <p>
+          The race condition: two drivers press Accept within milliseconds of each other. Without a lock,
+          both get a "trip created" confirmation and both drive to the pickup. This is the most important
+          correctness constraint in the entire system.
+        </p>
+        <div class="code-block">
+          <pre><code>
+// Node.js — Redis lock acquire/release
+const redis = require('ioredis');
+const { v4: uuid } = require('uuid');
+
+async function acquireLock(riderId, ttlSec = 10) {
+  const token = uuid();
+  // SET NX is atomic — only one caller wins
+  const ok = await redis.set(
+    `rider:${riderId}:lock`,
+    token,
+    'EX', ttlSec,
+    'NX'             // only set if key does NOT exist
+  );
+  return ok === 'OK' ? token : null;
+}
+
+// Lua script: check token matches before deleting (atomic)
+const RELEASE_SCRIPT = `
+  if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+  else
+    return 0
+  end
+`;
+
+async function releaseLock(riderId, token) {
+  return redis.eval(RELEASE_SCRIPT, 1, `rider:${riderId}:lock`, token);
+}
+
+// Usage in match handler
+async function confirmMatch(riderId, driverId) {
+  const token = await acquireLock(riderId);
+  if (!token) throw new Error('Rider already matched');
+
+  try {
+    const rider = await getRider(riderId);
+    if (rider.status !== 'requesting') return; // already cancelled or matched
+
+    await db.query(
+      `INSERT INTO trips (rider_id, driver_id, status)
+       VALUES ($1, $2, 'accepted')
+       ON CONFLICT (rider_id) DO NOTHING`,
+      [riderId, driverId]
+    );
+  } finally {
+    await releaseLock(riderId, token);
+  }
+}
+          </code></pre>
+          <p class="code-caption">Redis SET NX + Lua release — the only reliable way to prevent double-match</p>
+        </div>
+      </section>
+
+      <!-- ─── 6. ETA ENGINE ─────────────────────────────────────────── -->
+      <section class="content-card" id="eta">
+        <span class="section-label">Deep Dive 4</span>
+        <h2>ETA Engine — Road Network + A* + Hybrid Traffic</h2>
+
+        <h3>The road network as a weighted directed graph</h3>
+        <p>
+          Every intersection is a node. Every road segment is a directed edge (one-way streets are
+          single-direction edges). Each edge carries: distance in metres, speed limit, turn restrictions,
+          road type (motorway / arterial / local). The graph for a single city has millions of nodes.
+        </p>
+
+        <h3>Dijkstra vs A*</h3>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Algorithm</th><th>f(n)</th><th>Search pattern</th><th>Speed</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Dijkstra</td>
+                <td>g(n) — actual cost from start</td>
+                <td>Expands uniformly in all directions</td>
+                <td>O(E + V log V)</td>
+              </tr>
+              <tr>
+                <td>A*</td>
+                <td>g(n) + h(n) — actual + heuristic</td>
+                <td>Focuses toward the goal (straight-line estimate)</td>
+                <td>3–10× faster than Dijkstra on road graphs</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          A* works correctly as long as the heuristic <code>h(n)</code> is <em>admissible</em> — it never
+          overestimates the true remaining cost. The great-circle (Haversine) distance divided by the
+          fastest possible road speed is a perfect admissible heuristic for road routing.
+        </p>
+
+        <h3>Hybrid traffic model</h3>
+        <div class="code-block">
+          <pre><code>
+// For each road segment edge:
+estimated_speed =
+  0.4 × real_time_speed[segment_id]         // Kafka stream, refreshed every 5 min
+  + 0.6 × historical_avg_speed[segment_id]  // lookup by [hour_of_day][day_of_week]
+
+// Edge travel time
+edge_time_sec = edge_distance_m / (estimated_speed × 1000 / 3600)
+
+// A* heuristic: great-circle distance / max possible speed
+h(node) = haversine(node, destination) / MAX_SPEED_MPS
+          </code></pre>
+          <p class="code-caption">Traffic blending — 40% live data, 60% historical profile</p>
+        </div>
+
+        <h3>Two-tier ETA computation</h3>
+        <ul class="check-list">
+          <li>
+            <strong>Fast ETA (30–50 ms):</strong> Run A* on a small subgraph (1 km radius), only to a
+            depth of 100 nodes. Good enough for ranking the supply pool. Applied to all 20 candidates
+            simultaneously in parallel goroutines / async workers.
+          </li>
+          <li>
+            <strong>Accurate ETA (200–500 ms):</strong> Full A* on the complete road network for the
+            top 3 candidates. Used for the quoted arrival time shown to the rider.
+          </li>
+          <li>
+            <strong>Cache:</strong> Key = <code>hash(from_h3_10, to_h3_10, hour_of_day)</code>, TTL 30 s.
+            Cache hit rate ~65% for common origin/destination pairs.
+          </li>
+        </ul>
+      </section>
+
+      <!-- ─── 7. SURGE PRICING ───────────────────────────────────────── -->
+      <section class="content-card" id="surge">
+        <span class="section-label">Deep Dive 5</span>
+        <h2>Surge Pricing — Real-Time Streaming with Flink</h2>
+
+        <h3>The pipeline</h3>
+        <div class="code-block">
+          <pre><code>
+Kafka: "driver-locations" topic
+Kafka: "ride-requests"   topic
+  │
+  ▼
+Flink Streaming Job (5-second tumbling window per H3 res-10 cell)
+  │
+  ├── Count online drivers in cell       → supply_count
+  ├── Count open ride requests in cell   → demand_count
+  └── Compute demand_ratio = demand_count / max(supply_count, 1)
+  │
+  ▼
+Surge Multiplier Computation
+  raw_surge = 1.0 + (demand_ratio - 1.0) × elasticity_factor
+  surge     = clamp(raw_surge, min=1.0, max=10.0)
+
+  // Smooth with EMA to prevent price jitter
+  surge_smooth = 0.3 × surge + 0.7 × surge_smooth_prev
+  │
+  ▼
+Redis SETEX "surge:{cell_id}" surge_smooth EX 60
+  │
+  ▼
+Publish updated price to rider app via WebSocket broadcast
+(all riders in that H3 cell receive the update)
+          </code></pre>
+          <p class="code-caption">Surge pricing pipeline — price updates lag demand by &lt; 10 seconds</p>
+        </div>
+
+        <h3>Elasticity factors by market</h3>
+        <ul>
+          <li><strong>Dense metro (NYC, SF):</strong> 2.5 — riders have alternatives, price is a strong signal.</li>
+          <li><strong>Suburban / rural:</strong> 1.2 — fewer drivers, lower price sensitivity.</li>
+          <li><strong>Special events (concerts, airports):</strong> 3.0–5.0 — manually elevated ceiling.</li>
+        </ul>
+
+        <h3>Regulatory guardrails</h3>
+        <ul class="check-list">
+          <li>Hard cap at 10× base fare in most jurisdictions.</li>
+          <li>After 15 consecutive minutes of surge, Uber switches to driver incentives (bonuses) rather than price escalation.</li>
+          <li>Rider sees the exact multiplier before confirming — no bait-and-switch.</li>
+        </ul>
+      </section>
+
+      <!-- ─── 8. DATA STORES ─────────────────────────────────────────── -->
+      <section class="content-card" id="datastores">
+        <span class="section-label">Deep Dive 6</span>
+        <h2>Data Stores — What Goes Where and Why</h2>
+
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Store</th><th>Data</th><th>Why this store</th><th>Key config</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Redis Cluster</td>
+                <td>Live driver positions, surge multipliers, match locks</td>
+                <td>O(log N) GEOADD, sub-ms reads, built-in TTL auto-cleanup</td>
+                <td>6 nodes (3 primary + 3 replica), 128 GB RAM total</td>
+              </tr>
+              <tr>
+                <td>Cassandra</td>
+                <td>90-day location history, trip breadcrumbs</td>
+                <td>Write-optimised LSM tree; 1.25 M writes/sec without locks</td>
+                <td>Partition key (driver_id, day); TTL 90 days; RF=3</td>
+              </tr>
+              <tr>
+                <td>PostgreSQL</td>
+                <td>Trips, users, payments, audit log</td>
+                <td>ACID guarantees; UNIQUE constraint prevents double-booking</td>
+                <td>1 primary + 2 read replicas; connection pool 200</td>
+              </tr>
+              <tr>
+                <td>Kafka</td>
+                <td>Location update stream, ride request events</td>
+                <td>Durable event log; decouples producers from consumers</td>
+                <td>Partitioned by driver_id; RF=3; 7-day retention</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>PostgreSQL trip schema</h3>
+        <div class="code-block">
+          <pre><code>
+CREATE TABLE trips (
+  id              BIGSERIAL PRIMARY KEY,
+  rider_id        UUID        NOT NULL,
+  driver_id       UUID        NOT NULL,
+  status          VARCHAR(20) NOT NULL DEFAULT 'requesting',
+    -- 'requesting' | 'accepted' | 'driver_arrived'
+    -- | 'in_progress' | 'completed' | 'cancelled'
+  origin_lat      NUMERIC(9,6),
+  origin_lng      NUMERIC(9,6),
+  dest_lat        NUMERIC(9,6),
+  dest_lng        NUMERIC(9,6),
+  base_fare       NUMERIC(6,2),
+  surge_mult      NUMERIC(3,2) DEFAULT 1.00,
+  final_fare      NUMERIC(6,2),
+  distance_km     NUMERIC(7,2),
+  duration_sec    INT,
+  created_at      TIMESTAMPTZ  DEFAULT now(),
+  accepted_at     TIMESTAMPTZ,
+  started_at      TIMESTAMPTZ,
+  ended_at        TIMESTAMPTZ,
+
+  -- Prevents a rider from having two active trips
+  CONSTRAINT unique_active_rider UNIQUE (rider_id, created_at)
+);
+
+CREATE INDEX idx_trips_driver_status ON trips (driver_id, status);
+CREATE INDEX idx_trips_created_at    ON trips (created_at DESC);
+          </code></pre>
+          <p class="code-caption">PostgreSQL trips schema — UNIQUE constraint is the last line of defence against double-booking</p>
+        </div>
+
+        <h3>Cassandra location log schema</h3>
+        <div class="code-block">
+          <pre><code>
+CREATE TABLE driver_locations (
+  driver_id  UUID,
+  day        DATE,
+  ts         BIGINT,       -- epoch milliseconds
+  latitude   DECIMAL,
+  longitude  DECIMAL,
+  heading    SMALLINT,
+  speed_kmh  FLOAT,
+  PRIMARY KEY ((driver_id, day), ts)
+) WITH CLUSTERING ORDER BY (ts DESC)
+  AND default_time_to_live = 7776000;  -- 90 days in seconds
+          </code></pre>
+          <p class="code-caption">Cassandra schema — partition by (driver, day) spreads 1.25 M writes/sec evenly</p>
+        </div>
+      </section>
+
+      <!-- ─── 9. FAULT TOLERANCE ─────────────────────────────────────── -->
+      <section class="content-card" id="fault">
+        <span class="section-label">Deep Dive 7</span>
+        <h2>Fault Tolerance &amp; Distributed System Gotchas</h2>
+
+        <h3>CAP theorem — which services are AP vs CP</h3>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Data</th><th>CAP trade-off</th><th>Reasoning</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Driver location</td>
+                <td>AP (availability + partition tolerance)</td>
+                <td>Stale by 4 s is fine; location will update; showing wrong position briefly is acceptable</td>
+              </tr>
+              <tr>
+                <td>Trip / payment</td>
+                <td>CP (consistency + partition tolerance)</td>
+                <td>Cannot charge rider twice or create two trips — ACID required</td>
+              </tr>
+              <tr>
+                <td>Surge price</td>
+                <td>AP</td>
+                <td>A stale price for 10 s is fine; correctness matters less than liveness</td>
+              </tr>
+              <tr>
+                <td>Match lock</td>
+                <td>CP</td>
+                <td>The double-match invariant must hold under any failure</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Redis cluster failover</h3>
+        <ul class="check-list">
+          <li>Each shard: 1 primary + 1 replica. Cluster spread across 3 availability zones.</li>
+          <li>Primary failure detected via gossip protocol in &lt; 1 second.</li>
+          <li>Replica election requires majority quorum (&gt; N/2 nodes agree).</li>
+          <li>Clients auto-reconnect to new primary; in-flight GEOADD commands retried.</li>
+          <li>Lock TTL (10 s) ensures any failed match attempt auto-releases before the next retry window.</li>
+        </ul>
+
+        <h3>Kafka exactly-once for location updates</h3>
+        <div class="code-block">
+          <pre><code>
+// Consumer config
+const consumer = kafka.consumer({
+  groupId: 'location-ingest',
+  enableAutoCommit: false,          // manual commit after successful write
+  isolationLevel: 'read_committed'  // only consume committed messages
+});
+
+await consumer.run({
+  eachBatch: async ({ batch, commitOffsetsIfNecessary }) => {
+    for (const msg of batch.messages) {
+      const update = JSON.parse(msg.value);
+      await redis.geoadd('drivers:active', update.lng, update.lat, `driver:${update.id}`);
+      await cassandra.execute(INSERT_STMT, [update.id, update.day, update.ts, ...]);
+    }
+    // Commit only after both writes succeed — idempotent on replay
+    await commitOffsetsIfNecessary();
+  }
+});
+          </code></pre>
+          <p class="code-caption">Manual offset commit — if the consumer crashes mid-batch, it replays from last committed offset. GEOADD and Cassandra inserts are idempotent.</p>
+        </div>
+
+        <h3>Failure scenario matrix</h3>
+        <div class="data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Failure</th><th>Detection</th><th>Recovery</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Driver disconnects mid-offer</td><td>WebSocket close event</td><td>Move to next wave candidate immediately</td></tr>
+              <tr><td>Two drivers accept simultaneously</td><td>Redis SET NX returns null for second caller</td><td>Second caller receives "offer_expired" message</td></tr>
+              <tr><td>Matching service crashes after lock acquire</td><td>Lock TTL expires after 10 s</td><td>Rider request retried; new matching flow starts</td></tr>
+              <tr><td>Redis primary fails</td><td>Gossip, &lt; 1 s</td><td>Replica elected; client reconnects; &lt; 2 s downtime</td></tr>
+              <tr><td>Rider cancels during matching</td><td>REST DELETE /rides/{id}</td><td>Status → cancelled; lock released; all pending offers retracted</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── 10. API CONTRACTS ──────────────────────────────────────── -->
+      <section class="content-card" id="api">
+        <span class="section-label">Deep Dive 8</span>
+        <h2>API Contracts — REST + WebSocket</h2>
+
+        <h3>REST — rider-facing</h3>
+        <div class="code-block">
+          <pre><code>
+POST /v1/rides
+Body: {
+  "origin":      { "lat": 40.7128, "lng": -74.0060 },
+  "destination": { "lat": 40.7580, "lng": -73.9855 },
+  "ride_type":   "UberX"
+}
+Response 202 Accepted: {
+  "ride_id":           "a1b2-...",
+  "estimated_fare":    12.50,
+  "surge_multiplier":  1.2,
+  "estimated_eta_sec": 240,
+  "status":            "requesting"
+}
+// 202 not 200 — matching happens async; subscribe to WS for updates
+
+GET /v1/rides/{ride_id}
+Response 200: {
+  "status":  "accepted",
+  "driver":  { "id": "d001", "name": "Alex", "rating": 4.8,
+               "vehicle": "Toyota Prius 2022", "plate": "AB12CD" },
+  "driver_location": { "lat": 40.7255, "lng": -73.9877 },
+  "eta_sec": 115
+}
+
+DELETE /v1/rides/{ride_id}      // cancel
+Response 200: { "status": "cancelled", "cancellation_fee": 2.50 }
+          </code></pre>
+          <p class="code-caption">REST API — 202 Accepted because matching is async; WS delivers the result</p>
+        </div>
+
+        <h3>WebSocket — rider channel</h3>
+        <div class="code-block">
+          <pre><code>
+// Client subscribes after POST /rides
+→ { "type": "subscribe", "ride_id": "a1b2-..." }
+
+// Server pushes driver match
+← { "type": "driver_accepted",
+    "driver": { "name": "Alex", "eta_sec": 240, "location": {...} } }
+
+// Server pushes location every 5 s during pickup
+← { "type": "driver_location",
+    "lat": 40.7270, "lng": -73.9865,
+    "eta_sec": 95, "bearing": 45 }
+
+// Server pushes trip milestones
+← { "type": "driver_arrived" }
+← { "type": "trip_started",  "started_at": "2026-05-30T09:15:00Z" }
+← { "type": "trip_completed","fare": 13.80, "duration_sec": 820 }
+          </code></pre>
+          <p class="code-caption">Rider WebSocket — server-push model, client never polls</p>
+        </div>
+
+        <h3>WebSocket — driver channel</h3>
+        <div class="code-block">
+          <pre><code>
+// Driver sends location every 4 s (binary frame in production)
+→ { "type": "location", "lat": 40.7290, "lng": -73.9880,
+    "heading": 45, "speed_kmh": 32 }
+
+// Server sends ride offer
+← { "type": "offer",
+    "offer_id": "o999", "expires_sec": 30,
+    "pickup":  { "lat": 40.7128, "lng": -74.0060, "address": "123 Main St" },
+    "dropoff": { "lat": 40.7580, "lng": -73.9855 },
+    "est_km":  3.2, "est_min": 8, "surge_mult": 1.2 }
+
+// Driver accepts
+→ { "type": "accept", "offer_id": "o999" }
+
+// Server confirms or rejects (race condition)
+← { "type": "offer_confirmed",
+    "rider": { "name": "Sam", "rating": 4.9 } }
+  -- or --
+← { "type": "offer_expired" }
+          </code></pre>
+          <p class="code-caption">Driver WebSocket — offer expiry enforces the 30-second timeout chain</p>
+        </div>
+      </section>
+
+      <!-- ─── 11. INTERVIEW GUIDE ───────────────────────────────────── -->
+      <section class="content-card" id="interview">
+        <span class="section-label">Interview Prep</span>
+        <h2>What Interviewers Actually Look For — Company by Company</h2>
+
+        <h3>The 45-minute structure</h3>
+        <ul class="check-list">
+          <li><strong>5 min — Clarify requirements:</strong> Confirm scale numbers (100 M riders, 5 M drivers, 10 M trips/day). Ask: "Should I prioritise matching latency or cost efficiency?"</li>
+          <li><strong>10 min — HLD:</strong> Draw the five services, data stores, and the two async paths (Kafka → Redis for hot; Kafka → Cassandra for cold).</li>
+          <li><strong>20 min — Deep dives:</strong> Pick two: geospatial indexing (H3 vs Geohash trade-off) and the matching dispatch protocol (supply pool + ETA + wave offers + distributed lock).</li>
+          <li><strong>8 min — Scale &amp; bottlenecks:</strong> Walk through 1.25 M writes/sec → Redis sharding → where the bottleneck moves next.</li>
+          <li><strong>2 min — Graceful follow-ups:</strong> Show intellectual humility: "Good catch — I assumed TCP connections would be the limit. Switching to UDP for location would change the gateway design like this…"</li>
+        </ul>
+
+        <h3>Google</h3>
+        <ul>
+          <li>✓ Trade-offs by the numbers: "Why Redis over PostGIS? Redis GEOADD is O(log N) for writes; PostGIS would need a GiST index rebuild on every update — untenable at 1.25 M writes/sec."</li>
+          <li>✓ Graph algorithms: A* heuristic admissibility — can you prove the great-circle heuristic never over-estimates?</li>
+          <li>✓ Distributed consensus: walk through the Lua lock release script without being prompted.</li>
+          <li>✗ Avoid: treating surge pricing as an afterthought. Pricing is core revenue; Google interviewers will probe it.</li>
+        </ul>
+
+        <h3>Meta</h3>
+        <ul>
+          <li>✓ Observability: "How do you monitor location update end-to-end latency? Which dashboard shows you the first sign of a Redis slowdown?"</li>
+          <li>✓ Load testing: "How do you validate the system at 5 M concurrent WebSocket connections before going live?"</li>
+          <li>✓ ML integration: "How would you use Cassandra's historical traces to improve the A* speed profiles?"</li>
+          <li>✗ Avoid: hand-waving on QPS. Every number you state should be derivable — show the arithmetic.</li>
+        </ul>
+
+        <h3>Microsoft</h3>
+        <ul>
+          <li>✓ Reliability SLA: "What is the MTTR if the Redis primary fails? Walk through the gossip election + client reconnect timeline."</li>
+          <li>✓ API backward compatibility: "How do you version the WebSocket message schema when you add new fields?"</li>
+          <li>✓ Security: "How do you authenticate driver WebSocket connections? Bearer JWT + server-side validation on every frame."</li>
+          <li>✗ Avoid: ignoring compliance. Microsoft clients care about data residency for location data.</li>
+        </ul>
+
+        <h3>Salesforce</h3>
+        <ul>
+          <li>✓ CAP theorem application: "Location is AP; trips are CP. Explain why and what breaks if you flip it."</li>
+          <li>✓ Testing strategy: "How do you test that the double-match prevention actually works under concurrent load? Chaos engineering — kill the Redis primary during a high-volume wave dispatch."</li>
+          <li>✓ Audit / governance: "Every trip mutation goes through the PostgreSQL write replica with an append-only audit log. Explain why you can't use Cassandra for this."</li>
+          <li>✗ Avoid: missing the multi-tenancy angle. Salesforce will ask how you'd serve multiple city markets from one deployment.</li>
+        </ul>
+
+        <h3>High-signal phrases that separate senior answers</h3>
+        <ul class="check-list">
+          <li>"The p99 target of 200 ms means we cannot afford sequential ETA computation — all 10 candidate drivers must be evaluated in parallel."</li>
+          <li>"I'd rather have a slightly stale location update than a dropped frame — location is AP, so Redis replication lag is acceptable."</li>
+          <li>"The Lua lock release is non-negotiable. A plain GET + DEL sequence has a TOCTOU race condition."</li>
+          <li>"H3 ring expansion is O(1) per ring because the neighbour relationship is encoded in the cell index — it is not a spatial query."</li>
+          <li>"We detect the dead driver connection in &lt; 35 seconds (30-second ping + 5-second grace). That means a rider could wait 35 seconds before the system tries the next driver — I would reduce the heartbeat interval to 15 seconds at the cost of gateway CPU."</li>
+        </ul>
+
+        <h3>Red flags that tank interviews</h3>
+        <ul>
+          <li>✗ "We'll just use Geohash" — without mentioning boundary discontinuity.</li>
+          <li>✗ "Redis handles everything" — without discussing memory cost, sharding, or TTL expiry strategy.</li>
+          <li>✗ "A lock prevents double-match" — without explaining what happens when the lock holder crashes before releasing.</li>
+          <li>✗ "We scale horizontally" — without identifying what the next bottleneck is after adding nodes.</li>
+          <li>✗ Skipping failure scenarios — every component should have a "what if this dies" answer.</li>
+        </ul>
+      </section>
+
+      <!-- ─── KEY TAKEAWAY ───────────────────────────────────────────── -->
+      <section class="content-card takeaways" id="takeaway">
+        <h2>Key Takeaway</h2>
+        <p>
+          Uber's matching speed is the product of three compounding optimisations: H3 hexagonal indexing
+          that reduces 5 million global drivers to 50 local candidates in one lookup; WebSocket push
+          connections that eliminate TCP handshake overhead at 1.25 million updates per second; and
+          parallel A* ETA computation that scores every candidate simultaneously rather than sequentially.
+          None of these alone is enough — the system's latency budget is held by the slowest link, so all
+          three must work together.
+        </p>
+        <p>
+          In the interview, the design is secondary to the reasoning. What earns the hire decision is
+          surfacing the trade-offs unprompted: why AP for location but CP for payments, why Lua on the
+          lock release, why a wave dispatch rather than sending offers to all drivers simultaneously.
+          Show you have thought past the happy path.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

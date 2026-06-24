@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CAP Theorem | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=1600&h=700&fit=crop&auto=format&q=80" alt="Distributed nodes and network partitions" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Distributed Systems · Concept 31 · 10 min</span></div>
+        </figure>
+        <h1>CAP Theorem</h1>
+        <p class="summary">In a distributed system, you can have at most two of three: Consistency, Availability, and Partition Tolerance. Not as a design choice — as a mathematical proof. Understanding what CP and AP systems actually mean, and the PACELC extension that makes the trade-off more nuanced in practice.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">31 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Distributed Systems</span></div>
+          <div><span class="meta-label">Proved by</span><span class="meta-value">Eric Brewer (2000), Gilbert &amp; Lynch (formal proof, 2002)</span></div>
+          <div><span class="meta-label">Pair With</span><span class="meta-value">Consistency Models (Concept 22)</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">The CAP theorem is one of the most cited and most misunderstood concepts in distributed systems. "You can't have all three" is correct but incomplete. The nuance: partition tolerance is not optional — network partitions happen in any distributed system. So the real choice is always CP or AP: when a partition occurs, do you maintain consistency (refuse requests that might be stale) or availability (serve requests that might be stale)?</p>
+        <div class="callout"><p><strong>The correct framing:</strong> CA (no partition tolerance) only applies to a single-node system — which is not distributed. Every distributed system must tolerate partitions. Therefore the real choice is: CP (sacrifice availability during a partition) or AP (sacrifice consistency during a partition). Choose based on which failure mode hurts your business more.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The Trade-off</span>
+        <h2>CP vs AP — behaviour during a network partition</h2>
+        <div class="diagram-box">
+<span class="step">What a network partition looks like</span>
+
+Node A ─────────┐         ┌───── Node B
+                │         │
+                │  <span class="warn">NETWORK</span>  │
+                │  <span class="warn">SPLIT</span>   │
+                └── ✗ ✗ ──┘
+
+A and B can't communicate. Write arrives at A. Does B serve reads?
+
+<span class="step">CP choice: Consistency over Availability</span>
+
+During partition: Node B <span class="warn">refuses reads/writes</span> (or returns error)
+Reason: it cannot confirm it has the latest data from Node A.
+Result: <span class="ok">All reads return consistent (current) data</span>
+        <span class="warn">but service is unavailable on partitioned nodes</span>
+
+Examples: <span class="hi">etcd, ZooKeeper, HBase, single-leader PostgreSQL (sync replication)</span>
+When to use: leader election, distributed locks, financial ledgers.
+
+<span class="step">AP choice: Availability over Consistency</span>
+
+During partition: Node B <span class="ok">continues serving reads/writes</span>
+Reason: availability is more important than perfect consistency.
+Result: <span class="ok">Service stays available everywhere</span>
+        <span class="warn">but reads from B may return stale data until partition heals</span>
+
+Examples: <span class="hi">Cassandra, DynamoDB (default), CouchDB, DNS</span>
+When to use: user activity feeds, shopping carts, product catalogs, DNS.
+
+<span class="step">PACELC extension: the partition-free trade-off</span>
+
+During partition (P):   choose Availability (A) vs Consistency (C)
+Else (E, no partition): choose Latency (L) vs Consistency (C)
+
+Even without a partition, replication has latency.
+Strong consistency requires waiting for replicas → higher latency.
+Eventual consistency doesn't wait → lower latency.
+
+<span class="note">Example: DynamoDB is AP/EL — AP during partitions, low-latency eventual reads normally.</span>
+<span class="note">Example: Spanner is CP/EC — CP during partitions, consistent but higher latency normally.</span>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Database CAP positions and design implications</h2>
+        <table class="data-table">
+          <thead><tr><th>System</th><th>CAP position</th><th>During partition</th><th>Typical use case</th></tr></thead>
+          <tbody>
+            <tr><td><strong>PostgreSQL (sync replication)</strong></td><td>CP</td><td>Replicas go read-only or refuse writes</td><td>Financial data, strong consistency required</td></tr>
+            <tr><td><strong>Cassandra</strong></td><td>AP (tunable)</td><td>Continues serving from available nodes</td><td>High-write, globally distributed, eventual OK</td></tr>
+            <tr><td><strong>DynamoDB (default)</strong></td><td>AP</td><td>Continues serving, eventual consistency</td><td>Scale without ops overhead, eventual OK</td></tr>
+            <tr><td><strong>DynamoDB (strong reads)</strong></td><td>CP</td><td>Strong reads may fail during partition</td><td>When read-your-writes required</td></tr>
+            <tr><td><strong>etcd / ZooKeeper</strong></td><td>CP</td><td>Leader election quorum required to proceed</td><td>Distributed config, locks, leader election</td></tr>
+            <tr><td><strong>Google Spanner</strong></td><td>CP (effectively)</td><td>Consistent but higher latency via TrueTime</td><td>Global financial / e-commerce data</td></tr>
+            <tr><td><strong>MongoDB (default)</strong></td><td>CP</td><td>Primary required for writes</td><td>Document data with flexible schema</td></tr>
+          </tbody>
+        </table>
+
+        <div class="insight-box"><strong>Most applications don't need to choose.</strong> For a typical application with a single-region PostgreSQL primary and read replicas: partitions between primary and replicas are rare and brief. Your data's availability and consistency requirements are probably met without thinking about CAP at all. CAP becomes a real design constraint when you're building globally distributed systems with nodes in multiple regions that must continue operating independently during a region outage — and you need to decide what those nodes do during the split.</div>
+
+        <p class="mini-heading">The shopping cart example — Amazon's famous AP choice</p>
+        <p>Amazon deliberately chose AP for shopping carts. The reasoning: if a network partition occurs, it is better to allow a user to add items to their cart (available, possibly stale) than to refuse any cart interaction (consistent, unavailable). At worst, the cart might have a duplicate item that gets resolved when the partition heals. The business cost of "cart showed an extra item temporarily" is far lower than "user could not add to cart at all." This is a deliberate, reasoned AP choice — not an accident.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Every distributed system must tolerate partitions — so the real CAP choice is CP or AP. CP systems (etcd, PostgreSQL sync replication) refuse requests that can't be guaranteed consistent during a partition — they prioritise correctness over availability. AP systems (Cassandra, DynamoDB default) continue serving during a partition, accepting that some reads may be stale — they prioritise availability over consistency. Choose CP for financial ledgers, distributed locks, and leader election. Choose AP for user feeds, shopping carts, product catalogs, and DNS — where brief inconsistency is tolerable but downtime is not. PACELC extends CAP to also capture the latency-consistency trade-off in the partition-free case.</p>
+      </section>
+    </main>
+  </body>
+</html>

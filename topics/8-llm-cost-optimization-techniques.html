@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>8 LLM Cost Optimization Techniques: Cut API Spend by Up to 70% | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Financial charts and data visualization representing cost optimization"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Finance · Optimization · 10 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@lukechesser" target="_blank" rel="noopener">Luke Chesser</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>8 LLM Cost Optimization Techniques: How to Cut API Spend by Up to 70%</h1>
+        <p class="summary">
+          Eight concrete techniques — from prompt caching and model routing to output length control and batching — that visually-explained reduce LLM API spend by 40–70% without degrading quality.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Portal</span>
+            <span class="meta-value">Internal · Curated</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">LLM cost reduction: caching, batching, routing, context management, output control</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">Apr 2026</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          LLM API costs follow a simple but counterintuitive structure: you pay for every token the model reads and every token it writes, on every request. Most teams optimise only the obvious dimension (shorter prompts) and miss the 70% of spend driven by context repetition, overqualified models, and uncontrolled output length. The eight techniques below address all the layers.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Cost structure primer:</strong> Input tokens ≈ 3× cheaper than output tokens on most providers. Cached input tokens ≈ 10× cheaper than uncached. This changes the priority order for optimisation — context management matters more than prompt length, and output control matters most of all.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The $4,000 month that became $1,200</span>
+        <p>
+          A startup running a customer support AI hit a $4,000/month API bill at 50k conversations. After applying prompt caching (static system prompt), routing simple queries to Haiku, and adding output length constraints — the same workload cost $1,200. The product behaviour was unchanged. Three configuration changes cut the bill by 70%.
+        </p>
+      </section>
+
+      <!-- TECHNIQUE 1 -->
+      <section class="content-card">
+        <span class="section-label">Technique 1</span>
+        <h2>Prompt caching (the highest-leverage single technique)</h2>
+        <p>
+          If your system prompt is more than a few hundred tokens and is the same across most requests — cache it. Cached input tokens cost roughly 10% of uncached tokens on Claude. For a 2,000-token system prompt sent with every request:
+        </p>
+        <ul class="check-list">
+          <li>Without caching: 2,000 × $0.000003 × 1M requests = <strong>$6,000</strong></li>
+          <li>With caching: 2,000 × $0.0000003 × 1M requests = <strong>$600</strong></li>
+        </ul>
+        <p>
+          Implementation: add <code>"cache_control": {"type": "ephemeral"}</code> to the last block of your system prompt. The cache persists for 5 minutes (Claude); refreshing it before expiry with a keepalive request eliminates re-cache overhead for high-traffic applications.
+        </p>
+        <pre><code class="language-json">{
+  "system": [
+    {
+      "type": "text",
+      "text": "You are a helpful assistant for Acme Corp. [2000 tokens of context]",
+      "cache_control": { "type": "ephemeral" }
+    }
+  ]
+}</code></pre>
+      </section>
+
+      <!-- TECHNIQUE 2 -->
+      <section class="content-card">
+        <span class="section-label">Technique 2</span>
+        <h2>Model routing (match task complexity to model tier)</h2>
+        <p>
+          The cost difference between model tiers is not marginal — it is 10–20×:
+        </p>
+        <ul class="check-list">
+          <li><strong>Haiku 4.5:</strong> ~$0.80 / 1M input tokens — classification, extraction, simple Q&amp;A</li>
+          <li><strong>Sonnet 4.6:</strong> ~$3.00 / 1M input tokens — standard engineering tasks, most conversations</li>
+          <li><strong>Opus 4.8:</strong> ~$15.00 / 1M input tokens — complex reasoning, novel problem-solving, high-stakes decisions</li>
+        </ul>
+        <p>
+          A routing classifier (itself a fast, cheap model call) categorises each request and dispatches to the appropriate tier. The classifier overhead is negligible — a Haiku call to classify costs $0.0001 and saves $0.01–$0.15 per mis-routed request.
+        </p>
+        <pre><code class="language-python">def route_query(query: str) -> str:
+    classification = haiku.classify(
+        query,
+        categories=["simple_faq", "standard_task", "complex_reasoning"]
+    )
+    return {
+        "simple_faq": "claude-haiku-4-5",
+        "standard_task": "claude-sonnet-4-6",
+        "complex_reasoning": "claude-opus-4-8"
+    }[classification]</code></pre>
+      </section>
+
+      <!-- TECHNIQUE 3 -->
+      <section class="content-card">
+        <span class="section-label">Technique 3</span>
+        <h2>Output length control</h2>
+        <p>
+          Output tokens cost 3× more than input tokens and are the most predictable source of waste — models generate until they reach a natural stopping point, which is often longer than necessary.
+        </p>
+        <p class="mini-heading">Three controls in order of effectiveness</p>
+        <ul class="check-list">
+          <li><strong><code>max_tokens</code> parameter:</strong> Hard cap on response length. Set it based on your measured 95th-percentile of useful response length for each use case. Measure first; guess second.</li>
+          <li><strong>Format instructions:</strong> "Reply in 2-3 sentences maximum" or "Output only the JSON object, no explanation" in the system prompt. Models follow explicit length instructions reliably.</li>
+          <li><strong>Structured output:</strong> JSON Schema-constrained outputs are consistently shorter than free-text responses conveying equivalent information. Use structured outputs wherever the consuming code already needs to parse the response.</li>
+        </ul>
+      </section>
+
+      <!-- TECHNIQUE 4 -->
+      <section class="content-card">
+        <span class="section-label">Technique 4</span>
+        <h2>Context window management</h2>
+        <p>
+          For multi-turn conversations, the full conversation history is re-sent with every request. A 20-turn conversation where each turn averages 500 tokens sends 10,000 tokens of history on every request — even though the last 2–3 turns are almost always sufficient for the model to answer correctly.
+        </p>
+        <p class="mini-heading">Strategies in ascending cost savings</p>
+        <ul class="check-list">
+          <li><strong>Sliding window:</strong> Keep only the last N turns in context. Easiest to implement; loses long-term session context.</li>
+          <li><strong>Progressive summarisation:</strong> Summarise older turns into a compressed summary and keep recent turns verbatim. Preserves relevant context while reducing token count by 60–80%.</li>
+          <li><strong>Semantic retrieval:</strong> Store all turns as embeddings; retrieve only the most relevant turns for each request. Near-lossless context at O(1) token count per turn.</li>
+        </ul>
+      </section>
+
+      <!-- TECHNIQUE 5 -->
+      <section class="content-card">
+        <span class="section-label">Technique 5</span>
+        <h2>Batch API for async workloads</h2>
+        <p>
+          Most LLM providers offer a batch API that processes requests asynchronously (within 24 hours) at 50% of the synchronous price. If you have workloads that don't need immediate responses — nightly report generation, bulk classification, embedding refreshes, offline content processing — use batch mode exclusively.
+        </p>
+        <pre><code class="language-python">from anthropic import Anthropic
+
+client = Anthropic()
+
+# Batch: 50% cheaper, 24hr SLA
+batch = client.messages.batches.create(
+    requests=[
+        {"custom_id": f"req_{i}", "params": {"model": "claude-haiku-4-5", "messages": [...]}}
+        for i, item in enumerate(bulk_items)
+    ]
+)
+# Poll for completion; retrieve results batch
+print(f"Batch ID: {batch.id}  Status: {batch.processing_status}")</code></pre>
+      </section>
+
+      <!-- TECHNIQUE 6 -->
+      <section class="content-card">
+        <span class="section-label">Technique 6</span>
+        <h2>RAG instead of context stuffing</h2>
+        <p>
+          The instinct when building a knowledge-base application is to put all the relevant documents in the system prompt. At scale, this is prohibitively expensive — and the model's performance degrades when the context is packed with documents only partially relevant to the query.
+        </p>
+        <p>
+          Retrieval-Augmented Generation (RAG) replaces context stuffing with retrieval: embed the knowledge base, retrieve only the top-K relevant chunks for each query, and inject only those chunks into the context. Typical result: 80% context token reduction with equal or better accuracy because the injected context is more targeted.
+        </p>
+        <p>
+          The cost of the embedding + retrieval step is typically $0.0001 per query — negligible against the token savings.
+        </p>
+      </section>
+
+      <!-- TECHNIQUE 7 -->
+      <section class="content-card">
+        <span class="section-label">Technique 7</span>
+        <h2>Response caching for repeated queries</h2>
+        <p>
+          Many production LLM applications receive a small set of high-frequency queries. Caching the responses to these queries eliminates API calls entirely for cache hits. Implementation:
+        </p>
+        <ul class="check-list">
+          <li><strong>Exact match caching:</strong> Hash the full request (system prompt + user message) and cache the response in Redis with a TTL. Trivial to implement; effective for FAQ-style applications where users repeat common queries.</li>
+          <li><strong>Semantic caching:</strong> Embed the user query and check for high-similarity prior queries in a vector store. Cache hit if similarity exceeds threshold (typically 0.95). Handles paraphrases and spelling variants.</li>
+        </ul>
+        <p>
+          Real-world cache hit rates for customer support applications: 30–60%. That fraction of requests costs zero API tokens.
+        </p>
+      </section>
+
+      <!-- TECHNIQUE 8 -->
+      <section class="content-card">
+        <span class="section-label">Technique 8</span>
+        <h2>Fine-tuning to reduce prompt overhead</h2>
+        <p>
+          When a system prompt contains more than 500 tokens of instructions that apply to every request — persona, output format, constraints, examples — fine-tuning bakes those instructions into the model weights. Post-fine-tuning, the system prompt can be reduced to a few sentences.
+        </p>
+        <p>
+          The break-even calculation: fine-tuning cost (one-time) vs. token savings per request × request volume. For high-volume applications (1M+ requests/month) with large system prompts (1000+ tokens), fine-tuning pays back the one-time cost in days. For low-volume applications, it rarely makes sense.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Apply in priority order:</strong> Prompt caching → model routing → output length control → context window management → batch API → RAG → response caching → fine-tuning. Each technique has diminishing complexity. Start with the first three before considering the rest.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Common questions</span>
+        <h2>FAQ</h2>
+        <ul class="faq-list">
+          <li class="faq-item">
+            <p class="faq-question">Which technique has the best ROI for a new application?</p>
+            <p class="faq-answer">Prompt caching + model routing. Prompt caching requires one line of configuration and reduces input token costs by 90% for repeated system prompts. Model routing requires a classifier but reduces per-request model cost by 75–90% for simple queries. Together they address the two largest cost drivers before you've written 50 lines of optimisation code.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">Does context window management affect output quality?</p>
+            <p class="faq-answer">Sliding window does — it loses long-term context. Progressive summarisation is nearly lossless for most use cases because the summary captures the key decisions and established facts. Semantic retrieval is lossless by design but adds latency. For a chatbot, progressive summarisation is the standard starting point.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">Is the 70% cost reduction claim realistic for all applications?</p>
+            <p class="faq-answer">70% is achievable when starting from zero optimisation and applying all eight techniques. The specific savings depend heavily on application structure: a simple FAQ bot gets more from response caching; a complex agentic application gets more from model routing and context management. Measure first — find your largest cost driver and optimise that specifically.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          LLM API costs are driven by input token repetition (system prompt, conversation history), over-qualified model selection, and uncontrolled output length. Prompt caching, model routing, and output length control address these three root causes and together deliver 40–60% cost reduction with minimal engineering investment. Apply in that order before reaching for the more complex techniques.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

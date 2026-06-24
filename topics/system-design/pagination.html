@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pagination | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1481627834876-b7833e8f5570?w=1600&h=700&fit=crop&auto=format&q=80" alt="Pages and navigation through data" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 28 · 8 min</span></div>
+        </figure>
+        <h1>Pagination</h1>
+        <p class="summary">How APIs return large datasets in manageable chunks. Offset pagination is simple but breaks at scale. Cursor-based pagination is stable and performant. Keyset pagination is the production standard for large, frequently-updated datasets.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">28 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design</span></div>
+          <div><span class="meta-label">Standard</span><span class="meta-value">Cursor (keyset) pagination for production</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Twitter timeline, Stripe list endpoints, GitHub API</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every list endpoint that can return more results than fit in a single response needs pagination. The naive approach — OFFSET and LIMIT — works for prototypes but has two serious problems at scale: it gets slower as the offset increases (the database must skip rows), and it produces incorrect results under concurrent writes (inserts and deletes shift rows between pages).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Strategies</span>
+        <h2>Three pagination strategies compared</h2>
+        <div class="diagram-box">
+<span class="step">OFFSET pagination — simple, broken at scale</span>
+
+Page 1: SELECT * FROM orders ORDER BY created_at DESC LIMIT 20 OFFSET 0
+Page 2: SELECT * FROM orders ORDER BY created_at DESC LIMIT 20 OFFSET 20
+Page N: SELECT * FROM orders ORDER BY created_at DESC LIMIT 20 OFFSET (N-1)*20
+
+Problem 1 — PERFORMANCE:
+  OFFSET 100000 means the DB reads 100,020 rows, discards the first 100,000.
+  On a 10M row table: OFFSET 9,999,980 = full table scan. <span class="warn">O(offset) cost.</span>
+
+Problem 2 — STABILITY:
+  User reads page 1 (rows 1-20). New order inserted at row 5.
+  User reads page 2 (OFFSET 20): old row 20 is now row 21. <span class="warn">Row 20 appears on both pages!</span>
+  Concurrent deletes cause the opposite: <span class="warn">rows are silently skipped.</span>
+
+<span class="step">Cursor (keyset) pagination — stable and O(log n)</span>
+
+Page 1: SELECT * FROM orders ORDER BY created_at DESC, id DESC LIMIT 20
+  Last row: { created_at: '2024-01-15', id: 'ord_500' }
+  Cursor: base64url({ createdAt: '2024-01-15', id: 'ord_500' })
+
+Page 2: SELECT * FROM orders
+        WHERE (created_at, id) < ('2024-01-15', 'ord_500')
+        ORDER BY created_at DESC, id DESC LIMIT 20
+
+  Uses composite index on (created_at DESC, id DESC) → O(log n) regardless of page.
+  <span class="ok">New rows at the top don't affect pages you've already passed.</span>
+  <span class="ok">Deleted rows don't cause skips in subsequent pages.</span>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Keyset pagination with stable cursors</h2>
+        <pre><code class="language-js">import { z } from 'zod';
+import { Pool } from 'pg';
+
+const db = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// ─── CURSOR ENCODING ──────────────────────────────────────────────────────
+// Opaque token — clients treat as a black box, never parse or construct
+function encodeCursor(data) {
+  return Buffer.from(JSON.stringify(data)).toString('base64url');
+}
+
+function decodeCursor(cursor) {
+  try {
+    return JSON.parse(Buffer.from(cursor, 'base64url').toString());
+  } catch {
+    throw new Error('Invalid cursor');
+  }
+}
+
+// ─── LIST ORDERS — keyset pagination ──────────────────────────────────────
+const QuerySchema = z.object({
+  cursor: z.string().optional(),
+  limit:  z.coerce.number().int().min(1).max(100).default(20),
+});
+
+app.get('/orders', async (req, res) => {
+  const { cursor, limit } = QuerySchema.parse(req.query);
+
+  let query, params;
+
+  if (cursor) {
+    const { createdAt, id } = decodeCursor(cursor);
+    // Use the composite index: WHERE (created_at, id) < (lastCreatedAt, lastId)
+    query  = `SELECT id, user_id, total, status, created_at
+              FROM orders
+              WHERE (created_at, id) < ($1::timestamptz, $2)
+              ORDER BY created_at DESC, id DESC
+              LIMIT $3`;
+    params = [createdAt, id, limit + 1]; // +1 to detect if there's a next page
+  } else {
+    query  = `SELECT id, user_id, total, status, created_at
+              FROM orders
+              ORDER BY created_at DESC, id DESC
+              LIMIT $1`;
+    params = [limit + 1];
+  }
+
+  const rows = (await db.query(query, params)).rows;
+  const hasMore = rows.length > limit;
+  const items   = hasMore ? rows.slice(0, limit) : rows;
+
+  const last       = items[items.length - 1];
+  const nextCursor = hasMore && last
+    ? encodeCursor({ createdAt: last.created_at, id: last.id })
+    : null;
+
+  res.json({
+    items,
+    pagination: {
+      nextCursor,
+      hasMore,
+      count: items.length,
+    },
+  });
+});
+
+// ─── SEEK PAGINATION for random access (e.g. page 5 of 20) ───────────────
+// When random page access is needed (not just "next page"), use seek pagination:
+// Sort by an indexed column, use the last value as the filter boundary.
+// Trade-off: no "page N" concept, only "items after X".
+
+// ─── EXAMPLE: BIDIRECTIONAL PAGINATION (like Twitter timeline) ───────────
+app.get('/timeline', async (req, res) => {
+  const { beforeId, afterId, limit = 20 } = req.query;
+
+  let query, params;
+
+  if (beforeId) {
+    // Load older posts (scroll down)
+    query  = 'SELECT * FROM posts WHERE id < $1 ORDER BY id DESC LIMIT $2';
+    params = [beforeId, limit];
+  } else if (afterId) {
+    // Load newer posts (pull to refresh)
+    query  = 'SELECT * FROM posts WHERE id > $1 ORDER BY id ASC LIMIT $2';
+    params = [afterId, limit];
+  } else {
+    // Initial load — most recent
+    query  = 'SELECT * FROM posts ORDER BY id DESC LIMIT $1';
+    params = [limit];
+  }
+
+  const rows = (await db.query(query, params)).rows;
+
+  // For afterId, reverse to always return newest-first
+  if (afterId) rows.reverse();
+
+  res.json({
+    items:   rows,
+    oldestId: rows[rows.length - 1]?.id,
+    newestId: rows[0]?.id,
+  });
+});</code></pre>
+
+        <table class="data-table">
+          <thead><tr><th>Strategy</th><th>Performance</th><th>Stability</th><th>Random access</th><th>Use when</th></tr></thead>
+          <tbody>
+            <tr><td><strong>OFFSET</strong></td><td>O(offset) — degrades</td><td>Unstable (drift under writes)</td><td>Yes</td><td>Small tables, prototypes, admin UIs with low traffic</td></tr>
+            <tr><td><strong>Cursor (keyset)</strong></td><td>O(log n) constant</td><td>Stable</td><td>No (forward only)</td><td>Production list APIs, feeds, export endpoints</td></tr>
+            <tr><td><strong>Bidirectional cursor</strong></td><td>O(log n)</td><td>Stable</td><td>Limited</td><td>Social feeds (Twitter, Instagram) with pull-to-refresh</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Stripe, GitHub, and the opaque cursor convention</h2>
+        <p><strong>Stripe:</strong> Every list endpoint (charges, invoices, customers) uses cursor pagination with <code>starting_after</code> and <code>ending_before</code> parameters. The cursor is just the ID of the last item in the previous page — opaque to the client. Stripe explicitly documents that the order of returned items is not guaranteed to be stable under concurrent API calls, so consumers should not depend on ordering across sessions.</p>
+        <p><strong>GitHub REST API:</strong> Uses Link header pagination (RFC 5988) with opaque cursor-based URLs. Response headers contain <code>rel="next"</code> and <code>rel="prev"</code> links. GitHub explicitly tells developers to follow the Link header rather than constructing pagination URLs manually — because the internals of the cursor can change without notice.</p>
+
+        <div class="warn-box"><strong>Never expose raw OFFSET in your API.</strong> Once clients start using OFFSET as a page counter, they'll rely on the ordering being stable. Any insert or delete mid-dataset corrupts their pagination state silently. If you must support "page N" UX (an admin table with 50 pages), use OFFSET internally but cap the maximum offset at a value you're comfortable with (e.g. max 10,000 rows) to prevent full table scans.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Always use cursor-based (keyset) pagination for production list endpoints. OFFSET is convenient but produces incorrect results under concurrent writes and performs an O(offset) table scan. Cursor pagination uses a composite index for O(log n) performance at any page depth, and is stable — inserts and deletes don't cause rows to appear twice or be skipped. Encode cursors as opaque base64 tokens. Include hasMore and nextCursor in responses. Require a composite index on the sort columns — without it, keyset pagination degrades to a full table scan too.</p>
+      </section>
+    </main>
+  </body>
+</html>

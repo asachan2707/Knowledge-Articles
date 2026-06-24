@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>React Ecosystem | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="React ecosystem tools and libraries" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 10 of 11 · ~30 min</span>
+          </div>
+        </figure>
+        <h1>React Ecosystem</h1>
+        <p class="summary">Next.js App Router, Vite for instant dev, Tailwind utility-first styling, shadcn/ui component library, Framer Motion animations, and Storybook for isolated component development.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">10 of 11</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">Next.js · Vite · Tailwind CSS · shadcn/ui · Motion · Storybook</span></div>
+          <div><span class="meta-label">Context</span><span class="meta-value">These tools are the standard 2026 React production stack</span></div>
+        </div>
+      </header>
+
+      <!-- ─── NEXT.JS ─────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>Next.js — the React framework for production</h2>
+        <p class="lead">Next.js adds what React doesn't provide out of the box: routing, server-side rendering, static generation, image optimization, and API routes. The App Router (Next 13+) is the modern architecture built on React Server Components.</p>
+        <pre><code class="language-tsx">// ─── App Router file structure ────────────────────────────────────────────
+// app/
+//   layout.tsx          ← root layout (persists across navigations)
+//   page.tsx            ← home page /
+//   products/
+//     page.tsx          ← /products
+//     [productId]/
+//       page.tsx        ← /products/:productId
+//       loading.tsx     ← loading UI (automatic Suspense)
+//       error.tsx       ← error boundary
+//   dashboard/
+//     layout.tsx        ← dashboard-specific layout
+
+// ─── Root layout ──────────────────────────────────────────────────────────
+// app/layout.tsx
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    &lt;html lang="en"&gt;
+      &lt;body&gt;
+        &lt;TopNav /&gt;
+        {children}
+        &lt;Footer /&gt;
+      &lt;/body&gt;
+    &lt;/html&gt;
+  );
+}
+
+// ─── Server Component page — fetches data on the server ──────────────────
+// app/products/[productId]/page.tsx
+interface PageProps {
+  params: Promise&lt;{ productId: string }&gt;;  // Next 15: params is a Promise
+}
+
+export default async function ProductPage({ params }: PageProps) {
+  const { productId } = await params;
+
+  // Runs on the server — no client JS, no loading state visible
+  const product = await db.product.findUnique({ where: { id: productId } });
+
+  if (!product) notFound();  // from 'next/navigation'
+
+  return (
+    &lt;div&gt;
+      &lt;h1&gt;{product.name}&lt;/h1&gt;
+      &lt;p&gt;${(product.priceCents / 100).toFixed(2)}&lt;/p&gt;
+      &lt;AddToCartButton productId={productId} /&gt; {/* client component */}
+    &lt;/div&gt;
+  );
+}
+
+// SEO metadata — static or dynamic
+export async function generateMetadata({ params }: PageProps) {
+  const { productId } = await params;
+  const product = await db.product.findUnique({ where: { id: productId } });
+  return { title: product?.name ?? 'Product', description: product?.description };
+}
+
+// ─── Client Component — interactive parts ─────────────────────────────────
+// 'use client' marks this as a client component
+'use client';
+function AddToCartButton({ productId }: { productId: string }) {
+  const addItem = useCartStore(s => s.addItem);
+  return &lt;button onClick={() =&gt; addItem(productId)}&gt;Add to Cart&lt;/button&gt;;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── VITE ────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Vite — the build tool that replaced Create React App</h2>
+        <p>Vite uses native ES modules in development for instant start (&lt;300ms regardless of project size) and Rollup for production builds. It replaced CRA as the standard for client-side React apps.</p>
+        <pre><code class="language-ts">// ─── Create a Vite + React + TypeScript project ───────────────────────────
+// npm create vite@latest my-app -- --template react-ts
+
+// vite.config.ts — typical production config
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import { visualizer } from 'rollup-plugin-visualizer';
+import path from 'path';
+
+export default defineConfig({
+  plugins: [
+    react({
+      babel: { plugins: [['babel-plugin-react-compiler', {}]] }, // React Compiler
+    }),
+    visualizer({ open: false }),
+  ],
+  resolve: {
+    alias: { '@': path.resolve(__dirname, './src') },  // @/components/Button
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor:  ['react', 'react-dom'],
+          router:  ['react-router-dom'],
+          query:   ['@tanstack/react-query'],
+        },
+      },
+    },
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+  },
+});
+
+// ─── Environment variables ────────────────────────────────────────────────
+// .env.local (gitignored)
+VITE_API_URL=http://localhost:3000
+VITE_SENTRY_DSN=...
+
+// Usage in code — only VITE_ prefixed vars are exposed to client
+const apiUrl = import.meta.env.VITE_API_URL;
+</code></pre>
+      </section>
+
+      <!-- ─── TAILWIND CSS ─────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>Tailwind CSS — utility-first styling</h2>
+        <p>Tailwind provides low-level utility classes that you compose directly in JSX. No context switching between CSS files and components, no naming things, no specificity battles. The final CSS bundle is tiny because only used classes are included.</p>
+        <pre><code class="language-jsx">// ─── Tailwind patterns in React ──────────────────────────────────────────
+
+// Simple card
+function ProductCard({ product }) {
+  return (
+    &lt;div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden hover:shadow-md transition-shadow"&gt;
+      &lt;img src={product.imageUrl} alt={product.name} className="w-full h-48 object-cover" /&gt;
+      &lt;div className="p-4"&gt;
+        &lt;h3 className="font-semibold text-gray-900 text-lg"&gt;{product.name}&lt;/h3&gt;
+        &lt;p className="text-gray-500 text-sm mt-1"&gt;{product.description}&lt;/p&gt;
+        &lt;p className="text-blue-600 font-bold text-xl mt-3"&gt;
+          ${(product.priceCents / 100).toFixed(2)}
+        &lt;/p&gt;
+        &lt;button className="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors"&gt;
+          Add to Cart
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Conditional classes with clsx/cn ────────────────────────────────────
+// npm install clsx tailwind-merge
+import { clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+const cn = (...inputs) => twMerge(clsx(inputs));
+
+function Button({ variant, size, className, children, ...props }) {
+  return (
+    &lt;button
+      className={cn(
+        'inline-flex items-center justify-center font-semibold rounded-lg transition-colors',
+        {
+          'bg-blue-600 hover:bg-blue-700 text-white':      variant === 'primary',
+          'bg-gray-100 hover:bg-gray-200 text-gray-700':   variant === 'secondary',
+          'bg-red-600 hover:bg-red-700 text-white':        variant === 'danger',
+          'px-3 py-1.5 text-sm':                           size === 'sm',
+          'px-4 py-2 text-base':                           size === 'md',
+          'px-6 py-3 text-lg':                             size === 'lg',
+        },
+        className  // allow callers to extend
+      )}
+      {...props}
+    &gt;
+      {children}
+    &lt;/button&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── SHADCN/UI ─────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>shadcn/ui — components you own, not install</h2>
+        <p>shadcn/ui is not a traditional component library — it generates component source code into your project. You own the code, customize freely, and there is no version lock-in. Built on Radix UI (accessible primitives) + Tailwind.</p>
+        <pre><code class="language-bash"># Add components to your project (they become source files you own)
+npx shadcn@latest init
+npx shadcn@latest add button input dialog select table
+</code></pre>
+        <pre><code class="language-tsx">// The components live in src/components/ui/ — modify them freely
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+
+function InviteUserDialog({ open, onOpenChange }) {
+  const [email, setEmail] = useState('');
+  const [role, setRole]   = useState('viewer');
+
+  return (
+    &lt;Dialog open={open} onOpenChange={onOpenChange}&gt;
+      &lt;DialogContent className="sm:max-w-md"&gt;
+        &lt;DialogHeader&gt;
+          &lt;DialogTitle&gt;Invite team member&lt;/DialogTitle&gt;
+        &lt;/DialogHeader&gt;
+
+        &lt;div className="grid gap-4 py-4"&gt;
+          &lt;div className="grid gap-2"&gt;
+            &lt;Label htmlFor="email"&gt;Email&lt;/Label&gt;
+            &lt;Input
+              id="email"
+              type="email"
+              value={email}
+              onChange={e =&gt; setEmail(e.target.value)}
+              placeholder="colleague@company.com"
+            /&gt;
+          &lt;/div&gt;
+
+          &lt;div className="grid gap-2"&gt;
+            &lt;Label&gt;Role&lt;/Label&gt;
+            &lt;Select value={role} onValueChange={setRole}&gt;
+              &lt;SelectTrigger&gt;&lt;SelectValue /&gt;&lt;/SelectTrigger&gt;
+              &lt;SelectContent&gt;
+                &lt;SelectItem value="admin"&gt;Admin&lt;/SelectItem&gt;
+                &lt;SelectItem value="editor"&gt;Editor&lt;/SelectItem&gt;
+                &lt;SelectItem value="viewer"&gt;Viewer&lt;/SelectItem&gt;
+              &lt;/SelectContent&gt;
+            &lt;/Select&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div className="flex justify-end gap-2"&gt;
+          &lt;Button variant="outline" onClick={() =&gt; onOpenChange(false)}&gt;Cancel&lt;/Button&gt;
+          &lt;Button onClick={() =&gt; sendInvite(email, role)}&gt;Send Invite&lt;/Button&gt;
+        &lt;/div&gt;
+      &lt;/DialogContent&gt;
+    &lt;/Dialog&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── MOTION ───────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>Motion — declarative animations</h2>
+        <p>Motion (formerly Framer Motion) is the standard animation library for React. Declarative API — you describe the animation state, Motion handles the interpolation. Works with React's lifecycle and layout changes.</p>
+        <pre><code class="language-jsx">// npm install motion
+import { motion, AnimatePresence } from 'motion/react';
+
+// ─── Basic animation ──────────────────────────────────────────────────────
+function FadeInCard({ children }) {
+  return (
+    &lt;motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, ease: 'easeOut' }}
+    &gt;
+      {children}
+    &lt;/motion.div&gt;
+  );
+}
+
+// ─── AnimatePresence — animate on unmount ────────────────────────────────
+function Toast({ toasts }) {
+  return (
+    &lt;div className="toast-container"&gt;
+      &lt;AnimatePresence&gt;
+        {toasts.map(toast =&gt; (
+          &lt;motion.div
+            key={toast.id}
+            initial={{ opacity: 0, x: 100 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 100 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+            className="toast"
+          &gt;
+            {toast.message}
+          &lt;/motion.div&gt;
+        ))}
+      &lt;/AnimatePresence&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Layout animations — animate DOM position changes ─────────────────────
+function SortableList({ items }) {
+  return (
+    &lt;ul&gt;
+      {items.map(item =&gt; (
+        &lt;motion.li key={item.id} layout transition={{ type: 'spring', stiffness: 400 }}&gt;
+          {item.name}
+        &lt;/motion.li&gt;
+      ))}
+    &lt;/ul&gt;
+  );
+  // When items reorder, Motion smoothly animates each item to its new position
+}
+
+// ─── Gesture-driven animation ─────────────────────────────────────────────
+function DraggableCard({ children }) {
+  return (
+    &lt;motion.div
+      drag
+      dragConstraints={{ left: 0, right: 300, top: 0, bottom: 300 }}
+      whileDrag={{ scale: 1.05, cursor: 'grabbing' }}
+      whileHover={{ scale: 1.02 }}
+      whileTap={{ scale: 0.98 }}
+      className="card"
+    &gt;
+      {children}
+    &lt;/motion.div&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── STORYBOOK ─────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Storybook — isolated component development</h2>
+        <p>Storybook renders components in isolation — no routing, no auth, no global state. Each "story" is one visual state of a component. It doubles as a living component library for designers and developers.</p>
+        <pre><code class="language-tsx">// npx storybook@latest init
+
+// Button.stories.tsx
+import type { Meta, StoryObj } from '@storybook/react';
+import { Button } from './Button';
+
+const meta: Meta&lt;typeof Button&gt; = {
+  component: Button,
+  title: 'UI/Button',
+  tags: ['autodocs'],   // generates documentation page automatically
+  argTypes: {
+    variant: { control: 'select', options: ['primary', 'secondary', 'danger', 'ghost'] },
+    size:    { control: 'select', options: ['sm', 'md', 'lg'] },
+    loading: { control: 'boolean' },
+  },
+};
+
+export default meta;
+type Story = StoryObj&lt;typeof Button&gt;;
+
+export const Primary: Story = {
+  args: { children: 'Click me', variant: 'primary' },
+};
+
+export const Loading: Story = {
+  args: { children: 'Saving...', variant: 'primary', loading: true },
+};
+
+export const AllVariants: Story = {
+  render: () => (
+    &lt;div style={{ display: 'flex', gap: '8px' }}&gt;
+      &lt;Button variant="primary"&gt;Primary&lt;/Button&gt;
+      &lt;Button variant="secondary"&gt;Secondary&lt;/Button&gt;
+      &lt;Button variant="danger"&gt;Danger&lt;/Button&gt;
+      &lt;Button variant="ghost"&gt;Ghost&lt;/Button&gt;
+    &lt;/div&gt;
+  ),
+};
+
+// ─── Testing in Storybook (Storybook Test) ─────────────────────────────────
+// Stories become test cases in Vitest
+import { composeStories } from '@storybook/react';
+import * as stories from './Button.stories';
+
+const { Primary, Loading } = composeStories(stories);
+
+test('Primary button renders', async () => {
+  await render(&lt;Primary /&gt;);
+  expect(screen.getByRole('button', { name: 'Click me' })).toBeInTheDocument();
+});
+</code></pre>
+        <div class="insight-box"><strong>Storybook as the component contract:</strong> Write stories before implementing, collaborate with design, catch regressions with visual testing (Chromatic). The discipline of writing stories forces you to think about the full range of states a component needs to handle.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 10 Takeaway</h2>
+        <p>The 2026 React stack: Vite for fast local development, Next.js when you need SSR/RSC, Tailwind for styling, shadcn/ui for components you own and customize, Motion for animations, and Storybook for isolated component development. These tools are additive — each solves a specific problem without fighting the others. Start with Vite + Tailwind + shadcn/ui for most apps; add Next.js when SEO or SSR matters.</p>
+      </section>
+    </main>
+  </body>
+</html>

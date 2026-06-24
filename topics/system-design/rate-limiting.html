@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rate Limiting | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1563986768494-4dee2763ff3f?w=1600&h=700&fit=crop&auto=format&q=80" alt="Traffic control and flow management" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 10 · 10 min</span></div>
+        </figure>
+        <h1>Rate Limiting</h1>
+        <p class="summary">Controls how many requests a client can make in a given time window. Protects services from overload, prevents abuse, enforces fair usage across tenants, and is a prerequisite for any public-facing API.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">10 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design / Security</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Every public API: Stripe, GitHub, Twitter, OpenAI</span></div>
+          <div><span class="meta-label">Implementation</span><span class="meta-value">Redis sliding window, token bucket, leaky bucket</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Without rate limiting, a single misbehaving client — whether a scraper, a buggy integration, or a deliberate attacker — can exhaust your server capacity and degrade service for every other user. Rate limiting is the enforcement mechanism that ensures fair resource allocation.</p>
+        <div class="callout"><p><strong>Rate limiting at every layer:</strong> Effective rate limiting happens at multiple layers. At the network edge (Cloudflare, AWS WAF) for DDoS. At the API gateway for per-client quotas. At the service level for per-feature or per-tenant limits. These layers are complementary, not alternatives.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Algorithms</span>
+        <h2>Four algorithms — trade-offs between simplicity and accuracy</h2>
+
+        <p class="mini-heading">Fixed Window Counter — simplest, with a boundary problem</p>
+        <p>Count requests in a fixed time window (e.g. 12:00:00–12:01:00). Reset counter at the window boundary. Problem: a client can make 100 requests at 12:00:59 and 100 more at 12:01:01 — 200 requests in 2 seconds while technically under the per-minute limit.</p>
+
+        <p class="mini-heading">Sliding Window Log — most accurate, highest memory</p>
+        <p>Store a timestamp for every request in the last window. On each new request, remove timestamps older than the window, count remaining, reject if over limit. Perfectly accurate but stores O(requests) timestamps per client — expensive at scale.</p>
+
+        <p class="mini-heading">Sliding Window Counter — the production standard</p>
+        <p>Hybrid: combine the previous fixed window count with the current window count, weighted by how far into the current window we are. Approximates the sliding log with O(1) memory per client. This is what most production systems use.</p>
+
+        <p class="mini-heading">Token Bucket — allows bursting</p>
+        <p>Each client has a bucket with a maximum capacity. Tokens refill at a fixed rate (e.g. 10/second). Each request consumes one token. If bucket is empty, reject. Allows short bursts (drain the bucket) but enforces average rate. Used by AWS API Gateway and most CDNs.</p>
+
+        <div class="diagram-box">
+<span class="step">Token Bucket — allows burst up to bucket capacity</span>
+
+Bucket: capacity=10, refill=2/sec
+t=0:   [●●●●●●●●●●] 10 tokens
+t=0:   5 requests ──▶ [●●●●●] 5 tokens remain  <span class="ok">✓ allowed</span>
+t=0:   8 requests ──▶ <span class="warn">✗ rejected</span> (only 5 tokens, need 8)
+t=1s:  refill 2  ──▶ [●●●●●●●] 7 tokens
+t=1s:  3 requests ──▶ [●●●●] 4 tokens remain  <span class="ok">✓ allowed</span>
+
+<span class="step">Sliding Window Counter (production standard)</span>
+
+limit=100/min, window=60s
+current request at t=45s:
+
+requests in previous window (0s–60s): 80
+requests in current window (0s–45s):  30
+weight of previous window: (60-45)/60 = 0.25
+
+estimated count = 80 * 0.25 + 30 = 50 ──▶ <span class="ok">under 100, allow</span>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Sliding window counter in Node.js with Redis</h2>
+        <pre><code class="language-js">import { createClient } from 'redis';
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+// Sliding window counter using Redis sorted sets
+// Accurate, efficient, and works across multiple API gateway instances
+async function isRateLimited(identifier, { limit = 100, windowMs = 60000 } = {}) {
+  const key = `ratelimit:${identifier}`;
+  const now = Date.now();
+  const windowStart = now - windowMs;
+
+  // Atomic pipeline: remove expired, add current, count, set TTL
+  const [[, , count]] = await redis.multi()
+    .zRemRangeByScore(key, 0, windowStart)              // Remove old entries
+    .zAdd(key, [{ score: now, value: `${now}` }])       // Add current request
+    .zCard(key)                                          // Count in window
+    .expire(key, Math.ceil(windowMs / 1000))             // Auto-expire key
+    .exec();
+
+  return {
+    limited:   count > limit,
+    count:     count,
+    remaining: Math.max(0, limit - count),
+    resetAt:   new Date(now + windowMs).toISOString(),
+  };
+}
+
+// Token bucket with Redis — allows bursting
+async function tokenBucket(identifier, { capacity = 10, refillRate = 2, refillIntervalMs = 1000 } = {}) {
+  const key = `tokenbucket:${identifier}`;
+  const now = Date.now();
+
+  // GET current state
+  const [tokens, lastRefillStr] = await redis.hmGet(key, 'tokens', 'lastRefill');
+
+  let currentTokens = parseFloat(tokens ?? capacity);
+  const lastRefill   = parseInt(lastRefillStr ?? now);
+
+  // Calculate tokens to add since last refill
+  const elapsed  = now - lastRefill;
+  const newTokens = (elapsed / refillIntervalMs) * refillRate;
+  currentTokens = Math.min(capacity, currentTokens + newTokens);
+
+  if (currentTokens < 1) {
+    return { allowed: false, tokens: 0, retryAfterMs: Math.ceil((1 - currentTokens) / refillRate * refillIntervalMs) };
+  }
+
+  // Consume one token
+  currentTokens -= 1;
+  await redis.hSet(key, { tokens: currentTokens, lastRefill: now });
+  await redis.expire(key, Math.ceil(capacity / refillRate) + 1);
+
+  return { allowed: true, tokens: currentTokens };
+}
+
+// Express middleware — enforces per-user and per-IP limits
+function rateLimitMiddleware({ perUserLimit = 100, perIpLimit = 200, windowMs = 60000 } = {}) {
+  return async (req, res, next) => {
+    const userId     = req.user?.sub;
+    const ip         = req.ip;
+    const identifier = userId ?? ip; // Prefer user ID; fall back to IP for unauthenticated
+
+    const [userLimit, ipLimit] = await Promise.all([
+      isRateLimited(`user:${identifier}`, { limit: perUserLimit, windowMs }),
+      isRateLimited(`ip:${ip}`,           { limit: perIpLimit, windowMs }),
+    ]);
+
+    // Always expose headers so clients can back off gracefully
+    res.setHeader('X-RateLimit-Limit',     perUserLimit);
+    res.setHeader('X-RateLimit-Remaining', userLimit.remaining);
+    res.setHeader('X-RateLimit-Reset',     userLimit.resetAt);
+
+    if (userLimit.limited || ipLimit.limited) {
+      return res.status(429).json({
+        error:      'Too Many Requests',
+        message:    'Rate limit exceeded. Back off and retry.',
+        retryAfter: Math.ceil(windowMs / 1000),
+        resetAt:    userLimit.resetAt,
+      });
+    }
+
+    next();
+  };
+}
+
+// Mount on router
+app.use('/api/', rateLimitMiddleware({ perUserLimit: 100, perIpLimit: 300, windowMs: 60000 }));
+
+// Stricter limits for expensive operations
+app.use('/api/ai/', rateLimitMiddleware({ perUserLimit: 10, perIpLimit: 20, windowMs: 60000 }));</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>How Stripe, GitHub, and OpenAI implement rate limits</h2>
+        <p><strong>Stripe:</strong> Per-account limits based on account tier. Free accounts: 25 req/s. Production: higher. Stripe uses token bucket with burst allowance. They also rate limit per API key, not just per account — so one leaked key can be limited without affecting other keys on the same account.</p>
+        <p><strong>GitHub:</strong> 5,000 requests/hour for authenticated users, 60/hour for unauthenticated (IP-based). GraphQL API: 5,000 points/hour where each operation costs different points based on complexity. This is rate limiting by cost, not just count — prevents expensive queries from abusing the quota.</p>
+        <p><strong>OpenAI:</strong> Rate limits on tokens-per-minute, not just requests-per-minute. A single request consuming 10,000 tokens counts as much as 10 requests of 1,000 tokens each. This is resource-aware rate limiting — measuring actual consumption, not request count.</p>
+
+        <div class="insight-box"><strong>Rate limiting keys beyond just the user ID:</strong> Most production systems rate limit on multiple dimensions: user ID (per-account limit), API key (per-key limit), IP address (per-IP limit for unauthenticated), and endpoint (expensive endpoints get tighter limits). Layer these — a burst of requests from one IP is still caught even if the user hasn't hit their quota yet.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Protects services from overload and abuse</li><li>Fair usage enforcement across tenants</li><li>Forces good API client behavior (backoff, retry)</li><li>DDoS mitigation at application layer</li><li>Quota enforcement for billing tiers</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Legitimate burst traffic may be rejected (misconfigured limits)</li><li>Distributed systems need centralized state (Redis) for accuracy</li><li>False positives behind NAT (many users, one IP)</li><li>Rate limit state can be a single point of failure if Redis goes down</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Rate limiting is not optional for production APIs — it's the mechanism that keeps one client from starving all others. Use the sliding window counter algorithm (Redis sorted sets) for per-client quotas: accurate, O(1) memory, works across distributed gateway instances. Always expose rate limit headers (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset) so clients can implement proper backoff rather than hammering your 429 responses. Layer limits by user, API key, and IP address for defense in depth.</p>
+      </section>
+    </main>
+  </body>
+</html>

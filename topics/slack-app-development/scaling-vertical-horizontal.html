@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vertical vs. Horizontal Scaling | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Scale · 10 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Vertical vs. Horizontal Scaling</h1>
+        <p class="summary">
+          Vertical scaling = bigger box. Horizontal scaling = more boxes. The choice has cost,
+          reliability, and architectural implications. For a Slack app this is the moment you decide
+          between "one Bolt process behind a load balancer" and "many Bolt instances with shared state".
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Pick a scaling axis intentionally</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~10 min</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">Bolt deployment, Redis state, distributed apps</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Scaling exists because traffic grows, and a single box has limits. The question is never
+          "vertical or horizontal" — it's "what's the cheapest path to the next 10× of load while
+          keeping reliability acceptable?"
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Default for Slack apps:</strong> design <em>stateless</em> from day one. Push
+            installation tokens, dedup keys, and per-team state to Mongo / Postgres / Redis. Then
+            horizontal scaling is just "add more containers."
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Vertical scaling — bigger box</h2>
+        <p><strong>How:</strong> upgrade the instance class — more CPU, more RAM, faster disks.</p>
+        <p><strong>Pros:</strong></p>
+        <ul>
+          <li>Zero application changes.</li>
+          <li>No coordination cost (single process owns all state).</li>
+          <li>Cheap to operate at small scale.</li>
+        </ul>
+        <p><strong>Cons:</strong></p>
+        <ul>
+          <li>Hard ceiling — eventually no bigger box exists.</li>
+          <li>Single point of failure: machine down = service down.</li>
+          <li>Cost curve is non-linear; the biggest instance types are exponentially priced.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Horizontal scaling — more boxes</h2>
+        <p><strong>How:</strong> run multiple instances behind a load balancer; each handles a portion of traffic.</p>
+        <p><strong>Pros:</strong></p>
+        <ul>
+          <li>Effectively unbounded ceiling.</li>
+          <li>One node failing doesn't take down the service.</li>
+          <li>Linear-ish cost.</li>
+        </ul>
+        <p><strong>Cons:</strong></p>
+        <ul>
+          <li>Requires <em>stateless</em> processes (or sticky sessions, or a shared state store).</li>
+          <li>Coordination cost: leader election, distributed locks, consistency tradeoffs.</li>
+          <li>Higher operational complexity (deployments, observability, log aggregation).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Slack-app implications</h2>
+        <h3>Stateless Bolt processes</h3>
+        <p>
+          Bolt is a Node process. Make it stateless by:
+        </p>
+        <ul>
+          <li>Storing installations in a shared DB (not a local Map).</li>
+          <li>Storing event-dedup keys in Redis with TTL.</li>
+          <li>Avoiding in-process counters / queues; use Redis or SQS.</li>
+        </ul>
+
+        <h3>Socket Mode caveat</h3>
+        <p>
+          Each Socket Mode connection is held by one process. If you run 3 Bolt replicas in Socket Mode,
+          Slack will round-robin events across them — fine for stateless handlers, problematic if your
+          handler assumed it had local state.
+        </p>
+
+        <h3>Background work</h3>
+        <p>
+          Once you're horizontal, push slow work to a queue (BullMQ, SQS) consumed by separate worker
+          processes. Web tier handles ack + light work; workers do the rest.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The third option: scale <em>up</em> until it breaks, then scale <em>out</em></h2>
+        <p>
+          Pragmatic teams scale vertically first (it's free in engineering time), then go horizontal
+          when:
+        </p>
+        <ul>
+          <li>The biggest instance can't keep up.</li>
+          <li>Reliability becomes a real concern (single-node SLA isn't enough).</li>
+          <li>Deployment risk requires zero-downtime rollouts.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Cost mental model</h2>
+        <p>
+          A 4-vCPU container at $40/mo serving 1× traffic. To handle 10× traffic:
+        </p>
+        <ul>
+          <li><strong>Vertical:</strong> one 64-vCPU box at ~$1,600/mo.</li>
+          <li><strong>Horizontal:</strong> ten 4-vCPU containers at ~$400/mo (often cheaper, plus redundancy).</li>
+        </ul>
+        <p>The tradeoff: horizontal needs the engineering investment in statelessness up front.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Design Slack apps stateless from day one — pay the small upfront cost, unlock horizontal scaling forever.</li>
+          <li>Vertical scaling is fine for early days; horizontal becomes mandatory at modest scale.</li>
+          <li>Push state into Mongo/Postgres/Redis; keep the Bolt process disposable.</li>
+          <li>Background queues let your web tier stay fast while heavy work runs elsewhere.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=dvRFHG2-uYs" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Vertical Vs Horizontal Scaling
+            </a>
+          </li>
+          <li>
+            <a href="https://aws.amazon.com/builders-library/avoiding-overload-in-distributed-systems-by-putting-the-smaller-service-in-control/" target="_blank" rel="noopener">
+              <span class="resource-kind guide">Guide</span>
+              AWS Builders' Library — overload management
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

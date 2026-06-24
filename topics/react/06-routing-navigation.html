@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Routing & Navigation | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1508921234172-b68bc9673f34?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Navigation paths and routes" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 6 of 11 · ~30 min</span>
+          </div>
+        </figure>
+        <h1>Routing &amp; Navigation</h1>
+        <p class="summary">React Router v6 from basic routes to nested layouts, protected auth routes, dynamic segments, loaders that fetch before rendering, and navigation patterns like breadcrumbs and programmatic routing.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">6 of 11</span></div>
+          <div><span class="meta-label">Library</span><span class="meta-value">React Router v6</span></div>
+          <div><span class="meta-label">Key concept</span><span class="meta-value">Outlet renders child routes — layouts wrap pages without re-mounting</span></div>
+        </div>
+      </header>
+
+      <!-- ─── REACT ROUTER ─────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>React Router v6 — basics</h2>
+        <pre><code class="language-jsx">// npm install react-router-dom
+import { BrowserRouter, Routes, Route, Link, NavLink } from 'react-router-dom';
+
+function App() {
+  return (
+    &lt;BrowserRouter&gt;
+      &lt;nav&gt;
+        &lt;Link to="/"&gt;Home&lt;/Link&gt;
+        {/* NavLink adds aria-current and active class automatically */}
+        &lt;NavLink to="/products" className={({ isActive }) =&gt; isActive ? 'nav-active' : ''}&gt;
+          Products
+        &lt;/NavLink&gt;
+      &lt;/nav&gt;
+
+      &lt;Routes&gt;
+        &lt;Route path="/"         element={&lt;HomePage /&gt;} /&gt;
+        &lt;Route path="/products" element={&lt;ProductsPage /&gt;} /&gt;
+        &lt;Route path="/about"    element={&lt;AboutPage /&gt;} /&gt;
+        &lt;Route path="*"         element={&lt;NotFoundPage /&gt;} /&gt;
+      &lt;/Routes&gt;
+    &lt;/BrowserRouter&gt;
+  );
+}
+
+// Reading URL params and search params
+import { useParams, useSearchParams, useLocation, useNavigate } from 'react-router-dom';
+
+function ProductDetailPage() {
+  const { productId } = useParams();              // /products/:productId
+  const [searchParams] = useSearchParams();       // ?tab=reviews&page=2
+  const location  = useLocation();                // { pathname, search, hash, state }
+  const navigate  = useNavigate();                // programmatic navigation
+
+  const tab  = searchParams.get('tab') ?? 'details';
+  const page = Number(searchParams.get('page') ?? 1);
+
+  return (
+    &lt;div&gt;
+      &lt;button onClick={() =&gt; navigate(-1)}&gt;Back&lt;/button&gt;
+      &lt;button onClick={() =&gt; navigate('/products', { replace: true })}&gt;
+        All Products
+      &lt;/button&gt;
+      &lt;ProductDetail id={productId} tab={tab} page={page} /&gt;
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── NESTED ROUTES ────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Nested Routes — layouts that persist across pages</h2>
+        <p>Nested routes let a parent layout render persistently while child routes swap in and out via <code>&lt;Outlet /&gt;</code>. This is how dashboards and tabbed pages work — the shell stays, the content changes.</p>
+        <pre><code class="language-jsx">import { Outlet } from 'react-router-dom';
+
+// Dashboard layout — renders once, persists while child routes change
+function DashboardLayout() {
+  return (
+    &lt;div className="dashboard"&gt;
+      &lt;DashboardSidebar /&gt;
+      &lt;main&gt;
+        &lt;Outlet /&gt;  {/* child route renders here */}
+      &lt;/main&gt;
+    &lt;/div&gt;
+  );
+}
+
+// Route config — nested structure
+function App() {
+  return (
+    &lt;BrowserRouter&gt;
+      &lt;Routes&gt;
+        {/* Public routes */}
+        &lt;Route path="/"      element={&lt;LandingPage /&gt;} /&gt;
+        &lt;Route path="/login" element={&lt;LoginPage /&gt;} /&gt;
+
+        {/* Dashboard — all children render inside DashboardLayout's Outlet */}
+        &lt;Route path="/dashboard" element={&lt;DashboardLayout /&gt;}&gt;
+          &lt;Route index element={&lt;DashboardHome /&gt;} /&gt;        {/* /dashboard */}
+          &lt;Route path="users"    element={&lt;UsersPage /&gt;} /&gt;   {/* /dashboard/users */}
+          &lt;Route path="orders"   element={&lt;OrdersPage /&gt;} /&gt;  {/* /dashboard/orders */}
+          &lt;Route path="settings" element={&lt;SettingsPage /&gt;} /&gt;{/* /dashboard/settings */}
+
+          {/* Nested further — user detail with tabs */}
+          &lt;Route path="users/:userId" element={&lt;UserDetailLayout /&gt;}&gt;
+            &lt;Route index           element={&lt;UserProfileTab /&gt;} /&gt;
+            &lt;Route path="activity" element={&lt;UserActivityTab /&gt;} /&gt;
+            &lt;Route path="orders"   element={&lt;UserOrdersTab /&gt;} /&gt;
+          &lt;/Route&gt;
+        &lt;/Route&gt;
+
+        &lt;Route path="*" element={&lt;NotFound /&gt;} /&gt;
+      &lt;/Routes&gt;
+    &lt;/BrowserRouter&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── PROTECTED ROUTES ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>Protected Routes — auth guards</h2>
+        <pre><code class="language-jsx">import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { useAuth } from '../hooks/useAuth';
+
+// ─── Auth guard component ─────────────────────────────────────────────────
+function RequireAuth({ allowedRoles }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+
+  if (loading) return &lt;FullPageSpinner /&gt;;
+
+  if (!user) {
+    // Redirect to login, save the attempted URL for redirect-back after login
+    return &lt;Navigate to="/login" state={{ from: location }} replace /&gt;;
+  }
+
+  if (allowedRoles && !allowedRoles.some(role =&gt; user.roles.includes(role))) {
+    return &lt;Navigate to="/unauthorized" replace /&gt;;
+  }
+
+  return &lt;Outlet /&gt;;
+}
+
+// ─── Usage in route config ────────────────────────────────────────────────
+&lt;Routes&gt;
+  {/* Public */}
+  &lt;Route path="/" element={&lt;LandingPage /&gt;} /&gt;
+  &lt;Route path="/login" element={&lt;LoginPage /&gt;} /&gt;
+
+  {/* Protected: any logged-in user */}
+  &lt;Route element={&lt;RequireAuth /&gt;}&gt;
+    &lt;Route path="/dashboard" element={&lt;DashboardLayout /&gt;}&gt;
+      &lt;Route index element={&lt;DashboardHome /&gt;} /&gt;
+    &lt;/Route&gt;
+  &lt;/Route&gt;
+
+  {/* Admin only */}
+  &lt;Route element={&lt;RequireAuth allowedRoles={['admin']} /&gt;}&gt;
+    &lt;Route path="/admin" element={&lt;AdminPanel /&gt;} /&gt;
+  &lt;/Route&gt;
+&lt;/Routes&gt;
+
+// ─── Login page: redirect back after login ────────────────────────────────
+function LoginPage() {
+  const navigate  = useNavigate();
+  const location  = useLocation();
+  const { login } = useAuth();
+  const from = location.state?.from?.pathname ?? '/dashboard';
+
+  const handleLogin = async (credentials) => {
+    await login(credentials);
+    navigate(from, { replace: true });
+  };
+
+  return &lt;LoginForm onSubmit={handleLogin} /&gt;;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── DYNAMIC ROUTES ───────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>Dynamic Routes — URL parameters</h2>
+        <pre><code class="language-jsx">// Route definition
+&lt;Route path="/products/:categorySlug/:productId" element={&lt;ProductDetail /&gt;} /&gt;
+
+// Accessing params
+function ProductDetail() {
+  const { categorySlug, productId } = useParams();
+
+  // Use productId to fetch data
+  const { data: product, isLoading } = useQuery({
+    queryKey: ['product', productId],
+    queryFn: () => fetchProduct(productId),
+  });
+
+  if (isLoading) return &lt;Skeleton /&gt;;
+  return &lt;ProductView product={product} /&gt;;
+}
+
+// ─── Search params for filters/pagination ─────────────────────────────────
+function ProductsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const category = searchParams.get('category') ?? 'all';
+  const sort     = searchParams.get('sort') ?? 'newest';
+  const page     = Number(searchParams.get('page') ?? 1);
+
+  const updateFilter = (key, value) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.set(key, value);
+      next.set('page', '1');  // reset page on filter change
+      return next;
+    });
+  };
+
+  return (
+    &lt;div&gt;
+      &lt;select value={category} onChange={e =&gt; updateFilter('category', e.target.value)}&gt;
+        &lt;option value="all"&gt;All&lt;/option&gt;
+        &lt;option value="electronics"&gt;Electronics&lt;/option&gt;
+      &lt;/select&gt;
+      &lt;ProductGrid category={category} sort={sort} page={page} /&gt;
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── ROUTE LOADERS ────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>Route Loaders — fetch data before rendering</h2>
+        <p>React Router 6.4+ loaders let you fetch data as a side effect of navigation — before the component renders. This eliminates the loading spinner flash on initial page load.</p>
+        <pre><code class="language-jsx">// Using createBrowserRouter with loaders
+import { createBrowserRouter, RouterProvider, useLoaderData } from 'react-router-dom';
+
+// Loader runs during navigation — before component renders
+async function productLoader({ params }) {
+  const [product, reviews] = await Promise.all([
+    fetch(`/api/products/${params.productId}`).then(r => r.json()),
+    fetch(`/api/products/${params.productId}/reviews`).then(r => r.json()),
+  ]);
+  return { product, reviews };
+}
+
+// Component receives loader data via useLoaderData (no loading state needed!)
+function ProductDetailPage() {
+  const { product, reviews } = useLoaderData();
+
+  return (
+    &lt;div&gt;
+      &lt;h1&gt;{product.name}&lt;/h1&gt;
+      &lt;ReviewList reviews={reviews} /&gt;
+    &lt;/div&gt;
+  );
+}
+
+// Route config with loaders
+const router = createBrowserRouter([
+  {
+    path: '/',
+    element: &lt;RootLayout /&gt;,
+    children: [
+      {
+        path: 'products',
+        element: &lt;ProductsPage /&gt;,
+        loader: async () => fetch('/api/products').then(r => r.json()),
+      },
+      {
+        path: 'products/:productId',
+        element: &lt;ProductDetailPage /&gt;,
+        loader: productLoader,
+        errorElement: &lt;ProductError /&gt;,  // shown if loader throws
+      },
+    ],
+  },
+]);
+
+function App() {
+  return &lt;RouterProvider router={router} /&gt;;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── NAVIGATION PATTERNS ──────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Navigation Patterns — breadcrumbs, tabs, and programmatic routing</h2>
+        <pre><code class="language-jsx">// ─── Breadcrumbs — built from current location ────────────────────────────
+function Breadcrumbs() {
+  const location = useLocation();
+  const paths = location.pathname.split('/').filter(Boolean);
+
+  const crumbs = paths.map((segment, i) => ({
+    label: segment.replace(/-/g, ' '),
+    href: '/' + paths.slice(0, i + 1).join('/'),
+  }));
+
+  return (
+    &lt;nav aria-label="breadcrumb"&gt;
+      &lt;ol&gt;
+        &lt;li&gt;&lt;Link to="/"&gt;Home&lt;/Link&gt;&lt;/li&gt;
+        {crumbs.map((crumb, i) =&gt; (
+          &lt;li key={crumb.href}&gt;
+            {i === crumbs.length - 1
+              ? &lt;span aria-current="page"&gt;{crumb.label}&lt;/span&gt;
+              : &lt;Link to={crumb.href}&gt;{crumb.label}&lt;/Link&gt;
+            }
+          &lt;/li&gt;
+        ))}
+      &lt;/ol&gt;
+    &lt;/nav&gt;
+  );
+}
+
+// ─── Tab navigation using URL search params ───────────────────────────────
+const TABS = ['details', 'reviews', 'shipping'];
+
+function ProductTabs() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const active = searchParams.get('tab') ?? 'details';
+
+  return (
+    &lt;div&gt;
+      &lt;div role="tablist"&gt;
+        {TABS.map(tab =&gt; (
+          &lt;button
+            key={tab}
+            role="tab"
+            aria-selected={active === tab}
+            onClick={() =&gt; setSearchParams({ tab })}
+          &gt;
+            {tab}
+          &lt;/button&gt;
+        ))}
+      &lt;/div&gt;
+      &lt;div role="tabpanel"&gt;
+        {active === 'details'  &amp;&amp; &lt;ProductDetails /&gt;}
+        {active === 'reviews'  &amp;&amp; &lt;ProductReviews /&gt;}
+        {active === 'shipping' &amp;&amp; &lt;ShippingInfo /&gt;}
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Programmatic navigation patterns ─────────────────────────────────────
+function OrderForm() {
+  const navigate = useNavigate();
+
+  const handleSubmit = async (formData) => {
+    const order = await createOrder(formData);
+    // Navigate with state (accessible via useLocation in the target page)
+    navigate(`/orders/${order.id}`, {
+      state: { justCreated: true, fromCheckout: true },
+    });
+  };
+
+  return &lt;form onSubmit={handleSubmit}&gt;{/* ... */}&lt;/form&gt;;
+}
+
+// Block navigation when there are unsaved changes
+import { useBlocker } from 'react-router-dom';
+
+function EditForm({ isDirty }) {
+  const blocker = useBlocker(() => isDirty);
+
+  return (
+    &lt;div&gt;
+      {/* form */}
+      {blocker.state === 'blocked' &amp;&amp; (
+        &lt;ConfirmDialog
+          message="You have unsaved changes. Leave anyway?"
+          onConfirm={() =&gt; blocker.proceed()}
+          onCancel={() =&gt; blocker.reset()}
+        /&gt;
+      )}
+    &lt;/div&gt;
+  );
+}
+</code></pre>
+        <div class="insight-box"><strong>URL as state:</strong> Filters, pagination, and active tab should live in the URL, not in component state. URL state is free to share, bookmark, and use the back button with. Component state is lost on refresh. If users would be annoyed that the URL doesn't reflect their current view, put it in the URL.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 6 Takeaway</h2>
+        <p>React Router v6 is built around three ideas: nested routes with Outlet for persistent layouts, URL params for dynamic segments, and loaders for data-before-render. Protected routes are just wrapper components that check auth before rendering Outlet. Move filter/pagination/tab state into URL search params — it makes apps shareable and back-button-friendly with minimal extra code.</p>
+      </section>
+    </main>
+  </body>
+</html>

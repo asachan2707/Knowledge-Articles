@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Caching Strategies &amp; Pitfalls | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Performance · 20 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Caching Strategies &amp; Pitfalls</h1>
+        <p class="summary">
+          Cache placement, eviction policies, and four classic patterns — plus the pitfalls that make
+          caches dangerous: stale data, thundering herds, and cache stampedes. For Slack apps, caching
+          turns slow Web API workflows into instant ones.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Cache safely; invalidate intentionally</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~20 min (2 videos)</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value"><code>users.info</code>, <code>conversations.list</code>, rate limits</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A cache is just a fast copy of slow data. The hard part isn't the copy — it's deciding when
+          the copy is wrong and what to do about it.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Default for Slack apps:</strong> cache-aside in Redis with explicit TTL, invalidate
+            on writes, and never cache errors or 404s.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Where caches live</h2>
+        <ul>
+          <li><strong>Browser</strong> — HTTP <code>Cache-Control</code> headers; doesn't apply to Slack server apps.</li>
+          <li><strong>CDN / edge</strong> — for HTML/static assets; not for Slack API responses.</li>
+          <li><strong>Application memory</strong> — fastest; lost on restart; not shared across replicas.</li>
+          <li><strong>Distributed cache</strong> (Redis, Memcached) — shared across processes; survives a restart.</li>
+          <li><strong>Database</strong> — query results / materialized views; for expensive aggregates.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>The four classic patterns</h2>
+        <h3>Cache-aside (lazy loading)</h3>
+        <p>
+          Application reads the cache. On miss, it loads from the source, writes to the cache, returns
+          the value. Most common, simplest, and the default.
+        </p>
+        <pre class="code-block"><code>async function getUser(id) {
+  const cached = await redis.get(`user:${id}`);
+  if (cached) return JSON.parse(cached);
+  const user = (await slack.users.info({ user: id })).user;
+  await redis.setex(`user:${id}`, 300, JSON.stringify(user));   // 5-min TTL
+  return user;
+}</code></pre>
+
+        <h3>Read-through</h3>
+        <p>
+          Application reads only from the cache. The cache itself loads on miss. Requires a
+          cache-library that supports it (e.g., a wrapped client). Simpler app code; cache becomes a
+          smarter layer.
+        </p>
+
+        <h3>Write-through</h3>
+        <p>
+          Every write updates both cache and source synchronously. Cache stays consistent; writes are
+          slower.
+        </p>
+
+        <h3>Write-behind (write-back)</h3>
+        <p>
+          App writes to cache; cache writes to source asynchronously. Fast writes; risk of data loss
+          if the cache crashes before flush. Rarely used in Slack apps.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Eviction policies</h2>
+        <ul>
+          <li><strong>TTL</strong> — entry expires after N seconds. Always set one in production.</li>
+          <li><strong>LRU</strong> — evict least recently used when full. Default for Redis when configured.</li>
+          <li><strong>LFU</strong> — evict least frequently used. Better for items that are accessed irregularly but matter a lot.</li>
+          <li><strong>FIFO</strong> — evict in insertion order. Rare.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Pitfalls — and how to avoid them</h2>
+        <h3>Stale data</h3>
+        <p>
+          The cache shows a value the source has changed. Fix: TTL short enough that staleness is
+          tolerable, or invalidate on write.
+        </p>
+
+        <h3>Thundering herd</h3>
+        <p>
+          A popular cache key expires; 100 requests miss simultaneously and all hit the source. Fix:
+          probabilistic early refresh, or a single-flight lock.
+        </p>
+
+        <h3>Cache stampede</h3>
+        <p>
+          Same as thundering herd but worse — multiple keys expire together (e.g., on full restart).
+          Fix: jittered TTLs (<code>300 + random(0..60)</code>).
+        </p>
+
+        <h3>Cache penetration</h3>
+        <p>
+          Repeated requests for keys that don't exist hit the source every time. Fix: cache the "not
+          found" with a short TTL, or use a Bloom filter.
+        </p>
+
+        <h3>Caching errors</h3>
+        <p>
+          Caching a 500 means every subsequent request gets the same 500 until TTL. Fix: only cache
+          successful responses.
+        </p>
+
+        <h3>Inconsistent on writes</h3>
+        <p>
+          You updated the source but forgot the cache. Fix: invalidate (delete the cache key) on write,
+          then let the next read repopulate.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Slack-app caches that matter</h2>
+        <ul>
+          <li><strong><code>users.info</code></strong> — cache for 5–15 min. Profile rarely changes.</li>
+          <li><strong><code>conversations.list</code></strong> — cache for 1–5 min when you only need the channel set.</li>
+          <li><strong>Workspace settings</strong> — cache forever; invalidate on write from your settings UI.</li>
+          <li><strong>Rate-limit token buckets</strong> — Redis <code>INCR</code> with TTL.</li>
+          <li><strong>Event dedup</strong> — Redis <code>SETNX</code> with 24h TTL keyed by <code>event_id</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Cache-aside + TTL + invalidate-on-write covers 90% of needs.</li>
+          <li>Never cache errors. Sometimes cache "not found" with a short TTL.</li>
+          <li>Jitter your TTLs to avoid stampedes.</li>
+          <li>Slack rate limits make caching <code>users.info</code> and channel lists almost mandatory.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=dGAgxozNWFE" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Cache Systems Every Developer Should Know
+            </a>
+          </li>
+          <li>
+            <a href="https://www.youtube.com/watch?v=wh98s0XhMmQ" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Caching Pitfalls Every Developer Should Know
+            </a>
+          </li>
+          <li>
+            <a href="https://aws.amazon.com/caching/" target="_blank" rel="noopener">
+              <span class="resource-kind guide">Guide</span>
+              AWS — Caching overview
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

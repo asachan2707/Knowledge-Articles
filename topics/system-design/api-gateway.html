@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Gateway | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Network gateway infrastructure" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Architecture · Concept 06 · 12 min</span></div>
+        </figure>
+        <h1>API Gateway</h1>
+        <p class="summary">The single entry point for all client requests. Routes to the right service, enforces authentication, applies rate limits, and handles cross-cutting concerns — so individual services don't have to implement any of it.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">06 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Microservices Architecture</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">Kong, AWS API Gateway, Nginx, Traefik, Express Gateway</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Netflix, Amazon, Uber, every microservices org</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Without an API gateway, every client — mobile app, web app, third-party partner — needs to know the address of every microservice. Every service needs to implement auth, rate limiting, and logging independently. When services move or are split, every client breaks. An API gateway centralizes all of this: clients call one address, the gateway handles everything else.</p>
+        <div class="callout"><p><strong>What it replaces:</strong> If you find yourself copying the same JWT validation middleware into every service, implementing rate limiting in five different languages, or having mobile clients call 8 different services to render one screen — you need an API gateway.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">How It Works</span>
+        <h2>Request pipeline — what happens on every request</h2>
+        <div class="diagram-box">
+<span class="step">Every inbound request flows through the pipeline:</span>
+
+Client ──▶ <span class="hi">API Gateway</span>
+               │
+               ├─ <span class="step">1. TLS termination</span>         (decrypt HTTPS once, forward HTTP internally)
+               ├─ <span class="step">2. Authentication</span>          (validate JWT / API key)
+               ├─ <span class="step">3. Authorization</span>           (does this token have permission for this route?)
+               ├─ <span class="step">4. Rate limiting</span>           (has this client exceeded their quota?)
+               ├─ <span class="step">5. Request validation</span>      (required headers, payload size)
+               ├─ <span class="step">6. Routing</span>                 (which upstream service handles this path?)
+               ├─ <span class="step">7. Request transformation</span>  (add headers, strip fields, protocol translation)
+               │
+               ▼
+    <span class="ok">Upstream Service</span>  (only sees pre-validated, pre-authenticated requests)
+               │
+               ├─ <span class="step">8. Response transformation</span> (reshape, strip internal fields)
+               ├─ <span class="step">9. Response caching</span>        (cache and return on future identical requests)
+               └─ <span class="step">10. Logging / tracing</span>      (emit to observability stack)
+               │
+               ▼
+            Client
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Building an API Gateway middleware pipeline in Node.js</h2>
+        <pre><code class="language-js">import express from 'express';
+import httpProxy from 'http-proxy-middleware';
+import jwt from 'jsonwebtoken';
+import { createClient } from 'redis';
+
+const app = express();
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+// ─── ROUTE TABLE ─────────────────────────────────────────────────────────
+// Maps URL prefixes to upstream services — config-driven routing
+const routes = [
+  { prefix: '/api/orders',   upstream: 'http://order-service:8080',   auth: true  },
+  { prefix: '/api/products', upstream: 'http://product-service:8080',  auth: false },
+  { prefix: '/api/users',    upstream: 'http://user-service:8080',     auth: true  },
+];
+
+// ─── MIDDLEWARE 1: Authentication ─────────────────────────────────────────
+function authenticate(req, res, next) {
+  const route = routes.find(r => req.path.startsWith(r.prefix));
+  if (!route?.auth) return next(); // Public route — skip auth
+
+  const authHeader = req.headers['authorization'];
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+
+  try {
+    const payload = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+    req.user = payload; // Attach decoded token for downstream middleware
+    // Forward user identity to upstream services via header (not the raw token)
+    req.headers['x-user-id']   = payload.sub;
+    req.headers['x-user-roles'] = payload.roles?.join(',');
+    delete req.headers['authorization']; // Strip token — upstream never sees it
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// ─── MIDDLEWARE 2: Rate Limiting (sliding window in Redis) ────────────────
+function rateLimiter({ maxRequests = 100, windowSeconds = 60 } = {}) {
+  return async (req, res, next) => {
+    const key = `ratelimit:${req.user?.sub || req.ip}`;
+    const now = Date.now();
+    const windowStart = now - windowSeconds * 1000;
+
+    // Sliding window log using Redis sorted set
+    const multi = redis.multi();
+    multi.zRemRangeByScore(key, 0, windowStart);   // Remove old entries
+    multi.zAdd(key, [{ score: now, value: now.toString() }]); // Add current
+    multi.zCard(key);                               // Count requests in window
+    multi.expire(key, windowSeconds);
+
+    const results = await multi.exec();
+    const requestCount = results[2];
+
+    res.setHeader('X-RateLimit-Limit', maxRequests);
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - requestCount));
+
+    if (requestCount > maxRequests) {
+      return res.status(429).json({
+        error: 'Rate limit exceeded',
+        retryAfter: windowSeconds
+      });
+    }
+
+    next();
+  };
+}
+
+// ─── MIDDLEWARE 3: Request logging and tracing ────────────────────────────
+function tracing(req, res, next) {
+  const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+  req.headers['x-request-id'] = requestId;    // Propagate to upstream
+  res.setHeader('x-request-id', requestId);   // Echo back to client
+
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(JSON.stringify({
+      requestId,
+      method: req.method,
+      path:   req.path,
+      status: res.statusCode,
+      durationMs: Date.now() - start,
+      userId: req.user?.sub,
+    }));
+  });
+  next();
+}
+
+// ─── WIRE THE PIPELINE ────────────────────────────────────────────────────
+app.use(tracing);
+app.use(authenticate);
+app.use(rateLimiter({ maxRequests: 100, windowSeconds: 60 }));
+
+// Dynamic routing based on prefix
+for (const route of routes) {
+  app.use(route.prefix, httpProxy.createProxyMiddleware({
+    target:      route.upstream,
+    changeOrigin: true,
+    on: {
+      error: (err, req, res) => {
+        console.error(`Proxy error for ${route.upstream}:`, err.message);
+        res.status(502).json({ error: 'Service temporarily unavailable' });
+      }
+    }
+  }));
+}
+
+app.listen(3000);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Advanced Patterns</span>
+        <h2>Backend For Frontend (BFF) and request aggregation</h2>
+        <p>A standard API gateway routes requests 1:1 to upstreams. A BFF (Backend For Frontend) is a specialized gateway layer that aggregates multiple service calls into one response — tailored to a specific client type (mobile vs web vs partner API).</p>
+        <pre><code class="language-js">// BFF pattern: one client request → multiple upstream calls → single response
+// Reduces mobile round trips from 5 to 1
+
+app.get('/api/dashboard', authenticate, async (req, res) => {
+  const userId = req.user.sub;
+
+  // Fetch from 3 services in parallel — client pays for the slowest one, not all three
+  const [profile, orders, recommendations] = await Promise.allSettled([
+    fetch(`http://user-service:8080/users/${userId}`).then(r => r.json()),
+    fetch(`http://order-service:8080/orders?userId=${userId}&limit=5`).then(r => r.json()),
+    fetch(`http://recommendation-service:8080/recs/${userId}`).then(r => r.json()),
+  ]);
+
+  res.json({
+    profile:         profile.status === 'fulfilled'         ? profile.value         : null,
+    recentOrders:    orders.status === 'fulfilled'           ? orders.value          : [],
+    recommendations: recommendations.status === 'fulfilled' ? recommendations.value : [],
+  });
+  // Mobile gets 1 network call instead of 3, with partial results if any service is down
+});</code></pre>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Cross-cutting concerns (auth, rate limiting, logging) in one place</li><li>Services stay simple — no auth code in each service</li><li>Protocol translation (REST ↔ gRPC, HTTP ↔ WebSocket)</li><li>Canary deployments — route 5% of traffic to new service version</li><li>Client-facing API stable even as backend topology changes</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Single point of failure — must be HA</li><li>Added latency — one more network hop</li><li>Becomes a bottleneck under extreme load</li><li>Gateway sprawl — don't let it become a monolith of business logic</li><li>Complex debugging — failures may be gateway or upstream</li></ul></div>
+        </div>
+
+        <div class="warn-box"><strong>Don't put business logic in the gateway.</strong> The API gateway is for cross-cutting infrastructure concerns: auth, routing, rate limiting, protocol translation. When business rules start appearing in the gateway ("if user is premium, route to premium-service"), you're building a distributed monolith with an identity crisis. Keep logic in services.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>An API gateway is the enforcer at the border of your system — it handles every concern that would otherwise be duplicated across every service. Authentication, rate limiting, logging, routing, and TLS termination all belong here. Keep business logic out of the gateway — it is infrastructure, not application code. Use the BFF pattern when clients need aggregated responses to reduce round trips, and always run the gateway in an HA configuration with health-check-based routing.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Circuit Breaker | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=1600&h=700&fit=crop&auto=format&q=80" alt="Circuit board protection system" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Resilience · Concept 07 · 10 min</span></div>
+        </figure>
+        <h1>Circuit Breaker</h1>
+        <p class="summary">Wraps calls to downstream services and monitors failure rates. When failures exceed a threshold, it "opens" — stopping all calls and returning a fallback immediately. Protects your system from cascading failures and gives struggling services time to recover.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">07 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Resilience Patterns</span></div>
+          <div><span class="meta-label">Pattern Origin</span><span class="meta-value">Michael Nygard, "Release It!" (2007)</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Netflix Hystrix, Resilience4j, AWS SDK</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Without a circuit breaker, one slow or failed downstream service causes a cascade: your service threads block waiting for responses, your connection pool exhausts, your own service becomes slow, and now the service calling you also starts failing. In a microservices system, one degraded dependency can bring down the entire call chain. The circuit breaker stops this by failing fast.</p>
+        <div class="callout"><p><strong>Named after electrical circuit breakers:</strong> In your home, a circuit breaker trips when current exceeds a safe threshold — stopping damage to the wiring. In software, the circuit breaker "trips" when downstream error rate exceeds a threshold — stopping your system from making things worse for a struggling dependency.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">State Machine</span>
+        <h2>Three states: Closed, Open, Half-Open</h2>
+        <div class="diagram-box">
+<span class="ok">CLOSED</span> (normal operation)
+  │  All calls pass through to downstream
+  │  Failure counter increments on each failure
+  │
+  │  failure rate > threshold (e.g. 50% in last 60s)
+  ▼
+<span class="warn">OPEN</span> (tripped — fast fail)
+  │  All calls return immediately with fallback
+  │  No calls reach downstream service (it gets a break)
+  │  Downstream has time to recover
+  │
+  │  after reset timeout (e.g. 30 seconds)
+  ▼
+<span class="note">HALF-OPEN</span> (probe)
+  │  Allow ONE test request through
+  │
+  ├──▶ <span class="ok">SUCCESS</span>  ──▶ reset counters ──▶ <span class="ok">CLOSED</span>  (service recovered)
+  └──▶ <span class="warn">FAILURE</span>  ──▶ stay/return  ──▶ <span class="warn">OPEN</span>    (still broken, try again later)
+        </div>
+
+        <p>The half-open state is critical. Without it, you'd need manual intervention to re-enable calls after recovery. The half-open state automates recovery detection: let one request through, if it succeeds the service is back, reset and resume normal traffic.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Circuit breaker in Node.js — from scratch</h2>
+        <pre><code class="language-js">const STATES = { CLOSED: 'CLOSED', OPEN: 'OPEN', HALF_OPEN: 'HALF_OPEN' };
+
+class CircuitBreaker {
+  constructor(options = {}) {
+    this.failureThreshold  = options.failureThreshold  ?? 5;    // failures before opening
+    this.failureRatePercent = options.failureRatePercent ?? 50;  // % failure rate threshold
+    this.resetTimeout      = options.resetTimeout      ?? 30000; // ms before half-open probe
+    this.halfOpenMaxCalls  = options.halfOpenMaxCalls  ?? 1;     // probes in half-open
+
+    this.state          = STATES.CLOSED;
+    this.failureCount   = 0;
+    this.successCount   = 0;
+    this.lastFailureTime = null;
+    this.halfOpenCalls  = 0;
+
+    // Sliding window: track last N call results
+    this.callWindow     = [];
+    this.windowSize     = options.windowSize ?? 20;
+  }
+
+  async call(fn, fallback) {
+    if (this.state === STATES.OPEN) {
+      // Check if reset timeout has elapsed → try half-open probe
+      if (Date.now() - this.lastFailureTime >= this.resetTimeout) {
+        this.state = STATES.HALF_OPEN;
+        this.halfOpenCalls = 0;
+      } else {
+        // Fast fail — return fallback immediately
+        if (typeof fallback === 'function') return fallback();
+        throw new Error('Circuit breaker OPEN — service unavailable');
+      }
+    }
+
+    if (this.state === STATES.HALF_OPEN && this.halfOpenCalls >= this.halfOpenMaxCalls) {
+      // Already have a probe in flight
+      if (typeof fallback === 'function') return fallback();
+      throw new Error('Circuit breaker HALF_OPEN — waiting for probe result');
+    }
+
+    if (this.state === STATES.HALF_OPEN) this.halfOpenCalls++;
+
+    try {
+      const result = await fn();
+      this._onSuccess();
+      return result;
+    } catch (err) {
+      this._onFailure();
+      if (typeof fallback === 'function') return fallback();
+      throw err;
+    }
+  }
+
+  _onSuccess() {
+    this.callWindow.push(true);
+    if (this.callWindow.length > this.windowSize) this.callWindow.shift();
+
+    if (this.state === STATES.HALF_OPEN) {
+      // Probe succeeded — service recovered, reset to closed
+      console.log('Circuit breaker: probe succeeded, resetting to CLOSED');
+      this.state        = STATES.CLOSED;
+      this.failureCount = 0;
+      this.callWindow   = [];
+    }
+  }
+
+  _onFailure() {
+    this.callWindow.push(false);
+    if (this.callWindow.length > this.windowSize) this.callWindow.shift();
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+
+    const failureRate = this.callWindow.filter(r => !r).length / this.callWindow.length * 100;
+
+    if (
+      this.state === STATES.HALF_OPEN ||
+      (this.callWindow.length >= this.windowSize && failureRate >= this.failureRatePercent) ||
+      this.failureCount >= this.failureThreshold
+    ) {
+      console.warn(`Circuit breaker OPENED (failure rate: ${failureRate.toFixed(0)}%)`);
+      this.state = STATES.OPEN;
+    }
+  }
+
+  getState() {
+    return {
+      state: this.state,
+      failureCount: this.failureCount,
+      failureRate: this.callWindow.length
+        ? `${(this.callWindow.filter(r=>!r).length / this.callWindow.length * 100).toFixed(0)}%`
+        : '0%'
+    };
+  }
+}
+
+// Usage — wrap every external service call
+const paymentBreaker = new CircuitBreaker({
+  failureThreshold:   5,
+  failureRatePercent: 50,
+  resetTimeout:       30000,
+  windowSize:         20,
+});
+
+async function processPayment(order) {
+  return paymentBreaker.call(
+    // The actual call
+    () => paymentAPI.charge(order.userId, order.amount),
+    // Fallback when circuit is OPEN
+    () => {
+      // Queue for later processing instead of failing hard
+      paymentQueue.add('retry-payment', order, { delay: 30000 });
+      return { status: 'queued', message: 'Payment queued for processing' };
+    }
+  );
+}
+
+// Expose circuit state for monitoring dashboards
+app.get('/internal/circuit-breakers', (req, res) => {
+  res.json({
+    payment: paymentBreaker.getState(),
+    // ...other breakers
+  });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Netflix Hystrix — the pattern that popularized circuit breakers</h2>
+        <p>Netflix open-sourced Hystrix in 2012. By 2015, every Netflix service had Hystrix wrapping every downstream call. The insight from Netflix: at their scale (millions of users), any downstream call will fail some percentage of the time. Without circuit breakers, rare failures accumulate into thread pool exhaustion, which turns into cascading timeouts, which turns into a full outage.</p>
+        <p>Netflix discovered that adding fallbacks was equally important. A Hystrix command without a fallback just fails fast. A Hystrix command with a fallback degrades gracefully — the user sees a slightly degraded experience instead of an error page. "Degraded but available" is almost always better than "completely unavailable".</p>
+
+        <div class="insight-box"><strong>Timeouts are the other half of the pattern.</strong> A circuit breaker won't help if your downstream call never returns — it will just sit there, holding a thread. Always pair a circuit breaker with an explicit timeout. The typical pattern: set timeout to 2× the p99 latency of the downstream service, and open the circuit after 5 consecutive timeouts.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Prevents cascading failures across service graph</li><li>Gives failing services time to recover (no traffic pressure)</li><li>Fast-fail response instead of slow hang</li><li>Enables graceful degradation via fallbacks</li><li>Exposes service health via circuit state metrics</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Adds complexity — more moving parts, more config to tune</li><li>Thresholds require calibration per service and environment</li><li>Risk of opening on valid load spike, not actual failure</li><li>Fallback logic must be written and tested</li><li>Distributed state if circuit state needs to be shared across instances</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>The circuit breaker is the resilience pattern for microservices. Its job is to detect that a downstream service is struggling and stop making the situation worse by continuing to send traffic. The state machine — Closed → Open → Half-Open → Closed — automates failure detection and recovery. Always pair it with a meaningful fallback: fail fast with a queued retry, serve cached data, or return a partial response. A circuit breaker without a fallback just changes the error message; a circuit breaker with a fallback enables graceful degradation.</p>
+      </section>
+    </main>
+  </body>
+</html>

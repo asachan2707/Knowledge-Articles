@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The Beginner's Guide to Agentic AI | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1677442136019-21780ecad995?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract AI network visualization"
+            loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · Learning · 12 min read</span>
+          </div>
+        </figure>
+        <h1>The Beginner's Guide to Agentic AI: From Zero to Your First AI Agent</h1>
+        <p class="summary">
+          What separates a chatbot from an agent, how the agent loop works, what tool calling actually
+          does at the code level, and how to build your first working agent in under 50 lines of Python.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Sources</span><span class="meta-value">Hugging Face Agents Course, Anthropic building-effective-agents</span></div>
+          <div><span class="meta-label">Frameworks covered</span><span class="meta-value">smolagents, LangChain, LangGraph, raw API</span></div>
+          <div><span class="meta-label">Level</span><span class="meta-value">Beginner — no prior AI engineering experience needed</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A chatbot answers and waits. An agent acts, observes the result, decides what to do next, and
+          keeps going until a goal is met. That one difference — the loop — is what makes agentic AI
+          capable of completing multi-step tasks that no single prompt could handle.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> An agent is a loop wrapped around an LLM. The LLM reasons about
+          what to do; the agent framework executes the action; the result feeds back into the LLM's context.
+          Repeat until done.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">The spectrum of agency</span>
+        <p>
+          Not everything called an "agent" is the same. The autonomy spectrum runs from simple processors
+          (LLM output → fixed action) all the way to multi-agent systems where one LLM orchestrates
+          others. Most production deployments sit at levels 2–3 — routing and tool calling — not at
+          full autonomous agency. Start at level 2. Add complexity only when it demonstrably helps.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The agent loop</span>
+        <h2>Think → Act → Observe — the ReAct pattern</h2>
+        <p>
+          The core loop has three phases that cycle continuously:
+        </p>
+        <ol>
+          <li><strong>Think (Reason):</strong> the LLM receives the current context — system instructions,
+              conversation history, tool definitions, previous results — and reasons about the next action.
+              It may write this reasoning explicitly as a scratchpad before deciding.</li>
+          <li><strong>Act:</strong> the model emits a tool call — a structured JSON object naming a tool
+              and providing arguments. The agent framework (not the model) executes the function.</li>
+          <li><strong>Observe:</strong> the tool's return value is added to the context as an
+              observation message. The loop repeats. When the LLM produces a final answer instead of
+              a tool call, the loop terminates.</li>
+        </ol>
+        <p>
+          This is the <strong>ReAct pattern</strong> (Reason + Act), from the 2022 paper of the same
+          name. Every major agent framework — LangChain, LangGraph, smolagents, AutoGPT — implements
+          a variation of this loop.
+        </p>
+
+        <h2>How tool calling works at the code level</h2>
+        <p>
+          A tool is a Python function with a name, a description, and typed arguments. The description
+          is what the LLM reads to decide when and how to call the tool — write it as if briefing a
+          junior engineer.
+        </p>
+        <pre class="code-block"><code>from smolagents import tool
+
+@tool
+def calculator(a: int, b: int) -> int:
+    """
+    Multiply two integers together.
+    Use when the user needs a numerical calculation.
+    Args:
+        a: first integer
+        b: second integer
+    """
+    return a * b</code></pre>
+        <p>
+          The LLM never runs this function. It outputs structured text saying it wants to call
+          <code>calculator</code> with specific arguments. Your agent framework parses that output
+          and calls the actual Python function, then feeds the return value back to the LLM as
+          the next observation.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Your first agent</span>
+        <h2>A minimal working agent in ~30 lines</h2>
+        <pre class="code-block"><code>from smolagents import CodeAgent, DuckDuckGoSearchTool, HfApiModel
+
+# 1. Choose an LLM
+model = HfApiModel(model_id="meta-llama/Meta-Llama-3.1-8B-Instruct")
+
+# 2. Give it a tool
+tools = [DuckDuckGoSearchTool()]
+
+# 3. Create the agent
+agent = CodeAgent(tools=tools, model=model)
+
+# 4. Run it
+result = agent.run(
+    "What is the current population of Tokyo, and how does it compare to Paris?"
+)
+print(result)</code></pre>
+        <p>
+          What happens internally: the agent sends the question + tool schema to the LLM → the LLM
+          emits a search call → the agent executes the search → the result goes back to the LLM →
+          the LLM either calls another tool or writes a final answer.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Frameworks compared</span>
+        <h2>Which framework to use when</h2>
+        <ul class="check-list">
+          <li><strong>smolagents (Hugging Face):</strong> minimal, beginner-friendly, best for learning
+              the fundamentals without framework magic obscuring what is happening.</li>
+          <li><strong>LangChain:</strong> most popular, fastest to get a basic agent running across many
+              LLM providers. Richest ecosystem of pre-built tools and integrations.</li>
+          <li><strong>LangGraph:</strong> more control over the loop — supports branching, cycles, and
+              complex state machines. Better for production agents that need precise flow control.</li>
+          <li><strong>LlamaIndex:</strong> strongest on retrieval and RAG-focused agents. Best choice
+              for document Q&A and knowledge-base agents.</li>
+          <li><strong>Raw API:</strong> Anthropic's own recommendation for production — "Start simple.
+              Add framework complexity only when it demonstrably improves outcomes." Direct API calls
+              are more debuggable and less surprising than framework abstractions.</li>
+        </ul>
+
+        <h2>Common workflow patterns beyond the basic loop</h2>
+        <ul class="check-list">
+          <li><strong>Prompt chaining:</strong> output of step N feeds step N+1 — for tasks with a
+              fixed sequence of sub-problems.</li>
+          <li><strong>Routing:</strong> LLM classifies input and directs to a specialist handler —
+              good for support bots covering multiple domains.</li>
+          <li><strong>Parallelisation:</strong> run subtasks simultaneously — dramatically faster
+              for independent sub-problems.</li>
+          <li><strong>Orchestrator-Workers:</strong> a central LLM breaks work into tasks and
+              delegates to worker LLMs — scales to complex research or code generation tasks.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">What beginners get wrong</span>
+        <h2>The three mistakes to avoid early</h2>
+        <ul class="check-list">
+          <li><strong>Over-agentic design:</strong> most production tasks only need level 2–3 autonomy,
+              not a fully autonomous agent. Start with the simplest design that could work.</li>
+          <li><strong>No stopping conditions:</strong> always set a maximum step limit. An agent without
+              a stopping condition will loop indefinitely on ambiguous tasks or LLM errors.</li>
+          <li><strong>Vague tool descriptions:</strong> the LLM reads your tool descriptions at inference
+              time. Vague descriptions ("get data") cause wrong tool selection. Precise descriptions
+              ("search the web and return the top 3 results as a list of dicts with title and url keys")
+              get correct, reliable invocations.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Where to learn more</span>
+        <h2>The best resources</h2>
+        <ul class="check-list">
+          <li><strong>Hugging Face Agents Course</strong> — huggingface.co/learn/agents-course — free,
+              starts from zero, covers smolagents, LangGraph, and LlamaIndex across structured units.</li>
+          <li><strong>Anthropic Building Effective Agents</strong> — anthropic.com/news/building-effective-agents —
+              the most practical production guidance available, direct from the model creators.</li>
+          <li><strong>Model Context Protocol</strong> — modelcontextprotocol.io — the open standard
+              for tool interfaces. Understanding MCP means your tools work with any MCP-compliant agent.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          An agent is a loop: the LLM thinks, calls a tool, observes the result, and repeats until
+          the task is done. Start with a single tool in smolagents or raw API calls. Add tools and
+          complexity only when you have demonstrated you need them. Write tool descriptions as if
+          briefing a junior engineer — that description is literally what the model reads to decide
+          whether and how to use the tool.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

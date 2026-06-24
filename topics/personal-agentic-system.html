@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A Step-by-Step Guide to Your Personal Agentic System | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .step-grid { margin:1.25rem 0; }
+      .step-item { display:flex; gap:1rem; padding:.85rem 0; border-bottom:1px solid #f1f5f9; }
+      .step-item:last-child { border-bottom:none; }
+      .step-num { min-width:32px; height:32px; border-radius:50%; background:#0f172a; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.85rem; flex-shrink:0; margin-top:.1rem; }
+      .step-body h4 { margin:0 0 .3rem; font-family:Arial,Helvetica,sans-serif; font-size:.97rem; }
+      .step-body p  { margin:0; font-size:.87rem; color:var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1485827404703-89b55fcc595e?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Robot arm representing personal automation" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · Personal Productivity · 20 min read</span>
+          </div>
+        </figure>
+        <h1>A Step-by-Step Guide to Developing Your Personal Agentic System</h1>
+        <p class="summary">
+          A personal agentic system is a set of AI agents that handle recurring tasks in your life —
+          research, drafting, scheduling, coding, decision support — with enough autonomy to act and
+          enough structure to be trustworthy. This guide covers the design, tools, and JavaScript
+          implementation of a personal agent stack you actually control.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Stack</span><span class="meta-value">Claude API · Anthropic SDK · MCP · Node.js · local data storage</span></div>
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate — assumes basic JavaScript and API familiarity</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A personal agentic system is different from using an AI chatbot. A chatbot responds to prompts.
+          An agentic system has memory of who you are, goals you are pursuing, tools it can act on, and
+          the autonomy to take steps without you asking every time. The difference between the two is the
+          difference between a good search engine and a good assistant.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Design your personal agent system around three properties: memory
+          (persistent knowledge about you), tools (real actions it can take), and trust boundaries (what
+          it can do autonomously vs. what requires your approval).</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step-by-step design</span>
+        <h2>Building in the right order</h2>
+        <div class="step-grid">
+          <div class="step-item"><div class="step-num">1</div><div class="step-body"><h4>Define your use cases</h4><p>List the recurring tasks you want the agent to handle. Be specific: "draft weekly update emails" not "help with communication". Specificity determines which tools and memory you actually need.</p></div></div>
+          <div class="step-item"><div class="step-num">2</div><div class="step-body"><h4>Design the memory layer</h4><p>What does the agent need to remember about you? Professional context, preferences, active projects, recurring contacts. Store in structured files or a local database.</p></div></div>
+          <div class="step-item"><div class="step-num">3</div><div class="step-body"><h4>Define the tool set</h4><p>Which external systems does the agent need to reach? Calendar, email, notes, browser, code tools, Slack. Start with two tools — MCP servers make adding more straightforward.</p></div></div>
+          <div class="step-item"><div class="step-num">4</div><div class="step-body"><h4>Set trust boundaries</h4><p>Classify every tool call: READ (autonomous), DRAFT (show before sending), WRITE (confirm), EXECUTE (explicit approval). Never start with full autonomy.</p></div></div>
+          <div class="step-item"><div class="step-num">5</div><div class="step-body"><h4>Build the dispatch layer</h4><p>A simple router that maps incoming requests to the right specialised agent (research agent, coding agent, communication agent). Keeps each agent's context clean.</p></div></div>
+          <div class="step-item"><div class="step-num">6</div><div class="step-body"><h4>Add a feedback loop</h4><p>Log every agent action and outcome. Review weekly. Agents improve by having their memory and preferences updated from real outcomes.</p></div></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Memory layer</span>
+        <h2>Persistent context about you</h2>
+        <pre class="code-block"><code>// personal-memory.js — structured memory store
+import fs   from 'fs/promises';
+import path from 'path';
+
+const MEMORY_DIR = path.join(process.env.HOME, '.personal-agent', 'memory');
+
+const MEMORY_TYPES = {
+  user:     'user.json',
+  projects: 'projects.json',
+  prefs:    'preferences.json',
+  contacts: 'contacts.json',
+  feedback: 'feedback.json',
+};
+
+async function loadMemory(type) {
+  const file = path.join(MEMORY_DIR, MEMORY_TYPES[type]);
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+async function saveMemory(type, data) {
+  await fs.mkdir(MEMORY_DIR, { recursive: true });
+  const file    = path.join(MEMORY_DIR, MEMORY_TYPES[type]);
+  const current = await loadMemory(type);
+  const merged  = { ...current, ...data, updatedAt: new Date().toISOString() };
+  await fs.writeFile(file, JSON.stringify(merged, null, 2));
+}
+
+// Build a system prompt from memory
+async function buildSystemPrompt() {
+  const [user, prefs, projects] = await Promise.all([
+    loadMemory('user'),
+    loadMemory('prefs'),
+    loadMemory('projects'),
+  ]);
+
+  const activeProjects = Object.values(projects)
+    .filter(p => p.status === 'active')
+    .map(p => `- ${p.name}: ${p.description}`)
+    .join('\n');
+
+  return `You are ${user.name}'s personal AI assistant.
+
+About ${user.name}:
+${user.role ?? ''}. ${user.bio ?? ''}
+
+Active projects:
+${activeProjects || 'None listed'}
+
+Preferences:
+- Communication style: ${prefs.style ?? 'direct and concise'}
+- Code language: ${prefs.codeLanguage ?? 'JavaScript'}
+- Time zone: ${prefs.timezone ?? 'UTC'}
+
+Today: ${new Date().toDateString()}
+
+Always respect the trust boundaries:
+- READ: autonomous
+- DRAFT: show before sending
+- WRITE: confirm with user first
+- EXECUTE shell commands: always require explicit approval`;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Tool layer</span>
+        <h2>Actions the agent can take</h2>
+        <pre class="code-block"><code>// tools.js — personal agent tool definitions
+import { execSync } from 'child_process';
+import fs from 'fs/promises';
+
+// Tool registry with trust classification
+export const TOOLS = [
+  // READ tools — autonomous
+  {
+    trust: 'read',
+    name:  'read_file',
+    description: 'Read a file from the filesystem',
+    input_schema: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+    },
+    handler: async ({ path: p }) => fs.readFile(p, 'utf8'),
+  },
+  {
+    trust: 'read',
+    name:  'list_directory',
+    description: 'List files in a directory',
+    input_schema: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+    },
+    handler: async ({ path: p }) => {
+      const entries = await fs.readdir(p, { withFileTypes: true });
+      return entries.map(e => `${e.isDirectory() ? 'd' : 'f'} ${e.name}`).join('\n');
+    },
+  },
+  // WRITE tools — require confirmation
+  {
+    trust: 'write',
+    name:  'write_file',
+    description: 'Write content to a file',
+    input_schema: {
+      type: 'object',
+      properties: { path: { type: 'string' }, content: { type: 'string' } },
+      required: ['path', 'content'],
+    },
+    handler: async ({ path: p, content }) => { await fs.writeFile(p, content); return 'written'; },
+  },
+  // EXECUTE tools — always ask
+  {
+    trust: 'execute',
+    name:  'run_command',
+    description: 'Execute a shell command',
+    input_schema: {
+      type: 'object',
+      properties: { command: { type: 'string' } },
+      required: ['command'],
+    },
+    handler: ({ command }) => execSync(command, { encoding: 'utf8' }),
+  },
+];
+
+// Execute a tool call, respecting trust boundaries
+async function executeTool(name, input, trustOverride = null) {
+  const tool = TOOLS.find(t => t.name === name);
+  if (!tool) throw new Error(`Unknown tool: ${name}`);
+
+  const trust = trustOverride ?? tool.trust;
+
+  if (trust === 'write' || trust === 'execute') {
+    const { confirm } = await import('./cli-prompt.js');
+    const ok = await confirm(`Allow ${trust.toUpperCase()}: ${name}(${JSON.stringify(input)})?`);
+    if (!ok) return '[user declined]';
+  }
+
+  try {
+    return await tool.handler(input);
+  } catch (err) {
+    return `Error: ${err.message}`;
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Agent loop</span>
+        <h2>The dispatch and execution loop</h2>
+        <pre class="code-block"><code>// agent.js — personal agent main loop
+import Anthropic from '@anthropic-ai/sdk';
+import { buildSystemPrompt } from './personal-memory.js';
+import { TOOLS, executeTool } from './tools.js';
+
+const client = new Anthropic();
+
+export async function runPersonalAgent(userMessage, maxTurns = 10) {
+  const systemPrompt = await buildSystemPrompt();
+  const messages     = [{ role: 'user', content: userMessage }];
+
+  console.log('\n🤖 Agent started:', userMessage.slice(0, 80));
+
+  for (let turn = 0; turn < maxTurns; turn++) {
+    const response = await client.messages.create({
+      model:     'claude-sonnet-4-6',
+      max_tokens: 4096,
+      system:    systemPrompt,
+      tools:     TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
+      messages,
+    });
+
+    messages.push({ role: 'assistant', content: response.content });
+
+    // Done
+    if (response.stop_reason === 'end_turn') {
+      const text = response.content.find(b => b.type === 'text')?.text;
+      console.log('\n✅ Agent done\n');
+      return text;
+    }
+
+    // Tool calls
+    if (response.stop_reason === 'tool_use') {
+      const toolBlocks  = response.content.filter(b => b.type === 'tool_use');
+      const toolResults = [];
+
+      for (const block of toolBlocks) {
+        console.log(`  🔧 ${block.name}(${JSON.stringify(block.input).slice(0, 60)})`);
+        const result = await executeTool(block.name, block.input);
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: String(result) });
+      }
+
+      messages.push({ role: 'user', content: toolResults });
+    }
+  }
+
+  throw new Error(`Agent exceeded ${maxTurns} turns`);
+}
+
+// Usage
+const answer = await runPersonalAgent(
+  'Summarise all .md files in ~/Documents/projects and create a weekly-review.md with key highlights'
+);
+console.log(answer);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Specialised sub-agents</span>
+        <h2>Research, coding, and communication agents</h2>
+        <pre class="code-block"><code">// agent-dispatch.js — route to specialised agents by intent
+const AGENTS = {
+  research: {
+    system: 'You are a research assistant. Summarise clearly, cite sources, flag uncertainties.',
+    tools:  ['read_file', 'list_directory'], // read-only
+  },
+  coding: {
+    system: 'You are a senior JavaScript engineer. Write working code. Run commands only after confirmation.',
+    tools:  ['read_file', 'write_file', 'run_command'],
+  },
+  communication: {
+    system: 'You are a professional writing assistant. Draft clearly, match the tone of examples in memory.',
+    tools:  ['read_file'], // only reads — never auto-sends
+  },
+};
+
+async function dispatch(userMessage) {
+  // Lightweight intent classifier
+  const classifyRes = await client.messages.create({
+    model:     'claude-haiku-4-5-20251001',
+    max_tokens: 32,
+    tools: [{
+      name: 'classify',
+      input_schema: { type: 'object', properties: { agent: { type: 'string', enum: ['research','coding','communication','general'] } }, required: ['agent'] },
+    }],
+    tool_choice: { type: 'tool', name: 'classify' },
+    messages: [{ role: 'user', content: `Classify this task: "${userMessage}"` }],
+  });
+
+  const { agent } = classifyRes.content.find(b => b.type === 'tool_use').input;
+  const spec      = AGENTS[agent] ?? AGENTS.research;
+  console.log(`Routing to ${agent} agent`);
+
+  return runPersonalAgent(userMessage, 10); // uses full system prompt from memory
+}</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A personal agentic system is not about giving an AI unlimited access to your life. It is about
+          designing a trustworthy collaboration: structured memory that builds context over time, clearly
+          scoped tools with trust classifications that prevent surprises, and specialised sub-agents
+          that stay focused. Build incrementally — start with read-only tools and one use case.
+          Earn autonomy through demonstrated reliability, not configuration.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

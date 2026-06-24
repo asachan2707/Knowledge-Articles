@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Harness Engineering: What Makes AI Agents Perform Better Than 80% | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .pillar-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .85rem; margin: 1rem 0; }
+      .pillar { border: 1px solid var(--border); border-radius: 12px; padding: .9rem 1.1rem; }
+      .pillar h4 { margin: 0 0 .35rem; font-family: Arial, Helvetica, sans-serif; font-size: .95rem; }
+      .pillar p  { margin: 0; font-size: .85rem; color: var(--muted); }
+      .pillar-icon { font-size: 1.3rem; margin-bottom: .4rem; display: block; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Complex mechanical systems representing orchestration" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · Architecture · 18 min read</span>
+          </div>
+        </figure>
+        <h1>Harness Engineering: What Makes AI Agents Perform Better Than 80% of Others</h1>
+        <p class="summary">
+          The harness is everything around the model call: how you structure tasks, constrain output,
+          manage state, handle failures, verify results, and chain agents together. Most AI agents
+          underperform not because the model is weak but because the harness is thin. This guide shows
+          exactly how to build one that is robust.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate–Advanced</span></div>
+          <div><span class="meta-label">Focus</span><span class="meta-value">Production agent design patterns with JavaScript examples</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A harness is the scaffolding you build around an LLM call to make it reliable, observable,
+          and composable. A raw LLM call is a suggestion engine. A well-engineered harness is a
+          software system that happens to use an LLM internally — with typed contracts, error handling,
+          retry logic, verification steps, and audit trails.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> The model is only one component. The harness — task decomposition,
+          output schema enforcement, verification agents, failure recovery, and observability — determines
+          90% of a production agent's reliability.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">What separates good from bad harnesses</span>
+        <p>
+          Two teams build a document analysis agent. Team A prompts the model, gets text back, parses
+          it with regex, and ships. Team B defines a typed output schema, validates every response,
+          runs a verification agent on high-stakes outputs, retries with richer context on schema
+          violations, logs every call with cost and latency, and tests the harness with an eval suite.
+          Three weeks in, Team A's agent is failing on 15% of documents and nobody knows why. Team B's
+          agent has a 99.2% success rate and they know exactly where the other 0.8% fails.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The eight pillars</span>
+        <h2>What a harness must do</h2>
+        <div class="pillar-grid">
+          <div class="pillar"><span class="pillar-icon">🎯</span><h4>1. Task decomposition</h4><p>Break complex goals into atomic sub-tasks that each have a clear output contract.</p></div>
+          <div class="pillar"><span class="pillar-icon">📋</span><h4>2. Schema enforcement</h4><p>Force structured output via tool use. Never parse free text with regex when a schema will do.</p></div>
+          <div class="pillar"><span class="pillar-icon">🔁</span><h4>3. Retry with context</h4><p>When schema validation fails, retry with the error message included so the model self-corrects.</p></div>
+          <div class="pillar"><span class="pillar-icon">✅</span><h4>4. Verification agents</h4><p>Spawn a second agent to verify high-stakes outputs. Adversarial checking beats hoping.</p></div>
+          <div class="pillar"><span class="pillar-icon">🔒</span><h4>5. Risk gates</h4><p>Classify every tool call by impact. Gate writes and external actions behind confirmation or approval flows.</p></div>
+          <div class="pillar"><span class="pillar-icon">📊</span><h4>6. Observability</h4><p>Log every call: prompt, response, model, tokens, cost, latency, success/failure. Trace multi-step chains.</p></div>
+          <div class="pillar"><span class="pillar-icon">🧪</span><h4>7. Evals</h4><p>Write tests for the harness, not just the model. Test retry logic, schema fallbacks, and verification paths.</p></div>
+          <div class="pillar"><span class="pillar-icon">⚡</span><h4>8. Parallelism</h4><p>Identify independent sub-tasks and run them in parallel. Sequential agents for parallel work waste wall-clock time.</p></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pillar 1 &amp; 2: Decomposition + Schema</span>
+        <h2>Typed, decomposed task pipeline</h2>
+        <pre class="code-block"><code>import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+// Define a strict output schema for each atomic task
+const EXTRACT_SCHEMA = {
+  name: 'extract_requirements',
+  description: 'Extract structured requirements from a document',
+  input_schema: {
+    type: 'object',
+    properties: {
+      functional: {
+        type: 'array',
+        items: { type: 'object', properties: {
+          id:       { type: 'string' },
+          title:    { type: 'string' },
+          priority: { type: 'string', enum: ['must', 'should', 'could'] },
+        }, required: ['id', 'title', 'priority'] }
+      },
+      constraints: { type: 'array', items: { type: 'string' } },
+      ambiguities: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['functional', 'constraints', 'ambiguities'],
+  },
+};
+
+async function extractRequirements(document) {
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2048,
+    tools: [EXTRACT_SCHEMA],
+    tool_choice: { type: 'tool', name: 'extract_requirements' },
+    messages: [{ role: 'user', content: `Extract requirements from:\n\n${document}` }],
+  });
+
+  const toolUse = response.content.find(b => b.type === 'tool_use');
+  return toolUse.input; // Typed, validated object
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pillar 3: Retry with context</span>
+        <h2>Self-correcting retry loop</h2>
+        <pre class="code-block"><code>// Retry harness — feeds schema errors back to the model
+async function callWithRetry(prompt, schema, maxRetries = 3) {
+  const messages = [{ role: 'user', content: prompt }];
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // On retry, inject the previous error into context
+    if (lastError) {
+      messages.push(
+        { role: 'assistant', content: [{ type: 'text', text: 'I need to correct my previous response.' }] },
+        { role: 'user',      content: `Your previous response had this validation error: ${lastError}. Please fix it and return valid output.` }
+      );
+    }
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      tools: [schema],
+      tool_choice: { type: 'tool', name: schema.name },
+      messages,
+    });
+
+    const toolUse = response.content.find(b => b.type === 'tool_use');
+    if (!toolUse) { lastError = 'No tool call returned'; continue; }
+
+    const validation = validateSchema(toolUse.input, schema.input_schema);
+    if (validation.valid) return toolUse.input;
+
+    lastError = validation.errors.join('; ');
+    console.warn(`Attempt ${attempt} failed: ${lastError}`);
+  }
+
+  throw new Error(`Schema validation failed after ${maxRetries} attempts: ${lastError}`);
+}
+
+// Simple schema validator
+function validateSchema(data, schema) {
+  const errors = [];
+  for (const field of schema.required ?? []) {
+    if (data[field] === undefined) errors.push(`Missing required field: ${field}`);
+  }
+  return { valid: errors.length === 0, errors };
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pillar 4: Verification agents</span>
+        <h2>Adversarial verification for high-stakes output</h2>
+        <pre class="code-block"><code>// Two-agent pipeline: generator + adversarial verifier
+async function generateAndVerify(prompt) {
+  // Step 1: Primary agent generates output
+  const primary = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const draft = primary.content[0].text;
+
+  // Step 2: Independent verifier tries to find flaws
+  const verifier = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    tools: [{
+      name: 'verdict',
+      description: 'Return verification verdict',
+      input_schema: {
+        type: 'object',
+        properties: {
+          approved: { type: 'boolean' },
+          issues:   { type: 'array', items: { type: 'string' } },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+        },
+        required: ['approved', 'issues', 'confidence'],
+      },
+    }],
+    tool_choice: { type: 'tool', name: 'verdict' },
+    messages: [{
+      role: 'user',
+      content: `You are an adversarial reviewer. Your job is to FIND PROBLEMS in this output.
+Be skeptical. If anything looks wrong, flag it.\n\nOriginal task: ${prompt}\n\nOutput to verify:\n${draft}`,
+    }],
+  });
+
+  const { approved, issues, confidence } = verifier.content.find(b => b.type === 'tool_use').input;
+
+  if (!approved || confidence < 0.8) {
+    console.warn('Verification failed:', issues);
+    // Could retry, escalate, or return with warnings
+    return { output: draft, verified: false, issues };
+  }
+
+  return { output: draft, verified: true, issues: [] };
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pillar 6: Observability</span>
+        <h2>Tracing every call</h2>
+        <pre class="code-block"><code>// Observability wrapper around every LLM call
+class TracedClient {
+  #client;
+  #traces = [];
+
+  constructor(client) { this.#client = client; }
+
+  async create(params, label = 'unnamed') {
+    const start = performance.now();
+    let response, error;
+
+    try {
+      response = await this.#client.messages.create(params);
+    } catch (e) {
+      error = e;
+      throw e;
+    } finally {
+      const duration = performance.now() - start;
+      const trace = {
+        label,
+        model:     params.model,
+        timestamp: new Date().toISOString(),
+        duration:  Math.round(duration),
+        tokens:    response?.usage,
+        cost:      this.#estimateCost(params.model, response?.usage),
+        success:   !error,
+        error:     error?.message,
+      };
+      this.#traces.push(trace);
+      console.log(`[TRACE] ${label}: ${trace.duration}ms, ${trace.tokens?.output_tokens ?? 0} out tokens, $${trace.cost?.toFixed(4)}`);
+    }
+
+    return response;
+  }
+
+  #estimateCost(model, usage) {
+    if (!usage) return 0;
+    const rates = {
+      'claude-sonnet-4-6': { input: 3/1e6, output: 15/1e6 },
+      'claude-haiku-4-5-20251001': { input: 0.25/1e6, output: 1.25/1e6 },
+    };
+    const r = rates[model] ?? { input: 3/1e6, output: 15/1e6 };
+    return usage.input_tokens * r.input + usage.output_tokens * r.output;
+  }
+
+  getTraces() { return this.#traces; }
+  getTotalCost() { return this.#traces.reduce((s, t) => s + (t.cost ?? 0), 0); }
+}
+
+// Usage
+const traced = new TracedClient(client);
+const res = await traced.create({ model: 'claude-sonnet-4-6', max_tokens: 512, messages: [...] }, 'extract-requirements');
+console.log('Session cost: $' + traced.getTotalCost().toFixed(4));</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pillar 8: Parallelism</span>
+        <h2>Parallel task execution</h2>
+        <pre class="code-block"><code>// Run independent analysis tasks in parallel
+async function analyseDocument(doc) {
+  // These tasks don't depend on each other — run all at once
+  const [requirements, risks, timeline] = await Promise.all([
+    callWithRetry(
+      `Extract functional requirements from:\n${doc}`,
+      REQUIREMENTS_SCHEMA
+    ),
+    callWithRetry(
+      `Identify technical risks in:\n${doc}`,
+      RISKS_SCHEMA
+    ),
+    callWithRetry(
+      `Estimate implementation timeline for:\n${doc}`,
+      TIMELINE_SCHEMA
+    ),
+  ]);
+
+  // Synthesis step — depends on all three
+  const synthesis = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    messages: [{
+      role: 'user',
+      content: `Synthesise into a project brief:
+Requirements: ${JSON.stringify(requirements)}
+Risks: ${JSON.stringify(risks)}
+Timeline: ${JSON.stringify(timeline)}`,
+    }],
+  });
+
+  return {
+    requirements,
+    risks,
+    timeline,
+    brief: synthesis.content[0].text,
+  };
+}
+// Wall-clock time = max(requirements, risks, timeline) time, not sum.</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Putting it together</span>
+        <h2>The complete harness pattern</h2>
+        <pre class="code-block"><code>class AgentHarness {
+  #traced;
+
+  constructor(apiKey) {
+    const client = new Anthropic({ apiKey });
+    this.#traced  = new TracedClient(client);
+  }
+
+  async run(task, schema, options = {}) {
+    const { maxRetries = 3, verify = false, parallel = false } = options;
+
+    if (parallel && Array.isArray(task)) {
+      return Promise.all(task.map(t => this.run(t, schema, { maxRetries, verify })));
+    }
+
+    const output = await callWithRetry(task, schema, maxRetries);
+
+    if (verify) {
+      const { verified, issues } = await generateAndVerify(task);
+      if (!verified) console.warn('Verification issues:', issues);
+      return { output, verified, issues };
+    }
+
+    return { output, verified: null };
+  }
+
+  getStats() {
+    return {
+      traces:    this.#traced.getTraces().length,
+      totalCost: this.#traced.getTotalCost(),
+    };
+  }
+}
+
+// Usage
+const harness = new AgentHarness(process.env.ANTHROPIC_API_KEY);
+const result  = await harness.run(
+  'Analyse this requirements doc and extract structured data',
+  EXTRACT_SCHEMA,
+  { maxRetries: 3, verify: true }
+);
+console.log('Stats:', harness.getStats());</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Harness engineering is the discipline that separates demo agents from production agents.
+          Eight pillars — task decomposition, schema enforcement, retry with context, verification agents,
+          risk gates, observability, evals, and parallelism — together create a system that is reliable
+          enough to trust with real work. The model is interchangeable. The harness is your competitive
+          moat.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

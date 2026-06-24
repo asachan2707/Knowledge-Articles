@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DESIGN.md: The Complete Guide | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .section-note { background:#fffbeb; border-left:4px solid #f59e0b; padding:.7rem 1rem; border-radius:0 8px 8px 0; margin:.75rem 0; font-size:.88rem; }
+      .section-note strong { color:#92400e; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1507925921958-8a62f3d1a50d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Design documentation and architecture notes" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Engineering · AI · Architecture · Documentation · 14 min read</span>
+          </div>
+        </figure>
+        <h1>DESIGN.md: The Complete Guide</h1>
+        <p class="summary">
+          DESIGN.md is the architectural memory file for your project — where technical decisions,
+          trade-offs, and constraints live. Unlike CLAUDE.md (behavioral instructions for AI) or
+          README.md (project overview for users), DESIGN.md is for engineers and AI agents who
+          need to understand <em>why</em> the system is built the way it is before touching it.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Distinct from</span><span class="meta-value">CLAUDE.md (AI behavior) · README.md (user docs) · SPEC.md (session tasks)</span></div>
+          <div><span class="meta-label">Audience</span><span class="meta-value">Engineers (human and AI) touching the codebase</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Three months into a project, a new engineer (or an AI agent) looks at a peculiar design
+          choice and asks: "why is this done this way?" Without a DESIGN.md, the answer is either
+          tribal knowledge locked in the original engineer's head, or it's been lost entirely.
+          With a DESIGN.md, the answer is one grep away — and so is every other non-obvious
+          architectural decision in the project.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> DESIGN.md captures the decisions that are not visible in the
+          code. The code shows you WHAT was built. DESIGN.md explains WHY — the constraints that
+          were active, the alternatives that were rejected, and the trade-offs that were accepted.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">DESIGN.md vs other project files</span>
+        <h2>Why this file is different from everything else</h2>
+        <div class="section-note">
+          <strong>CLAUDE.md</strong> — behavioral OS for AI agents. Tells Claude HOW to work on this project (don't use console.log, run tests before committing). Read every session.<br><br>
+          <strong>README.md</strong> — user-facing overview. Tells visitors what the project does, how to install it, how to run it. Read once by new users.<br><br>
+          <strong>SPEC.md</strong> — current session state. Tells agents what's done, what's in progress, what's next. Updated every session.<br><br>
+          <strong>DESIGN.md</strong> — architectural memory. Tells engineers WHY the system was built the way it was. Updated when decisions change, never deleted.
+        </div>
+        <p>
+          A good heuristic: if you find yourself saying "but wait, why did we do it this way?" and
+          the answer involves constraints, alternatives rejected, or trade-offs accepted — that answer
+          belongs in DESIGN.md, not in a comment, not in a PR description, not in Slack.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The DESIGN.md template</span>
+        <h2>What a complete DESIGN.md contains</h2>
+        <pre class="code-block"><code># DESIGN.md — [Project Name] Architectural Memory
+
+> Last updated: [date] | Engineers: [names or teams]
+> This file explains WHY the system is built the way it is.
+> Read this before making any architectural change.
+
+---
+
+## Architecture Overview
+
+[One diagram or one paragraph describing the system shape.
+Not implementation detail — the high-level structure.]
+
+Example:
+This is a three-tier web application:
+- API layer (Express, stateless, horizontally scaled)
+- Business logic layer (domain services, no framework coupling)
+- Data layer (Postgres via Prisma, Redis for ephemeral state)
+
+Inter-service communication: synchronous HTTP for read operations,
+BullMQ async jobs for anything that mutates state.
+
+---
+
+## Technology Decisions
+
+### Database: PostgreSQL (not MongoDB)
+**Decision date:** 2024-08-15
+**Decision makers:** [names]
+
+We evaluated:
+- PostgreSQL: relational, ACID, mature ecosystem, strong JSON support
+- MongoDB: flexible schema, easier horizontal write scaling
+
+**Chosen because:** Our data has strong relational structure (orders → items → products → inventory).
+Changing schema would require migrations regardless of database. Postgres JSON columns give us
+schema flexibility where we need it without sacrificing relational integrity where we don't.
+
+**Trade-off accepted:** Horizontal write scaling is harder with Postgres. We accept this because
+we expect write volume to remain manageable (< 10k writes/min) for the next 18 months.
+
+**Revisit if:** Write volume exceeds 50k/min or we need multi-region active-active writes.
+
+---
+
+### Queue: BullMQ over direct async (no Kafka)
+**Decision date:** 2024-09-03
+
+We evaluated:
+- BullMQ (Redis-backed): simple, observable, retry logic built in, same Redis instance
+- Kafka: high throughput, log retention, consumer groups
+- Direct async (fire-and-forget): simplest code, no infrastructure
+
+**Chosen because:** We need retries, visibility, and dead-letter queues. We do NOT need Kafka's
+throughput (< 1k events/sec) or log retention. BullMQ gives us 80% of Kafka's operational
+benefits at 20% of its complexity.
+
+**Trade-off accepted:** Redis is now a critical dependency. Losing Redis means losing queue state.
+Mitigated by: Redis Sentinel, BullMQ's at-least-once delivery with idempotent handlers.
+
+---
+
+### ORM: Prisma (not raw SQL, not TypeORM)
+**Decision date:** 2024-08-20
+
+**Chosen because:** Type-safe queries from schema-generated types. Migration system that's
+version-controlled. Prisma Client is auto-generated — no runtime schema discovery.
+
+**Trade-off accepted:** Complex queries (window functions, CTEs, bulk upserts) require $queryRaw.
+Convention: all raw SQL lives in src/db/raw/ and is documented here.
+
+---
+
+## Data Model Decisions
+
+### Orders table: no soft delete
+Most tables use soft delete (deletedAt column). Orders do NOT.
+
+**Why:** Orders are financial records. They must never be deleted, even logically.
+Cancelled orders have status = 'cancelled', not deletedAt. Auditors and accounting need
+the full history of every order state change.
+
+**Impact:** Never add soft delete to orders. If you need to "hide" an order from a UI,
+filter by status, not by deletedAt.
+
+---
+
+### Idempotency keys on all payment operations
+Every write to the payments table requires an idempotencyKey column.
+
+**Why:** Payment webhooks are delivered at-least-once by Stripe. We have been burned by
+double-charges in staging. The idempotency key is the guard.
+
+**How:** Generated by the caller as UUID, stored with the payment record. Duplicate calls
+with the same key return the existing record.
+
+---
+
+## Architectural Constraints
+
+These are HARD constraints — do not work around them without a design discussion:
+
+1. **No direct DB access outside src/db/** — All queries go through the data access layer.
+   Reason: we want to be able to swap the ORM, add query logging, and enforce access patterns
+   without finding DB calls scattered across the codebase.
+
+2. **No synchronous calls between services in the write path** — All writes trigger BullMQ jobs
+   for downstream effects. Synchronous calls in write paths create coupling and cascade failures.
+
+3. **No state in application containers** — All state lives in Postgres or Redis. Containers must
+   be disposable: kill one, start another, no data loss.
+
+4. **All API responses must use the standard envelope** — { data, error, meta }. Never return
+   a raw object. Reason: clients depend on this shape; inconsistency breaks mobile clients.
+
+---
+
+## Patterns in Use
+
+### Repository Pattern (data access)
+All DB access via a repository class. The repository is the only file that imports Prisma.
+Services import repositories, not Prisma directly.
+
+```
+src/
+  db/
+    repositories/
+      OrderRepository.ts   ← all order DB operations
+      UserRepository.ts
+  services/
+    OrderService.ts        ← imports OrderRepository, not prisma
+```
+
+### Result Type (error handling)
+Functions that can fail return Result<T, E> not throw. Thrown errors are for unexpected failures
+(programming errors), not for expected business failures (user not found, insufficient inventory).
+
+```typescript
+type Result<T, E> = { ok: true; data: T } | { ok: false; error: E };
+```
+
+---
+
+## Known Technical Debt
+
+| Item | Severity | Owner | Created |
+|------|----------|-------|---------|
+| UserService.createUser duplicates validation logic from API layer | Medium | — | 2024-10 |
+| Payment webhook handler lacks structured logging | High | — | 2024-11 |
+| Search is full-table scan on orders — needs pg_trgm index | High | — | 2024-12 |
+
+---
+
+## Rejected Approaches (and why)
+
+### GraphQL API (rejected 2024-08-10)
+Evaluated as the API layer. Rejected because: our API consumers are internal services and
+a single mobile app. GraphQL's flexibility is a cost (tooling, caching complexity, N+1 risks)
+that doesn't pay off for a limited consumer set. REST with a consistent envelope serves our needs.
+
+### Event sourcing (rejected 2024-09-15)
+Evaluated for the orders domain. Rejected because: our query patterns are simple (get order by ID,
+list orders by user). Event sourcing would add reconstruction complexity without query benefit.
+Revisit if we need audit logs with time-travel queries.
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">How AI agents use DESIGN.md</span>
+        <h2>Wiring DESIGN.md into Claude Code sessions</h2>
+        <pre class="code-block"><code># CLAUDE.md — reference DESIGN.md for architectural context
+## Architecture
+
+This project has a DESIGN.md with all architectural decisions and constraints.
+
+### Before any architectural change (mandatory)
+1. Read DESIGN.md fully — especially "Architectural Constraints" and "Technology Decisions"
+2. If your proposed change would violate a constraint: STOP and explain the conflict
+3. If your change requires a new architectural decision: propose the decision format from DESIGN.md
+   before implementing
+
+### When to update DESIGN.md
+- After making a non-obvious architectural decision
+- After discovering a constraint that isn't documented
+- After choosing between two approaches — document the one you rejected and why
+- After resolving a technical debt item
+
+### Pattern references
+All patterns in use are documented in DESIGN.md "Patterns in Use" section.
+If you are about to introduce a pattern not listed there, document it first.</code></pre>
+
+        <h3>DESIGN.md vs ADRs (Architecture Decision Records)</h3>
+        <p>
+          ADRs (individual files per decision in docs/decisions/) are the formal version of DESIGN.md's
+          "Technology Decisions" section. They are better for large teams where decisions need
+          review and sign-off. For smaller teams and solo projects, a single DESIGN.md is simpler
+          to maintain and easier for AI agents to consume (one file, not a directory of 40 files).
+          The content is identical — the format is the only difference.
+        </p>
+
+        <pre class="code-block"><code">// Programmatically validate that DESIGN.md is current
+// Run this before deploys to catch stale documentation
+
+import fs from 'fs/promises';
+
+async function validateDesignMd() {
+  const design = await fs.readFile('DESIGN.md', 'utf8');
+  const issues  = [];
+
+  // Check: all files referenced in DESIGN.md exist
+  const fileRefs = design.match(/src\/[^\s`\]'"]+/g) ?? [];
+  for (const ref of fileRefs) {
+    try   { await fs.access(ref); }
+    catch { issues.push(`DESIGN.md references missing file: ${ref}`); }
+  }
+
+  // Check: known tech debt section exists
+  if (!design.includes('## Known Technical Debt')) {
+    issues.push('DESIGN.md missing "Known Technical Debt" section');
+  }
+
+  // Check: last updated date is within 90 days
+  const match     = design.match(/Last updated: (\d{4}-\d{2}-\d{2})/);
+  const lastUpdate = match ? new Date(match[1]) : null;
+  if (!lastUpdate || (Date.now() - lastUpdate) > 90 * 86400 * 1000) {
+    issues.push('DESIGN.md may be stale — last updated > 90 days ago');
+  }
+
+  issues.forEach(i => console.warn(`⚠  ${i}`));
+  return issues.length === 0;
+}</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          DESIGN.md is the architectural memory of your project — it captures WHY, not WHAT.
+          Its five sections (overview, technology decisions, data model decisions, constraints,
+          patterns) give any engineer or AI agent the context to make decisions that are
+          consistent with the existing architecture. The discipline of writing it is as
+          valuable as the document itself: forcing you to articulate WHY you're making a
+          decision often reveals that you haven't thought it through. If you can't explain
+          the trade-off you accepted, you may not have made the right decision.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

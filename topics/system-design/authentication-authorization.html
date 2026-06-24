@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Authentication & Authorization | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=1600&h=700&fit=crop&auto=format&q=80" alt="Security keys and access control" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Security · Concept 23 · 12 min</span></div>
+        </figure>
+        <h1>Authentication &amp; Authorization</h1>
+        <p class="summary">Authentication (who are you?) and authorization (what can you do?) are the two security questions every API must answer. JWT structure, stateless vs stateful sessions, RBAC vs ABAC permission models, and the security pitfalls lurking in common implementations.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">23 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Security</span></div>
+          <div><span class="meta-label">Pair With</span><span class="meta-value">OAuth 2.0 (Concept 24), API Gateway (Concept 06)</span></div>
+          <div><span class="meta-label">Frameworks</span><span class="meta-value">Passport.js, Auth0, Clerk, AWS Cognito</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Authentication answers "who is this?" Authorization answers "are they allowed to do this?" They are separate concerns that are often conflated. A valid JWT proves identity. An authorization layer decides whether that identity can read resource X or write resource Y. Mixing them — stuffing permissions into the token and trusting them without re-checking — leads to privilege escalation and stale permission bugs.</p>
+        <div class="callout"><p><strong>The key distinction:</strong> A user who logs in successfully (authn passes) should still be denied if they try to read someone else's order (authz fails). Never assume that a successfully authenticated user is authorised for everything. Always check authorisation explicitly for every resource access.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JWT</span>
+        <h2>JWT structure, stateless verification, and pitfalls</h2>
+        <div class="diagram-box">
+<span class="step">JWT structure — three base64url-encoded parts separated by dots</span>
+
+eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9    ← <span class="hi">Header</span>
+.eyJzdWIiOiJ1c2VyXzEyMyIsImVtYWlsIjoiYWxpY2VAZXhhbXBsZS5jb20iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMzYwMH0  ← <span class="hi">Payload</span>
+.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c  ← <span class="hi">Signature</span>
+
+Header (decoded):  { "alg": "RS256", "typ": "JWT" }
+Payload (decoded): {
+  "sub":   "user_123",             ← subject (user ID)
+  "email": "alice@example.com",
+  "role":  "admin",                ← <span class="warn">if permissions change, old token still claims admin</span>
+  "iat":   1700000000,             ← issued-at
+  "exp":   1700003600              ← expires in 1 hour
+}
+
+<span class="ok">Signature</span> = RS256(base64(header) + "." + base64(payload), privateKey)
+Server verifies with publicKey — no DB lookup needed.
+
+<span class="step">Security pitfall: alg=none attack</span>
+A malicious client can craft a token with "alg":"none" and no signature.
+<span class="warn">Fix: ALWAYS explicitly specify the allowed algorithm. Never trust the header's alg field.</span>
+jwt.verify(token, publicKey, { algorithms: ['RS256'] })  ✓
+jwt.verify(token, publicKey)                              ✗ (accepts alg:none)
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>JWT auth middleware + RBAC and ABAC authorization</h2>
+        <pre><code class="language-js">import jwt from 'jsonwebtoken';
+import jwksClient from 'jwks-rsa';
+
+// ─── JWT AUTHENTICATION MIDDLEWARE ────────────────────────────────────────
+// Verify token signature using RS256 + JWKS (public key from auth server)
+// This pattern works with Auth0, Clerk, AWS Cognito, and any OIDC provider
+
+const jwks = jwksClient({ jwksUri: process.env.JWKS_URI }); // e.g. https://auth.example.com/.well-known/jwks.json
+
+function getSigningKey(header, callback) {
+  jwks.getSigningKey(header.kid, (err, key) => {
+    if (err) return callback(err);
+    callback(null, key.getPublicKey());
+  });
+}
+
+async function authenticate(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or malformed Authorization header' });
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    const payload = await new Promise((resolve, reject) => {
+      jwt.verify(token, getSigningKey, {
+        algorithms:     ['RS256'],         // CRITICAL: whitelist only your algorithm
+        audience:       process.env.JWT_AUDIENCE,  // e.g. 'https://api.example.com'
+        issuer:         process.env.JWT_ISSUER,    // e.g. 'https://auth.example.com'
+        clockTolerance: 30,                // 30s clock skew tolerance
+      }, (err, decoded) => err ? reject(err) : resolve(decoded));
+    });
+
+    req.user = {
+      id:    payload.sub,
+      email: payload.email,
+      roles: payload.roles ?? [],
+    };
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') return res.status(401).json({ error: 'Token expired' });
+    if (err.name === 'JsonWebTokenError')  return res.status(401).json({ error: 'Invalid token' });
+    next(err);
+  }
+}
+
+// ─── RBAC: Role-Based Access Control ─────────────────────────────────────
+// Roles are coarse-grained: admin, editor, viewer
+// Simple, fast, but can't express "user can only edit THEIR OWN resources"
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    const hasRole = req.user.roles.some(r => roles.includes(r));
+    if (!hasRole) return res.status(403).json({ error: 'Forbidden — insufficient role' });
+    next();
+  };
+}
+
+app.delete('/users/:id', authenticate, requireRole('admin'), async (req, res) => {
+  await userService.delete(req.params.id);
+  res.status(204).end();
+});
+
+// ─── ABAC: Attribute-Based Access Control ─────────────────────────────────
+// More expressive: decisions based on attributes of user, resource, and environment.
+// "A user can edit an order IF order.userId === user.id OR user.roles includes 'admin'"
+
+async function canEditOrder(user, orderId) {
+  const order = await db.query('SELECT user_id, status FROM orders WHERE id = $1', [orderId]);
+  if (!order.rows.length) return false;
+  if (order.rows[0].status === 'shipped') return false; // No edits after shipping
+
+  return user.id === order.rows[0].user_id  // Owner can edit
+      || user.roles.includes('admin');        // Admins can always edit
+}
+
+app.put('/orders/:id', authenticate, async (req, res) => {
+  const allowed = await canEditOrder(req.user, req.params.id);
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+
+  // Proceed with update
+  const updated = await orderService.update(req.params.id, req.body);
+  res.json(updated);
+});
+
+// ─── TOKEN REFRESH FLOW ────────────────────────────────────────────────────
+// Access token: short-lived (15 min – 1 hour). Sent on every request.
+// Refresh token: long-lived (days – weeks). Used only to get new access tokens.
+// Stored in httpOnly cookie (not localStorage) to prevent XSS theft.
+
+app.post('/auth/refresh', async (req, res) => {
+  const refreshToken = req.cookies.refresh_token; // httpOnly cookie
+  if (!refreshToken) return res.status(401).json({ error: 'No refresh token' });
+
+  // Validate refresh token against DB (allows revocation)
+  const session = await db.query(
+    'SELECT user_id, expires_at FROM sessions WHERE refresh_token = $1',
+    [refreshToken]
+  );
+
+  if (!session.rows.length || new Date(session.rows[0].expires_at) < new Date()) {
+    res.clearCookie('refresh_token');
+    return res.status(401).json({ error: 'Refresh token expired or revoked' });
+  }
+
+  const user        = await userService.findById(session.rows[0].user_id);
+  const accessToken = jwt.sign(
+    { sub: user.id, email: user.email, roles: user.roles },
+    process.env.JWT_PRIVATE_KEY,
+    { algorithm: 'RS256', expiresIn: '15m' }
+  );
+
+  res.json({ accessToken });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>Common security pitfalls in auth implementations</h2>
+
+        <table class="data-table">
+          <thead><tr><th>Pitfall</th><th>What goes wrong</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td>alg:none attack</td><td>Attacker strips signature, sets alg=none, claims any identity</td><td>Whitelist algorithms: <code>{ algorithms: ['RS256'] }</code></td></tr>
+            <tr><td>JWT in localStorage</td><td>XSS attack reads token, impersonates user indefinitely</td><td>Store access token in memory; refresh token in httpOnly cookie</td></tr>
+            <tr><td>No token expiry</td><td>Compromised token usable forever</td><td>Short-lived access tokens (15m), refresh token rotation</td></tr>
+            <tr><td>Permissions in JWT trusted blindly</td><td>Role changes not reflected until token expires</td><td>Look up current permissions from DB on sensitive operations</td></tr>
+            <tr><td>Missing resource-level checks</td><td>User accesses other users' resources by changing ID in URL</td><td>ABAC check: verify requester owns the resource</td></tr>
+            <tr><td>Weak JWT secret (HS256)</td><td>Brute-force or dictionary attacks recover secret</td><td>Use RS256 with 2048+ bit key, or switch to Auth0/Clerk</td></tr>
+          </tbody>
+        </table>
+
+        <div class="warn-box"><strong>Never implement auth from scratch for production.</strong> Use a battle-tested library (jsonwebtoken for verification, Passport.js for strategy composition) or delegate entirely to an identity provider (Auth0, Clerk, AWS Cognito). The attack surface for auth is enormous and the failure modes are catastrophic. Your competitive advantage is in your product, not your auth stack.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Authentication and authorization are separate layers — verify identity first, then check permissions. Use JWTs with RS256 (asymmetric keys), explicit algorithm whitelisting, and short expiry (15m–1h). Store refresh tokens in httpOnly cookies, not localStorage. Implement RBAC for coarse-grained roles and ABAC for resource-level ownership checks. Never trust permissions embedded in a token for sensitive operations — check the current state from the database. And unless you have a security team reviewing it: use an identity provider rather than building auth yourself.</p>
+      </section>
+    </main>
+  </body>
+</html>

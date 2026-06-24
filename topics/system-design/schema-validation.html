@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Schema Validation | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=1600&h=700&fit=crop&auto=format&q=80" alt="Code structure and validation" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 19 · 8 min</span></div>
+        </figure>
+        <h1>Schema Validation</h1>
+        <p class="summary">Validating request and response shapes at API boundaries using Zod, JSON Schema, or OpenAPI. The practice that prevents malformed input from propagating deep into your system, generates documentation for free, and makes runtime type errors disappear at the boundary where they should be caught.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">19 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design</span></div>
+          <div><span class="meta-label">Libraries</span><span class="meta-value">Zod, Joi, AJV, typebox, OpenAPI/Swagger</span></div>
+          <div><span class="meta-label">Rule</span><span class="meta-value">Validate at every trust boundary — never inside the domain</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every API endpoint is a trust boundary. Beyond that boundary lies untrusted input — from users, third-party webhooks, or other services. Without validation, a missing required field becomes a null reference error three function calls deep in your business logic. With schema validation at the boundary, malformed input produces a clear 400 Bad Request immediately, the error message is useful, and your domain logic never sees invalid data.</p>
+        <div class="callout"><p><strong>Schema-first design:</strong> Define the contract (schema) before writing the implementation. This forces you to think about the API shape up front, generates automatic documentation, enables mock servers during frontend development, and makes breaking changes visible in diffs.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Validation Layers</span>
+        <h2>Where to validate — and what each layer catches</h2>
+        <div class="diagram-box">
+<span class="step">Request lifecycle — validation at each trust boundary</span>
+
+Internet
+  │
+  ▼
+<span class="hi">API Gateway</span>    ← request size, rate limit, auth token present (structural)
+  │
+  ▼
+<span class="hi">Route handler</span>  ← schema validation (Zod/AJV): types, required fields, formats
+  │               → <span class="warn">400 Bad Request</span> with field-level error details if invalid
+  ▼
+<span class="hi">Business logic</span> ← domain validation: "account balance must be positive AFTER transfer"
+  │               → <span class="warn">422 Unprocessable Entity</span> if business rule violated
+  ▼
+<span class="hi">Database</span>       ← constraint validation (NOT NULL, UNIQUE, FK)
+                  → last resort — should not be your primary validation layer
+
+<span class="dim">Rule: catch errors at the earliest possible layer.</span>
+<span class="dim">Schema validation catches format errors before they touch domain logic.</span>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Schema-first API with Zod in Node.js</h2>
+        <pre><code class="language-js">import { z } from 'zod';
+import express from 'express';
+
+// ─── DEFINE SCHEMAS (the contract) ───────────────────────────────────────
+// Define once, use for: request validation, response shaping, TypeScript types, docs
+
+const CreateOrderSchema = z.object({
+  userId:          z.string().uuid('userId must be a valid UUID'),
+  items: z.array(z.object({
+    productId:   z.string().uuid(),
+    quantity:    z.number().int().min(1).max(100),
+    priceInCents: z.number().int().positive(), // Store money as integers, not floats
+  })).min(1, 'Order must contain at least one item').max(50),
+  shippingAddress: z.object({
+    line1:       z.string().min(1).max(200),
+    city:        z.string().min(1).max(100),
+    country:     z.string().length(2, 'Use ISO 3166-1 alpha-2 country codes'),
+    postalCode:  z.string().regex(/^[A-Z0-9 -]{3,10}$/, 'Invalid postal code format'),
+  }),
+  couponCode: z.string().regex(/^[A-Z0-9]{6,12}$/).optional(),
+});
+
+// TypeScript type inferred from schema — single source of truth
+// type CreateOrderInput = z.infer<typeof CreateOrderSchema>;
+
+const OrderResponseSchema = z.object({
+  orderId:     z.string().uuid(),
+  status:      z.enum(['pending', 'confirmed', 'shipped', 'delivered', 'cancelled']),
+  totalCents:  z.number().int().positive(),
+  createdAt:   z.string().datetime(),
+});
+
+// ─── VALIDATION MIDDLEWARE ─────────────────────────────────────────────────
+function validateBody(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.body);
+
+    if (!result.success) {
+      // Zod provides field-level error paths — return them to the client
+      const errors = result.error.issues.map(issue => ({
+        field:   issue.path.join('.'),
+        message: issue.message,
+        code:    issue.code,
+      }));
+
+      return res.status(400).json({
+        error:   'Validation failed',
+        errors,
+      });
+    }
+
+    req.validatedBody = result.data; // Only use validated data downstream
+    next();
+  };
+}
+
+function validateQuery(schema) {
+  return (req, res, next) => {
+    const result = schema.safeParse(req.query);
+    if (!result.success) {
+      return res.status(400).json({ error: 'Invalid query parameters', errors: result.error.issues });
+    }
+    req.validatedQuery = result.data;
+    next();
+  };
+}
+
+// ─── ROUTES ────────────────────────────────────────────────────────────────
+const app = express();
+app.use(express.json({ limit: '100kb' })); // Reject oversized bodies early
+
+app.post('/orders', validateBody(CreateOrderSchema), async (req, res) => {
+  const { userId, items, shippingAddress, couponCode } = req.validatedBody; // Guaranteed valid shape
+
+  // Business logic validation (not schema validation — this uses domain knowledge)
+  const total = items.reduce((sum, item) => sum + item.priceInCents * item.quantity, 0);
+  if (total > 100_000_00) { // $100,000 max order
+    return res.status(422).json({ error: 'Order total exceeds maximum allowed value' });
+  }
+
+  const order = await orderService.createOrder({ userId, items, shippingAddress, couponCode });
+
+  // Validate response shape too — prevents leaking sensitive fields
+  const response = OrderResponseSchema.parse(order);
+  res.status(201).json(response);
+});
+
+// ─── PAGINATION QUERY VALIDATION ──────────────────────────────────────────
+const PaginationSchema = z.object({
+  cursor:   z.string().optional(),
+  limit:    z.coerce.number().int().min(1).max(100).default(20), // coerce: "20" → 20
+  sortBy:   z.enum(['createdAt', 'totalCents', 'status']).default('createdAt'),
+  sortDir:  z.enum(['asc', 'desc']).default('desc'),
+});
+
+app.get('/orders', validateQuery(PaginationSchema), async (req, res) => {
+  const { cursor, limit, sortBy, sortDir } = req.validatedQuery;
+  // limit is guaranteed to be a number 1-100, not a string or undefined
+  const orders = await orderService.listOrders({ cursor, limit, sortBy, sortDir });
+  res.json(orders);
+});
+
+// ─── WEBHOOK PAYLOAD VALIDATION ────────────────────────────────────────────
+// Always validate incoming webhook payloads from external services
+const StripeWebhookSchema = z.object({
+  id:      z.string().startsWith('evt_'),
+  type:    z.string(),
+  data:    z.object({ object: z.record(z.unknown()) }),
+  created: z.number().int(),
+});
+
+app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), (req, res) => {
+  // 1. Verify signature FIRST — reject anything without valid sig
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch {
+    return res.status(400).json({ error: 'Invalid signature' });
+  }
+
+  // 2. Validate shape — even from Stripe (external trust boundary)
+  const result = StripeWebhookSchema.safeParse(event);
+  if (!result.success) return res.status(400).json({ error: 'Unexpected event shape' });
+
+  handleStripeEvent(result.data);
+  res.json({ received: true });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>OpenAPI, contract-first design, and runtime type safety</h2>
+        <p><strong>OpenAPI (Swagger):</strong> Define your API in a YAML/JSON schema file first. From the schema, generate: server stubs, client SDKs, interactive documentation, mock servers for frontend dev, and validation middleware. Teams like Stripe publish machine-readable OpenAPI specs for their entire API — clients generate SDKs in any language from the spec rather than hand-writing them.</p>
+        <p><strong>tRPC (TypeScript):</strong> Goes further than Zod — the server's router is the schema. TypeScript infers types from the server procedures to the client, with zero serialization step. If the server procedure signature changes, the TypeScript client fails to compile before any test runs. This is schema validation taken to its logical end: the type system enforces the contract.</p>
+        <p><strong>GraphQL schema validation:</strong> Every GraphQL server validates queries against the schema before execution. A query requesting a non-existent field returns an error immediately without reaching any resolver. Schema introspection lets clients know exactly what fields and types are available — self-documenting by design.</p>
+
+        <div class="warn-box"><strong>Never trust data that crossed a trust boundary — even from your own services.</strong> A service calling your API is an external caller from your API's perspective. Validate incoming data from microservices the same way you validate user input. Internal attackers, bugs, and schema drift all inject invalid data through internal channels. Trust the schema, not the caller.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Invalid input caught at the boundary — never reaches domain logic</li><li>Field-level error messages guide API consumers to fix their requests</li><li>Schema is living documentation — always in sync with behaviour</li><li>TypeScript inference from Zod eliminates runtime type errors in handlers</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Schema maintenance cost as API evolves (can be automated with code-gen)</li><li>Overly strict schemas reject valid edge cases (e.g. international postal codes)</li><li>Performance: Zod adds ~0.5–2ms per request for complex schemas (acceptable)</li><li>Schema drift if code and schema are maintained separately</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Validate at every trust boundary and nowhere else. Use Zod (or equivalent) to define schemas that are the single source of truth for: request validation, response shaping, TypeScript types, and documentation. Return field-level errors on validation failure so API consumers can fix their requests without guessing. Never use unvalidated input in business logic — access only <code>req.validatedBody</code>, never <code>req.body</code> after validation middleware runs. Schema-first design, where the contract is defined before implementation, produces better APIs than implementation-first design every time.</p>
+      </section>
+    </main>
+  </body>
+</html>

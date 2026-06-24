@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Performance Optimization | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Performance metrics and speed optimization" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 8 of 11 · ~35 min</span>
+          </div>
+        </figure>
+        <h1>Performance Optimization</h1>
+        <p class="summary">React Compiler's automatic memoization, manual memo/useCallback/useMemo, lazy loading routes and images, code splitting strategies, virtualizing 100k-row lists, and reading bundle analysis output.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">8 of 11</span></div>
+          <div><span class="meta-label">Golden rule</span><span class="meta-value">Measure first. Optimize second. Never guess what is slow.</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">React DevTools Profiler · Lighthouse · rollup-plugin-visualizer</span></div>
+        </div>
+      </header>
+
+      <!-- ─── REACT COMPILER ───────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>React Compiler — automatic memoization</h2>
+        <p class="lead">React Compiler (formerly React Forget) is a Babel/SWC plugin that automatically applies memoization where React previously required manual <code>memo</code>, <code>useCallback</code>, and <code>useMemo</code>. It shipped stable in React 19.</p>
+        <pre><code class="language-jsx">// Before React Compiler — manual memoization everywhere
+const Parent = memo(function Parent({ data }) {
+  const processedData = useMemo(() => expensiveTransform(data), [data]);
+  const handleClick = useCallback((id) => selectItem(id), []);
+  return &lt;Child data={processedData} onClick={handleClick} /&gt;;
+});
+
+// With React Compiler — write normal code, compiler does the rest
+function Parent({ data }) {
+  const processedData = expensiveTransform(data);  // compiler memoizes automatically
+  const handleClick = (id) => selectItem(id);        // compiler wraps in useCallback
+  return &lt;Child data={processedData} onClick={handleClick} /&gt;;
+}
+// The compiled output is equivalent to the manual version above
+
+// ─── Enabling React Compiler ──────────────────────────────────────────────
+// vite.config.js
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [
+    react({
+      babel: {
+        plugins: [['babel-plugin-react-compiler', {}]],
+      },
+    }),
+  ],
+});
+
+// ─── What React Compiler can't optimize ──────────────────────────────────
+// Code that violates React's rules of hooks (compiler skips these components)
+// Direct DOM mutations, external mutable state
+// Use React Compiler's eslint plugin to find violations:
+// npm install eslint-plugin-react-compiler
+</code></pre>
+        <div class="insight-box"><strong>React Compiler vs manual memoization:</strong> If you're on React 19+, enable the compiler and remove manual memo/useCallback/useMemo unless the profiler shows it's still needed. The compiler is more precise — it memoizes at the expression level, not the function level.</div>
+      </section>
+
+      <!-- ─── MEMOIZATION ──────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Memoization — manual React.memo, useMemo, useCallback</h2>
+        <p>Before React Compiler (or when you're on React 18), manual memoization is how you prevent expensive re-renders. The key is measuring before adding memos — premature memoization adds complexity without benefit.</p>
+        <pre><code class="language-jsx">import { memo, useMemo, useCallback } from 'react';
+
+// ─── React.memo — skip re-render when props haven't changed ──────────────
+// Use when: component is expensive to render AND props are stable references
+const ExpensiveChart = memo(function ExpensiveChart({ data, width, height }) {
+  // 200ms D3 render — only runs when data/width/height change
+  return &lt;svg&gt;{/* complex D3 visualization */}&lt;/svg&gt;;
+});
+
+// memo with custom comparison
+const UserRow = memo(
+  function UserRow({ user, onEdit }) { return &lt;tr&gt;{/* ... */}&lt;/tr&gt;; },
+  (prevProps, nextProps) => prevProps.user.updatedAt === nextProps.user.updatedAt
+);
+
+// ─── useMemo — memoize expensive computed values ─────────────────────────
+function OrderSummary({ orders, filter }) {
+  // Recomputes ONLY when orders or filter changes
+  const filteredOrders = useMemo(
+    () => orders.filter(o => filter === 'all' || o.status === filter),
+    [orders, filter]
+  );
+
+  const totals = useMemo(
+    () => filteredOrders.reduce((acc, o) => ({
+      count:   acc.count + 1,
+      revenue: acc.revenue + o.totalCents,
+    }), { count: 0, revenue: 0 }),
+    [filteredOrders]
+  );
+
+  return &lt;div&gt;{totals.count} orders, ${(totals.revenue / 100).toFixed(2)}&lt;/div&gt;;
+}
+
+// ─── useCallback — stable function reference ─────────────────────────────
+// Use when: passing a callback to a memoized child component
+function ProductList({ categoryId }) {
+  const [selectedId, setSelectedId] = useState(null);
+
+  // Without useCallback: new function on every render → memo(ProductCard) re-renders anyway
+  const handleSelect = useCallback((id) => setSelectedId(id), []);
+
+  return &lt;ProductGrid onSelect={handleSelect} /&gt;;
+}
+
+// ─── When NOT to memoize ──────────────────────────────────────────────────
+// These add overhead WITHOUT benefit:
+const text    = useMemo(() => `Hello, ${name}`, [name]);     // trivial — just use template literal
+const doubled = useMemo(() => count * 2, [count]);           // trivial computation
+const onClick = useCallback(() => setCount(c => c + 1), []); // child not memoized
+</code></pre>
+        <div class="warn-box"><strong>memo does not prevent re-renders if props are object/array literals.</strong> <code>&lt;Comp config={'{'}{'}'}  /&gt;</code> passes a new object on every parent render — memo is useless. Either lift the object outside the component, use useMemo, or rely on React Compiler.</div>
+      </section>
+
+      <!-- ─── LAZY LOADING ─────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>Lazy Loading — load components on demand</h2>
+        <pre><code class="language-jsx">import { lazy, Suspense } from 'react';
+
+// ─── Route-level code splitting ───────────────────────────────────────────
+// Each route becomes a separate JS chunk — only downloaded when navigated to
+const HomePage         = lazy(() => import('./pages/HomePage'));
+const ProductsPage     = lazy(() => import('./pages/ProductsPage'));
+const AdminDashboard   = lazy(() => import('./pages/admin/Dashboard'));
+const HeavyDataViz     = lazy(() => import('./components/HeavyDataViz'));
+
+// Suspense provides the fallback while the chunk loads
+function App() {
+  return (
+    &lt;BrowserRouter&gt;
+      &lt;Suspense fallback={&lt;PageLoadingSpinner /&gt;}&gt;
+        &lt;Routes&gt;
+          &lt;Route path="/"         element={&lt;HomePage /&gt;} /&gt;
+          &lt;Route path="/products" element={&lt;ProductsPage /&gt;} /&gt;
+          &lt;Route path="/admin"    element={&lt;AdminDashboard /&gt;} /&gt;
+        &lt;/Routes&gt;
+      &lt;/Suspense&gt;
+    &lt;/BrowserRouter&gt;
+  );
+}
+
+// ─── Component-level lazy loading ────────────────────────────────────────
+function ProductPage({ product }) {
+  const [showChart, setShowChart] = useState(false);
+
+  return (
+    &lt;div&gt;
+      &lt;h1&gt;{product.name}&lt;/h1&gt;
+      &lt;button onClick={() =&gt; setShowChart(true)}&gt;Show Price History&lt;/button&gt;
+
+      {showChart &amp;&amp; (
+        &lt;Suspense fallback={&lt;div className="chart-skeleton"&gt;Loading chart...&lt;/div&gt;}&gt;
+          &lt;HeavyDataViz productId={product.id} /&gt;
+        &lt;/Suspense&gt;
+      )}
+    &lt;/div&gt;
+  );
+}
+
+// ─── Lazy loading images ──────────────────────────────────────────────────
+function ProductImage({ src, alt }) {
+  return (
+    &lt;img
+      src={src}
+      alt={alt}
+      loading="lazy"          // native browser lazy load
+      decoding="async"        // non-blocking decode
+      width={400}
+      height={300}
+      style={{ aspectRatio: '4/3', objectFit: 'cover' }}
+    /&gt;
+  );
+}
+</code></pre>
+      </section>
+
+      <!-- ─── CODE SPLITTING ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>Code Splitting — reducing initial bundle size</h2>
+        <pre><code class="language-js">// ─── Vite code splitting ───────────────────────────────────────────────────
+// vite.config.js — manual chunks for vendor splitting
+export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor':  ['react', 'react-dom'],
+          'router':        ['react-router-dom'],
+          'query':         ['@tanstack/react-query'],
+          'charts':        ['recharts', 'd3'],  // split heavy libs
+        },
+      },
+    },
+    chunkSizeWarningLimit: 500,  // warn if chunk > 500kb
+  },
+});
+
+// ─── Dynamic import with preload hint ─────────────────────────────────────
+// Preload a chunk in the background before the user navigates to it
+function NavBar() {
+  const handleProductsHover = () => {
+    // Preload the chunk when user hovers the link
+    import('./pages/ProductsPage');
+  };
+
+  return (
+    &lt;nav&gt;
+      &lt;Link to="/products" onMouseEnter={handleProductsHover}&gt;Products&lt;/Link&gt;
+    &lt;/nav&gt;
+  );
+}
+
+// ─── What to split, what to keep together ────────────────────────────────
+// SPLIT:   Admin pages (not all users visit)
+//          Heavy visualization libraries (chart.js, d3, mapbox)
+//          PDF/Excel export functionality
+//          Rich text editors (TipTap, Quill)
+//          Settings/preferences pages
+
+// KEEP:    Core UI components (Button, Input, etc.) — loaded on every page
+//          Authentication code — needed before anything else renders
+//          Navigation — visible on all pages
+</code></pre>
+      </section>
+
+      <!-- ─── VIRTUALIZATION ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>Virtualization — render only what's visible</h2>
+        <p>Rendering a 10,000-row table creates 10,000 DOM nodes. Virtualization renders only the rows visible in the viewport (~20–30) and swaps them as the user scrolls. Essential for any list with more than ~100 items.</p>
+        <pre><code class="language-jsx">// npm install @tanstack/react-virtual
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { useRef } from 'react';
+
+function VirtualTable({ rows }) {
+  const parentRef = useRef(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 48,   // estimated row height in pixels
+    overscan: 5,               // render 5 extra rows outside viewport
+  });
+
+  return (
+    &lt;div
+      ref={parentRef}
+      style={{ height: '600px', overflow: 'auto' }}
+    &gt;
+      {/* Total scrollable height — keeps scrollbar correct */}
+      &lt;div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative' }}&gt;
+        {rowVirtualizer.getVirtualItems().map(virtualRow =&gt; (
+          &lt;div
+            key={virtualRow.index}
+            style={{
+              position: 'absolute',
+              top:    virtualRow.start,
+              left:   0,
+              width:  '100%',
+              height: virtualRow.size,
+            }}
+          &gt;
+            &lt;TableRow row={rows[virtualRow.index]} /&gt;
+          &lt;/div&gt;
+        ))}
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// 10,000 rows → only ~20 DOM nodes at any time
+</code></pre>
+      </section>
+
+      <!-- ─── BUNDLE ANALYSIS ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Bundle Analysis — understanding what's in your build</h2>
+        <pre><code class="language-js">// npm install rollup-plugin-visualizer
+// vite.config.js
+import { visualizer } from 'rollup-plugin-visualizer';
+
+export default defineConfig({
+  plugins: [
+    react(),
+    visualizer({
+      filename: 'stats.html',  // open this file after build
+      open: true,
+      gzipSize: true,
+      brotliSize: true,
+    }),
+  ],
+});
+
+// Run: npm run build → stats.html opens automatically
+// Look for: large vendor chunks, duplicate packages, unexpected inclusions
+
+// ─── Common bundle bloat patterns and fixes ────────────────────────────────
+// Problem: importing all of lodash
+import _ from 'lodash';                      // 70kb gzipped
+import { debounce, throttle } from 'lodash'; // still 70kb — tree-shaking doesn't work for lodash
+
+// Fix: lodash-es or individual packages
+import debounce from 'lodash-es/debounce';  // ~3kb
+import { debounce } from 'lodash-es';       // tree-shakeable
+
+// Problem: moment.js with all locales
+import moment from 'moment';  // 280kb gzipped
+
+// Fix: use date-fns or dayjs
+import { format, parseISO } from 'date-fns';  // import only what you use (~2kb per function)
+import dayjs from 'dayjs';                     // 7kb total
+
+// ─── Measuring runtime performance ────────────────────────────────────────
+// React DevTools Profiler — record a session, look for:
+// - Components that render too often (grey = skipped, colored = rendered)
+// - Long render times (hover for ms)
+// - Wasteful re-renders from unstable prop references
+
+// Web Vitals in code
+import { onCLS, onINP, onLCP } from 'web-vitals';
+
+function sendToAnalytics({ name, value, id }) {
+  analytics.track('web_vital', { name, value, id });
+}
+
+onCLS(sendToAnalytics);
+onINP(sendToAnalytics);
+onLCP(sendToAnalytics);
+</code></pre>
+        <div class="diagram-box">
+<span class="step">Performance checklist</span>
+
+<span class="hi">Initial load</span>
+  ☑ Route-level code splitting (React.lazy + Suspense)
+  ☑ Images: loading="lazy", correct dimensions, WebP/AVIF
+  ☑ Vendor chunk splitting (react, router, heavy libs separate)
+  ☑ Gzip/Brotli on server (automatic on Vercel/Netlify/Cloudflare)
+
+<span class="hi">Runtime re-renders</span>
+  ☑ React Compiler enabled (React 19+)
+  ☑ Stable prop references for memoized components (useCallback/useMemo)
+  ☑ Context split by update frequency
+  ☑ Virtualize lists &gt; 100 items
+
+<span class="hi">Measurement tools</span>
+  ☑ React DevTools Profiler: record interactions, check render counts
+  ☑ Chrome Performance tab: flame chart for JS execution
+  ☑ Lighthouse: LCP, CLS, INP scores
+  ☑ Bundle visualizer: spot bloat before it ships
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 8 Takeaway</h2>
+        <p>Performance optimization in React has a clear priority order: (1) enable React Compiler if on React 19 — it handles most memoization automatically, (2) split code at route boundaries with React.lazy, (3) virtualize long lists with TanStack Virtual, (4) analyze your bundle with rollup-plugin-visualizer and cut bloat. Only reach for manual memo/useMemo/useCallback when the profiler shows a specific problem. Premature optimization adds complexity without measurable benefit.</p>
+      </section>
+    </main>
+  </body>
+</html>

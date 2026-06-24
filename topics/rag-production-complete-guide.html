@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Production RAG: Strategies, Scale, and Architecture | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .arch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .9rem; margin: 1rem 0; }
+      .arch-card { border: 1px solid var(--border); border-radius: 12px; padding: .95rem 1.1rem; background: var(--surface); }
+      .arch-card h4 { margin: 0 0 .35rem; font-family: Arial, Helvetica, sans-serif; font-size: .95rem; }
+      .arch-card p  { margin: 0; font-size: .84rem; color: var(--muted); }
+      .rag-num { display: inline-block; padding: .18rem .6rem; border-radius: 20px; font-size: .72rem; font-weight: 700; color: #0369a1; background: #e0f2fe; border: 1px solid #bae6fd; margin-bottom: .4rem; }
+      .tradeoff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; margin: .75rem 0; }
+      .pro  { background: #f0fdf4; border-left: 4px solid #22c55e; padding: .7rem 1rem; border-radius: 0 8px 8px 0; font-size: .88rem; }
+      .con  { background: #fff1f2; border-left: 4px solid #f43f5e; padding: .7rem 1rem; border-radius: 0 8px 8px 0; font-size: .88rem; }
+      .pro strong, .con strong { display: block; font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; opacity: .7; margin-bottom: .3rem; }
+      @media (max-width: 600px) { .tradeoff-grid { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract data pipeline visualization" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · RAG · Architecture · 40 min read</span>
+          </div>
+        </figure>
+        <h1>Production RAG: Advanced Strategies, 10M+ Document Scale, and Architecture Trade-offs</h1>
+        <p class="summary">
+          Three RAG articles merged: advanced retrieval strategies (Flow RAG and Modular RAG),
+          building a pipeline for 10M+ documents with near-zero hallucination, and a complete
+          production-ready RAG architecture guide. Covers chunking, embedding, hybrid search,
+          re-ranking, routing, guardrails, and the full system design at scale.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate → Advanced</span></div>
+          <div><span class="meta-label">Focus</span><span class="meta-value">Production patterns, not toy demos</span></div>
+          <div><span class="meta-label">Scale</span><span class="meta-value">Covers 10M+ document corpus design</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Basic RAG is three lines: embed query, find similar chunks, stuff them into a prompt. Production
+          RAG is a system — with offline indexing pipelines, query understanding, multi-stage retrieval,
+          re-ranking, context assembly, and post-generation verification. The gap between demo RAG and
+          production RAG is where most projects break.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> RAG quality is determined at two independent stages: indexing
+          quality (how chunks are built and stored) and retrieval quality (how the right chunks are found
+          at query time). Most teams fix the LLM call and ignore both. Fix both.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">RAG evolution</span>
+        <h2>From Naive RAG to Modular and Flow RAG</h2>
+        <p>There are three generations of RAG architecture. Each solves limitations of the previous one.</p>
+        <div class="arch-grid">
+          <div class="arch-card">
+            <span class="rag-num">Gen 1</span>
+            <h4>Naive RAG</h4>
+            <p>Chunk → embed → vector search → stuff top-K into prompt. Works for demos. Fails on complex queries, long documents, and diverse document types.</p>
+          </div>
+          <div class="arch-card">
+            <span class="rag-num">Gen 2</span>
+            <h4>Advanced RAG</h4>
+            <p>Adds query expansion, hybrid search, re-ranking, and better chunking. Significantly better recall. Still a linear pipeline — every query takes the same path.</p>
+          </div>
+          <div class="arch-card">
+            <span class="rag-num">Gen 3</span>
+            <h4>Modular / Flow RAG</h4>
+            <p>Dynamic pipeline composition. Query routing decides which retrieval strategy to use. Iterative refinement. Self-reflection. Parallel retrieval. Adaptive to query type.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Chunking — the most important decision</span>
+        <h2>How you split documents determines everything downstream</h2>
+        <pre class="code-block"><code>// chunking-strategies.js
+
+// 1. Fixed-size chunking — simple, predictable
+function fixedSizeChunker(text, chunkSize = 512, overlap = 64) {
+  const words  = text.split(/\s+/);
+  const chunks = [];
+  let i = 0;
+  while (i < words.length) {
+    chunks.push(words.slice(i, i + chunkSize).join(' '));
+    i += chunkSize - overlap;
+  }
+  return chunks;
+}
+
+// 2. Recursive character splitter — splits by paragraph → sentence → word
+function recursiveSplit(text, maxChunkLen = 1000, separators = ['\n\n', '\n', '. ', ' ']) {
+  if (text.length <= maxChunkLen) return [text];
+  const sep = separators.find(s => text.includes(s));
+  if (!sep) return [text]; // can't split further
+
+  const parts  = text.split(sep);
+  const chunks = [];
+  let current  = '';
+
+  for (const part of parts) {
+    const candidate = current ? current + sep + part : part;
+    if (candidate.length > maxChunkLen && current) {
+      chunks.push(...recursiveSplit(current, maxChunkLen, separators.slice(1)));
+      current = part;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(...recursiveSplit(current, maxChunkLen, separators.slice(1)));
+  return chunks;
+}
+
+// 3. Semantic chunker — splits when topic shifts (requires embeddings)
+async function semanticChunker(sentences, embedFn, similarityThreshold = 0.8) {
+  if (sentences.length <= 1) return sentences;
+  const embeddings = await embedFn(sentences);
+  const chunks = [];
+  let start = 0;
+
+  for (let i = 1; i < sentences.length; i++) {
+    const sim = cosineSim(embeddings[i - 1], embeddings[i]);
+    if (sim < similarityThreshold) {
+      chunks.push(sentences.slice(start, i).join(' '));
+      start = i;
+    }
+  }
+  chunks.push(sentences.slice(start).join(' '));
+  return chunks;
+}
+
+// Cosine similarity helper
+function cosineSim(a, b) {
+  const dot  = a.reduce((s, v, i) => s + v * b[i], 0);
+  const norm = v => Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  return dot / (norm(a) * norm(b));
+}</code></pre>
+
+        <h3>Chunking strategy decision table</h3>
+        <ul class="check-list">
+          <li><strong>Fixed-size:</strong> simple code docs, structured data. Fast to implement. Bad for natural boundaries.</li>
+          <li><strong>Recursive:</strong> general prose, articles, books. Best default choice. Respects paragraph/sentence structure.</li>
+          <li><strong>Semantic:</strong> long-form documents where topics shift. High quality. Expensive (requires embedding every sentence).</li>
+          <li><strong>Document-specific:</strong> markdown by heading, HTML by section, PDF by page/column. Best for structured formats.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Hybrid search</span>
+        <h2>Combining dense + sparse retrieval</h2>
+        <p>
+          Dense search (embeddings) finds semantically similar content. Sparse search (BM25 keyword)
+          finds exact term matches. Hybrid outperforms either alone — especially for technical queries
+          where exact terms matter.
+        </p>
+        <pre class="code-block"><code>// Reciprocal Rank Fusion (RRF) — the standard hybrid merge algorithm
+function reciprocalRankFusion(denseResults, sparseResults, k = 60) {
+  const scores = new Map();
+
+  function addScores(results) {
+    results.forEach((result, rank) => {
+      const id = result.id;
+      const score = 1 / (k + rank + 1);
+      scores.set(id, (scores.get(id) ?? 0) + score);
+    });
+  }
+
+  addScores(denseResults);
+  addScores(sparseResults);
+
+  // Merge result objects
+  const allResults = new Map([
+    ...denseResults.map(r => [r.id, r]),
+    ...sparseResults.map(r => [r.id, r]),
+  ]);
+
+  return Array.from(scores.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, score]) => ({ ...allResults.get(id), fusionScore: score }));
+}
+
+// Usage with pgvector (dense) + tsvector (sparse)
+async function hybridSearch(query, topK = 20) {
+  const [queryEmbedding] = await embed([query]);
+
+  const [denseHits, sparseHits] = await Promise.all([
+    // Dense: cosine similarity via pgvector
+    sql`
+      SELECT id, content, 1 - (embedding <=> ${pgvector.toSql(queryEmbedding)}) AS score
+      FROM documents
+      ORDER BY embedding <=> ${pgvector.toSql(queryEmbedding)}
+      LIMIT ${topK * 2}
+    `,
+    // Sparse: full-text search via tsvector
+    sql`
+      SELECT id, content, ts_rank(search_vector, plainto_tsquery('english', ${query})) AS score
+      FROM documents
+      WHERE search_vector @@ plainto_tsquery('english', ${query})
+      ORDER BY score DESC
+      LIMIT ${topK * 2}
+    `,
+  ]);
+
+  const merged = reciprocalRankFusion(denseHits, sparseHits);
+  return merged.slice(0, topK);
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Re-ranking</span>
+        <h2>Precision pass after recall</h2>
+        <p>
+          Retrieval optimises for recall (don't miss the answer). Re-ranking optimises for precision
+          (put the best answer first). A cross-encoder re-ranker reads query + chunk together and
+          scores their relevance — far more accurate than embedding similarity alone.
+        </p>
+        <pre class="code-block"><code>// Re-ranking with Cohere Rerank API (or use a local cross-encoder)
+import Anthropic from '@anthropic-ai/sdk';
+
+// Option A: use Cohere Rerank (most common)
+async function rerankCohere(query, documents, topN = 5) {
+  const res = await fetch('https://api.cohere.ai/v1/rerank', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${process.env.COHERE_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'rerank-english-v3.0',
+      query,
+      documents: documents.map(d => d.content),
+      top_n: topN,
+    }),
+  }).then(r => r.json());
+
+  return res.results.map(r => ({ ...documents[r.index], rerankScore: r.relevance_score }));
+}
+
+// Option B: use Claude itself as a re-ranker (slower but no extra API)
+async function rerankWithLLM(query, candidates, topN = 5) {
+  const client = new Anthropic();
+  const res = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001', // use fast/cheap model for re-ranking
+    max_tokens: 512,
+    tools: [{
+      name: 'rank',
+      description: 'Rank candidate chunks by relevance to the query',
+      input_schema: {
+        type: 'object',
+        properties: {
+          ranked_indices: { type: 'array', items: { type: 'number' }, description: 'Indices of candidates ordered most → least relevant' },
+        },
+        required: ['ranked_indices'],
+      },
+    }],
+    tool_choice: { type: 'tool', name: 'rank' },
+    messages: [{
+      role: 'user',
+      content: `Query: ${query}\n\nCandidates:\n${candidates.map((c, i) => `[${i}] ${c.content.slice(0, 300)}`).join('\n\n')}`,
+    }],
+  });
+
+  const { ranked_indices } = res.content.find(b => b.type === 'tool_use').input;
+  return ranked_indices.slice(0, topN).map(i => candidates[i]);
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Flow RAG — advanced pattern</span>
+        <h2>Query routing and iterative retrieval</h2>
+        <pre class="code-block"><code>// Flow RAG: classify query → route to appropriate retrieval strategy
+const client = new Anthropic();
+
+async function classifyQuery(query) {
+  const res = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 128,
+    tools: [{
+      name: 'classify',
+      input_schema: {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            enum: ['factual', 'comparative', 'procedural', 'analytical', 'conversational'],
+          },
+          needsMultiHop: { type: 'boolean' },
+          keywords:      { type: 'array', items: { type: 'string' } },
+        },
+        required: ['type', 'needsMultiHop'],
+      },
+    }],
+    tool_choice: { type: 'tool', name: 'classify' },
+    messages: [{ role: 'user', content: `Classify this query: "${query}"` }],
+  });
+  return res.content.find(b => b.type === 'tool_use').input;
+}
+
+async function flowRAG(query) {
+  const classification = await classifyQuery(query);
+
+  let chunks;
+
+  if (classification.type === 'comparative') {
+    // Parallel retrieval for each comparison target
+    const targets = await extractComparisonTargets(query);
+    const results = await Promise.all(targets.map(t => hybridSearch(t)));
+    chunks = results.flat();
+
+  } else if (classification.needsMultiHop) {
+    // Iterative retrieval: use first results to generate follow-up queries
+    chunks = await iterativeRetrieval(query, maxHops = 3);
+
+  } else {
+    // Standard single-pass hybrid retrieval
+    chunks = await hybridSearch(query);
+  }
+
+  // Re-rank all candidates
+  const reranked = await rerankCohere(query, chunks, 5);
+
+  // Generate with citations
+  return generateWithCitations(query, reranked);
+}
+
+async function iterativeRetrieval(query, maxHops) {
+  let allChunks = [];
+  let currentQuery = query;
+
+  for (let hop = 0; hop < maxHops; hop++) {
+    const newChunks = await hybridSearch(currentQuery, 10);
+    allChunks = [...allChunks, ...newChunks];
+
+    // Ask the model if it has enough information
+    const sufficiency = await checkSufficiency(query, allChunks);
+    if (sufficiency.sufficient) break;
+
+    // Generate a follow-up query to fill the gap
+    currentQuery = sufficiency.followUpQuery;
+  }
+
+  return allChunks;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scale: 10M+ documents</span>
+        <h2>Architecture decisions for large corpora</h2>
+        <p>At 10M+ documents, the naive in-process vector store won't work. These are the non-negotiable design choices.</p>
+
+        <h3>Indexing pipeline</h3>
+        <pre class="code-block"><code>// Offline indexing pipeline — runs as background job, not on query path
+async function indexingPipeline(documentBatch) {
+  const BATCH_SIZE = 100;
+
+  for (let i = 0; i < documentBatch.length; i += BATCH_SIZE) {
+    const batch = documentBatch.slice(i, i + BATCH_SIZE);
+
+    // 1. Parse and chunk
+    const chunked = batch.flatMap(doc => ({
+      doc_id:   doc.id,
+      source:   doc.source,
+      chunks:   recursiveSplit(doc.content, 1000),
+    }));
+
+    // 2. Generate embeddings in batch (cheaper per token)
+    const allChunkTexts = chunked.flatMap(d => d.chunks);
+    const embeddings    = await embedBatch(allChunkTexts);
+
+    // 3. Write to vector store (pgvector with HNSW index)
+    const rows = [];
+    let embIdx = 0;
+    for (const { doc_id, source, chunks } of chunked) {
+      for (let c = 0; c < chunks.length; c++) {
+        rows.push({ doc_id, source, chunk_index: c, content: chunks[c], embedding: embeddings[embIdx++] });
+      }
+    }
+
+    await sql`
+      INSERT INTO document_chunks ${sql(rows, 'doc_id', 'source', 'chunk_index', 'content', 'embedding')}
+      ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
+        content   = EXCLUDED.content,
+        embedding = EXCLUDED.embedding,
+        indexed_at = now()
+    `;
+
+    // 4. Update tsvector for BM25 (Postgres full-text)
+    await sql`
+      UPDATE document_chunks
+      SET search_vector = to_tsvector('english', content)
+      WHERE doc_id = ANY(${batch.map(d => d.id)})
+    `;
+
+    console.log(`Indexed batch ${i / BATCH_SIZE + 1}: ${rows.length} chunks`);
+  }
+}
+
+// Batch embedding — much cheaper than individual calls
+async function embedBatch(texts, batchSize = 96) {
+  const results = [];
+  for (let i = 0; i < texts.length; i += batchSize) {
+    const batch  = texts.slice(i, i + batchSize);
+    const vecs   = await embed(batch);
+    results.push(...vecs);
+  }
+  return results;
+}</code></pre>
+
+        <h3>HNSW index for fast ANN search</h3>
+        <pre class="code-block"><code>-- PostgreSQL schema with pgvector HNSW index
+-- Supports cosine similarity search across 10M+ vectors
+
+CREATE TABLE document_chunks (
+  id            BIGSERIAL PRIMARY KEY,
+  doc_id        TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  chunk_index   INT NOT NULL,
+  content       TEXT NOT NULL,
+  embedding     vector(1024),  -- voyage-3-large dimension
+  search_vector tsvector,
+  indexed_at    TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (doc_id, chunk_index)
+);
+
+-- HNSW index — fast approximate nearest neighbour, good for 10M+ rows
+-- m=16: connections per node (higher = better recall, more RAM)
+-- ef_construction=64: index build quality
+CREATE INDEX ON document_chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+-- Full-text index for sparse/BM25 retrieval
+CREATE INDEX ON document_chunks USING gin (search_vector);
+
+-- Partitioning by source for large corpora (optional but helps at 10M+)
+-- Partition table by source_domain if queries are mostly single-domain</code></pre>
+
+        <h3>Architecture trade-off table</h3>
+        <div class="arch-grid">
+          <div class="arch-card">
+            <h4>pgvector (Postgres)</h4>
+            <p>Best when you're already on Postgres. No extra infra. HNSW handles ~10M vectors well. Transactional consistency. Harder to scale beyond 50M vectors.</p>
+          </div>
+          <div class="arch-card">
+            <h4>Qdrant</h4>
+            <p>Purpose-built vector DB. Excellent filtering + vector search combined. Self-hosted or managed. Built-in quantisation for memory efficiency at scale.</p>
+          </div>
+          <div class="arch-card">
+            <h4>Pinecone</h4>
+            <p>Fully managed. Easiest operational burden. Best for 10M+ at high QPS. Higher cost than self-hosted. No SQL-style filtering.</p>
+          </div>
+          <div class="arch-card">
+            <h4>Weaviate</h4>
+            <p>GraphQL API. Built-in hybrid search. Good for multi-modal (text + images). Module ecosystem. Steeper learning curve.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Hallucination reduction</span>
+        <h2>Near-zero hallucination at scale</h2>
+        <pre class="code-block"><code>// Generate with mandatory citations + faithfulness check
+async function generateWithCitations(query, retrievedChunks) {
+  const context = retrievedChunks
+    .map((c, i) => `[SOURCE ${i + 1}]\n${c.content}\n[/SOURCE ${i + 1}]`)
+    .join('\n\n');
+
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2048,
+    system: `You are a factual Q&A assistant. You MUST:
+1. Only use information from the provided sources.
+2. Cite every claim with [SOURCE N] notation.
+3. If the answer is not in the sources, say "I don't have enough information to answer this."
+4. Never speculate or use prior knowledge not in the sources.`,
+    messages: [{
+      role: 'user',
+      content: `Sources:\n${context}\n\nQuestion: ${query}`,
+    }],
+  });
+
+  const answer = response.content[0].text;
+
+  // Post-generation faithfulness check
+  const faithfulness = await checkFaithfulness(answer, retrievedChunks);
+  if (faithfulness.score < 0.8) {
+    console.warn('Low faithfulness score:', faithfulness.issues);
+    // Could trigger a retry or flagging for human review
+  }
+
+  return { answer, sources: retrievedChunks, faithfulness };
+}
+
+async function checkFaithfulness(answer, sources) {
+  const res = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 512,
+    tools: [{
+      name: 'faithfulness_check',
+      input_schema: {
+        type: 'object',
+        properties: {
+          score:  { type: 'number', minimum: 0, maximum: 1 },
+          issues: { type: 'array', items: { type: 'string' } },
+          claims_without_source: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['score', 'issues'],
+      },
+    }],
+    tool_choice: { type: 'tool', name: 'faithfulness_check' },
+    messages: [{
+      role: 'user',
+      content: `Answer: ${answer}\n\nSources:\n${sources.map(s => s.content).join('\n---\n')}
+Is every claim in the answer supported by the sources? Check carefully for unsupported claims.`,
+    }],
+  });
+
+  return res.content.find(b => b.type === 'tool_use').input;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Production architecture</span>
+        <h2>Complete system design</h2>
+        <pre class="code-block"><code>// Production RAG system — all components assembled
+class ProductionRAGSystem {
+  constructor({ vectorStore, llmClient, rerankClient }) {
+    this.vectorStore  = vectorStore;
+    this.llm          = llmClient;
+    this.reranker     = rerankClient;
+    this.cache        = new SemanticCache(); // cache by embedding similarity
+  }
+
+  async query(userQuery, options = {}) {
+    const { maxChunks = 5, verifyFaithfulness = true } = options;
+
+    // 0. Semantic cache check — avoid LLM call for repeated/similar queries
+    const cached = await this.cache.get(userQuery);
+    if (cached) return { ...cached, fromCache: true };
+
+    // 1. Query understanding
+    const classification = await classifyQuery(userQuery);
+    const expandedQueries = await expandQuery(userQuery, classification);
+
+    // 2. Hybrid retrieval (dense + sparse)
+    const allCandidates = await Promise.all(
+      expandedQueries.map(q => this.vectorStore.hybridSearch(q, 20))
+    );
+    const deduped = deduplicateByDocId(allCandidates.flat());
+
+    // 3. Re-rank
+    const reranked = await this.reranker.rerank(userQuery, deduped, maxChunks);
+
+    // 4. Generate with citations
+    const { answer, faithfulness } = await generateWithCitations(userQuery, reranked);
+
+    // 5. Guardrails
+    const safe = await checkOutputSafety(answer);
+    if (!safe) throw new Error('Response failed safety check');
+
+    const result = { answer, sources: reranked, faithfulness, classification };
+
+    // 6. Cache the result
+    await this.cache.set(userQuery, result);
+
+    return result;
+  }
+}
+
+// Semantic cache — cache by embedding similarity, not exact string match
+class SemanticCache {
+  #store = [];
+
+  async get(query, threshold = 0.95) {
+    if (!this.#store.length) return null;
+    const [qVec] = await embed([query]);
+    const best = this.#store
+      .map(e => ({ ...e, sim: cosineSim(qVec, e.vec) }))
+      .sort((a, b) => b.sim - a.sim)[0];
+    return best?.sim >= threshold ? best.value : null;
+  }
+
+  async set(query, value) {
+    const [vec] = await embed([query]);
+    this.#store.push({ query, vec, value, ts: Date.now() });
+    // Evict entries older than 1 hour
+    this.#store = this.#store.filter(e => Date.now() - e.ts < 3_600_000);
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Evals and observability</span>
+        <h2>Measuring RAG quality in production</h2>
+        <ul class="check-list">
+          <li><strong>Context Precision:</strong> of retrieved chunks, what fraction are actually relevant? (target &gt; 0.8)</li>
+          <li><strong>Context Recall:</strong> of all relevant chunks in the corpus, what fraction did we retrieve? (target &gt; 0.7)</li>
+          <li><strong>Answer Faithfulness:</strong> what fraction of claims in the answer are supported by sources? (target &gt; 0.9)</li>
+          <li><strong>Answer Relevance:</strong> does the answer actually address the question? (target &gt; 0.85)</li>
+          <li><strong>Latency P99:</strong> time from query to first token. Alert if &gt; 2s for interactive use.</li>
+          <li><strong>Cost per query:</strong> embedding + re-rank + generation. Track separately to find optimization opportunities.</li>
+        </ul>
+        <p>Tools: RAGAS (automated RAG evaluation), Langfuse (tracing + cost), PromptFoo (regression testing against a golden dataset).</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Production RAG is a system, not a feature. The quality ceiling is set at index time (how chunks
+          are built) and the quality floor is set at retrieval time (how the right chunks are found).
+          Hybrid search + re-ranking + faithfulness verification together push hallucination rates below
+          5% even at 10M+ document scale. The architecture cost is real — but so is the reliability gain.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The Complete Backend Developer Guide 2026 — Skills, Languages, Java, Spring Boot &amp; Rules | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .lang-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:.85rem; margin:1rem 0; }
+      .lang-card { border:1px solid var(--border); border-radius:10px; padding:.85rem 1rem; }
+      .lang-card h4 { margin:0 0 .2rem; font-family:Arial,Helvetica,sans-serif; font-size:.95rem; }
+      .lang-card p  { margin:0 0 .4rem; font-size:.83rem; color:var(--muted); }
+      .lang-card .verdict { font-size:.78rem; font-weight:700; padding:.18rem .55rem; border-radius:5px; display:inline-block; }
+      .verdict-strong { background:#dcfce7; color:#166534; }
+      .verdict-solid  { background:#dbeafe; color:#1d4ed8; }
+      .verdict-niche  { background:#fef9c3; color:#854d0e; }
+      .skill-section h3 { margin-top:1.25rem; }
+      .rules-list { counter-reset:rule; }
+      .rules-list li { counter-increment:rule; list-style:none; padding:.45rem 0 .45rem 2.5rem; position:relative; border-bottom:1px solid #f8fafc; font-size:.91rem; }
+      .rules-list li::before { content:counter(rule); position:absolute; left:0; width:1.6rem; height:1.6rem; background:#0f172a; color:#fff; border-radius:50%; font-size:.72rem; font-weight:700; display:flex; align-items:center; justify-content:center; top:.4rem; }
+      .rules-list strong { display:block; }
+      .rules-list span { color:var(--muted); font-size:.86rem; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Backend server infrastructure" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Engineering · Career · Java · Spring Boot · 28 min read</span>
+          </div>
+        </figure>
+        <h1>The Complete Backend Developer Guide 2026 — Skills, Languages, Java Performance &amp; Engineering Rules</h1>
+        <p class="summary">
+          Six articles merged: the 8 backend skills every developer needs, how to choose your backend
+          language in 2026, 10 Java performance tricks, 10 programming rules from real projects,
+          a complete backend developer roadmap, and a practical Spring Boot cheat sheet — all with
+          JavaScript/Node.js parallels throughout.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Merged from</span><span class="meta-value">8 Backend Skills · Language Guide · Java Performance · Programming Rules · Backend Roadmap · Spring Boot Cheat Sheet</span></div>
+          <div><span class="meta-label">Examples</span><span class="meta-value">JavaScript (Node.js) with Java/Spring Boot parallels</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Backend development in 2026 has two parallel paths: mastering the fundamentals (data
+          structures, APIs, databases, concurrency) that never change, and adapting to the tooling
+          that does (AI-assisted generation, new runtimes, cloud-native patterns). This guide covers
+          both — the skills that compound over a career, and the practical techniques that apply
+          immediately to your current stack.
+        </p>
+      </section>
+
+      <!-- PART 1: 8 BACKEND SKILLS -->
+      <section class="content-card skill-section">
+        <span class="section-label">Part 1: 8 backend skills every developer should master</span>
+        <h2>The skills that separate mid-level from senior</h2>
+
+        <h3>1. Database fundamentals that go beyond CRUD</h3>
+        <pre class="code-block"><code>// Most developers write queries. Senior developers understand what queries cost.
+
+// Bad: N+1 query — 1 query to get orders, then 1 per order to get items
+const orders = await db.orders.findMany({ where: { userId } });
+for (const order of orders) {
+  order.items = await db.orderItems.findMany({ where: { orderId: order.id } });
+}
+
+// Good: single query with join
+const orders = await db.orders.findMany({
+  where:   { userId },
+  include: { items: true }, // Prisma: generates a JOIN, not N+1
+});
+
+// Best: understand the actual SQL and add indexes for it
+// EXPLAIN ANALYZE SELECT ... — read this output before you deploy any query that hits > 100k rows
+// Know: sequential scan vs index scan vs index-only scan
+// Know: when an index helps and when it hurts (low-cardinality columns, write-heavy tables)
+
+// The skill: be able to look at a slow query and know WHY it's slow
+// before you look at the execution plan.</code></pre>
+
+        <h3>2. Concurrency — beyond async/await</h3>
+        <pre class="code-block"><code">// async/await handles I/O concurrency. CPU concurrency is different.
+
+// I/O concurrency (most backend work) — Node.js handles this natively
+async function fetchMultiple(urls) {
+  return Promise.all(urls.map(url => fetch(url).then(r => r.json())));
+}
+
+// Bounded concurrency — prevent overloading downstream services
+async function processWithLimit(items, processor, limit = 10) {
+  const results = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const batch = await Promise.all(items.slice(i, i + limit).map(processor));
+    results.push(...batch);
+  }
+  return results;
+}
+
+// Race conditions with shared state — the skill is knowing when they're possible
+// Bad: read-modify-write without atomicity
+let count = await redis.get('request_count');
+count = parseInt(count) + 1;
+await redis.set('request_count', count); // race: another process may have incremented between get and set
+
+// Good: atomic increment
+await redis.incr('request_count'); // single atomic operation, no race
+
+// Know the difference: event loop concurrency (Node.js) vs thread concurrency (Java, Go)
+// Both are concurrent. Only thread concurrency has true data races on shared memory.</code></pre>
+
+        <h3>3. API design — contracts that don't break clients</h3>
+        <pre class="code-block"><code>// The skill: design APIs that can evolve without breaking consumers
+
+// Versioning pattern
+app.use('/v1', v1Router); // immutable — any client relying on v1 is safe forever
+app.use('/v2', v2Router); // v2 has breaking changes; new clients start here
+
+// Additive-only changes don't need a version bump
+// Breaking changes: removing fields, changing field types, changing URL shape
+// Safe changes: adding optional fields, adding endpoints, adding optional query params
+
+// Error contracts — be specific, be consistent
+// Bad: { error: "Something went wrong" }
+// Good:
+function apiError(code, message, details = {}) {
+  return { error: { code, message, details, timestamp: new Date().toISOString() } };
+}
+// 400: apiError('VALIDATION_ERROR', 'Invalid input', { fields: ['email'] })
+// 404: apiError('NOT_FOUND', 'Order not found', { orderId: req.params.id })
+// 409: apiError('CONFLICT', 'Email already registered')
+// 429: apiError('RATE_LIMITED', 'Too many requests', { retryAfter: 60 })
+
+// Idempotency keys — let clients safely retry
+app.post('/orders', async (req, res) => {
+  const idempotencyKey = req.headers['idempotency-key'];
+  if (idempotencyKey) {
+    const existing = await redis.get(`idem:${idempotencyKey}`);
+    if (existing) return res.json(JSON.parse(existing)); // return cached response
+  }
+  const order = await createOrder(req.body);
+  if (idempotencyKey) await redis.setEx(`idem:${idempotencyKey}`, 86400, JSON.stringify(order));
+  res.status(201).json(order);
+});</code></pre>
+
+        <h3>4. Caching — more than just Redis.get/set</h3>
+        <pre class="code-block"><code">// The three caching decisions: what to cache, when to invalidate, what happens on miss
+
+// Cache-aside (most common)
+async function getProduct(id) {
+  const key    = `product:${id}`;
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const product = await db.products.findUnique({ where: { id } });
+  if (product) await redis.setEx(key, 3600, JSON.stringify(product)); // 1h TTL
+  return product;
+}
+
+// Invalidation on write
+async function updateProduct(id, data) {
+  const product = await db.products.update({ where: { id }, data });
+  await redis.del(`product:${id}`);           // evict exact key
+  await redis.del(`products:category:${product.categoryId}`); // evict related list
+  return product;
+}
+
+// The hard part: cache stampede prevention (many misses hitting DB simultaneously)
+async function getWithStampedePrevention(key, fetcher, ttl) {
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  // Only one process regenerates at a time
+  const lockKey = `lock:${key}`;
+  const locked  = await redis.set(lockKey, '1', { NX: true, EX: 5 }); // NX = only if not exists
+  if (!locked) {
+    await new Promise(r => setTimeout(r, 100)); // brief wait
+    return getWithStampedePrevention(key, fetcher, ttl); // retry
+  }
+  try {
+    const value = await fetcher();
+    await redis.setEx(key, ttl, JSON.stringify(value));
+    return value;
+  } finally {
+    await redis.del(lockKey);
+  }
+}</code></pre>
+
+        <h3>5. Observability — debugging production without SSH</h3>
+        <pre class="code-block"><code">// The three pillars: logs, metrics, traces. Know what each one is for.
+
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import pino from 'pino';
+
+const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
+
+// Structured logging — every log is a machine-parseable event
+function requestLogger(req, res, next) {
+  const start   = Date.now();
+  const traceId = req.headers['x-trace-id'] ?? crypto.randomUUID();
+  req.log = logger.child({ traceId, method: req.method, path: req.path });
+
+  res.on('finish', () => {
+    req.log.info({ statusCode: res.statusCode, durationMs: Date.now() - start }, 'request');
+  });
+  next();
+}
+
+// The skill: be able to answer "what was happening when this error occurred?"
+// from logs alone, without access to the production machine.
+// That requires: trace IDs that link related log lines, structured context on every log,
+// and timing data on every operation.</code></pre>
+
+        <h3>6. Security fundamentals</h3>
+        <pre class="code-block"><code">// Four things every backend must handle correctly:
+
+// 1. Input validation — at the boundary, not inside the system
+import { z } from 'zod';
+const CreateOrderSchema = z.object({
+  userId:    z.string().uuid(),
+  items:     z.array(z.object({ productId: z.string().uuid(), quantity: z.number().int().min(1) })).min(1),
+  couponCode: z.string().max(20).optional(),
+});
+app.post('/orders', async (req, res) => {
+  const result = CreateOrderSchema.safeParse(req.body);
+  if (!result.success) return res.status(400).json({ error: result.error.flatten() });
+  // result.data is now type-safe
+});
+
+// 2. Authentication vs authorization — always both
+// Authentication: who are you? (JWT, session)
+// Authorization: are you allowed to do this?
+async function requireOwner(req, res, next) {
+  const order = await db.orders.findUnique({ where: { id: req.params.id } });
+  if (!order) return res.status(404).json({ error: 'NOT_FOUND' });
+  if (order.userId !== req.user.id) return res.status(403).json({ error: 'FORBIDDEN' });
+  req.order = order;
+  next();
+}
+
+// 3. SQL injection — parameterized queries, always
+// Bad: `SELECT * FROM users WHERE email = '${email}'`
+// Good: db.users.findFirst({ where: { email } }) — ORM handles parameterization
+// If raw SQL: db.$queryRaw`SELECT * FROM users WHERE email = ${email}`
+
+// 4. Rate limiting — protect every public endpoint
+import rateLimit from 'express-rate-limit';
+app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));</code></pre>
+
+        <h3>7. Message queues — asynchronous decoupling</h3>
+        <pre class="code-block"><code">// Queues decouple rate: producer runs at its speed, consumer at its own.
+// Use when: work is expensive, order matters less than throughput, failures need retry.
+import { Queue, Worker } from 'bullmq';
+
+const emailQueue = new Queue('email', { connection: { host: 'localhost', port: 6379 } });
+
+// Producer — fast, non-blocking
+async function onOrderCreated(order) {
+  await emailQueue.add('order-confirmation', { orderId: order.id, userEmail: order.user.email });
+  // Returns immediately — email is sent asynchronously
+}
+
+// Consumer — runs in separate process, can retry on failure
+const emailWorker = new Worker('email', async (job) => {
+  await sendOrderConfirmationEmail(job.data.userEmail, job.data.orderId);
+}, {
+  connection: { host: 'localhost', port: 6379 },
+  concurrency: 5, // 5 emails in parallel
+});
+
+emailWorker.on('failed', (job, err) => {
+  logger.error({ jobId: job.id, err: err.message }, 'email job failed');
+});
+
+// BullMQ handles: retries (exponential backoff), dead-letter, concurrency, monitoring</code></pre>
+
+        <h3>8. Testing at the right level</h3>
+        <pre class="code-block"><code">// The skill: know which layer to test for each type of correctness
+
+// Unit tests: business logic that doesn't touch I/O
+function calculateDiscount(price, coupon) {
+  if (!coupon) return price;
+  if (coupon.type === 'percent') return price * (1 - coupon.value / 100);
+  if (coupon.type === 'fixed')   return Math.max(0, price - coupon.value);
+  throw new Error(`Unknown coupon type: ${coupon.type}`);
+}
+// Test this with pure unit tests — no DB, no HTTP
+
+// Integration tests: the full stack, real DB, real HTTP
+// These are more expensive but catch the bugs that unit tests miss
+import supertest from 'supertest';
+const app = createApp(); // real Express app
+it('creates an order and returns 201', async () => {
+  const res = await supertest(app)
+    .post('/orders')
+    .set('Authorization', `Bearer ${testToken}`)
+    .send({ userId: testUser.id, items: [{ productId: testProduct.id, quantity: 2 }] });
+
+  expect(res.status).toBe(201);
+  expect(res.body.id).toBeDefined();
+  // Verify DB state too
+  const dbOrder = await db.orders.findUnique({ where: { id: res.body.id } });
+  expect(dbOrder.status).toBe('pending');
+});</code></pre>
+      </section>
+
+      <!-- PART 2: LANGUAGE CHOICE -->
+      <section class="content-card">
+        <span class="section-label">Part 2: Language choice in 2026</span>
+        <h2>Python, Java, JavaScript, Go — the honest answer</h2>
+        <div class="lang-grid">
+          <div class="lang-card">
+            <h4>JavaScript / Node.js</h4>
+            <p>Best for: APIs, real-time, full-stack teams, AI integration, rapid iteration. Weakest at: CPU-heavy work, strict type safety at scale without heavy TS discipline.</p>
+            <span class="verdict verdict-strong">Strong choice for APIs and AI</span>
+          </div>
+          <div class="lang-card">
+            <h4>Python</h4>
+            <p>Best for: data engineering, ML pipelines, scripting, AI/LLM work where Python SDKs lead. Weakest at: high-concurrency APIs, memory efficiency.</p>
+            <span class="verdict verdict-strong">Dominant for AI/data</span>
+          </div>
+          <div class="lang-card">
+            <h4>Java / Spring</h4>
+            <p>Best for: large enterprise, high-throughput services, teams that need strong contracts and compile-time safety. Weakest at: startup speed, developer onboarding time.</p>
+            <span class="verdict verdict-solid">Enterprise standard</span>
+          </div>
+          <div class="lang-card">
+            <h4>Go</h4>
+            <p>Best for: infrastructure, CLIs, high-performance services, teams that want simplicity and static binaries. Weakest at: generics (improving), ecosystem breadth.</p>
+            <span class="verdict verdict-solid">Infrastructure &amp; performance</span>
+          </div>
+          <div class="lang-card">
+            <h4>Rust</h4>
+            <p>Best for: systems programming, performance-critical services, WebAssembly. High learning curve. Weakest at: rapid iteration, team ramp-up.</p>
+            <span class="verdict verdict-niche">Niche but growing</span>
+          </div>
+        </div>
+        <p>
+          <strong>The honest 2026 answer:</strong> if you're building API backends and want the most
+          job opportunities, Node.js + TypeScript gives you full-stack range. If you're in data/AI
+          pipelines, Python. If you're in enterprise Java shops, Spring Boot is not going anywhere.
+          Go is the best choice for teams building infrastructure or extremely high-throughput services.
+          Pick based on your team and domain, not trends.
+        </p>
+      </section>
+
+      <!-- PART 3: JAVA PERFORMANCE -->
+      <section class="content-card">
+        <span class="section-label">Part 3: 10 Java performance tricks (with Node.js parallels)</span>
+        <h2>Performance patterns that apply across languages</h2>
+
+        <pre class="code-block"><code>// 1. StringBuilder over string concatenation in loops
+// Java: use StringBuilder; Node.js equivalent: push to array, join at end
+const parts = [];
+for (const item of items) parts.push(item.name);
+const result = parts.join(', '); // O(n) — one allocation
+// Bad: items.reduce((acc, i) => acc + ', ' + i.name, '') — O(n²) allocations
+
+// 2. Object pooling for high-throughput paths
+// Avoid allocating objects in hot loops — reuse a pool
+class ConnectionPool {
+  constructor(size, factory) {
+    this.pool = Array.from({ length: size }, factory);
+    this.available = [...this.pool];
+  }
+  acquire()        { return this.available.pop() ?? this.factory(); }
+  release(conn)    { this.available.push(conn); }
+}
+
+// 3. Lazy initialization — don't compute what you might not need
+class ReportGenerator {
+  get expensiveData() {
+    return (this._data ??= computeExpensiveData()); // compute once, cache
+  }
+}
+
+// 4. Avoid N+1 queries (same pattern in every language)
+// Bad: query users, then query roles for each user in a loop
+// Good: single query with JOIN, or batch fetch with IN clause
+const userIds = users.map(u => u.id);
+const roles   = await db.roles.findMany({ where: { userId: { in: userIds } } });
+const roleMap = Object.groupBy(roles, r => r.userId);
+
+// 5. Index your queries — the biggest performance win available to most applications
+// Covered index: index contains ALL columns the query needs — no table lookup required
+// Partial index: index only the rows you query (e.g., WHERE status = 'active')
+// Composite index: multi-column index where column order matches your WHERE clause order
+
+// 6. Connection pool sizing — not too small, not too large
+// Default pool size of 10 is wrong for most applications
+// Too small: requests queue behind DB connections
+// Too large: DB gets overloaded (PostgreSQL: max_connections / num_app_instances)
+// Rule of thumb: (core count × 2) + effective_spindle_count for OLTP workloads
+
+// 7. Batch operations instead of row-by-row
+// Bad: 1000 individual inserts in a loop
+// Good: single batch insert
+await db.events.createMany({ data: events }); // Prisma: single INSERT with multiple rows
+
+// 8. Read-your-writes consistency with caching
+// After a write, update the cache immediately (write-through) or invalidate it
+// Avoids the window where a user writes and reads back stale data
+
+// 9. Avoid premature serialization
+// Don't JSON.stringify large objects unless you need the string
+// Pass objects by reference through your pipeline; only serialize at the boundary
+
+// 10. Profile before optimizing
+// The only rule that overrides all others: measure first
+// Node.js: --prof flag + node --prof-process
+// The 90/10 rule always applies: 90% of time is spent in 10% of code</code></pre>
+      </section>
+
+      <!-- PART 4: PROGRAMMING RULES -->
+      <section class="content-card">
+        <span class="section-label">Part 4: 10 programming rules from real projects</span>
+        <h2>Rules that survive contact with production</h2>
+        <ol class="rules-list">
+          <li>
+            <strong>Make it work, then make it right, then make it fast.</strong>
+            <span>In that order, never backwards. Optimising code that has the wrong behaviour is waste.</span>
+          </li>
+          <li>
+            <strong>Code is read 10x more than it is written.</strong>
+            <span>Name variables, functions, and modules for the reader, not the writer. "getActiveUsersByRegion" is always better than "getData".</span>
+          </li>
+          <li>
+            <strong>The simplest solution that works is the right solution.</strong>
+            <span>Complexity is a tax on every future change. The cost of clever code compounds. Three similar lines is better than a premature abstraction.</span>
+          </li>
+          <li>
+            <strong>Errors are information, not noise.</strong>
+            <span>Every error message should tell the caller what went wrong, what state the system is in, and what they can do next. Generic "Internal Server Error" is a failure to communicate.</span>
+          </li>
+          <li>
+            <strong>Design for failure, not for success.</strong>
+            <span>The happy path is easy. Every function should have an explicit contract for what it does when the input is invalid, the network is unavailable, or the downstream service times out.</span>
+          </li>
+          <li>
+            <strong>Tests are part of the code, not a separate concern.</strong>
+            <span>Untested code is a hypothesis, not a fact. The test tells you what the code does from the caller's perspective — which is more valuable than the implementation itself.</span>
+          </li>
+          <li>
+            <strong>Solve one problem per function, class, and module.</strong>
+            <span>When you can't name a function without using "and," it's doing two things. Split it. The tests will be simpler and the code will be reusable.</span>
+          </li>
+          <li>
+            <strong>Distributed systems are harder than you think.</strong>
+            <span>Network calls fail. Clocks drift. Messages arrive out of order. Idempotency and retries are not edge cases — they are default requirements for any service that communicates with another.</span>
+          </li>
+          <li>
+            <strong>Documentation decays; tests don't.</strong>
+            <span>A test that fails is noticed immediately. A doc that drifts out of sync stays wrong forever. Write tests for behaviour, and let tests be the documentation for correctness.</span>
+          </li>
+          <li>
+            <strong>Performance problems are usually schema or query problems.</strong>
+            <span>Before adding caching, read replicas, or horizontal scaling — EXPLAIN ANALYZE. 90% of database performance problems are missing indexes or N+1 queries. Fix those first.</span>
+          </li>
+        </ol>
+      </section>
+
+      <!-- PART 5: SPRING BOOT CHEAT SHEET (with Node.js parallels) -->
+      <section class="content-card">
+        <span class="section-label">Part 5: Spring Boot cheat sheet — with Node.js equivalents</span>
+        <h2>Key patterns and their Express/Node counterparts</h2>
+        <pre class="code-block"><code>// ── Controller layer ──────────────────────────────────────────
+// Spring Boot
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
+    @GetMapping("/{id}")
+    public ResponseEntity<Order> getOrder(@PathVariable String id) {
+        return orderService.findById(id)
+            .map(ResponseEntity::ok)
+            .orElse(ResponseEntity.notFound().build());
+    }
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public Order createOrder(@Valid @RequestBody CreateOrderDto dto) {
+        return orderService.create(dto);
+    }
+}
+
+// Node.js / Express equivalent
+router.get('/orders/:id', async (req, res) => {
+  const order = await orderService.findById(req.params.id);
+  if (!order) return res.status(404).json({ error: 'NOT_FOUND' });
+  res.json(order);
+});
+router.post('/orders', validate(CreateOrderSchema), async (req, res) => {
+  const order = await orderService.create(req.body);
+  res.status(201).json(order);
+});
+
+// ── Dependency injection ──────────────────────────────────────
+// Spring Boot: @Service, @Autowired (constructor injection preferred)
+@Service
+public class OrderService {
+    private final OrderRepository repo;
+    private final EmailService emailService;
+    public OrderService(OrderRepository repo, EmailService emailService) {
+        this.repo = repo; this.emailService = emailService;
+    }
+}
+
+// Node.js: factory function pattern (manual DI)
+function createOrderService({ db, emailService }) {
+  return {
+    async create(data) { /* uses db and emailService via closure */ },
+    async findById(id) { return db.orders.findUnique({ where: { id } }); },
+  };
+}
+const orderService = createOrderService({ db, emailService });
+
+// ── Exception handling ─────────────────────────────────────────
+// Spring Boot: @ControllerAdvice + @ExceptionHandler
+@ControllerAdvice
+public class GlobalExceptionHandler {
+    @ExceptionHandler(NotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNotFound(NotFoundException ex) {
+        return ResponseEntity.status(404).body(new ErrorResponse("NOT_FOUND", ex.getMessage()));
+    }
+}
+
+// Node.js: centralized error middleware
+app.use((err, req, res, next) => {
+  if (err instanceof NotFoundError) return res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+  if (err instanceof ValidationError) return res.status(400).json({ error: 'VALIDATION_ERROR', details: err.details });
+  logger.error({ err }, 'unhandled error');
+  res.status(500).json({ error: 'INTERNAL_ERROR' });
+});
+
+// ── Transaction management ────────────────────────────────────
+// Spring Boot: @Transactional
+@Transactional
+public Order fulfillOrder(String orderId) {
+    Order order = repo.findById(orderId).orElseThrow();
+    order.setStatus("fulfilled");
+    inventoryService.deduct(order.getItems()); // same transaction
+    return repo.save(order);
+}
+
+// Node.js: Prisma $transaction
+const order = await db.$transaction(async (tx) => {
+  const order = await tx.orders.update({ where: { id: orderId }, data: { status: 'fulfilled' } });
+  await tx.inventory.update(/* deduct items, same transaction */);
+  return order;
+});</code></pre>
+      </section>
+
+      <!-- PART 6: BACKEND ROADMAP -->
+      <section class="content-card">
+        <span class="section-label">Part 6: Becoming a complete backend developer</span>
+        <h2>The learning sequence that builds the right foundation</h2>
+        <ul class="check-list">
+          <li><strong>Foundation (months 1–3):</strong> HTTP fundamentals, one relational DB (PostgreSQL), one framework (Express or Spring Boot), git + CI basics. Build three CRUD APIs.</li>
+          <li><strong>Core skills (months 4–8):</strong> Authentication (JWT, sessions), input validation, error handling, writing integration tests, SQL query optimisation, one caching layer (Redis). Build a real project with auth and tests.</li>
+          <li><strong>Intermediate (months 9–15):</strong> Message queues (BullMQ or Kafka basics), rate limiting, observability (structured logging, traces), API versioning, Docker + basic Kubernetes. Contribute to a real codebase.</li>
+          <li><strong>Advanced (months 16–24):</strong> Distributed system patterns (sagas, outbox, CQRS), high-availability design, database sharding and replication, performance profiling, security auditing. Design a system from scratch and operate it.</li>
+          <li><strong>Specialist (ongoing):</strong> Pick a domain: data engineering, AI/ML pipelines, real-time systems, financial systems. Go deep in the tools and patterns specific to that domain.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Backend development mastery compounds. The 8 core skills (database depth, concurrency,
+          API design, caching, observability, security, queues, testing) are as relevant in your
+          tenth year as your first — the technology changes, the problems don't. Language choice in
+          2026 is domain-driven: Node.js/TypeScript for APIs and AI, Python for data/ML, Java for
+          enterprise, Go for infrastructure. Performance problems are almost always schema or query
+          problems first. And the 10 rules that survive production contact — make it work first,
+          name for the reader, design for failure, test behaviour not code — apply regardless of
+          what language or framework you're working in.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

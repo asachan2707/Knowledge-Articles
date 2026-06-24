@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL Shortener | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+      <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../index.html">← Back to Learning Hub</a>
+        <h1>URL Shortener</h1>
+        <p class="summary">
+          A senior-architect view of designing and implementing a production-grade URL shortener. This topic is written
+          to help a learner move from interview-level diagrams to real architectural thinking, including requirements,
+          scaling, HLD, LLD, APIs, data modeling, implementation paths, and operational tradeoffs.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Topic type</span>
+            <span class="meta-value">System design deep dive</span>
+          </div>
+          <div>
+            <span class="meta-label">Perspective</span>
+            <span class="meta-value">Senior architect</span>
+          </div>
+          <div>
+            <span class="meta-label">Learning goal</span>
+            <span class="meta-value">Understand design, implementation, and scale tradeoffs</span>
+          </div>
+          <div>
+            <span class="meta-label">Best for</span>
+            <span class="meta-value">System design learners, architects, backend engineers</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A URL shortener looks deceptively simple: take a long URL, return a small alias, and redirect users when that
+          alias is opened. A senior architect sees a broader problem. The system must generate unique keys at scale,
+          keep redirects fast, absorb traffic bursts, protect against abuse, support analytics, and remain operable when
+          usage patterns shift from small workloads to internet-scale distribution.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core architectural mindset:</strong> do not design only for the happy path of create-and-redirect.
+            Design for scale, skewed traffic, misuse, observability, evolution, and operational recovery.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Problem framing</span>
+        <h2>What the system must really do</h2>
+        <ul class="check-list">
+          <li>Create short links quickly and guarantee key uniqueness.</li>
+          <li>Redirect in very low latency because users feel redirect slowness immediately.</li>
+          <li>Handle read-heavy traffic where redirects greatly outnumber creates.</li>
+          <li>Protect against malicious URLs, spam campaigns, and traffic abuse.</li>
+          <li>Support optional features such as custom aliases, expiration, QR links, and analytics.</li>
+          <li>Stay easy to evolve from a simple service into a multi-region platform.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Senior architect lens</span>
+        <h2>How to think about this before drawing boxes</h2>
+        <p>
+          The first design question is not which database to choose. It is which parts of the workload are dominant and
+          where the failure cost is highest. In a URL shortener, redirect traffic is typically much larger than link
+          creation traffic, so the read path must be extremely optimized. That changes the architecture: caching,
+          replication, edge proximity, and hot-key mitigation become more important than exotic write pipelines.
+        </p>
+        <p>
+          The second question is which guarantees are strict. Usually, unique short-code generation is strict, while
+          click analytics can be eventually consistent. Making that distinction early prevents overengineering.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">System design learning path</span>
+        <h2>Study this topic in four layers</h2>
+        <div class="resource-grid">
+          <a class="resource-link" href="./resources/high-level-design.html">
+            <span class="resource-title">High-Level Design</span>
+            <span class="resource-meta">Architecture, requirements, traffic flow, scaling priorities, and component choices.</span>
+          </a>
+          <a class="resource-link" href="./resources/low-level-design.html">
+            <span class="resource-title">Low-Level Design</span>
+            <span class="resource-meta">Data model, APIs, schemas, short-code generation, caching, and redirect logic.</span>
+          </a>
+          <a class="resource-link" href="./resources/implementation-guide.html">
+            <span class="resource-title">Implementation Guide</span>
+            <span class="resource-meta">Practical backend implementation ideas, code structure, and rollout approach.</span>
+          </a>
+          <a class="resource-link" href="./resources/senior-architect-playbook.html">
+            <span class="resource-title">Senior Architect Playbook</span>
+            <span class="resource-meta">Tradeoffs, failure modes, multi-region thinking, security, and interview-level shortcuts.</span>
+          </a>
+          <a class="resource-link" href="../../projects/url-shortener-app/index.html">
+            <span class="resource-title">Runnable Demo Project</span>
+            <span class="resource-meta">React + Node implementation with live backend mode and automatic mock fallback.</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Baseline requirements</span>
+        <h2>Functional and non-functional expectations</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>What matters</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Functional</td>
+              <td>Create short URLs, resolve short codes, optional aliasing, expiration, analytics, and admin controls.</td>
+            </tr>
+            <tr>
+              <td>Latency</td>
+              <td>Redirect path should usually complete in tens of milliseconds at the service layer.</td>
+            </tr>
+            <tr>
+              <td>Availability</td>
+              <td>Redirect service must stay highly available because every shared link depends on it.</td>
+            </tr>
+            <tr>
+              <td>Scalability</td>
+              <td>Expect read-heavy traffic, bursty hot links, and the need for horizontal scaling.</td>
+            </tr>
+            <tr>
+              <td>Security</td>
+              <td>Spam prevention, malicious URL checks, rate limits, and abuse reporting are essential.</td>
+            </tr>
+            <tr>
+              <td>Operability</td>
+              <td>Tracing, metrics, dashboards, replay-safe analytics pipelines, and rollback paths matter early.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A strong URL shortener design is not about saying “use cache, DB, and load balancer.” It is about identifying
+          the dominant read path, protecting key generation and redirect latency, and making smart tradeoffs between
+          strict consistency and scalable auxiliary features like analytics.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

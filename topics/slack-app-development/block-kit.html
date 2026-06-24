@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Block Kit | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Slack messaging app open on laptop and phone"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Core · UI · 45 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@austindistel" target="_blank" rel="noopener">Austin Distel</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Block Kit — Slack's UI Framework</h1>
+        <p class="summary">
+          Block Kit is Slack's declarative UI framework. Messages, modals, and Home tabs are JSON
+          arrays of <em>blocks</em> composed of <em>elements</em>. This page walks the block types,
+          element types, validation rules, and the Block Kit Builder workflow.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack core</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Compose any Slack UI fluently</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~45 min read + practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Modals, App Home, rich messages</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Block Kit replaced the older "attachments" API. A message is now an array of blocks; each
+          block has a <code>type</code> and (often) a set of nested <code>elements</code>. The result
+          renders identically across desktop, mobile, and notification surfaces.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Workflow:</strong> design in <a href="https://app.slack.com/block-kit-builder" target="_blank" rel="noopener">Block Kit Builder</a> first → paste the JSON → wire in dynamic data
+            → ship. Don't write block JSON from scratch in your editor; the Builder is faster and
+            catches errors immediately.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Block types</h2>
+        <ul>
+          <li><strong>section</strong> — text + optional accessory (button, image, select). The workhorse.</li>
+          <li><strong>divider</strong> — horizontal line. Use sparingly.</li>
+          <li><strong>header</strong> — large bold text. <code>plain_text</code> only.</li>
+          <li><strong>context</strong> — small text + small images. Footer/metadata.</li>
+          <li><strong>actions</strong> — a row of interactive elements (buttons, selects, etc.).</li>
+          <li><strong>input</strong> — only valid in modals/Home; one editable field.</li>
+          <li><strong>image</strong> — an image with alt text.</li>
+          <li><strong>file</strong> — embed a file uploaded to Slack.</li>
+          <li><strong>video</strong> — inline video player.</li>
+          <li><strong>rich_text</strong> — read-only rich text (mostly for representing existing message content).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Element types</h2>
+        <ul>
+          <li><strong>button</strong> — primary action element. Has <code>style</code>: default, primary, danger.</li>
+          <li><strong>static_select</strong> / <strong>multi_static_select</strong> — pick from a static list.</li>
+          <li><strong>users_select</strong>, <strong>channels_select</strong>, <strong>conversations_select</strong> — Slack-aware pickers.</li>
+          <li><strong>external_select</strong> — options loaded from your endpoint.</li>
+          <li><strong>datepicker</strong>, <strong>timepicker</strong>, <strong>datetimepicker</strong>.</li>
+          <li><strong>plain_text_input</strong> (single + multiline), <strong>number_input</strong>, <strong>email_input</strong>, <strong>url_input</strong>.</li>
+          <li><strong>checkboxes</strong>, <strong>radio_buttons</strong>.</li>
+          <li><strong>overflow</strong> — three-dot menu.</li>
+          <li><strong>image</strong> as element (e.g., section accessory).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Worked example — an approval message</h2>
+        <pre class="code-block"><code>const approvalMessage = {
+  channel: 'C1',
+  text: 'PTO request from @amy needs your approval',  // notification fallback
+  blocks: [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: 'PTO Request' },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: '*From:* &lt;@U_AMY&gt;' },
+        { type: 'mrkdwn', text: '*Dates:* May 20 – May 24' },
+        { type: 'mrkdwn', text: '*Reason:* Vacation' },
+        { type: 'mrkdwn', text: '*Days:* 5' },
+      ],
+    },
+    {
+      type: 'actions',
+      block_id: 'approval_actions',
+      elements: [
+        {
+          type: 'button',
+          action_id: 'approve_pto',
+          text: { type: 'plain_text', text: 'Approve' },
+          style: 'primary',
+          value: 'pto:42',
+        },
+        {
+          type: 'button',
+          action_id: 'reject_pto',
+          text: { type: 'plain_text', text: 'Reject' },
+          style: 'danger',
+          value: 'pto:42',
+          confirm: {
+            title:   { type: 'plain_text', text: 'Are you sure?' },
+            text:    { type: 'plain_text', text: 'This will reject the PTO request.' },
+            confirm: { type: 'plain_text', text: 'Reject' },
+            deny:    { type: 'plain_text', text: 'Cancel' },
+          },
+        },
+      ],
+    },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: 'Submitted 2026-05-11 · ID 42' }],
+    },
+  ],
+};</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>The validation rules that catch you</h2>
+        <ul>
+          <li><strong>50 blocks max</strong> per message. 100 in modals/App Home.</li>
+          <li><strong>Header text max 150 chars</strong>, plain_text only.</li>
+          <li><strong>section text max 3000 chars</strong>; sections support up to 10 <code>fields</code>.</li>
+          <li><strong>actions</strong> — up to 25 elements per row.</li>
+          <li><strong>input blocks</strong> require unique <code>block_id</code> and unique <code>action_id</code> on the inner element.</li>
+          <li><strong>buttons</strong> need <code>plain_text</code> labels (no markdown).</li>
+          <li><strong>Images</strong> require <code>alt_text</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Reading modal state</h2>
+        <p>
+          Modal submissions arrive as <code>view.state.values</code>: an object keyed by
+          <code>block_id</code>, then by <code>action_id</code>, then a per-element value.
+        </p>
+        <pre class="code-block"><code>app.view('feedback_modal', async ({ ack, view }) =&gt; {
+  await ack();
+  const v = view.state.values;
+  const message    = v.b_msg.a_msg.value;                    // plain_text_input
+  const reason     = v.b_reason.a_reason.selected_option.value; // static_select
+  const dueDate    = v.b_due.a_due.selected_date;            // datepicker
+  const ccUserIds  = v.b_cc.a_cc.selected_users;             // multi_users_select
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Composition patterns</h2>
+        <ul>
+          <li><strong>Builder functions</strong> — write small functions that return blocks. Compose with spread.</li>
+          <li><strong>Snapshot tests</strong> — Block Kit JSON is stable structured output, perfect for Jest snapshots.</li>
+          <li><strong>Block Kit Builder permalink</strong> — when designing, share the Builder URL with PMs/designers for review.</li>
+          <li><strong>Localization</strong> — wrap every <code>plain_text</code> string in your i18n function.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Always design in Block Kit Builder first.</li>
+          <li>Send a <code>text</code> fallback for notifications + accessibility.</li>
+          <li>Memorize the validation limits — they bite at runtime, not compile time.</li>
+          <li>Write small builder functions that return blocks; snapshot-test them.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://api.slack.com/block-kit" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Block Kit
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/reference/block-kit" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Block Kit reference (in depth)
+            </a>
+          </li>
+          <li>
+            <a href="https://app.slack.com/block-kit-builder" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Tool</span>
+              Block Kit Builder
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

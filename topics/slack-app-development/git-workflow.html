@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Git Workflow + Merge vs. Rebase | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Tooling · 90 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Git Workflow + Merge vs. Rebase</h1>
+        <p class="summary">
+          Git is the substrate every other engineering practice rests on. Three short videos cover the
+          mental model, daily workflow, and the merge vs. rebase tradeoff. This page summarizes the
+          ones you'll use every day on a Slack-app team.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Move confidently in real shared repos</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~90 min total (3 videos)</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">Every PR you open against the team's repo</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Git is two things: a content-addressable store of snapshots (commits) and a set of pointers
+          (branches, tags, HEAD) into it. Once that mental model clicks, every command makes sense —
+          rebase, cherry-pick, reset, even reflog.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>One sentence:</strong> commits are immutable; branches are <em>movable pointers</em>;
+            <code>HEAD</code> is "where I am". Everything else is a verb that moves pointers around.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The daily verbs</h2>
+        <pre class="code-block"><code>git clone &lt;url&gt;                          # bring the repo down
+git checkout -b feature/standup           # branch from current HEAD
+# ...edit files...
+git status                                # what changed
+git diff                                  # what changed (line by line)
+git add -p                                # stage hunks (review as you go)
+git commit -m "feat(standup): add /standup command"
+git push -u origin feature/standup        # push and set upstream
+# ...open PR...
+
+git fetch origin                          # update local refs (no merge)
+git rebase origin/main                    # replay my commits onto latest main
+# ...resolve any conflicts, edit files, then:
+git add &lt;files&gt;
+git rebase --continue
+git push --force-with-lease               # safe force-push of rebased branch</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Merge vs. rebase</h2>
+        <h3>Merge</h3>
+        <p>
+          <code>git merge feature</code> on <code>main</code> creates a merge commit that joins two
+          histories. The full branching graph is preserved.
+        </p>
+        <p><strong>Pros:</strong> non-destructive; preserves what really happened.</p>
+        <p><strong>Cons:</strong> messy history with many parallel lines; <code>git log</code> gets noisy.</p>
+
+        <h3>Rebase</h3>
+        <p>
+          <code>git rebase main</code> on <code>feature</code> replays your branch's commits on top of
+          the latest <code>main</code>, producing a linear history.
+        </p>
+        <p><strong>Pros:</strong> clean linear history; easy to bisect; great for review.</p>
+        <p><strong>Cons:</strong> rewrites commit hashes; never rebase a branch others are based on without coordination.</p>
+
+        <h3>The team rule</h3>
+        <p>
+          Most modern teams: <strong>rebase your feature branch onto main</strong> before opening / updating a PR;
+          <strong>merge with --no-ff into main</strong> on PR approval (or squash-merge for tiny PRs).
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Force pushing safely</h2>
+        <p>
+          After a rebase, your local commits have new hashes. To push, you need a force push.
+          <code>git push --force-with-lease</code> is the safe version: it refuses to overwrite if
+          someone else pushed to your branch since you last fetched.
+        </p>
+        <pre class="code-block"><code># Safe — refuses if remote moved
+git push --force-with-lease
+
+# Dangerous — never do this on shared branches
+git push --force</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Commit hygiene</h2>
+        <ul>
+          <li><strong>One logical change per commit.</strong> Refactors and features in separate commits.</li>
+          <li><strong>Conventional commits</strong> — <code>feat:</code>, <code>fix:</code>, <code>refactor:</code>, <code>docs:</code>, <code>chore:</code>. Tooling can generate changelogs automatically.</li>
+          <li><strong>Imperative mood.</strong> "Add /standup command" not "Added /standup command".</li>
+          <li><strong>Body explains why.</strong> The diff shows what; the commit body explains the reasoning.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Recovering from disasters</h2>
+        <ul>
+          <li><strong>Bad commit:</strong> <code>git revert &lt;sha&gt;</code> — adds a new commit that undoes it.</li>
+          <li><strong>Wrong branch:</strong> <code>git stash</code> → <code>git checkout right-branch</code> → <code>git stash pop</code>.</li>
+          <li><strong>Lost commits:</strong> <code>git reflog</code> shows every move <code>HEAD</code> made; reset to a previous state.</li>
+          <li><strong>Broken merge:</strong> <code>git merge --abort</code>.</li>
+          <li><strong>Broken rebase:</strong> <code>git rebase --abort</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Slack-app PR norms</h2>
+        <ul>
+          <li>Small, atomic PRs &mdash; one feature at a time. Reviewers will actually read them.</li>
+          <li>Run lint + tests locally before pushing; let CI confirm.</li>
+          <li>Update the PR description with the Slack-app behavior change (screenshots of message UI help).</li>
+          <li>Rebase onto main right before merge — keeps history linear in <code>main</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Commits are immutable; branches are pointers. Everything else is a verb on pointers.</li>
+          <li>Rebase your feature branch onto main; merge into main on approval.</li>
+          <li>Always <code>--force-with-lease</code>, never plain <code>--force</code>.</li>
+          <li>Small atomic commits + conventional messages = easy PR review and great <code>git log</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=e9lnsKot_SQ" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              How Git Works: Explained in 4 Minutes
+            </a>
+          </li>
+          <li>
+            <a href="https://www.youtube.com/watch?v=8JJ101D3knE" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Git Tutorial for Beginners (Mosh)
+            </a>
+          </li>
+          <li>
+            <a href="https://www.youtube.com/watch?v=0chZFIZLR_0" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Git MERGE vs REBASE: Everything You Need to Know
+            </a>
+          </li>
+          <li>
+            <a href="https://git-scm.com/book/en/v2" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Pro Git book (free)
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

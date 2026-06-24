@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AWS &amp; Cloud Computing | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Cloud · 60 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>AWS &amp; Cloud Computing for Slack Apps</h1>
+        <p class="summary">
+          The AWS surface every backend engineer is expected to know — compute, storage, databases,
+          networking, IAM, observability — and the typical "first deploy" architectures for a Bolt
+          for JS Slack app on AWS.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Pick a sane first-deploy architecture</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~60 min</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">ECS Fargate, Lambda, RDS, ElastiCache, Secrets Manager</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          You don't need to know all 200+ AWS services. You need a working map of the dozen or so that
+          come up in real architecture discussions, and a default deploy shape for a Slack app on AWS.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The dozen services to know</h2>
+        <h3>Compute</h3>
+        <ul>
+          <li><strong>EC2</strong> — virtual machines. Use when you need full control or run heavy stateful workloads.</li>
+          <li><strong>ECS / Fargate</strong> — managed containers. Fargate runs containers without you running EC2.</li>
+          <li><strong>Lambda</strong> — serverless functions. Pay per ms; cold-starts; great for low-traffic apps.</li>
+          <li><strong>EKS</strong> — managed Kubernetes. Only when you have real k8s expertise and need it.</li>
+        </ul>
+
+        <h3>Storage</h3>
+        <ul>
+          <li><strong>S3</strong> — object storage. For files, backups, logs, static sites.</li>
+          <li><strong>EBS</strong> — block storage attached to EC2.</li>
+          <li><strong>EFS</strong> — shared file system; rarely needed for Slack apps.</li>
+        </ul>
+
+        <h3>Databases</h3>
+        <ul>
+          <li><strong>RDS (Postgres / MySQL)</strong> — managed relational DB. Default for installation store + audit log.</li>
+          <li><strong>DynamoDB</strong> — managed NoSQL key-value; pay-per-request mode is great for low traffic.</li>
+          <li><strong>ElastiCache (Redis)</strong> — managed Redis. Default for caching, dedup, locks.</li>
+          <li><strong>OpenSearch</strong> — full-text and analytics; only for search-heavy features.</li>
+        </ul>
+
+        <h3>Networking</h3>
+        <ul>
+          <li><strong>VPC</strong> — private network for your resources.</li>
+          <li><strong>ALB / NLB</strong> — load balancers in front of ECS / EC2.</li>
+          <li><strong>Route 53</strong> — DNS.</li>
+          <li><strong>CloudFront</strong> — CDN; only if you serve static assets at scale.</li>
+          <li><strong>API Gateway</strong> — front door for Lambda / HTTP.</li>
+        </ul>
+
+        <h3>Identity, secrets, observability</h3>
+        <ul>
+          <li><strong>IAM</strong> — roles &amp; policies. Principle: least privilege.</li>
+          <li><strong>Secrets Manager / SSM Parameter Store</strong> — store Slack tokens, signing secrets, DB credentials. Never <code>.env</code> on a server.</li>
+          <li><strong>CloudWatch</strong> — logs, metrics, alarms.</li>
+          <li><strong>X-Ray</strong> — distributed tracing.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Three first-deploy shapes for a Bolt app</h2>
+        <h3>Shape A — ECS Fargate (recommended default)</h3>
+        <pre class="code-block"><code>Internet → Route 53 → ALB → ECS Fargate (2 Bolt containers)
+                                  ├─ RDS Postgres (installations, audit)
+                                  ├─ ElastiCache Redis (cache, dedup, locks)
+                                  └─ Secrets Manager (tokens, signing secret)</code></pre>
+        <p>Long-lived processes, easy logging, simple model. Best if your app is HTTP-based and modestly active.</p>
+
+        <h3>Shape B — Lambda + API Gateway (event-only)</h3>
+        <pre class="code-block"><code>Slack → API Gateway → Lambda (single Bolt handler, AwsLambdaReceiver)
+                            ├─ DynamoDB (installations)
+                            └─ Secrets Manager</code></pre>
+        <p>No idle cost; cold-starts can hurt the 3-second ack. Good for low-traffic internal apps.</p>
+
+        <h3>Shape C — Socket Mode on Fargate (no public URL)</h3>
+        <pre class="code-block"><code>ECS Fargate (1+ Bolt container, Socket Mode)
+              ├─ RDS Postgres
+              ├─ ElastiCache Redis
+              └─ Secrets Manager</code></pre>
+        <p>No ALB, no public ingress. Great for behind-the-firewall apps and dev sandboxes.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>IAM in one screen</h2>
+        <ul>
+          <li><strong>Identity</strong> — users, roles, federated identities.</li>
+          <li><strong>Policy</strong> — JSON document granting actions on resources.</li>
+          <li><strong>Trust policy</strong> — who can <em>assume</em> a role.</li>
+          <li><strong>Principle of least privilege</strong> — start with no permissions; grant exactly what the app needs.</li>
+        </ul>
+        <p>
+          Your ECS task should run with an <strong>IAM Task Role</strong> that grants only:
+          read on the specific Secrets Manager entries, write to its CloudWatch log group, and connect
+          to its RDS / ElastiCache. Never use long-lived AWS access keys in env vars.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Cost mental model</h2>
+        <ul>
+          <li><strong>Fargate (2 × 0.5 vCPU 1 GB):</strong> ~$30/mo.</li>
+          <li><strong>RDS Postgres (db.t4g.micro):</strong> ~$15/mo.</li>
+          <li><strong>ElastiCache Redis (cache.t4g.micro):</strong> ~$13/mo.</li>
+          <li><strong>ALB:</strong> ~$20/mo.</li>
+          <li><strong>Secrets Manager:</strong> $0.40 / secret / mo.</li>
+        </ul>
+        <p>A small Slack app running on AWS is realistically &lt; $100/mo until it grows.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>ECS Fargate + RDS + ElastiCache is the safe default for an HTTP Bolt app.</li>
+          <li>Lambda only if your app is genuinely event-driven and tolerates cold-starts.</li>
+          <li>IAM Task Roles + Secrets Manager — never long-lived keys, never <code>.env</code> in prod.</li>
+          <li>You don't need 200 services; you need 12 used well.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=O61gbmYZJmE" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              AWS &amp; Cloud Computing for Beginners
+            </a>
+          </li>
+          <li>
+            <a href="https://aws.amazon.com/architecture/well-architected/" target="_blank" rel="noopener">
+              <span class="resource-kind guide">Guide</span>
+              AWS Well-Architected Framework
+            </a>
+          </li>
+          <li>
+            <a href="https://docs.aws.amazon.com/lambda/latest/dg/welcome.html" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              AWS Lambda
+            </a>
+          </li>
+          <li>
+            <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              AWS ECS
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Distributed System Patterns | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Distributed · 15 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Top 7 Distributed System Patterns</h1>
+        <p class="summary">
+          Ambassador, circuit breaker, CQRS, event sourcing, leader election, publisher–subscriber,
+          and sharding. Even at modest scale, your Slack app will touch at least three of them. This
+          page maps each pattern to a concrete Slack-app problem.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Recognize when each pattern earns its keep</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~15 min</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">Outbound calls, idempotency, fan-out, sharding</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Distributed-system patterns are names for problems other people already solved. You will
+          re-discover them painfully if you don't learn them up front.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>1 · Ambassador</h2>
+        <p>
+          A small proxy in front of an external service, handling cross-cutting concerns (retries,
+          metrics, circuit breaking, auth). Often runs as a sidecar.
+        </p>
+        <p><strong>Slack fit:</strong> wrap your Slack <code>WebClient</code> in a thin "Ambassador"
+          that adds tracing, retries, and rate-limit awareness — every Web API call goes through it.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>2 · Circuit Breaker</h2>
+        <p>
+          When a downstream service fails too often, "open the circuit" — short-circuit calls and fail
+          fast for a cooldown period. Prevents cascading failures.
+        </p>
+        <p><strong>Slack fit:</strong> wrap outbound calls (Jira, GitHub, your own API) in a circuit
+          breaker (<code>opossum</code>, <code>cockatiel</code>). When Jira is down, your slash command
+          fails with a friendly "service unavailable" instead of timing out.</p>
+        <pre class="code-block"><code>import { circuitBreaker, ConsecutiveBreaker, retry, ExponentialBackoff } from 'cockatiel';
+
+const breaker = circuitBreaker(retry({ maxAttempts: 3, backoff: new ExponentialBackoff() }), {
+  halfOpenAfter: 10_000,
+  breaker: new ConsecutiveBreaker(5),
+});
+
+const result = await breaker.execute(() =&gt; fetch('https://jira/api/...'));</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>3 · CQRS (Command Query Responsibility Segregation)</h2>
+        <p>
+          Reads and writes go through separate models. Writes go to the canonical store; reads go to
+          a denormalized read store optimized for query.
+        </p>
+        <p><strong>Slack fit:</strong> heavy reporting dashboards over Slack event data — write events
+          to Postgres, project them into a denormalized read table for fast dashboard queries.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>4 · Event Sourcing</h2>
+        <p>
+          Persist every state change as an event. Rebuild current state by replaying events. Gives
+          you an audit log for free and time-travel debugging.
+        </p>
+        <p><strong>Slack fit:</strong> a workflow app where every transition (request → approve → fulfill)
+          becomes an event, and the current state is a projection. Excellent audit story.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>5 · Leader Election</h2>
+        <p>
+          One node in a cluster is elected leader; only the leader runs certain tasks. Implementations:
+          ZooKeeper, etcd, Redis Redlock, or a simple DB-backed lease.
+        </p>
+        <p><strong>Slack fit:</strong> running a daily standup cron — only one Bolt replica should
+          fire it. Use a Redis lease (<code>SET lock:cron 1 NX EX 90</code>) renewed every 30s.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>6 · Publisher–Subscriber</h2>
+        <p>
+          Publishers emit events to a topic; subscribers receive copies independently. Loose coupling
+          between producers and consumers.
+        </p>
+        <p><strong>Slack fit:</strong> a "user submitted feedback" event published to a topic;
+          subscribers handle storage, Slack notification, and analytics independently. Add a new
+          subscriber later without touching the publisher.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>7 · Sharding</h2>
+        <p>
+          Split data across nodes by a shard key (user id, region, hash). Each shard handles a portion
+          of the load.
+        </p>
+        <p><strong>Slack fit:</strong> Enterprise-Grid scale apps shard by <code>enterprise_id</code>
+          + <code>team_id</code>. Even at smaller scale, shard background queues by team to keep one
+          noisy workspace from blocking others.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>The two foundational properties to bake in</h2>
+        <h3>Idempotency</h3>
+        <p>
+          The same operation applied twice has the same effect as once. Critical for Slack — Events
+          API retries, button double-clicks, webhook redelivery. Use idempotency keys
+          (<code>event_id</code>, <code>request_id</code>) and dedup with Redis.
+        </p>
+
+        <h3>Backpressure</h3>
+        <p>
+          When consumers are slower than producers, push back instead of falling over. Bounded queues,
+          rate limiting, 429 responses with <code>Retry-After</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Circuit breakers + idempotency are the two patterns every Slack app needs first.</li>
+          <li>Leader election (Redis lease) for any cron / scheduled task across replicas.</li>
+          <li>Pub/sub when you need fan-out without coupling producer to consumers.</li>
+          <li>Don't introduce a pattern unless you have a measured pain it solves.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=nH4qjmP2KEE" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              Top 7 Most-Used Distributed System Patterns
+            </a>
+          </li>
+          <li>
+            <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/" target="_blank" rel="noopener">
+              <span class="resource-kind guide">Guide</span>
+              Martin Fowler — Patterns of Distributed Systems
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

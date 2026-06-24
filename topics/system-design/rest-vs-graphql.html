@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>REST vs GraphQL | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1504639725590-34d0984388bd?w=1600&h=700&fit=crop&auto=format&q=80" alt="API design approaches compared" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · API Design · Concept 27 · 10 min</span></div>
+        </figure>
+        <h1>REST vs GraphQL</h1>
+        <p class="summary">REST's resource-centric model vs GraphQL's query language for APIs — the overfetching problem, the N+1 query problem, schema evolution, and when each is genuinely the better choice. Plus gRPC for internal service communication where performance matters most.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">27 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">API Design</span></div>
+          <div><span class="meta-label">GraphQL used by</span><span class="meta-value">GitHub, Shopify, Facebook, Twitter</span></div>
+          <div><span class="meta-label">gRPC used by</span><span class="meta-value">Google, Netflix, Uber (internal services)</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">REST dominated web APIs for 15 years. GraphQL emerged from Facebook's need to serve a mobile app with limited bandwidth — every byte mattered, and REST's fixed response shapes sent too much data on some calls and required too many calls on others. Today both are valid choices, and the right one depends on who your clients are and what they need.</p>
+        <div class="callout"><p><strong>The real decision:</strong> REST is the right default for most teams. GraphQL is worth the complexity when you have many different clients with different data needs (web, mobile, partner integrations), or when overfetching/underfetching are genuine pain points you've measured — not assumed.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Comparison</span>
+        <h2>REST vs GraphQL — the practical trade-offs</h2>
+        <div class="diagram-box">
+<span class="step">REST: overfetching and multiple round trips</span>
+
+Load a user profile page — needs: name, avatar, recent posts, post like counts
+
+GET /users/123             → { id, name, avatar, email, address, phone, ... } ← <span class="warn">overfetching</span>
+GET /users/123/posts       → [ {id, title, body, createdAt, ...}, ... ]
+GET /posts/1/likes/count   → { count: 42 }
+GET /posts/2/likes/count   → { count: 17 }
+...
+<span class="warn">N+1 requests if you have N posts</span>
+
+<span class="step">GraphQL: one request, exactly the data needed</span>
+
+POST /graphql
+{
+  user(id: "123") {
+    name
+    avatar
+    posts(limit: 5) {
+      title
+      likeCount   ← resolved in one DB query with JOIN
+    }
+  }
+}
+
+Response: exactly those 5 fields. <span class="ok">No overfetching. One round trip.</span>
+
+<span class="step">GraphQL N+1 problem — if NOT using DataLoader</span>
+
+Query: users { posts { author { name } } }
+Resolves: 1 query for users, N queries for posts, N*M queries for authors
+→ <span class="warn">100 users × 10 posts = 1001 queries</span>
+
+<span class="ok">Fix: DataLoader batches and deduplicates resolver calls</span>
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th></th><th>REST</th><th>GraphQL</th><th>gRPC</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Interface</strong></td><td>Resource endpoints</td><td>Typed schema, single endpoint</td><td>Service methods (IDL)</td></tr>
+            <tr><td><strong>Data fetching</strong></td><td>Fixed response shapes</td><td>Client specifies exact fields</td><td>Fixed protocol buffers</td></tr>
+            <tr><td><strong>Overfetching</strong></td><td>Common (fixed shapes)</td><td>Eliminated</td><td>Minimal (compact binary)</td></tr>
+            <tr><td><strong>N+1 problem</strong></td><td>Managed with includes/embed</td><td>DataLoader required</td><td>N/A (RPC model)</td></tr>
+            <tr><td><strong>Caching</strong></td><td>HTTP cache (GET = free)</td><td>POST only → no HTTP cache</td><td>Per-method cache</td></tr>
+            <tr><td><strong>Learning curve</strong></td><td>Low</td><td>Medium (schema, resolvers, DataLoader)</td><td>High (protobuf, code-gen)</td></tr>
+            <tr><td><strong>Best for</strong></td><td>Public APIs, CRUD, webhooks</td><td>Complex frontends, multiple clients</td><td>Internal microservices</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>GraphQL with DataLoader to solve the N+1 problem</h2>
+        <pre><code class="language-js">import { ApolloServer, gql } from '@apollo/server';
+import DataLoader from 'dataloader';
+import { Pool } from 'pg';
+
+const db = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// ─── SCHEMA ────────────────────────────────────────────────────────────────
+const typeDefs = gql`
+  type User {
+    id:     ID!
+    name:   String!
+    email:  String!
+    posts:  [Post!]!
+  }
+
+  type Post {
+    id:        ID!
+    title:     String!
+    body:      String!
+    likeCount: Int!
+    author:    User!
+  }
+
+  type Query {
+    user(id: ID!): User
+    users: [User!]!
+  }
+`;
+
+// ─── DATALOADERS — batch and deduplicate resolver calls ───────────────────
+// Without DataLoader: resolving 10 users × 5 posts each = 10 posts queries
+// With DataLoader: 1 batched query for all post IDs
+
+function createLoaders() {
+  return {
+    userById: new DataLoader(async (userIds) => {
+      const { rows } = await db.query(
+        'SELECT * FROM users WHERE id = ANY($1)',
+        [userIds]
+      );
+      // DataLoader requires results in same order as input IDs
+      const byId = Object.fromEntries(rows.map(r => [r.id, r]));
+      return userIds.map(id => byId[id] ?? null);
+    }),
+
+    postsByUserId: new DataLoader(async (userIds) => {
+      const { rows } = await db.query(
+        'SELECT * FROM posts WHERE user_id = ANY($1) ORDER BY created_at DESC',
+        [userIds]
+      );
+      // Group posts by user_id
+      const byUserId = {};
+      rows.forEach(post => {
+        if (!byUserId[post.user_id]) byUserId[post.user_id] = [];
+        byUserId[post.user_id].push(post);
+      });
+      return userIds.map(id => byUserId[id] ?? []);
+    }),
+  };
+}
+
+// ─── RESOLVERS ────────────────────────────────────────────────────────────
+const resolvers = {
+  Query: {
+    user:  (_parent, { id }, { loaders }) => loaders.userById.load(id),
+    users: (_parent, _args, { db }) => db.query('SELECT * FROM users').then(r => r.rows),
+  },
+
+  User: {
+    // This resolver will be called for every User in the result set.
+    // Without DataLoader: N queries. With DataLoader: 1 batched query.
+    posts: (user, _args, { loaders }) => loaders.postsByUserId.load(user.id),
+  },
+
+  Post: {
+    author: (post, _args, { loaders }) => loaders.userById.load(post.user_id),
+    likeCount: async (post) => {
+      const { rows } = await db.query('SELECT COUNT(*) FROM likes WHERE post_id = $1', [post.id]);
+      return parseInt(rows[0].count);
+    },
+  },
+};
+
+// ─── SERVER — loaders created per request (not shared) ───────────────────
+const server = new ApolloServer({ typeDefs, resolvers });
+
+// Each request gets its own DataLoader instances (prevents cache leaking between users)
+const context = ({ req }) => ({ db, loaders: createLoaders(), user: req.user });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>GitHub GraphQL API and when NOT to use GraphQL</h2>
+        <p><strong>GitHub GraphQL API:</strong> GitHub migrated from REST to GraphQL for their v4 API. Their key motivation: the REST API required many round trips to build complex views (issue + comments + reactions + labels + assignees). With GraphQL, integrators fetch all of it in one query, specifying only the fields they need. GitHub still maintains the REST API (v3) for simpler use cases.</p>
+        <p><strong>When GraphQL is NOT worth it:</strong> Public APIs serving simple CRUD (GET /products/:id) don't need GraphQL's complexity. HTTP caching on REST is extremely valuable for read-heavy APIs and works for free — GraphQL's POST-only model requires custom cache keys. Simple internal services or webhooks don't benefit from a query language. Start with REST; introduce GraphQL when you have evidence of the problem it solves.</p>
+        <p><strong>gRPC for internal services:</strong> When two microservices communicate thousands of times per second, gRPC's binary protocol (protobuf) and HTTP/2 multiplexing provide 5–10× better throughput than REST+JSON. Code generation from .proto files gives type-safe clients in any language. Used heavily by Google, Netflix, and Uber for internal service-to-service calls.</p>
+
+        <div class="insight-box"><strong>REST + sparse fieldsets is often good enough.</strong> Before adopting GraphQL, try: <code>GET /users/123?fields=id,name,avatar</code>. Many REST frameworks support this. It solves overfetching without the N+1 complexity, the DataLoader requirement, the POST-only caching constraint, and the learning curve of an entirely different API paradigm.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>REST is the right default — it is simpler, HTTP-cacheable, and well-understood. GraphQL is worth the complexity when many different clients have different data needs and overfetching/underfetching are genuine measured problems. If you choose GraphQL, DataLoader is mandatory — without it, every relationship in your schema becomes an N+1 query. gRPC is the choice for internal microservice-to-microservice communication where throughput matters and both sides can run code generation. Don't let hype drive the choice — let the actual client data requirements drive it.</p>
+      </section>
+    </main>
+  </body>
+</html>

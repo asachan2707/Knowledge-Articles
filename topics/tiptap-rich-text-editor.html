@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Building a Feature-Rich Text Editor with Tiptap and React | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .feature-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:.75rem; margin:.85rem 0; }
+      .feature-item { border:1px solid var(--border); border-radius:8px; padding:.7rem .9rem; font-size:.86rem; }
+      .feature-item h4 { margin:0 0 .2rem; font-family:Arial,Helvetica,sans-serif; font-size:.88rem; }
+      .feature-item p  { margin:0; font-size:.82rem; color:var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1484480974693-6ca0a78fb36b?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Rich text editor interface" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React · Tiptap · Project · Frontend · 22 min read</span>
+          </div>
+        </figure>
+        <h1>Building a Feature-Rich Text Editor with Tiptap and React</h1>
+        <p class="summary">
+          A complete project guide for building a rich text editor with Tiptap v2 and React — covering
+          setup, core extensions, custom extensions, toolbar components, collaboration-ready output
+          formats, and real-world patterns for editor state management, image uploads, and AI
+          integration.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Category</span><span class="meta-value">Project</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Tiptap v2 · React · TypeScript · ProseMirror</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Tiptap is a ProseMirror wrapper that makes building rich text editors in React practical.
+          ProseMirror is powerful but demands schema expertise; Tiptap abstracts the schema complexity
+          with a composable extension system. You get the full power of ProseMirror (collaborative
+          editing, custom nodes, marks) with an API that doesn't require a three-day learning curve.
+        </p>
+        <div class="callout">
+          <p><strong>Why Tiptap over alternatives:</strong> Quill (old, limited extension model),
+          Draft.js (Facebook's, deprecated in spirit), Slate (flexible but low-level), ProseMirror
+          (full power, steep curve). Tiptap gives you ProseMirror's power with React-native ergonomics
+          and a rich official extension ecosystem.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Setup</span>
+        <h2>Installation and basic configuration</h2>
+        <pre class="code-block"><code>npm install @tiptap/react @tiptap/pm @tiptap/starter-kit
+# Optional extensions (add as needed)
+npm install @tiptap/extension-placeholder @tiptap/extension-image @tiptap/extension-link
+npm install @tiptap/extension-code-block-lowlight lowlight
+npm install @tiptap/extension-collaboration @tiptap/extension-collaboration-cursor</code></pre>
+
+        <pre class="code-block"><code>// Editor.tsx — minimal working editor
+import { useEditor, EditorContent } from '@tiptap/react';
+import StarterKit from '@tiptap/starter-kit';
+import Placeholder from '@tiptap/extension-placeholder';
+
+interface EditorProps {
+  content?: string;
+  onChange?: (html: string) => void;
+  placeholder?: string;
+}
+
+export function Editor({ content = '', onChange, placeholder = 'Start writing...' }: EditorProps) {
+  const editor = useEditor({
+    extensions: [
+      StarterKit,  // bold, italic, heading, code, lists, blockquote, horizontal rule
+      Placeholder.configure({ placeholder }),
+    ],
+    content,
+    onUpdate: ({ editor }) => onChange?.(editor.getHTML()),
+  });
+
+  return <EditorContent editor={editor} className="editor-content" />;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Core extensions</span>
+        <h2>What StarterKit includes and what to add</h2>
+        <div class="feature-grid">
+          <div class="feature-item"><h4>StarterKit (included)</h4><p>Bold, italic, strike, code, headings 1–6, paragraph, bullet list, ordered list, blockquote, code block, horizontal rule, undo/redo</p></div>
+          <div class="feature-item"><h4>Link</h4><p>Clickable links with open-on-click, auto-link detection, and href editing</p></div>
+          <div class="feature-item"><h4>Image</h4><p>Inline images with optional resize handles (via extension-image-resize)</p></div>
+          <div class="feature-item"><h4>Table</h4><p>Full table support with row/column add/remove, cell merging</p></div>
+          <div class="feature-item"><h4>Mention</h4><p>@mention with dropdown suggestion list — for users, tags, or any entity</p></div>
+          <div class="feature-item"><h4>TaskList</h4><p>Checkable task items — GitHub-flavored checkbox lists</p></div>
+          <div class="feature-item"><h4>CodeBlock Lowlight</h4><p>Syntax-highlighted code blocks via lowlight (highlight.js)</p></div>
+          <div class="feature-item"><h4>Collaboration</h4><p>Y.js CRDT-based real-time collaboration (needs Hocuspocus server)</p></div>
+        </div>
+
+        <pre class="code-block"><code>// Extended editor with common feature set
+import { useEditor, EditorContent } from '@tiptap/react';
+import StarterKit       from '@tiptap/starter-kit';
+import Link             from '@tiptap/extension-link';
+import Image            from '@tiptap/extension-image';
+import TaskList         from '@tiptap/extension-task-list';
+import TaskItem         from '@tiptap/extension-task-item';
+import Placeholder      from '@tiptap/extension-placeholder';
+import { common, createLowlight } from 'lowlight';
+import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
+
+const lowlight = createLowlight(common);
+
+export function RichEditor({ content, onChange }) {
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({ codeBlock: false }), // disable to use CodeBlockLowlight instead
+      Link.configure({ openOnClick: false, autolink: true }),
+      Image.configure({ inline: false, allowBase64: true }),
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      Placeholder.configure({ placeholder: 'Start writing...' }),
+      CodeBlockLowlight.configure({ lowlight }),
+    ],
+    content,
+    onUpdate: ({ editor }) => onChange?.(editor.getHTML()),
+    editorProps: {
+      attributes: { class: 'prose max-w-none focus:outline-none min-h-[200px]' },
+    },
+  });
+
+  return <EditorContent editor={editor} />;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Toolbar</span>
+        <h2>Building a floating and fixed toolbar</h2>
+        <pre class="code-block"><code>// Toolbar.tsx — formatting toolbar using editor.chain()
+interface ToolbarProps { editor: Editor | null; }
+
+export function Toolbar({ editor }: ToolbarProps) {
+  if (!editor) return null;
+
+  return (
+    <div className="toolbar">
+      <ToolbarButton
+        onClick={() => editor.chain().focus().toggleBold().run()}
+        active={editor.isActive('bold')}
+        title="Bold (Cmd+B)"
+      >B</ToolbarButton>
+
+      <ToolbarButton
+        onClick={() => editor.chain().focus().toggleItalic().run()}
+        active={editor.isActive('italic')}
+        title="Italic (Cmd+I)"
+      >I</ToolbarButton>
+
+      {/* Heading selector */}
+      {[1, 2, 3].map(level => (
+        <ToolbarButton
+          key={level}
+          onClick={() => editor.chain().focus().toggleHeading({ level }).run()}
+          active={editor.isActive('heading', { level })}
+        >H{level}</ToolbarButton>
+      ))}
+
+      <ToolbarButton
+        onClick={() => editor.chain().focus().toggleBulletList().run()}
+        active={editor.isActive('bulletList')}
+      >• List</ToolbarButton>
+
+      <ToolbarButton
+        onClick={() => {
+          const url = window.prompt('URL:');
+          if (url) editor.chain().focus().setLink({ href: url }).run();
+        }}
+        active={editor.isActive('link')}
+      >Link</ToolbarButton>
+
+      <ToolbarButton
+        onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+        active={editor.isActive('codeBlock')}
+      >Code</ToolbarButton>
+
+      {/* Undo / Redo */}
+      <ToolbarButton
+        onClick={() => editor.chain().focus().undo().run()}
+        disabled={!editor.can().undo()}
+      >↩</ToolbarButton>
+      <ToolbarButton
+        onClick={() => editor.chain().focus().redo().run()}
+        disabled={!editor.can().redo()}
+      >↪</ToolbarButton>
+    </div>
+  );
+}
+
+// Bubble menu — appears when text is selected
+import { BubbleMenu } from '@tiptap/react';
+function EditorWithBubble({ editor }) {
+  return (
+    <>
+      {editor && (
+        <BubbleMenu editor={editor} tippyOptions={{ duration: 100 }}>
+          <div className="bubble-menu">
+            <button onClick={() => editor.chain().focus().toggleBold().run()}>Bold</button>
+            <button onClick={() => editor.chain().focus().toggleItalic().run()}>Italic</button>
+          </div>
+        </BubbleMenu>
+      )}
+      <EditorContent editor={editor} />
+    </>
+  );
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Image uploads</span>
+        <h2>Handling image uploads with presigned URLs</h2>
+        <pre class="code-block"><code>// Custom image upload extension
+import { Plugin } from '@tiptap/pm/state';
+import Image from '@tiptap/extension-image';
+
+const ImageWithUpload = Image.extend({
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handleDOMEvents: {
+            drop(view, event) {
+              const files = event.dataTransfer?.files;
+              if (!files?.length) return false;
+
+              Array.from(files)
+                .filter(f => f.type.startsWith('image/'))
+                .forEach(async (file) => {
+                  // 1. Upload to your storage
+                  const url = await uploadImage(file);
+                  // 2. Insert into editor at drop position
+                  const { schema } = view.state;
+                  const node = schema.nodes.image.create({ src: url });
+                  const pos  = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
+                  if (pos != null) {
+                    const tr = view.state.tr.insert(pos, node);
+                    view.dispatch(tr);
+                  }
+                });
+              return true;
+            },
+          },
+          // Also handle paste
+          handlePaste(view, event) {
+            const items = event.clipboardData?.items ?? [];
+            for (const item of items) {
+              if (item.type.startsWith('image/')) {
+                item.getAsFile() && uploadImage(item.getAsFile()!).then(url => {
+                  const { schema, tr, selection } = view.state;
+                  const node = schema.nodes.image.create({ src: url });
+                  view.dispatch(tr.replaceSelectionWith(node));
+                });
+                return true;
+              }
+            }
+            return false;
+          },
+        },
+      }),
+    ];
+  },
+});
+
+async function uploadImage(file: File): Promise<string> {
+  const { uploadUrl, publicUrl } = await fetch('/api/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({ filename: file.name, contentType: file.type }),
+    headers: { 'Content-Type': 'application/json' },
+  }).then(r => r.json());
+
+  await fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': file.type } });
+  return publicUrl;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Output formats &amp; AI integration</span>
+        <h2>Getting data out and adding AI features</h2>
+        <pre class="code-block"><code>// Three output formats — choose based on your storage needs
+const editor = useEditor({ extensions, content });
+
+// HTML — rich, human-readable, good for display
+const html = editor.getHTML();
+
+// JSON (TipTap doc format) — structured, re-editable, lossless
+const json = editor.getJSON();
+
+// Markdown (via extension) — plaintext, good for LLM input
+import { generateText } from '@tiptap/core';
+import { markdown } from '@tiptap/pm/markdown';
+// Or use: editor.storage.markdown.getMarkdown() with the Markdown extension
+
+// AI writing assistant integration
+async function aiContinue(editor) {
+  const currentText = editor.getText(); // plain text version
+  const response    = await fetch('/api/ai-continue', {
+    method: 'POST',
+    body: JSON.stringify({ text: currentText }),
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+
+  // Stream AI output directly into editor
+  const insertionPos = editor.state.selection.to;
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value);
+    editor.chain().focus().insertContentAt(insertionPos + buffer.length - 1, buffer.slice(-1)).run();
+  }
+}
+
+// Word count / reading time display
+function EditorStats({ editor }) {
+  if (!editor) return null;
+  const words   = editor.getText().split(/\s+/).filter(Boolean).length;
+  const minutes = Math.max(1, Math.round(words / 200));
+  return <span>{words} words · {minutes} min read</span>;
+}</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Tiptap's extension model is its biggest strength: you get a fully functional editor from
+          StarterKit in 10 lines, then add only what you need. The editor.chain().focus() API is
+          how you drive formatting from toolbar buttons. For production use: store content as JSON
+          (lossless round-trip), handle image uploads via the drop/paste Plugin hooks, and expose
+          plain text output for any AI integration. The collaboration extension (Y.js) is available
+          when you need real-time multi-user editing, backed by the Hocuspocus server.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

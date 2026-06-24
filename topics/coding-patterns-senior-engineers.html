@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>7 Coding Patterns I Stole From Senior Engineers | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .pattern-header { display:flex; align-items:baseline; gap:.75rem; margin-bottom:.5rem; }
+      .pattern-num { font-size:2rem; font-weight:800; color:#e2e8f0; line-height:1; }
+      .pattern-header h3 { margin:0; font-family:Arial,Helvetica,sans-serif; font-size:1.05rem; }
+      .pattern-body { padding-left:2.75rem; }
+      .pattern-divider { border:none; border-top:1px solid #f1f5f9; margin:1.5rem 0; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1516116216624-53e697fedbea?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Senior developer reviewing code" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Engineering · JavaScript · Career · Patterns · 18 min read</span>
+          </div>
+        </figure>
+        <h1>7 Coding Patterns I Stole From Senior Engineers</h1>
+        <p class="summary">
+          Seven JavaScript patterns that separate mid-level developers from senior ones — not because
+          they are complex, but because they encode hard-won lessons about code that has to survive
+          years of production use, changing requirements, and engineers who weren't there when it was written.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">medium.com/skillstuff — adapted and extended</span></div>
+          <div><span class="meta-label">Language</span><span class="meta-value">JavaScript / TypeScript with full implementations</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The difference between mid-level and senior code is rarely algorithmic sophistication.
+          It is almost always: error handling, naming, testability, and anticipation of future change.
+          These seven patterns embody that difference. They are not frameworks or libraries —
+          they are ways of thinking about code structure that apply in any codebase.
+        </p>
+      </section>
+
+      <section class="content-card">
+
+        <div class="pattern-header">
+          <span class="pattern-num">1</span>
+          <h3>The Result Type — explicit failure over exceptions</h3>
+        </div>
+        <div class="pattern-body">
+          <p>Senior engineers stopped using exceptions for expected business failures. Exceptions are for unexpected conditions (programming errors, out-of-memory). Business failures (user not found, insufficient inventory, validation error) are expected — they should be part of the return type, not a surprise that crashes the call stack.</p>
+          <pre class="code-block"><code>// The Result type — make failures explicit in the type system
+type Ok<T>  = { ok: true;  value: T };
+type Err<E> = { ok: false; error: E };
+type Result<T, E = string> = Ok<T> | Err<E>;
+
+const ok  = <T>(value: T): Ok<T>   => ({ ok: true, value });
+const err = <E>(error: E): Err<E>  => ({ ok: false, error });
+
+// Before: caller must know to catch, easy to forget
+async function getUser(id: string) {
+  const user = await db.users.findUnique({ where: { id } });
+  if (!user) throw new Error('User not found');
+  return user;
+}
+
+// After: caller is forced to handle both cases
+async function getUser(id: string): Promise<Result<User, 'NOT_FOUND'>> {
+  const user = await db.users.findUnique({ where: { id } });
+  return user ? ok(user) : err('NOT_FOUND');
+}
+
+// Usage — the type forces you to handle the error case
+const result = await getUser(userId);
+if (!result.ok) {
+  // TypeScript knows result.error is 'NOT_FOUND' here
+  return res.status(404).json({ error: result.error });
+}
+// TypeScript knows result.value is User here
+return res.json(result.value);</code></pre>
+        </div>
+
+        <hr class="pattern-divider" />
+
+        <div class="pattern-header">
+          <span class="pattern-num">2</span>
+          <h3>The Builder Pattern for complex objects — readable construction</h3>
+        </div>
+        <div class="pattern-body">
+          <p>When an object requires more than 3-4 constructor parameters, a builder makes construction readable and allows optional configuration without positional argument confusion. Each builder method returns <code>this</code> for chaining.</p>
+          <pre class="code-block"><code>// Without builder: hard to read, easy to get arguments in wrong order
+const query = new DatabaseQuery('users', true, false, 10, 'createdAt', 'DESC', ['id','name','email']);
+
+// With builder: self-documenting, each option is named
+class QueryBuilder {
+  private config = { table: '', conditions: [], limit: 100, orderBy: null, fields: ['*'] };
+
+  from(table: string)         { this.config.table    = table;           return this; }
+  where(condition: string)    { this.config.conditions.push(condition); return this; }
+  limit(n: number)            { this.config.limit    = n;               return this; }
+  orderBy(field: string, dir: 'ASC'|'DESC' = 'ASC') { this.config.orderBy = `${field} ${dir}`; return this; }
+  select(...fields: string[]) { this.config.fields   = fields;          return this; }
+
+  build(): string {
+    const where   = this.config.conditions.length ? `WHERE ${this.config.conditions.join(' AND ')}` : '';
+    const orderBy = this.config.orderBy ? `ORDER BY ${this.config.orderBy}` : '';
+    return `SELECT ${this.config.fields.join(',')} FROM ${this.config.table} ${where} ${orderBy} LIMIT ${this.config.limit}`.trim();
+  }
+}
+
+const query = new QueryBuilder()
+  .from('users')
+  .where("status = 'active'")
+  .where("created_at > '2024-01-01'")
+  .select('id', 'name', 'email')
+  .orderBy('createdAt', 'DESC')
+  .limit(50)
+  .build();</code></pre>
+        </div>
+
+        <hr class="pattern-divider" />
+
+        <div class="pattern-header">
+          <span class="pattern-num">3</span>
+          <h3>The Null Object Pattern — eliminate conditional chains</h3>
+        </div>
+        <div class="pattern-body">
+          <p>Instead of checking for null/undefined before every method call, return an object that implements the same interface but does nothing. Eliminates defensive null checks scattered through the call site.</p>
+          <pre class="code-block"><code>// Without null object: null checks everywhere
+const logger = config.debug ? realLogger : null;
+if (logger) logger.info('Starting');
+// ... 50 more "if (logger)" checks
+
+// With null object: same interface, no-op implementation
+const NullLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
+const logger = config.debug ? realLogger : NullLogger;
+logger.info('Starting'); // no check needed, always safe
+
+// More realistic: optional analytics
+interface Analytics { track(event: string, props?: object): void; }
+const NullAnalytics: Analytics = { track: () => {} };
+
+class OrderService {
+  constructor(
+    private db: Database,
+    private analytics: Analytics = NullAnalytics // default to no-op
+  ) {}
+
+  async createOrder(data: CreateOrderDto) {
+    const order = await this.db.orders.create(data);
+    this.analytics.track('order_created', { orderId: order.id }); // safe, even if analytics is null-like
+    return order;
+  }
+}</code></pre>
+        </div>
+
+        <hr class="pattern-divider" />
+
+        <div class="pattern-header">
+          <span class="pattern-num">4</span>
+          <h3>Pipeline / Compose — small pure functions chained together</h3>
+        </div>
+        <div class="pattern-body">
+          <p>Senior engineers decompose complex transformations into small, pure, testable functions, then compose them. Each function does one thing. The composition is readable. Each piece is independently testable.</p>
+          <pre class="code-block"><code>// Without pipeline: one tangled function
+async function processOrder(rawOrder) {
+  // validate, transform, enrich, save — all mixed together
+  if (!rawOrder.userId) throw new Error('...');
+  const user = await db.users.findUnique({ where: { id: rawOrder.userId } });
+  if (!user) throw new Error('...');
+  const items = rawOrder.items.filter(i => i.quantity > 0);
+  const total = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
+  const order = await db.orders.create({ data: { ...rawOrder, items, total, status: 'pending' } });
+  await emailService.send(user.email, 'order_confirmation', { order });
+  return order;
+}
+
+// With pipeline: each step is a named, testable unit
+const pipe = (...fns) => (x) => fns.reduce((v, f) => f(v), x);
+const pipeAsync = (...fns) => (x) => fns.reduce(async (v, f) => f(await v), Promise.resolve(x));
+
+const validateOrder    = (order) => { if (!order.userId) throw new Error('Missing userId'); return order; };
+const filterEmptyItems = (order) => ({ ...order, items: order.items.filter(i => i.quantity > 0) });
+const calculateTotal   = (order) => ({ ...order, total: order.items.reduce((s, i) => s + i.price * i.quantity, 0) });
+const setInitialStatus = (order) => ({ ...order, status: 'pending' });
+const saveOrder        = async (order) => db.orders.create({ data: order });
+
+const processOrder = pipeAsync(
+  validateOrder,
+  filterEmptyItems,
+  calculateTotal,
+  setInitialStatus,
+  saveOrder
+);
+
+// Each step is independently testable:
+// test('filterEmptyItems removes zero-quantity items', () => { ... })
+// The pipeline composition test only needs to verify the steps are called in order</code></pre>
+        </div>
+
+        <hr class="pattern-divider" />
+
+        <div class="pattern-header">
+          <span class="pattern-num">5</span>
+          <h3>The Command Pattern — actions as objects (reversible, loggable)</h3>
+        </div>
+        <div class="pattern-body">
+          <p>Encapsulate an action as an object with execute and undo methods. Enables undo/redo, audit logging, queuing actions for later execution, and retrying failed operations.</p>
+          <pre class="code-block"><code>interface Command { execute(): Promise<void>; undo(): Promise<void>; description: string; }
+
+class UpdateOrderStatusCommand implements Command {
+  private previousStatus: string | null = null;
+  readonly description: string;
+
+  constructor(private orderId: string, private newStatus: string, private db: Database) {
+    this.description = `Update order ${orderId} status to ${newStatus}`;
+  }
+  async execute() {
+    const order = await this.db.orders.findUnique({ where: { id: this.orderId } });
+    this.previousStatus = order!.status; // store for undo
+    await this.db.orders.update({ where: { id: this.orderId }, data: { status: this.newStatus } });
+  }
+  async undo() {
+    if (!this.previousStatus) throw new Error('Execute must be called before undo');
+    await this.db.orders.update({ where: { id: this.orderId }, data: { status: this.previousStatus } });
+  }
+}
+
+class CommandHistory {
+  private stack: Command[] = [];
+  async execute(command: Command) {
+    await command.execute();
+    this.stack.push(command);
+    console.log(`Executed: ${command.description}`);
+  }
+  async undo() {
+    const command = this.stack.pop();
+    if (!command) throw new Error('Nothing to undo');
+    await command.undo();
+    console.log(`Undone: ${command.description}`);
+  }
+}</code></pre>
+        </div>
+
+        <hr class="pattern-divider" />
+
+        <div class="pattern-header">
+          <span class="pattern-num">6</span>
+          <h3>The Strategy Pattern via dependency injection — swap behavior without if/else</h3>
+        </div>
+        <div class="pattern-body">
+          <p>When behavior varies by condition (payment method, notification channel, export format), senior engineers inject the strategy rather than branching with if/else inside the function. Adding a new variant doesn't require touching the existing code.</p>
+          <pre class="code-block"><code>// Without strategy: growing if/else that violates open/closed principle
+async function sendNotification(userId, message, channel) {
+  if (channel === 'email') await emailService.send(userId, message);
+  else if (channel === 'sms') await smsService.send(userId, message);
+  else if (channel === 'push') await pushService.send(userId, message);
+  // Adding Slack requires touching this function
+}
+
+// With strategy: each channel is a named strategy, function is closed for modification
+interface NotificationStrategy { send(userId: string, message: string): Promise<void>; }
+
+class EmailNotification implements NotificationStrategy {
+  async send(userId: string, message: string) { await emailService.send(userId, message); }
+}
+class SMSNotification  implements NotificationStrategy {
+  async send(userId: string, message: string) { await smsService.send(userId, message); }
+}
+class SlackNotification implements NotificationStrategy {
+  async send(userId: string, message: string) { await slackService.send(userId, message); }
+}
+
+// NotificationService is now closed for modification, open for extension
+class NotificationService {
+  constructor(private strategy: NotificationStrategy) {}
+  async notify(userId: string, message: string) { return this.strategy.send(userId, message); }
+}
+
+// Add Slack: create SlackNotification, no changes to NotificationService
+const notifier = new NotificationService(new SlackNotification());
+await notifier.notify(userId, 'Your order shipped');</code></pre>
+        </div>
+
+        <hr class="pattern-divider" />
+
+        <div class="pattern-header">
+          <span class="pattern-num">7</span>
+          <h3>Event-Driven Decoupling — what happened vs what to do about it</h3>
+        </div>
+        <div class="pattern-body">
+          <p>Senior engineers separate domain events (what happened) from reactions (what to do about it). The order service emits "OrderCreated" — it does not call the email service, the inventory service, and the analytics service directly. Those services listen for the event. Adding a new reaction doesn't require touching the order service.</p>
+          <pre class="code-block"><code">// Without events: OrderService is coupled to every downstream concern
+class OrderService {
+  async createOrder(data) {
+    const order = await this.db.orders.create(data);
+    await this.emailService.sendConfirmation(order);    // coupled
+    await this.inventoryService.reserve(order.items);  // coupled
+    await this.analyticsService.track('order_created'); // coupled
+    return order;
+  }
+}
+
+// With events: OrderService only cares about orders
+import EventEmitter from 'events';
+const events = new EventEmitter();
+
+class OrderService {
+  async createOrder(data) {
+    const order = await this.db.orders.create(data);
+    events.emit('order:created', order); // that's it — reactions are not its concern
+    return order;
+  }
+}
+
+// Reactions are registered by the services that own them
+events.on('order:created', async (order) => emailService.sendConfirmation(order));
+events.on('order:created', async (order) => inventoryService.reserve(order.items));
+events.on('order:created', async (order) => analyticsService.track('order_created', order));
+
+// Adding Slack notification requires zero changes to OrderService
+events.on('order:created', async (order) => slackService.notifyOps(order));</code></pre>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          These seven patterns share a common underlying principle: make things explicit. The Result
+          type makes failures explicit in the type system. The Builder makes construction intent
+          explicit. The Null Object makes "no-op" explicit. The Pipeline makes transformation steps
+          explicit. The Command makes actions explicit and reversible. The Strategy makes varying
+          behavior explicit and injectable. Event-driven decoupling makes what-happened explicit
+          and separate from what-to-do. Senior code is not clever — it is explicit about its
+          intentions and honest about its failure modes.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL Shortener Implementation | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to URL Shortener</a>
+        <h1>URL Shortener: Implementation Guide</h1>
+        <p class="summary">
+          This page maps the design into a practical implementation path. The focus is not language-specific syntax, but
+          how a real backend should be structured so the design stays maintainable as features and traffic grow.
+        </p>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A strong implementation starts small but keeps extension points clear. The first version should be simple
+          enough to ship quickly, yet structured so caching, analytics, abuse controls, and multi-region support can be
+          introduced without rewriting the whole service.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Service structure</span>
+        <h2>Suggested backend modules</h2>
+        <pre><code>src/
+  controllers/
+    createLinkController
+    redirectController
+  services/
+    shortLinkService
+    keyGenerationService
+    analyticsPublisher
+    safetyService
+  repositories/
+    shortLinkRepository
+  cache/
+    linkCache
+  models/
+    shortLink
+    clickEvent
+  utils/
+    base62
+    validators
+    clock</code></pre>
+        <p>
+          This layout keeps the redirect logic focused while separating persistence, validation, caching, and event
+          publishing. It also makes future testing easier because the core service can be exercised without a live HTTP
+          layer.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Core implementation</span>
+        <h2>Example flow for create and redirect</h2>
+        <p class="mini-heading">Create short link</p>
+        <pre><code>function createShortLink(input):
+  validateInput(input)
+  shortCode = input.customAlias ?? keyGenerationService.nextCode()
+  assertAliasAvailable(shortCode)
+  entity = buildShortLinkEntity(input, shortCode)
+  repository.insert(entity)
+  cache.put("link:" + shortCode, entity)
+  return entity</code></pre>
+        <p class="mini-heading">Redirect lookup</p>
+        <pre><code>function resolveRedirect(shortCode):
+  cached = cache.get("link:" + shortCode)
+  if cached exists and cached is active:
+    analyticsPublisher.publish(shortCode)
+    return redirect(cached.longUrl)
+
+  entity = repository.findByShortCode(shortCode)
+  if entity missing or inactive or expired:
+    return notFoundOrGone()
+
+  cache.put("link:" + shortCode, entity)
+  analyticsPublisher.publish(shortCode)
+  return redirect(entity.longUrl)</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Phased delivery</span>
+        <h2>How to build this without overengineering</h2>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Phase</th>
+              <th>What to build</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Phase 1</td>
+              <td>Single service, relational DB, basic Base62 codes, create API, redirect endpoint, minimal cache.</td>
+            </tr>
+            <tr>
+              <td>Phase 2</td>
+              <td>Analytics queue, dashboard metrics, admin disable flow, rate limiting, improved cache TTL policy.</td>
+            </tr>
+            <tr>
+              <td>Phase 3</td>
+              <td>Custom domains, richer moderation, read replicas, better hot-key management, region-aware routing.</td>
+            </tr>
+            <tr>
+              <td>Phase 4</td>
+              <td>Multi-region resilience, stronger abuse intelligence, tenant isolation, enterprise controls.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Testing strategy</span>
+        <h2>What to validate before calling it production-ready</h2>
+        <ul class="check-list">
+          <li>Unit tests for Base62 generation, expiration logic, reserved aliases, and validation behavior.</li>
+          <li>Integration tests for create, redirect, disabled link, expired link, and duplicate alias scenarios.</li>
+          <li>Load tests for redirect latency under hot-key and cache-miss situations.</li>
+          <li>Failure tests for cache outage, analytics queue backlog, and partial database latency spikes.</li>
+          <li>Security tests for open redirect abuse, malicious URL inputs, and rate-limit bypass attempts.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Operational details</span>
+        <h2>Implementation choices that matter later</h2>
+        <p>
+          Emit metrics early: redirect count, redirect latency, create latency, cache hit ratio, DB lookup rate, queue
+          lag, blocked-link rate, and error-class breakdown. Engineers usually regret adding observability too late.
+        </p>
+        <p>
+          Make link status explicit with values like <code>ACTIVE</code>, <code>DISABLED</code>, and
+          <code>EXPIRED</code>. That avoids scattered conditional logic and makes moderation workflows cleaner.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The implementation should mirror the architectural priorities: keep redirect handling thin, make key
+          generation deterministic, isolate analytics asynchronously, and ship in phases so complexity only appears when
+          the traffic or business model actually needs it.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

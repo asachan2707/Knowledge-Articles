@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ACID Properties | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server racks with blue indicator lights in a datacenter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Foundations · Databases · 15 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@imgix" target="_blank" rel="noopener">imgix</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>ACID Properties</h1>
+        <p class="summary">
+          Atomicity, Consistency, Isolation, Durability — the four guarantees a transactional database
+          gives you. Knowing what each one really means is the difference between a Slack app that
+          loses installations on a crash and one that doesn't.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Common foundations</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Reason about correctness under failure</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~15 min</span></div>
+          <div><span class="meta-label">Slack tie-in</span><span class="meta-value">Installation store, billing, audit log</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          ACID is the contract a transactional database honors when you wrap operations in a
+          transaction. Most NoSQL stores give you a <em>weaker</em> set of guarantees — they trade
+          some ACID for scale, and you need to know what you're trading.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>A — Atomicity</h2>
+        <p>
+          A transaction either entirely succeeds or entirely fails. No partial application, ever.
+        </p>
+        <p>
+          <strong>Why it matters for Slack:</strong> when a workspace installs your app, you need to
+          insert the bot token, the user mapping, and an audit row in one transaction. Without
+          atomicity, a crash between two writes leaves your app in a corrupted half-installed state.
+        </p>
+        <pre class="code-block"><code>BEGIN;
+INSERT INTO installations (team_id, bot_token) VALUES ('T1', 'xoxb-...');
+INSERT INTO audit_log     (event, team_id)     VALUES ('install', 'T1');
+COMMIT;     -- both rows land, or neither</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>C — Consistency</h2>
+        <p>
+          The database moves from one valid state to another. Constraints (foreign keys, CHECK,
+          UNIQUE) hold before and after every transaction.
+        </p>
+        <p>
+          <strong>Why it matters for Slack:</strong> a UNIQUE constraint on <code>(team_id, enterprise_id)</code>
+          stops two parallel installs from creating duplicate rows. The DB enforces it; your app
+          doesn't have to.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>I — Isolation</h2>
+        <p>
+          Concurrent transactions don't see each other's intermediate state. The four standard
+          isolation levels:
+        </p>
+        <ul>
+          <li><strong>READ UNCOMMITTED</strong> — sees other transactions' uncommitted writes ("dirty reads"). Almost never used.</li>
+          <li><strong>READ COMMITTED</strong> — sees only committed data. Default in Postgres.</li>
+          <li><strong>REPEATABLE READ</strong> — same row reads the same value within a transaction. Default in MySQL.</li>
+          <li><strong>SERIALIZABLE</strong> — transactions appear to run sequentially. Strongest, slowest.</li>
+        </ul>
+        <p>
+          <strong>Why it matters for Slack:</strong> when two clicks of the same "Approve" button race,
+          you need either an <code>UPDATE … WHERE status='pending'</code> guard or higher isolation,
+          or one of them silently overwrites the other.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>D — Durability</h2>
+        <p>
+          Once a transaction commits, the result survives crashes, power loss, restarts. Implemented
+          by write-ahead logs flushed to disk before <code>COMMIT</code> returns.
+        </p>
+        <p>
+          <strong>Why it matters for Slack:</strong> "I installed your app" must be durable. If the
+          install row is lost on a database restart, your event-API webhooks start failing for that
+          workspace. Always run with WAL/fsync enabled in production; never skip <code>fsync</code>
+          for "performance".
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>NoSQL realities</h2>
+        <p>
+          Document and KV stores often offer <em>tunable</em> consistency:
+        </p>
+        <ul>
+          <li><strong>MongoDB:</strong> single-document writes are atomic; multi-document transactions exist (since 4.0) but are slower.</li>
+          <li><strong>DynamoDB:</strong> single-item writes are atomic; transactions across items are explicit (<code>TransactWriteItems</code>).</li>
+          <li><strong>Cassandra:</strong> tunable consistency per query (<code>ONE</code>, <code>QUORUM</code>, <code>ALL</code>).</li>
+          <li><strong>Redis:</strong> commands are atomic; <code>MULTI</code>/<code>EXEC</code> + Lua for multi-step atomicity.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Practical Slack-app rules</h2>
+        <ul>
+          <li>OAuth installation, billing, audit log → <strong>SQL with transactions</strong>. Don't compromise.</li>
+          <li>Per-workspace settings, message templates → Mongo or Postgres JSONB; either works.</li>
+          <li>Counters and rate limits → Redis; not durable, but you don't need to recover them after a crash.</li>
+          <li>For racey writes (approve/reject), use <code>UPDATE ... WHERE status='pending'</code> and check rowcount.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>ACID is what you give up when you choose "fast" over "safe" — be conscious about it.</li>
+          <li>Wrap multi-row writes in transactions. Single-row writes are already atomic.</li>
+          <li>Use guarded UPDATEs (<code>WHERE status='pending'</code>) to avoid race conditions on Slack actions.</li>
+          <li>Never disable durability ("fsync off") for production data.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=GAe5oB742dw" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              ACID Properties in Databases With Examples
+            </a>
+          </li>
+          <li>
+            <a href="https://www.postgresql.org/docs/current/transaction-iso.html" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Postgres — transaction isolation
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

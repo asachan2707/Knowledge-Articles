@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API & Data Fetching | React Master Tree | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../react-master-tree.html">← Back to React Master Tree</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="API connections and data flow" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">React Master Tree · Chapter 7 of 11 · ~35 min</span>
+          </div>
+        </figure>
+        <h1>API &amp; Data Fetching</h1>
+        <p class="summary">From raw fetch() to TanStack Query's cache — error states, loading skeletons, SWR revalidation, WebSocket real-time updates, and optimistic mutations that make UIs feel instant.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">7 of 11</span></div>
+          <div><span class="meta-label">Libraries</span><span class="meta-value">Fetch API · Axios · TanStack Query · SWR · WebSockets</span></div>
+          <div><span class="meta-label">Key insight</span><span class="meta-value">TanStack Query is not just a fetcher — it's a server state synchronization engine</span></div>
+        </div>
+      </header>
+
+      <!-- ─── FETCH API ────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>Fetch API — the browser's built-in HTTP client</h2>
+        <pre><code class="language-jsx">// ─── Creating a typed API client ──────────────────────────────────────────
+class ApiError extends Error {
+  constructor(status, message, body) {
+    super(message);
+    this.status = status;
+    this.body = body;
+  }
+}
+
+async function apiFetch(path, options = {}) {
+  const token = localStorage.getItem('token');
+
+  const res = await fetch(`${import.meta.env.VITE_API_URL}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
+    ...options,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.message ?? `HTTP ${res.status}`, body);
+  }
+
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+// ─── Usage ────────────────────────────────────────────────────────────────
+const users    = await apiFetch('/users');
+const user     = await apiFetch('/users/123');
+const newUser  = await apiFetch('/users', { method: 'POST', body: { name, email } });
+const updated  = await apiFetch('/users/123', { method: 'PATCH', body: { name } });
+await apiFetch('/users/123', { method: 'DELETE' });
+</code></pre>
+      </section>
+
+      <!-- ─── AXIOS ───────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Axios — batteries-included HTTP client</h2>
+        <p>Axios is popular in older React codebases. Key differences from fetch: automatic JSON parse, error on non-2xx status, interceptors for auth/logging, request cancellation, upload progress.</p>
+        <pre><code class="language-jsx">// npm install axios
+import axios from 'axios';
+
+// ─── Axios instance with interceptors ────────────────────────────────────
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL,
+  timeout: 10000,
+});
+
+// Request interceptor — add auth header
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('token');
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+// Response interceptor — global error handling + token refresh
+api.interceptors.response.use(
+  res => res.data,   // unwrap .data automatically
+  async err => {
+    if (err.response?.status === 401 && !err.config._retry) {
+      err.config._retry = true;
+      const newToken = await refreshToken();
+      localStorage.setItem('token', newToken);
+      err.config.headers.Authorization = `Bearer ${newToken}`;
+      return api(err.config);  // retry original request
+    }
+    return Promise.reject(err);
+  }
+);
+
+// Usage — clean because interceptor unwraps .data
+const users = await api.get('/users');             // already the array
+const user  = await api.post('/users', { name });  // already the created object
+
+// Upload with progress
+const upload = async (file) => {
+  return api.post('/uploads', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: e => setProgress(Math.round((e.loaded / e.total) * 100)),
+  });
+};
+</code></pre>
+      </section>
+
+      <!-- ─── TANSTACK QUERY ────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>TanStack Query — server state synchronization</h2>
+        <p>TanStack Query manages the full lifecycle of server data: fetching, caching, background revalidation, retries, and mutations with rollback. It eliminates the loading/error/data state you would otherwise manage manually.</p>
+        <pre><code class="language-jsx">// npm install @tanstack/react-query
+import { QueryClient, QueryClientProvider, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { staleTime: 5 * 60 * 1000, retry: 2 },
+  },
+});
+
+function App() {
+  return (
+    &lt;QueryClientProvider client={queryClient}&gt;
+      &lt;Router /&gt;
+    &lt;/QueryClientProvider&gt;
+  );
+}
+
+// ─── useQuery — fetch and cache data ──────────────────────────────────────
+function UserProfile({ userId }) {
+  const { data: user, isLoading, error, isFetching } = useQuery({
+    queryKey: ['user', userId],      // cache key — changing userId auto-refetches
+    queryFn: () => apiFetch(`/users/${userId}`),
+    staleTime: 5 * 60 * 1000,       // 5 min before refetch
+    gcTime: 10 * 60 * 1000,         // 10 min before garbage collect
+    enabled: !!userId,              // don't fetch if userId is null
+  });
+
+  if (isLoading) return &lt;Skeleton /&gt;;
+  if (error)     return &lt;Error message={error.message} /&gt;;
+
+  return (
+    &lt;div&gt;
+      &lt;h1&gt;{user.name}&lt;/h1&gt;
+      {isFetching &amp;&amp; &lt;RefreshSpinner /&gt;} {/* background refetch indicator */}
+    &lt;/div&gt;
+  );
+}
+
+// ─── useMutation — modify server data ─────────────────────────────────────
+function UpdateUserForm({ userId }) {
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: (data) => apiFetch(`/users/${userId}`, { method: 'PATCH', body: data }),
+    onSuccess: (updatedUser) => {
+      // Update cache directly — no refetch needed
+      queryClient.setQueryData(['user', userId], updatedUser);
+      // Or invalidate to trigger a refetch:
+      // queryClient.invalidateQueries({ queryKey: ['user', userId] });
+    },
+    onError: (error) => showToast({ type: 'error', message: error.message }),
+  });
+
+  const handleSubmit = (formData) => mutation.mutate(formData);
+
+  return (
+    &lt;form onSubmit={handleSubmit}&gt;
+      {/* form fields */}
+      &lt;Button type="submit" loading={mutation.isPending}&gt;Save&lt;/Button&gt;
+    &lt;/form&gt;
+  );
+}
+
+// ─── Parallel queries ─────────────────────────────────────────────────────
+function Dashboard({ userId }) {
+  const userQuery   = useQuery({ queryKey: ['user', userId],   queryFn: () => fetchUser(userId) });
+  const ordersQuery = useQuery({ queryKey: ['orders', userId], queryFn: () => fetchOrders(userId) });
+
+  // Both fire concurrently — no waterfall
+  const isLoading = userQuery.isLoading || ordersQuery.isLoading;
+  // ...
+}
+</code></pre>
+      </section>
+
+      <!-- ─── SWR ──────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>SWR — stale-while-revalidate from Vercel</h2>
+        <p>SWR is the Vercel-maintained alternative to TanStack Query. Simpler API, slightly smaller bundle. Best when you need automatic revalidation on focus/reconnect and don't need advanced mutation patterns.</p>
+        <pre><code class="language-jsx">// npm install swr
+import useSWR, { useSWRConfig } from 'swr';
+import useSWRMutation from 'swr/mutation';
+
+// Global fetcher config
+const fetcher = (url) => fetch(url).then(r => r.json());
+
+// ─── Basic usage ──────────────────────────────────────────────────────────
+function UserCard({ userId }) {
+  const { data: user, error, isLoading, isValidating } = useSWR(
+    userId ? `/api/users/${userId}` : null,  // null key = don't fetch
+    fetcher,
+    {
+      revalidateOnFocus: true,   // refetch when tab regains focus
+      revalidateOnReconnect: true,
+      refreshInterval: 0,        // 0 = no polling (set >0 for live data)
+    }
+  );
+
+  if (isLoading) return &lt;Skeleton /&gt;;
+  if (error)     return &lt;Error /&gt;;
+  return &lt;div&gt;{user.name} {isValidating &amp;&amp; '⟳'}&lt;/div&gt;;
+}
+
+// ─── Mutations with SWR ───────────────────────────────────────────────────
+const updateUser = async (url, { arg }) =>
+  fetch(url, { method: 'PATCH', body: JSON.stringify(arg), headers: {'Content-Type':'application/json'} }).then(r => r.json());
+
+function EditUser({ userId }) {
+  const { trigger, isMutating } = useSWRMutation(`/api/users/${userId}`, updateUser);
+
+  const handleSave = async (data) => {
+    await trigger(data);
+    // SWR automatically updates the cache for this key
+  };
+
+  return &lt;Button onClick={() =&gt; handleSave({ name: 'New Name' }) } loading={isMutating}&gt;Save&lt;/Button&gt;;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── WEBSOCKETS ────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>WebSockets — real-time data in React</h2>
+        <pre><code class="language-jsx">// ─── Custom hook for WebSocket connection ─────────────────────────────────
+function useWebSocket(url) {
+  const [messages, setMessages]   = useState([]);
+  const [status, setStatus]       = useState('connecting');
+  const wsRef = useRef(null);
+
+  useEffect(() => {
+    if (!url) return;
+
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+
+    ws.onopen    = () => setStatus('connected');
+    ws.onclose   = () => setStatus('disconnected');
+    ws.onerror   = () => setStatus('error');
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      setMessages(prev => [...prev, msg]);
+    };
+
+    return () => ws.close();
+  }, [url]);
+
+  const send = useCallback((data) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(data));
+    }
+  }, []);
+
+  return { messages, status, send };
+}
+
+// ─── Live order tracking ──────────────────────────────────────────────────
+function OrderTracker({ orderId }) {
+  const token = useAuthToken();
+  const { messages, status } = useWebSocket(
+    orderId ? `wss://api.example.com/orders/${orderId}/track?token=${token}` : null
+  );
+
+  const latest = messages[messages.length - 1];
+
+  return (
+    &lt;div&gt;
+      &lt;ConnectionBadge status={status} /&gt;
+      {latest &amp;&amp; &lt;OrderStatusCard status={latest.status} location={latest.location} /&gt;}
+      &lt;Timeline events={messages} /&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ─── Combining WebSocket with TanStack Query ──────────────────────────────
+// WebSocket updates the query cache directly — query data stays fresh in real time
+function useLiveOrderStatus(orderId) {
+  const queryClient = useQueryClient();
+
+  // Initial fetch via query
+  const query = useQuery({
+    queryKey: ['order', orderId],
+    queryFn: () => apiFetch(`/orders/${orderId}`),
+  });
+
+  // WebSocket updates
+  useEffect(() => {
+    if (!orderId) return;
+    const ws = new WebSocket(`wss://api.example.com/orders/${orderId}/live`);
+    ws.onmessage = (e) => {
+      const update = JSON.parse(e.data);
+      // Patch query cache in place
+      queryClient.setQueryData(['order', orderId], prev => ({ ...prev, ...update }));
+    };
+    return () => ws.close();
+  }, [orderId, queryClient]);
+
+  return query;
+}
+</code></pre>
+      </section>
+
+      <!-- ─── OPTIMISTIC UPDATES ────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Optimistic Updates — instant UI feedback</h2>
+        <p>Optimistic updates assume a mutation will succeed and update the UI immediately — then roll back if the server returns an error. This makes interactions feel instant even over slow networks.</p>
+        <pre><code class="language-jsx">// ─── TanStack Query optimistic mutation ───────────────────────────────────
+function TodoList({ listId }) {
+  const queryClient = useQueryClient();
+
+  const toggleTodo = useMutation({
+    mutationFn: ({ id, done }) =>
+      apiFetch(`/todos/${id}`, { method: 'PATCH', body: { done } }),
+
+    onMutate: async ({ id, done }) => {
+      // Cancel any in-flight refetches
+      await queryClient.cancelQueries({ queryKey: ['todos', listId] });
+
+      // Snapshot previous value
+      const previous = queryClient.getQueryData(['todos', listId]);
+
+      // Optimistically update cache
+      queryClient.setQueryData(['todos', listId], (old) =>
+        old.map(todo => todo.id === id ? { ...todo, done } : todo)
+      );
+
+      return { previous };  // context for rollback
+    },
+
+    onError: (err, variables, context) => {
+      // Rollback on error
+      queryClient.setQueryData(['todos', listId], context.previous);
+      showToast({ type: 'error', message: 'Failed to update. Changes reverted.' });
+    },
+
+    onSettled: () => {
+      // Always refetch after error or success to stay in sync with server
+      queryClient.invalidateQueries({ queryKey: ['todos', listId] });
+    },
+  });
+
+  const { data: todos } = useQuery({
+    queryKey: ['todos', listId],
+    queryFn: () => apiFetch(`/lists/${listId}/todos`),
+  });
+
+  return (
+    &lt;ul&gt;
+      {todos?.map(todo =&gt; (
+        &lt;li
+          key={todo.id}
+          style={{ opacity: todo.done ? 0.5 : 1 }}
+          onClick={() =&gt; toggleTodo.mutate({ id: todo.id, done: !todo.done })}
+        &gt;
+          {todo.text}
+        &lt;/li&gt;
+      ))}
+    &lt;/ul&gt;
+  );
+}
+
+// ─── Simple optimistic pattern without TanStack Query ────────────────────
+function LikeButton({ postId, initialLiked }) {
+  const [liked, setLiked] = useState(initialLiked);
+  const [count, setCount] = useState(0);
+
+  const handleLike = async () => {
+    const nextLiked = !liked;
+    setLiked(nextLiked);     // optimistic
+    setCount(c => c + (nextLiked ? 1 : -1));
+
+    try {
+      await apiFetch(`/posts/${postId}/like`, {
+        method: nextLiked ? 'POST' : 'DELETE',
+      });
+    } catch {
+      setLiked(liked);       // rollback
+      setCount(c => c + (liked ? 1 : -1));
+    }
+  };
+
+  return (
+    &lt;button onClick={handleLike} aria-pressed={liked}&gt;
+      {liked ? '❤️' : '🤍'} {count}
+    &lt;/button&gt;
+  );
+}
+</code></pre>
+        <div class="insight-box"><strong>The three phases of an optimistic update:</strong> (1) snapshot the current cache, (2) immediately apply the expected change, (3) on error, roll back to the snapshot. Always invalidate the query on settlement to ensure eventual consistency with the server.</div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Chapter 7 Takeaway</h2>
+        <p>Build a typed fetch wrapper once and use it everywhere. Use TanStack Query or SWR for all server data — they replace the loading/error/data tri-state pattern you would otherwise repeat on every page. WebSockets and TanStack Query work beautifully together: Query handles initial fetch and cache management, WebSocket pushes incremental updates directly into the cache. Optimistic updates make the UI feel fast; just always have a rollback path.</p>
+      </section>
+    </main>
+  </body>
+</html>

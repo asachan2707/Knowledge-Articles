@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Building Claude from Scratch: 62 Components Behind Anthropic's Thinking Engine | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1655720828018-edd2daec9349?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract glowing circuit board representing AI architecture"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · Architecture · 18 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@growtika" target="_blank" rel="noopener">Growtika</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Building Claude from Scratch: 62 Components Behind Anthropic's Thinking Engine</h1>
+        <p class="summary">
+          A systematic breakdown of the 62 architectural components that make Claude work — organised into four pillars: Cognition, Orchestration, Reliability, and Harness Design — plus Anthropic's own engineering lessons on building long-running AI applications.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Sources</span>
+            <span class="meta-value">
+              <a href="https://levelup.gitconnected.com/building-claude-from-scratch-62-components-behind-anthropics-thinking-engine-cd38ee3daf93" target="_blank" rel="noopener">Level Up Coding</a>
+              · <a href="https://www.anthropic.com/engineering/harness-design-long-running-apps" target="_blank" rel="noopener">Anthropic Engineering Blog</a>
+            </span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Claude's internal architecture: cognition, orchestration, reliability, harness design</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">2025–2026</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Most engineers think of Claude as a model. It is more accurate to think of it as a system — a model surrounded by an orchestration harness that shapes how it reasons, remembers, recovers from failure, and composes multi-step work. The 62 components described here are not internal Anthropic secrets; they are the architectural patterns and design decisions that anyone building serious AI applications needs to understand and replicate.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea from Anthropic's engineering blog:</strong> "AI models are rarely the bottleneck anymore. The harness around them is." Every component in a harness encodes an assumption about what the model cannot do on its own — and those assumptions should be stress-tested with every new model release.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · From single prompt to thinking engine</span>
+        <p>
+          A naive Claude integration is one API call: send a prompt, receive a response. The gap between that and a production AI system is exactly the 62 components. Anthropic's own engineering team learned this building long-running agentic applications — and documented the failures: context degradation, self-evaluation bias, cascading errors from over-specified plans, and the cost of harness components that became unnecessary as the model improved.
+        </p>
+        <p>
+          The lesson is not "add all 62 components." It is: understand what each one solves, add it when you hit the problem it fixes, and remove it when a new model makes it unnecessary.
+        </p>
+      </section>
+
+      <!-- PILLAR 1 -->
+      <section class="content-card">
+        <span class="section-label">Pillar 1 — Cognition</span>
+        <h2>How Claude thinks before it acts</h2>
+        <p>
+          Cognition components shape how the model deliberates — allocating compute to reasoning, checking its own work, and maintaining consistency across a long task.
+        </p>
+
+        <p class="mini-heading">Thinking channels and extended reasoning</p>
+        <p>
+          Dedicating a structured internal reasoning pass — visible as <code>&lt;thinking&gt;</code> tokens — before generating a response. This dramatically improves accuracy on multi-step problems by giving the model "scratch space" to work through the problem before committing to an answer.
+        </p>
+
+        <p class="mini-heading">Compute optimal allocation</p>
+        <p>
+          Not all tasks deserve the same reasoning depth. A component that routes simple tasks to fast, shallow processing and complex tasks to extended thinking avoids spending $0.50 of reasoning compute on a $0.01 question.
+        </p>
+
+        <p class="mini-heading">Self-consistency and Best-of-N verification</p>
+        <p>
+          Generate N independent responses to the same prompt, then select the one that agrees with the majority. For critical decisions — routing, classification, safety checks — this reduces variance dramatically. N=3 with majority vote is the standard implementation.
+        </p>
+
+        <p class="mini-heading">Deliberative alignment</p>
+        <p>
+          A pre-response check that asks: does this output align with the stated goal, system prompt constraints, and safety guidelines? Runs before the response is sent to the user. Catches misaligned outputs that the generation pass produced correctly by the model's own logic but incorrectly relative to the task.
+        </p>
+
+        <p class="mini-heading">Bi-temporal memory</p>
+        <p>
+          Separating what the model knows (training knowledge, with a cutoff) from what happened in the current session (live context). A component that labels information by source — "this is from training, this is from the retrieved document, this is from the conversation" — prevents the model from conflating stale knowledge with current context.
+        </p>
+      </section>
+
+      <!-- PILLAR 2 -->
+      <section class="content-card">
+        <span class="section-label">Pillar 2 — Orchestration</span>
+        <h2>Composing thoughts into multi-step trajectories</h2>
+        <p>
+          Orchestration components control how a sequence of LLM calls is structured, how work is decomposed, and how the outputs of one step inform the next.
+        </p>
+
+        <p class="mini-heading">OODA loop (Observe, Orient, Decide, Act)</p>
+        <p>
+          A military decision-making framework applied to agentic AI. Each agent cycle: observe the environment state, orient relative to the goal, decide the next action, act, then re-observe. Prevents agents from "acting blind" — executing based on a stale world model rather than current observations.
+        </p>
+
+        <p class="mini-heading">Plan-and-execute with sprint contracts</p>
+        <p>
+          Before executing, the agent produces a detailed plan. For long-running tasks, the plan is broken into sprints: discrete, verifiable chunks of work. Before each sprint, generator and evaluator agree on a "done" definition — a sprint contract. This bridges the gap between a high-level spec and testable implementation steps.
+        </p>
+        <p>
+          Anthropic's finding: high-level specs with sprint contracts outperform granular upfront specs. Errors in over-specified plans cascade. Let the agent plan at a high level, then negotiate each sprint.
+        </p>
+
+        <p class="mini-heading">Tree of thoughts</p>
+        <p>
+          Instead of a single reasoning chain, explore multiple reasoning branches in parallel, evaluate each, and prune poor ones. Effective for problems with multiple plausible solution paths where the best path is not obvious upfront.
+        </p>
+
+        <p class="mini-heading">Architect-editor split</p>
+        <p>
+          Separate the agent that designs a solution (high-level reasoning, broad context) from the agent that implements it (narrow context, code-level focus). The architect avoids getting lost in implementation details; the editor avoids losing the big picture. Each operates at the right altitude.
+        </p>
+
+        <p class="mini-heading">Planner-Generator-Evaluator: the three-agent architecture</p>
+        <p>
+          Anthropic's documented production pattern for complex generative tasks:
+        </p>
+        <ul class="check-list">
+          <li><strong>Planner:</strong> Expands a 1–4 sentence prompt into a full specification. Stays high-level — avoids granular technical decisions that cascade as errors downstream.</li>
+          <li><strong>Generator:</strong> Implements the spec sprint-by-sprint. Self-evaluates before handoff. Uses version control between sprints.</li>
+          <li><strong>Evaluator:</strong> QA via live environment interaction (e.g., Playwright for web apps). Hard thresholds per criterion — fail triggers detailed feedback to the generator for revision.</li>
+        </ul>
+        <p>
+          Real cost/quality data from Anthropic: solo agent (20 min, $9, core features broken) vs. full 3-agent harness (6 hrs, $200, working gameplay with richer features) vs. simplified harness on a newer model (3h 50m, $125, full featured output). The right harness complexity depends on the model and the task.
+        </p>
+      </section>
+
+      <!-- PILLAR 3 -->
+      <section class="content-card">
+        <span class="section-label">Pillar 3 — Reliability</span>
+        <h2>Preventing and detecting failure in long-running tasks</h2>
+
+        <p class="mini-heading">Context window management: resets vs. compaction</p>
+        <p>
+          As a session grows, models degrade — and some exhibit "context anxiety," wrapping up tasks prematurely near perceived context limits. Two mitigation strategies:
+        </p>
+        <ul class="check-list">
+          <li><strong>Context resets:</strong> Full window clear + structured handoff artifact. Clean slate eliminates anxiety. Adds orchestration overhead and latency.</li>
+          <li><strong>Compaction:</strong> In-place summarisation of prior context. Preserves continuity but insufficient alone for strong context-anxiety models. The Claude Agent SDK supports automatic compaction.</li>
+        </ul>
+        <p>
+          Anthropic's finding: Claude 4.6 improvements eliminated the need for resets in tasks where 4.5 required them. Harness complexity requirements track model capability — re-examine on every new model release.
+        </p>
+
+        <p class="mini-heading">Generator/evaluator separation (GAN-inspired)</p>
+        <p>
+          The most important reliability insight from Anthropic: models "confidently praise their own work even when quality is mediocre." Separating generator and evaluator roles is far more effective than asking a model to be critical of its own output.
+        </p>
+        <p>
+          Tuning a standalone evaluator to be skeptical is tractable. Making a generator self-critical is not. Run them as separate agents with separate prompts — the evaluator is explicitly told to find failure modes, not validate success.
+        </p>
+
+        <p class="mini-heading">Evaluator calibration</p>
+        <p>
+          Raw LLM evaluators fail predictably: they identify issues, then rationalise them away. The tuning loop: read evaluator logs → find divergence from human judgment → update evaluator prompt → repeat. A calibrated evaluator catches bugs that a developer would catch in manual QA — route ordering conflicts, logical AND/OR errors in handlers, events firing at wrong times.
+        </p>
+
+        <p class="mini-heading">Grading criteria design</p>
+        <p>
+          Subjective quality judgments must be decomposed into gradable criteria. Example for a frontend design task:
+        </p>
+        <ul class="check-list">
+          <li><strong>Design quality</strong> (coherent whole vs. sum of parts) — AI underperforms here by default; weight heavily.</li>
+          <li><strong>Originality</strong> (custom decisions vs. template defaults) — explicitly penalise "AI slop" patterns.</li>
+          <li><strong>Craft</strong> (typography, spacing, contrast) — AI performs well here by default.</li>
+          <li><strong>Functionality</strong> (usability, task completion) — AI performs well here by default.</li>
+        </ul>
+        <p>
+          Weight criteria where the model underperforms. The wording of criteria directly shapes output character — "museum quality" language in the evaluator steers generation toward a distinct visual convergence.
+        </p>
+      </section>
+
+      <!-- PILLAR 4 -->
+      <section class="content-card">
+        <span class="section-label">Pillar 4 — Harness design principles</span>
+        <h2>Building the system that surrounds the model</h2>
+
+        <p class="mini-heading">Start simple; add complexity only when demonstrably needed</p>
+        <p>
+          Every harness component encodes an assumption about model limitation. Before adding a component, verify the limitation exists with the current model. Before shipping, run without the component and measure the quality delta.
+        </p>
+
+        <p class="mini-heading">The harness simplification methodology</p>
+        <ol>
+          <li>Remove one component at a time.</li>
+          <li>Measure impact on output quality.</li>
+          <li>Keep only load-bearing components.</li>
+          <li>Reassess with each new model release.</li>
+        </ol>
+        <p>
+          Claude 4.6 made sprint decomposition unnecessary for tasks that 4.5 required it for — single continuous sessions replaced multi-session resets. The space of interesting harness combinations doesn't shrink as models improve; it moves.
+        </p>
+
+        <p class="mini-heading">Communication via files, not return values</p>
+        <p>
+          In multi-agent architectures, agents communicate by writing to and reading from files rather than passing return values through function calls. This decouples timing, enables inspection, and supports restart/recovery without rerunning the entire chain.
+        </p>
+
+        <p class="mini-heading">Evaluator cost/benefit is contextual</p>
+        <p>
+          An evaluator is worth the cost when the task exceeds the model's reliable solo capability. It becomes unnecessary overhead for tasks within native model competence. The boundary shifts outward with each model improvement — a harness designed for Claude 3 is almost certainly over-engineered for Claude 4.6.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Common questions</span>
+        <h2>FAQ</h2>
+        <ul class="faq-list">
+          <li class="faq-item">
+            <p class="faq-question">Should I implement all 62 components for a production agent?</p>
+            <p class="faq-answer">No. Start with the model alone. Add components when you encounter the specific failure they address. A well-calibrated evaluator, context management, and a planning step cover the majority of production failure modes. The other components address edge cases — add them when the edge case bites you.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">Does the 3-agent architecture apply to all use cases?</p>
+            <p class="faq-answer">It is most valuable for long-running generative tasks where quality is difficult to verify automatically — code generation, document production, complex research. For simple retrieval, classification, or short-form generation, a single well-prompted model with a lightweight evaluator is sufficient and far cheaper.</p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">How do I know when a harness component is no longer needed?</p>
+            <p class="faq-answer">Run without it on a benchmark set of tasks. If output quality is equivalent, remove it. The trigger for this test should be every new model release — capability improvements frequently make previously load-bearing components redundant.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Claude's value in production is not the model — it is the system around the model. Cognition shapes deliberation; orchestration decomposes work; reliability catches failures; harness design keeps the whole system honest. Build incrementally, remove components when models outgrow them, and separate evaluator from generator — it is the single highest-leverage reliability improvement available.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>28 Core System Design Concepts, Explained Through the Failures They Prevent | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .concept-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .9rem; margin: 1.25rem 0; }
+      .concept-card { border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.1rem; background: var(--surface); }
+      .concept-num  { font-family: Arial, Helvetica, sans-serif; font-size: .72rem; font-weight: 700; color: #6366f1; background: #eef2ff; border-radius: 20px; padding: .18rem .6rem; display: inline-block; margin-bottom: .45rem; }
+      .concept-card h4 { margin: 0 0 .2rem; font-family: Arial, Helvetica, sans-serif; font-size: .98rem; }
+      .concept-card .prevents { font-size: .8rem; color: #dc2626; font-weight: 600; margin-bottom: .3rem; }
+      .concept-card p { margin: 0; font-size: .84rem; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server infrastructure representing distributed systems" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Architecture · 45 min read</span>
+          </div>
+        </figure>
+        <h1>28 Core System Design Concepts, Explained Through the Failures They Prevent</h1>
+        <p class="summary">
+          Every system design concept exists because a real system failed without it. This guide pairs
+          each concept with the failure it prevents, a mental model for when to apply it, and a concrete
+          JavaScript implementation. Covers infrastructure, data, resilience, API design, and distributed
+          systems.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate → Advanced</span></div>
+          <div><span class="meta-label">Focus</span><span class="meta-value">Failure-first mental models + Node.js patterns</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          System design is failure prevention engineering. Each concept in this guide answers one question:
+          "what breaks without this?" Learn that first, then the solution clicks into place naturally.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Don't memorise patterns. Memorise the failure each pattern prevents.
+          In an interview or a production incident, you'll reach for the right tool because you recognise
+          the failure mode, not because you recalled a definition.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Infrastructure</span>
+        <h2>The foundation concepts</h2>
+        <div class="concept-grid">
+          <div class="concept-card">
+            <span class="concept-num">#01</span>
+            <h4>Load Balancer</h4>
+            <div class="prevents">Prevents: single server overload + single point of failure</div>
+            <p>Distributes traffic across server pool. Round-robin for stateless services. Sticky sessions when you must route a user to the same server. Health checks remove dead servers automatically.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#02</span>
+            <h4>Horizontal vs Vertical Scaling</h4>
+            <div class="prevents">Prevents: hitting hardware ceiling</div>
+            <p>Vertical = bigger machine (fast, has a ceiling). Horizontal = more machines (no ceiling, requires statelessness). Prefer horizontal for web tiers. Vertical for managed databases (simpler).</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#03</span>
+            <h4>CDN (Content Delivery Network)</h4>
+            <div class="prevents">Prevents: high latency for geographically distant users + origin overload</div>
+            <p>Caches static assets at edge nodes near users. Cloudflare, AWS CloudFront, Fastly. Cache-Control headers control TTL. Invalidate on deploy.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#04</span>
+            <h4>Auto-scaling</h4>
+            <div class="prevents">Prevents: paying for idle capacity and crashing under traffic spikes</div>
+            <p>Rules-based (CPU &gt; 70% → add instance) or predictive (scale up before Monday morning peak). Always set a max to prevent runaway cost.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Caching</span>
+        <h2>Keeping data close</h2>
+
+        <pre class="code-block"><code>// Redis caching pattern with cache-aside
+import { createClient } from 'redis';
+import postgres from 'postgres';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+const sql   = postgres(process.env.DATABASE_URL);
+await redis.connect();
+
+async function getUserById(userId) {
+  const key = `user:${userId}`;
+
+  // 1. Try cache first
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  // 2. Cache miss → hit DB
+  const [user] = await sql`SELECT * FROM users WHERE id = ${userId}`;
+  if (!user) return null;
+
+  // 3. Populate cache with TTL
+  await redis.setEx(key, 300, JSON.stringify(user)); // 5 min TTL
+  return user;
+}
+
+// Invalidate on write
+async function updateUser(userId, data) {
+  await sql`UPDATE users SET ${sql(data)} WHERE id = ${userId}`;
+  await redis.del(`user:${userId}`); // evict stale cache
+}</code></pre>
+
+        <div class="concept-grid">
+          <div class="concept-card">
+            <span class="concept-num">#05</span>
+            <h4>Cache-Aside (Lazy Loading)</h4>
+            <div class="prevents">Prevents: caching data that is never read (wasteful)</div>
+            <p>App checks cache; on miss, reads DB and writes to cache. Most common pattern. Cache is eventual — stale reads possible during the TTL window.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#06</span>
+            <h4>Write-Through Cache</h4>
+            <div class="prevents">Prevents: stale cache reads after writes</div>
+            <p>Write to cache AND DB in the same operation. Always consistent. Higher write latency. Use when reads must always be fresh.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#07</span>
+            <h4>Cache Eviction Policies</h4>
+            <div class="prevents">Prevents: cache filling with useless data</div>
+            <p>LRU (least recently used) — default for most caches. LFU (least frequently used) — better for hot/cold patterns. TTL — time-based eviction regardless of usage.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Database patterns</span>
+        <h2>Data at scale</h2>
+
+        <pre class="code-block"><code>// Read replica routing — send reads to replicas, writes to primary
+class DatabaseRouter {
+  #primary;
+  #replicas;
+  #rr = 0; // round-robin counter
+
+  constructor(primaryUrl, replicaUrls) {
+    this.#primary  = postgres(primaryUrl);
+    this.#replicas = replicaUrls.map(url => postgres(url));
+  }
+
+  // All writes MUST go to primary for consistency
+  write(query) { return this.#primary.unsafe(query); }
+
+  // Reads round-robin across replicas
+  read(query) {
+    if (this.#replicas.length === 0) return this.#primary.unsafe(query);
+    const replica = this.#replicas[this.#rr % this.#replicas.length];
+    this.#rr++;
+    return replica.unsafe(query);
+  }
+}</code></pre>
+
+        <div class="concept-grid">
+          <div class="concept-card">
+            <span class="concept-num">#08</span>
+            <h4>Read Replicas</h4>
+            <div class="prevents">Prevents: read query load overloading the primary database</div>
+            <p>Replicas get async copies of all writes. Route SELECT queries to replicas. Accepts slight replication lag (~10–100ms) in exchange for horizontal read scale.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#09</span>
+            <h4>Database Sharding</h4>
+            <div class="prevents">Prevents: write throughput ceiling on a single DB server</div>
+            <p>Split rows across multiple DB instances by a shard key (user_id % N). Each shard owns its subset. Cross-shard queries become expensive — choose the shard key to minimise them.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#10</span>
+            <h4>Database Indexing</h4>
+            <div class="prevents">Prevents: full table scans on large tables (O(n) → O(log n))</div>
+            <p>Index every column used in WHERE, JOIN ON, or ORDER BY. B-tree for range queries. Hash for equality. Don't over-index — writes pay the penalty.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#11</span>
+            <h4>SQL vs NoSQL</h4>
+            <div class="prevents">Prevents: choosing the wrong data model and paying for years</div>
+            <p>SQL: relational data, strong consistency, complex queries. NoSQL: flexible schema, horizontal write scale, simple access patterns. Most apps start SQL — switch only when you hit a specific wall.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#12</span>
+            <h4>CAP Theorem</h4>
+            <div class="prevents">Prevents: believing you can have perfect consistency AND availability AND partition tolerance</div>
+            <p>Pick 2: Consistency (all nodes see same data), Availability (always responds), Partition Tolerance (works despite network splits). In practice: CP (ZooKeeper, HBase) or AP (Cassandra, DynamoDB). CA is only possible without partitions — not realistic in distributed systems.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resilience patterns</span>
+        <h2>Staying up when things break</h2>
+
+        <pre class="code-block"><code>// Circuit breaker implementation
+class CircuitBreaker {
+  #state = 'CLOSED'; // CLOSED → OPEN → HALF_OPEN
+  #failures = 0;
+  #lastFailTime = 0;
+  #threshold;
+  #resetTimeout;
+
+  constructor({ threshold = 5, resetTimeout = 30_000 } = {}) {
+    this.#threshold     = threshold;
+    this.#resetTimeout  = resetTimeout;
+  }
+
+  async call(fn) {
+    if (this.#state === 'OPEN') {
+      if (Date.now() - this.#lastFailTime > this.#resetTimeout) {
+        this.#state = 'HALF_OPEN'; // test if service recovered
+      } else {
+        throw new Error('Circuit OPEN — request rejected fast');
+      }
+    }
+
+    try {
+      const result = await fn();
+      if (this.#state === 'HALF_OPEN') {
+        this.#reset(); // service recovered
+      }
+      return result;
+    } catch (err) {
+      this.#record(err);
+      throw err;
+    }
+  }
+
+  #record(err) {
+    this.#failures++;
+    this.#lastFailTime = Date.now();
+    if (this.#failures >= this.#threshold) {
+      this.#state = 'OPEN';
+      console.warn(`Circuit OPEN after ${this.#failures} failures`);
+    }
+  }
+
+  #reset() {
+    this.#state    = 'CLOSED';
+    this.#failures = 0;
+  }
+}
+
+const breaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30_000 });
+const data = await breaker.call(() => fetch('https://external-api.com/data').then(r => r.json()));</code></pre>
+
+        <div class="concept-grid">
+          <div class="concept-card">
+            <span class="concept-num">#13</span>
+            <h4>Circuit Breaker</h4>
+            <div class="prevents">Prevents: cascading failures when a downstream service is slow or down</div>
+            <p>Three states: CLOSED (normal), OPEN (failing fast without calling service), HALF_OPEN (testing recovery). Protects the upstream service from overloading the already-struggling downstream.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#14</span>
+            <h4>Retry with Exponential Backoff</h4>
+            <div class="prevents">Prevents: thundering herd when retries amplify load on a recovering service</div>
+            <p>Wait 1s, 2s, 4s, 8s... between retries. Add jitter (random ±20%) to prevent all clients retrying simultaneously. Cap at max retries (3–5) to avoid infinite loops.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#15</span>
+            <h4>Bulkhead</h4>
+            <div class="prevents">Prevents: one slow consumer exhausting all connection pool slots</div>
+            <p>Isolate resource pools per downstream dependency. If Service A's pool is full, Service B's pool is unaffected. Named after ship watertight compartments.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#16</span>
+            <h4>Timeout</h4>
+            <div class="prevents">Prevents: requests hanging indefinitely and exhausting thread/connection pools</div>
+            <p>Every outbound call needs a timeout. Rule of thumb: P99 latency × 3 is a reasonable start. Use read timeouts AND connection timeouts separately.</p>
+          </div>
+        </div>
+
+        <pre class="code-block"><code>// Retry with exponential backoff + jitter
+async function withRetry(fn, maxAttempts = 4, baseDelayMs = 500) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxAttempts) throw err;
+      const delay = baseDelayMs * 2 ** (attempt - 1);
+      const jitter = delay * (0.8 + Math.random() * 0.4); // ±20% jitter
+      console.log(`Attempt ${attempt} failed. Retrying in ${Math.round(jitter)}ms...`);
+      await new Promise(r => setTimeout(r, jitter));
+    }
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Messaging &amp; async patterns</span>
+        <h2>Decoupling for scale</h2>
+
+        <div class="concept-grid">
+          <div class="concept-card">
+            <span class="concept-num">#17</span>
+            <h4>Message Queue</h4>
+            <div class="prevents">Prevents: slow jobs blocking request threads; producer overwhelming consumer</div>
+            <p>Producer publishes; consumer processes at its own pace. BullMQ (Redis-backed), SQS, RabbitMQ. Enables horizontal scaling of workers independently of API servers.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#18</span>
+            <h4>Pub/Sub</h4>
+            <div class="prevents">Prevents: tight coupling between services that need to react to the same event</div>
+            <p>Publisher emits events; multiple subscribers react independently. Kafka, Redis Pub/Sub, AWS SNS. Decouples services — adding a new subscriber doesn't change the publisher.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#19</span>
+            <h4>Event Sourcing</h4>
+            <div class="prevents">Prevents: losing audit history and difficulty replaying state</div>
+            <p>Store events (what happened), not current state (what is). Replay events to reconstruct state at any point in time. Enables CQRS, audit logs, and time-travel debugging.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#20</span>
+            <h4>Idempotency</h4>
+            <div class="prevents">Prevents: duplicate charges, double sends, or corrupted state from retried requests</div>
+            <p>Same operation called N times = same result as called once. Implement via idempotency keys (UUID per operation, stored in DB). Essential for payments, emails, and any at-least-once delivery system.</p>
+          </div>
+        </div>
+
+        <pre class="code-block"><code>// BullMQ job queue pattern
+import { Queue, Worker } from 'bullmq';
+import { createClient } from 'redis';
+
+const connection = { host: 'localhost', port: 6379 };
+const emailQueue = new Queue('emails', { connection });
+
+// Producer — API handler
+async function sendWelcomeEmail(userId) {
+  await emailQueue.add('welcome', { userId }, {
+    jobId: `welcome-${userId}`,  // idempotency: same userId won't queue twice
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+  });
+}
+
+// Consumer — separate worker process
+const worker = new Worker('emails', async (job) => {
+  const { userId } = job.data;
+  const user = await getUserById(userId);
+  await sendEmail({ to: user.email, template: 'welcome' });
+  console.log(`Welcome email sent to ${user.email}`);
+}, { connection, concurrency: 10 });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">API design patterns</span>
+        <h2>Designing APIs that age well</h2>
+
+        <div class="concept-grid">
+          <div class="concept-card">
+            <span class="concept-num">#21</span>
+            <h4>Rate Limiting</h4>
+            <div class="prevents">Prevents: one client overwhelming the service; cost abuse; DDoS amplification</div>
+            <p>Token bucket or sliding window algorithms. Per-user and per-IP limits. Return 429 with Retry-After header. Implement in Redis for distributed rate limiting across nodes.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#22</span>
+            <h4>API Gateway</h4>
+            <div class="prevents">Prevents: every microservice reimplementing auth, rate limiting, logging, and routing</div>
+            <p>Single entry point that handles cross-cutting concerns centrally. Kong, AWS API Gateway, Nginx. Routes to the right microservice. Terminates TLS. Enforces auth before requests reach services.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#23</span>
+            <h4>API Versioning</h4>
+            <div class="prevents">Prevents: breaking existing clients when you evolve the API</div>
+            <p>URL versioning (<code>/v1/users</code>) is the simplest. Header versioning (<code>Accept: application/vnd.api+json;version=2</code>) is cleaner. Maintain at least one previous major version.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#24</span>
+            <h4>Pagination</h4>
+            <div class="prevents">Prevents: returning millions of rows in a single response (OOM, timeout)</div>
+            <p>Offset pagination is simple but has skew under concurrent inserts. Cursor pagination (next_cursor token) is stable and scales. Always cap max page size server-side.</p>
+          </div>
+        </div>
+
+        <pre class="code-block"><code>// Redis sliding window rate limiter
+import { createClient } from 'redis';
+
+const redis = createClient();
+
+async function rateLimit(identifier, limit = 100, windowMs = 60_000) {
+  const key = `ratelimit:${identifier}:${Math.floor(Date.now() / windowMs)}`;
+
+  const [count] = await redis
+    .multi()
+    .incr(key)
+    .expire(key, Math.ceil(windowMs / 1000) + 1)
+    .exec();
+
+  const remaining = Math.max(0, limit - count);
+  const allowed = count <= limit;
+
+  return { allowed, remaining, limit };
+}
+
+// Express middleware
+function rateLimitMiddleware(limit = 100, windowMs = 60_000) {
+  return async (req, res, next) => {
+    const id = req.user?.id ?? req.ip;
+    const { allowed, remaining } = await rateLimit(id, limit, windowMs);
+
+    res.setHeader('X-RateLimit-Limit', limit);
+    res.setHeader('X-RateLimit-Remaining', remaining);
+
+    if (!allowed) return res.status(429).json({ error: 'Too Many Requests' });
+    next();
+  };
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Distributed systems</span>
+        <h2>The hard problems of distribution</h2>
+
+        <div class="concept-grid">
+          <div class="concept-card">
+            <span class="concept-num">#25</span>
+            <h4>Consistent Hashing</h4>
+            <div class="prevents">Prevents: massive cache invalidation when a node is added or removed</div>
+            <p>Place nodes and keys on a hash ring. Adding a node only moves ~1/N of keys. Used by Redis Cluster, Cassandra, Memcached sharding. Virtual nodes (vnodes) smooth out uneven distribution.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#26</span>
+            <h4>Leader Election</h4>
+            <div class="prevents">Prevents: split-brain: two nodes both believing they are the write leader</div>
+            <p>One node elected leader; others are followers. Raft and Paxos are the consensus algorithms. ZooKeeper, etcd, and Consul handle this in managed form. Kafka uses KRaft (Kafka Raft) internally.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#27</span>
+            <h4>Service Discovery</h4>
+            <div class="prevents">Prevents: hardcoded service addresses breaking when containers restart with new IPs</div>
+            <p>Services register themselves on startup; clients query the registry. Consul, Kubernetes DNS, AWS Cloud Map. Health checks remove dead registrations automatically.</p>
+          </div>
+          <div class="concept-card">
+            <span class="concept-num">#28</span>
+            <h4>Observability (Logs + Metrics + Traces)</h4>
+            <div class="prevents">Prevents: debugging production incidents with no information</div>
+            <p>Logs = what happened. Metrics = how fast/how many. Traces = the path through the system. The three pillars. OpenTelemetry is the standard for instrumenting all three in one pass.</p>
+          </div>
+        </div>
+
+        <pre class="code-block"><code>// OpenTelemetry tracing setup for Node.js
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+
+const sdk = new NodeSDK({
+  traceExporter: new OTLPTraceExporter({ url: 'http://localhost:4318/v1/traces' }),
+  instrumentations: [getNodeAutoInstrumentations()], // auto-instruments http, express, pg, redis
+});
+sdk.start();
+
+// Manual span for custom operations
+import { trace } from '@opentelemetry/api';
+const tracer = trace.getTracer('my-service');
+
+async function processOrder(orderId) {
+  const span = tracer.startSpan('process-order');
+  span.setAttribute('order.id', orderId);
+
+  try {
+    const order = await fetchOrder(orderId);
+    span.setAttribute('order.amount', order.total);
+    await chargePayment(order);
+    span.setStatus({ code: SpanStatusCode.OK });
+    return order;
+  } catch (err) {
+    span.recordException(err);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+    throw err;
+  } finally {
+    span.end();
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Every system design concept is a battle-tested response to a documented class of failure.
+          Learn the failure first — cascading failures, hot-shard contention, replication lag, thundering
+          herds — and the concept that prevents it becomes intuitive rather than arbitrary. The 28 patterns
+          above cover the failures that every production system will eventually encounter at scale.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

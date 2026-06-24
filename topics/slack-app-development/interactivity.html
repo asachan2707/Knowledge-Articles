@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Interactivity in Slack | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563986768609-322da13575f3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Slack messaging app open on laptop and phone"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Core · UX · 45 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@austindistel" target="_blank" rel="noopener">Austin Distel</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Interactivity in Slack</h1>
+        <p class="summary">
+          Interactivity covers everything users <em>do</em> with your app: slash commands, shortcuts,
+          buttons, select menus, modals, and Home tab interactions. The 3-second ack rule and the
+          <code>response_url</code> mechanism are the two ideas that govern all of it.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack core</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Wire up commands, buttons, modals correctly</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~45 min read</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">Block Kit, Bolt patterns, App Home</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every interactive thing — a button click, a slash command, a modal submission — sends a
+          payload to your app. Your app must respond within 3 seconds (with an empty <code>ack</code> if
+          needed) and then optionally do follow-up work using either the Web API or the
+          <code>response_url</code> Slack provides in the payload.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Two rules:</strong> 1) <code>ack()</code> within 3 seconds, always. 2) Use
+            <code>response_url</code> for follow-up replies to slash commands and message buttons; use
+            <code>views.update</code>/<code>views.push</code> for modal flows.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The interactive surface</h2>
+        <ul>
+          <li><strong>Slash commands</strong> — global verbs typed in any channel (<code>/standup</code>).</li>
+          <li><strong>Global shortcuts</strong> — invoked from the lightning-bolt menu, no channel context.</li>
+          <li><strong>Message shortcuts</strong> — invoked from a specific message's "More actions" menu.</li>
+          <li><strong>Block actions</strong> — buttons, select menus, datepickers in a message or App Home.</li>
+          <li><strong>View submissions</strong> — modal "Submit" button.</li>
+          <li><strong>View closed</strong> — modal closed without submitting.</li>
+          <li><strong>Home opened</strong> — user opens your App Home tab.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>The 3-second ack rule</h2>
+        <p>
+          Slack expects a 200 OK within 3 seconds. If you don't ack, the user sees an error like
+          "/standup failed with the error: operation_timeout." Bolt's <code>ack()</code> sends the
+          200 immediately; <em>then</em> you do the slow work.
+        </p>
+        <pre class="code-block"><code>app.command('/standup', async ({ command, ack, client }) =&gt; {
+  await ack();                              // 1. acknowledge fast
+  await someSlowWork();                     // 2. then do work (any duration)
+  await client.chat.postMessage({           // 3. notify when done
+    channel: command.channel_id,
+    text: 'Standup created!',
+  });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2><code>response_url</code> — the back-channel</h2>
+        <p>
+          For slash commands and block actions, the payload includes a <code>response_url</code> you
+          can POST to up to 5 times within 30 minutes. This is how you respond to a slash command
+          <em>without</em> needing the bot's posting scope or a channel ID.
+        </p>
+        <pre class="code-block"><code>// Inside a slash command handler:
+await ack();
+
+// Send an ephemeral follow-up via response_url (no chat:write needed)
+await fetch(command.response_url, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    response_type: 'ephemeral',  // or 'in_channel'
+    text: 'Working on it…',
+  }),
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Modals (views) — open / push / update</h2>
+        <ul>
+          <li><code>views.open</code> — open a brand new modal in response to an interaction (needs <code>trigger_id</code>, valid for ~3s).</li>
+          <li><code>views.push</code> — stack another modal on top of the current one.</li>
+          <li><code>views.update</code> — replace the current modal's content (e.g., on validation error).</li>
+          <li><code>views.publish</code> — render a view to App Home.</li>
+        </ul>
+        <pre class="code-block"><code>app.command('/feedback', async ({ command, ack, client }) =&gt; {
+  await ack();
+  await client.views.open({
+    trigger_id: command.trigger_id,
+    view: {
+      type: 'modal',
+      callback_id: 'feedback_modal',
+      title: { type: 'plain_text', text: 'Send feedback' },
+      submit: { type: 'plain_text', text: 'Send' },
+      blocks: [
+        {
+          type: 'input',
+          block_id: 'b_msg',
+          label: { type: 'plain_text', text: 'Your message' },
+          element: { type: 'plain_text_input', action_id: 'a_msg', multiline: true },
+        },
+      ],
+    },
+  });
+});
+
+app.view('feedback_modal', async ({ ack, body, view, client }) =&gt; {
+  await ack();
+  const message = view.state.values.b_msg.a_msg.value;
+  await client.chat.postMessage({ channel: 'C_FEEDBACK', text: `From &lt;@${body.user.id}&gt;: ${message}` });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Validation in modals</h2>
+        <p>
+          To show inline errors on a modal submission, ack with
+          <code>{ response_action: 'errors', errors: { block_id: 'message' } }</code> instead of a bare
+          <code>ack()</code>.
+        </p>
+        <pre class="code-block"><code>app.view('feedback_modal', async ({ ack, view }) =&gt; {
+  const text = view.state.values.b_msg.a_msg.value;
+  if (text.length &lt; 5) {
+    return ack({
+      response_action: 'errors',
+      errors: { b_msg: 'Please write at least 5 characters.' },
+    });
+  }
+  await ack();
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Block actions — every button click</h2>
+        <p>
+          A button (or select / datepicker / checkbox) carries an <code>action_id</code>. Bolt routes
+          each click to the matching <code>app.action(id, …)</code> handler.
+        </p>
+        <pre class="code-block"><code>app.action('approve_button', async ({ ack, body, client }) =&gt; {
+  await ack();
+  await client.chat.update({
+    channel: body.channel.id,
+    ts: body.message.ts,
+    text: 'Approved',
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `Approved by &lt;@${body.user.id}&gt; ✅` } }],
+  });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Patterns &amp; pitfalls</h2>
+        <ul>
+          <li><strong>Trigger IDs expire fast (~3s)</strong> — don't <code>await</code> slow work before opening a modal.</li>
+          <li><strong>action_id collisions</strong> — make them unique and namespaced (<code>review:approve</code>).</li>
+          <li><strong>Confirmation dialogs</strong> — every destructive action gets a <code>confirm</code> on the button.</li>
+          <li><strong>Error responses</strong> — let users know via ephemeral or modal errors, never silent failure.</li>
+          <li><strong>Idempotency</strong> — buttons can be double-clicked; check + dedupe by message ts + action id.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Ack within 3 seconds. Always.</li>
+          <li>Use <code>response_url</code> for slash command follow-ups; <code>views.*</code> for modals.</li>
+          <li>Validate modal submissions with <code>response_action: 'errors'</code>.</li>
+          <li>Namespace your <code>action_id</code>s and confirm destructive actions.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://api.slack.com/interactivity" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Interactivity in Slack
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/interactivity/handling" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Handling user interactions
+            </a>
+          </li>
+          <li>
+            <a href="https://api.slack.com/surfaces/modals" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Modals (views)
+            </a>
+          </li>
+          <li>
+            <a href="https://slack.dev/bolt-js/concepts/actions" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              Bolt for JS — Actions concept
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

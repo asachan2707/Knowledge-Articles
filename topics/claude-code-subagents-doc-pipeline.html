@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Code Sub-Agents: Agentic Programming, Documentation Pipelines &amp; Self-Healing Docs | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .pipeline-steps { counter-reset:step; }
+      .pipeline-step { display:flex; gap:1rem; padding:.9rem 0; border-bottom:1px solid #f1f5f9; }
+      .pipeline-step:last-child { border-bottom:none; }
+      .step-badge { min-width:2rem; height:2rem; border-radius:50%; background:#0f172a; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.82rem; flex-shrink:0; }
+      .step-text h4 { margin:0 0 .2rem; font-family:Arial,Helvetica,sans-serif; font-size:.96rem; }
+      .step-text p  { margin:0; font-size:.86rem; color:var(--muted); }
+      .agent-card { border:1px solid var(--border); border-radius:10px; padding:.9rem 1rem; margin:.6rem 0; }
+      .agent-card h4 { margin:0 0 .2rem; font-family:Arial,Helvetica,sans-serif; font-size:.93rem; }
+      .agent-card p  { margin:0; font-size:.85rem; color:var(--muted); }
+      .agent-role { font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em; background:#eef2ff; color:#4338ca; border-radius:4px; padding:.15rem .5rem; margin-bottom:.35rem; display:inline-block; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1555949963-aa79dcee981c?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Automated pipeline with agents" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Claude Code · Sub-Agents · Documentation · 20 min read</span>
+          </div>
+        </figure>
+        <h1>Claude Code Sub-Agents: Agentic Programming, Documentation Pipelines &amp; Self-Healing Docs</h1>
+        <p class="summary">
+          Three articles merged: the agentic programming model that makes sub-agents accessible,
+          a step-by-step guide to building a documentation pipeline in minutes using Claude Code
+          sub-agents, and the OpenCode approach to self-healing documentation that keeps docs
+          perpetually in sync with code. Full JavaScript implementations throughout.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Merged from</span><span class="meta-value">OpenCode Agents · Sub-Agents Agentic Programming · Build a Doc Pipeline</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Claude Code · Anthropic SDK · Node.js · Markdown</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Sub-agents turn Claude Code from a reactive assistant into an orchestration layer. Instead of
+          one monolithic conversation that slowly loses coherence, sub-agents decompose work into
+          focused parallel tasks — each with its own context, tools, and success criteria. Documentation
+          pipelines are the clearest first use case: they are repetitive, well-defined, and high-value
+          targets for automation.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> A documentation pipeline built on Claude Code sub-agents takes
+          ~30 minutes to set up and then runs automatically — extracting docs from code, generating
+          structured reference content, detecting drift between code and docs, and triggering regeneration.
+          What used to take weeks of documentation sprints becomes a background process.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1: Agentic programming for the masses</span>
+        <h2>What sub-agents are and why they change the model</h2>
+        <p>
+          Traditional AI-assisted coding: you prompt → model responds → you prompt again. The model's
+          effective "work window" is bounded by its context. Complex tasks that span multiple files,
+          multiple tools, and multiple decisions degrade because everything competes for the same
+          context space.
+        </p>
+        <p>
+          Sub-agents solve this with decomposition. An orchestrator agent breaks work into focused tasks.
+          Each sub-agent gets its own context, does one thing well, and returns a structured result.
+          The orchestrator synthesises results. No sub-agent needs to know about the others.
+        </p>
+        <pre class="code-block"><code>// The mental model shift
+// Before sub-agents: one long conversation, context degrades
+const result = await claude.messages.create({
+  messages: [
+    { role: 'user', content: 'Analyse all 47 source files and generate documentation for each...' },
+    // By file 15 the model has forgotten the style from file 1
+    // By file 30 it's making up function signatures
+    // By file 47 the output is inconsistent and needs manual review
+  ]
+});
+
+// With sub-agents: orchestrator + N focused agents
+async function generateDocs(sourceFiles) {
+  // Each sub-agent gets ONLY the file it needs to document
+  const docTasks = sourceFiles.map(file => () =>
+    claude.messages.create({
+      system: DOC_AGENT_SYSTEM_PROMPT, // same instructions every time
+      messages: [{ role: 'user', content: `Generate docs for:\n\n${file.content}` }],
+    })
+  );
+
+  // Run up to 10 in parallel — context is fully isolated per agent
+  const results = await runWithConcurrency(docTasks, 10);
+  return results.map((r, i) => ({ file: sourceFiles[i].path, docs: r.content[0].text }));
+}
+
+async function runWithConcurrency(tasks, concurrency) {
+  const results = [];
+  for (let i = 0; i < tasks.length; i += concurrency) {
+    const batch = tasks.slice(i, i + concurrency).map(t => t());
+    results.push(...await Promise.all(batch));
+  }
+  return results;
+}</code></pre>
+
+        <h3>The three sub-agent patterns</h3>
+        <ul class="check-list">
+          <li><strong>Fan-out (parallel):</strong> Orchestrator spawns N agents simultaneously, each handling one item from a list (files, modules, functions). Results collected and synthesised. Best for: documentation, analysis, code review.</li>
+          <li><strong>Pipeline (sequential):</strong> Agent A produces output that becomes Agent B's input. Agent B's output feeds Agent C. Best for: multi-step transformations where each step depends on the previous.</li>
+          <li><strong>Specialised routing:</strong> Orchestrator classifies the task and routes to the right specialised sub-agent (documentation agent, testing agent, refactoring agent). Best for: mixed-task workflows where different inputs need different tools.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 2: Build a documentation pipeline in minutes</span>
+        <h2>From zero to running doc pipeline in 30 minutes</h2>
+
+        <div class="pipeline-steps">
+          <div class="pipeline-step">
+            <div class="step-badge">1</div>
+            <div class="step-text"><h4>Inventory the source</h4><p>Walk the source tree, collect all JS/TS files that export public APIs. Filter out test files, config, and auto-generated code.</p></div>
+          </div>
+          <div class="pipeline-step">
+            <div class="step-badge">2</div>
+            <div class="step-text"><h4>Fan-out to doc agents</h4><p>One sub-agent per file. Each agent reads the file and generates structured markdown documentation: function signatures, parameters, return types, examples.</p></div>
+          </div>
+          <div class="pipeline-step">
+            <div class="step-badge">3</div>
+            <div class="step-text"><h4>Assemble the reference</h4><p>Orchestrator collects all file-level docs and assembles them into a structured docs/ directory with an index.</p></div>
+          </div>
+          <div class="pipeline-step">
+            <div class="step-badge">4</div>
+            <div class="step-text"><h4>Diff against existing docs</h4><p>For incremental runs: compare generated docs against what's already in docs/. Only update files where the content changed.</p></div>
+          </div>
+          <div class="pipeline-step">
+            <div class="step-badge">5</div>
+            <div class="step-text"><h4>Add a git hook</h4><p>Wire the pipeline to a pre-commit or post-push hook. Docs stay in sync without a documentation sprint.</p></div>
+          </div>
+        </div>
+
+        <pre class="code-block"><code>// doc-pipeline.js — full implementation
+import Anthropic from '@anthropic-ai/sdk';
+import fs        from 'fs/promises';
+import path      from 'path';
+import { glob }  from 'glob';
+
+const client = new Anthropic();
+
+const DOC_AGENT_PROMPT = `You are a technical documentation writer.
+Given a JavaScript/TypeScript source file, generate structured markdown documentation.
+
+Format:
+# [filename]
+
+## Overview
+One paragraph: what this module does and why it exists.
+
+## Exports
+
+### functionName(param: type): ReturnType
+Description. Note edge cases and gotchas.
+
+**Parameters:**
+- \`param\` (type): description
+
+**Returns:** description
+
+**Example:**
+\`\`\`js
+// working code example
+\`\`\`
+
+Rules:
+- Only document PUBLIC exports (exported functions, classes, constants)
+- Skip private functions, internals, and implementation details
+- Example must be runnable
+- Flag deprecated APIs with a ⚠️ note`;
+
+async function documentFile(filePath) {
+  const content = await fs.readFile(filePath, 'utf8');
+
+  if (content.trim().length === 0) return null;
+
+  const response = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001', // fast and cheap for per-file docs
+    max_tokens: 2048,
+    system:     DOC_AGENT_PROMPT,
+    messages:   [{ role: 'user', content: `File: ${filePath}\n\n\`\`\`js\n${content}\n\`\`\`` }],
+  });
+
+  return {
+    filePath,
+    docs: response.content[0].text,
+    tokens: response.usage.input_tokens + response.usage.output_tokens,
+  };
+}
+
+async function runDocPipeline({ src, out, concurrency = 8 }) {
+  // 1. Inventory
+  const files = await glob(`${src}/**/*.{js,ts,jsx,tsx}`, {
+    ignore: ['**/*.test.*', '**/*.spec.*', '**/node_modules/**', '**/dist/**'],
+  });
+
+  console.log(`Documenting ${files.length} files (${concurrency} parallel)...`);
+  await fs.mkdir(out, { recursive: true });
+
+  let totalTokens = 0;
+  let written     = 0;
+  let skipped     = 0;
+
+  // 2. Fan-out — batch by concurrency
+  for (let i = 0; i < files.length; i += concurrency) {
+    const batch   = files.slice(i, i + concurrency);
+    const results = await Promise.allSettled(batch.map(f => documentFile(f)));
+
+    for (const result of results) {
+      if (result.status === 'rejected') { console.error('Error:', result.reason); continue; }
+      if (!result.value) { skipped++; continue; }
+
+      const { filePath, docs, tokens } = result.value;
+      totalTokens += tokens;
+
+      // 3. Write to docs/ mirroring src/ structure
+      const relPath = path.relative(src, filePath);
+      const docPath = path.join(out, relPath.replace(/\.(j|t)sx?$/, '.md'));
+
+      await fs.mkdir(path.dirname(docPath), { recursive: true });
+
+      // 4. Only write if changed (idempotent)
+      let existing = '';
+      try { existing = await fs.readFile(docPath, 'utf8'); } catch {}
+
+      if (existing !== docs) {
+        await fs.writeFile(docPath, docs);
+        console.log(`  ✓ ${relPath}`);
+        written++;
+      }
+    }
+
+    console.log(`  [${Math.min(i + concurrency, files.length)}/${files.length}]`);
+  }
+
+  // 5. Generate index
+  const allDocs = await glob(`${out}/**/*.md`);
+  const index   = allDocs
+    .map(f => `- [${path.relative(out, f)}](./${path.relative(out, f)})`)
+    .join('\n');
+  await fs.writeFile(path.join(out, 'README.md'), `# API Reference\n\n${index}\n`);
+
+  console.log(`\nDone: ${written} written, ${skipped} empty/unchanged, ~${totalTokens} tokens`);
+}
+
+// Run
+await runDocPipeline({ src: './src', out: './docs/api', concurrency: 8 });</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 3: Self-healing documentation with OpenCode</span>
+        <h2>Documentation that fixes itself when code changes</h2>
+        <p>
+          OpenCode extends the doc pipeline with a <em>drift detection</em> layer. Instead of regenerating
+          all docs on every run, it computes a fingerprint of each source file, compares it to the
+          fingerprint stored when docs were last generated, and triggers regeneration only for files
+          that changed. The result: docs that are always in sync without full-pipeline cost.
+        </p>
+        <pre class="code-block"><code>// self-healing-docs.js — drift detection + targeted regeneration
+import crypto from 'crypto';
+import fs     from 'fs/promises';
+import path   from 'path';
+import { glob } from 'glob';
+
+const MANIFEST_PATH = '.doc-manifest.json';
+
+// Fingerprint a file by hashing its exported symbols
+// (not the full file — we don't care about formatting changes)
+function fingerprint(content) {
+  // Extract only export declarations — ignore blank lines, comments, impl details
+  const exportLines = content
+    .split('\n')
+    .filter(line => line.trim().startsWith('export'))
+    .join('\n');
+  return crypto.createHash('sha256').update(exportLines).digest('hex').slice(0, 12);
+}
+
+async function loadManifest() {
+  try   { return JSON.parse(await fs.readFile(MANIFEST_PATH, 'utf8')); }
+  catch { return {}; }
+}
+
+async function saveManifest(manifest) {
+  await fs.writeFile(MANIFEST_PATH, JSON.stringify(manifest, null, 2));
+}
+
+export async function selfHealingDocs({ src, out, concurrency = 8 }) {
+  const files    = await glob(`${src}/**/*.{js,ts}`, { ignore: ['**/*.test.*','**/node_modules/**','**/dist/**'] });
+  const manifest = await loadManifest();
+
+  // Detect drift
+  const stale = [];
+  for (const filePath of files) {
+    const content = await fs.readFile(filePath, 'utf8');
+    const fp      = fingerprint(content);
+    if (manifest[filePath] !== fp) {
+      stale.push({ filePath, content, fp });
+    }
+  }
+
+  if (stale.length === 0) {
+    console.log('All docs up to date.');
+    return;
+  }
+
+  console.log(`Regenerating docs for ${stale.length} changed files...`);
+
+  // Re-document only stale files
+  for (let i = 0; i < stale.length; i += concurrency) {
+    const batch   = stale.slice(i, i + concurrency);
+    const results = await Promise.allSettled(batch.map(({ filePath }) => documentFile(filePath)));
+
+    for (let j = 0; j < results.length; j++) {
+      const result = results[j];
+      if (result.status === 'rejected') { console.error(result.reason); continue; }
+
+      const { filePath, docs } = result.value;
+      const relPath = path.relative(src, filePath);
+      const docPath = path.join(out, relPath.replace(/\.tsx?$/, '.md'));
+
+      await fs.mkdir(path.dirname(docPath), { recursive: true });
+      await fs.writeFile(docPath, docs);
+
+      // Update manifest fingerprint for this file
+      manifest[filePath] = batch[j].fp;
+      console.log(`  ✓ ${relPath}`);
+    }
+  }
+
+  await saveManifest(manifest);
+  console.log('Self-heal complete.');
+}</code></pre>
+
+        <h3>Wiring to a git hook</h3>
+        <pre class="code-block"><code>#!/bin/sh
+# .git/hooks/post-commit
+# Run: chmod +x .git/hooks/post-commit
+
+node scripts/self-healing-docs.js
+git add docs/
+if [ -n "$(git diff --cached --name-only)" ]; then
+  git commit --amend --no-edit --no-verify
+fi</code></pre>
+
+        <p>
+          With this hook, every commit automatically regenerates docs for changed files and amends the
+          commit to include the updated docs. Docs and code are always in sync without any manual effort.
+        </p>
+
+        <h3>Adding a drift-check CI step</h3>
+        <pre class="code-block"><code>// scripts/check-doc-drift.js — fails CI if docs are stale
+import { selfHealingDocs } from './self-healing-docs.js';
+import { glob } from 'glob';
+import fs from 'fs/promises';
+
+// Regenerate to a temp dir and compare against committed docs
+const tempOut = '/tmp/docs-check';
+await selfHealingDocs({ src: './src', out: tempOut });
+
+const generated = await glob(`${tempOut}/**/*.md`);
+let drift = false;
+
+for (const genFile of generated) {
+  const relPath      = genFile.replace(tempOut, '');
+  const committedPath = `./docs/api${relPath}`;
+  try {
+    const committed = await fs.readFile(committedPath, 'utf8');
+    const generated_ = await fs.readFile(genFile, 'utf8');
+    if (committed !== generated_) {
+      console.error(`DRIFT: ${committedPath} is out of sync with source`);
+      drift = true;
+    }
+  } catch {
+    console.error(`MISSING: ${committedPath} not committed`);
+    drift = true;
+  }
+}
+
+process.exit(drift ? 1 : 0);
+// Add to CI: node scripts/check-doc-drift.js || (echo "Docs out of sync — run npm run docs" && exit 1)</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Claude Code integration</span>
+        <h2>Running doc pipelines from Claude Code</h2>
+        <pre class="code-block"><code># CLAUDE.md — documentation pipeline instructions
+## Documentation
+
+This project uses an automated doc pipeline.
+
+### Generating docs
+- Run: `npm run docs` — regenerates docs for all changed files
+- Run: `npm run docs:all` — regenerates all docs (full rebuild)
+- Run: `npm run docs:check` — fails if any docs are out of sync
+
+### When to run
+- After adding new exported functions or changing function signatures
+- After every PR — CI will fail if docs are stale
+- Never manually edit files in docs/api/ — they are auto-generated
+
+### Sub-agent pattern
+When asked to document a specific module, use the sub-agent pattern:
+1. Read the source file
+2. Generate documentation following the format in scripts/doc-pipeline.js
+3. Write to the correct path in docs/api/
+4. Update .doc-manifest.json with the new fingerprint</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Claude Code sub-agents make documentation pipelines genuinely automatable: fan-out over
+          source files (one agent per file, fully isolated context), write structured markdown, and
+          use fingerprint-based drift detection to only regenerate what changed. The self-healing
+          layer — git hook + CI drift check — means documentation debt never accumulates. What
+          previously required weeks of documentation sprints becomes a 30-minute setup that
+          then runs itself indefinitely.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

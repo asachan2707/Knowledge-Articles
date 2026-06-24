@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CDN | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=1600&h=700&fit=crop&auto=format&q=80" alt="Global network visualization" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Infrastructure · Concept 03 · 10 min</span></div>
+        </figure>
+        <h1>Content Delivery Network (CDN)</h1>
+        <p class="summary">A geographically distributed network of edge servers that caches your static assets close to your users. A user in Tokyo fetching from a CDN PoP in Tokyo gets sub-10ms response times instead of the 150ms round trip to your US-East origin.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">03 of 13</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Infrastructure / Performance</span></div>
+          <div><span class="meta-label">Used By</span><span class="meta-value">Every web-scale product</span></div>
+          <div><span class="meta-label">Providers</span><span class="meta-value">Cloudflare, AWS CloudFront, Fastly, Akamai</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Physics is the enemy. The speed of light through fiber is roughly 200,000 km/s — a round trip from Sydney to New York is about 160ms of pure physics, before any server processing. A CDN sidesteps physics by putting a copy of your content in Sydney, cutting that round trip to under 5ms.</p>
+        <div class="callout"><p><strong>CDN vs server-side cache:</strong> A CDN is cache at the network edge — geographically distributed and HTTP-protocol-aware. A server-side cache (Redis) is in-memory storage in your data center. They solve different problems: CDN cuts geographic latency; server-side cache cuts database latency. Most production systems use both.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">How It Works</span>
+        <h2>Request flow — origin pull and cache fill</h2>
+        <div class="diagram-box">
+<span class="step">First request (cache MISS at edge)</span>
+
+User (Tokyo) ──▶ <span class="hi">CDN PoP Tokyo</span> ──▶ <span class="warn">MISS</span>
+                        │
+                        └──▶ <span class="hi">Origin (US-East)</span> ──▶ <span class="dim">150ms round trip</span>
+                                     │
+                               <span class="ok">Response + Cache-Control headers</span>
+                                     │
+                        ◀────────────┘
+                  <span class="ok">Store in edge cache</span>
+User ◀──────────────────┘
+
+<span class="step">Subsequent requests (cache HIT at edge)</span>
+
+User (Tokyo) ──▶ <span class="hi">CDN PoP Tokyo</span> ──▶ <span class="ok">HIT</span> ──▶ User
+                 <span class="dim">~3ms, no origin contact</span>
+        </div>
+
+        <p>The CDN respects your origin's <code>Cache-Control</code> headers to decide TTL. A <code>Cache-Control: max-age=86400</code> header tells the CDN to cache the response for 24 hours before re-validating with the origin. Once cached, thousands of requests to that edge PoP are served from memory — the origin never sees them.</p>
+
+        <p class="mini-heading">Push CDN vs Pull CDN</p>
+        <p><strong>Pull CDN:</strong> You don't pre-load anything. When a user requests a file that isn't cached at the edge, the CDN pulls it from your origin, caches it, and serves it. Subsequent requests are served from cache. This is the default model (CloudFront, Cloudflare). Simple to set up; the first user after a cache miss pays the origin latency.</p>
+        <p><strong>Push CDN:</strong> You explicitly upload assets to the CDN before any user requests them. Use for large static files (firmware updates, video files) where you want guaranteed availability at every PoP before the launch event. More operational overhead but no cold-start penalty.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Cache Headers</span>
+        <h2>HTTP headers that control CDN behavior</h2>
+        <pre><code class="language-js">// Express.js — controlling what the CDN caches and for how long
+import express from 'express';
+const app = express();
+
+// Static assets — cache aggressively at CDN (1 year), use content hash for versioning
+app.use('/static', express.static('public', {
+  setHeaders(res, path) {
+    // Hashed filenames (bundle.a3f9b2.js) can be cached forever
+    // The hash changes when content changes — old URL = old content, always
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+}));
+
+// API responses — don't cache at CDN (dynamic, user-specific)
+app.get('/api/user/profile', (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(userProfile);
+});
+
+// Public but dynamic — cache short-term, allow stale while revalidating
+app.get('/api/products', (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+  // CDN serves cached version for 60s, then revalidates in background
+  // Users never wait for revalidation — they always get a fast cached response
+  res.json(products);
+});
+
+// Conditional responses — support ETags for bandwidth-efficient revalidation
+app.get('/api/feed', async (req, res) => {
+  const feed = await getFeed();
+  const etag = generateEtag(feed);
+
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end(); // Not Modified — CDN keeps its cached copy
+  }
+
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'public, max-age=30');
+  res.json(feed);
+});
+
+// Purge the CDN cache programmatically (CloudFront example)
+import { CloudFrontClient, CreateInvalidationCommand } from '@aws-sdk/client-cloudfront';
+
+async function purgeCache(paths) {
+  const client = new CloudFrontClient({ region: 'us-east-1' });
+  await client.send(new CreateInvalidationCommand({
+    DistributionId: process.env.CLOUDFRONT_DISTRIBUTION_ID,
+    InvalidationBatch: {
+      Paths: { Quantity: paths.length, Items: paths },
+      CallerReference: Date.now().toString()
+    }
+  }));
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Edge Computing</span>
+        <h2>CDN is evolving into edge computing</h2>
+        <p>Modern CDNs (Cloudflare Workers, AWS Lambda@Edge, Fastly Compute) let you run code at the edge, not just cache static files. This unlocks patterns that previously required origin round trips:</p>
+        <ul class="check-list">
+          <li><strong>A/B testing at the edge:</strong> Route 10% of users to variant B by modifying the response at the edge — no origin call, no latency</li>
+          <li><strong>Auth at the edge:</strong> Validate JWTs at the CDN layer and reject unauthorized requests before they reach your origin, reducing attack surface</li>
+          <li><strong>Personalization:</strong> Rewrite HTML at the edge based on cookies (geo, language, plan tier) — different responses per user without sacrificing cache efficiency</li>
+          <li><strong>Image optimization:</strong> Resize, convert to WebP, and compress images on the fly at the edge based on request headers (Accept, viewport width)</li>
+        </ul>
+
+        <pre><code class="language-js">// Cloudflare Worker — JWT validation at the edge (never reaches origin if invalid)
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Only protect API routes, pass static assets through
+    if (!url.pathname.startsWith('/api/')) {
+      return fetch(request);
+    }
+
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    const token = authHeader.slice(7);
+    try {
+      // Verify JWT using Web Crypto API (available at edge)
+      await verifyJWT(token, env.JWT_SECRET);
+      return fetch(request); // Valid — pass to origin
+    } catch {
+      return new Response('Forbidden', { status: 403 });
+    }
+  }
+};</code></pre>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Drastic latency reduction for geographically distributed users</li><li>Massive origin offload (95%+ of static requests never reach origin)</li><li>DDoS protection — CDN absorbs attack traffic at the edge</li><li>Bandwidth cost reduction (CDN egress cheaper than origin egress)</li><li>Edge compute enables auth/routing without origin round trips</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Stale content — CDN serves old versions until TTL expires or invalidated</li><li>Cache invalidation propagation delay (purges take seconds to minutes)</li><li>Not suitable for personalized or authenticated responses without edge compute</li><li>Debugging is harder — add <code>X-Cache: HIT/MISS</code> headers</li><li>Cost at very high egress volume</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Common Mistakes</span>
+        <h2>What breaks in production</h2>
+        <ul class="check-list">
+          <li><strong>Caching API responses that include user data:</strong> If <code>/api/dashboard</code> returns user-specific data and gets cached, user A gets user B's data. Always set <code>Cache-Control: private, no-store</code> on authenticated endpoints.</li>
+          <li><strong>Not versioning static assets:</strong> If you deploy new JS without changing the filename, CDN keeps serving old JS. Use content-hashed filenames (<code>app.[hash].js</code>) so every deploy gets a new URL.</li>
+          <li><strong>Setting max-age too high on mutable URLs:</strong> <code>Cache-Control: max-age=86400</code> on <code>/logo.png</code> means users see the old logo for up to 24 hours after you change it. Either use immutable + hashed filenames, or use short TTLs on mutable URLs.</li>
+          <li><strong>Forgetting the Vary header:</strong> If your API returns different responses based on Accept-Language, set <code>Vary: Accept-Language</code> so the CDN caches one version per language, not one version for all.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A CDN is geography-aware caching. It solves the physics problem of global latency by putting copies of your content where your users are. The key to getting it right is your cache headers: use content-hashed filenames with long TTLs for static assets, short TTLs with stale-while-revalidate for public API responses, and never cache private or authenticated responses. Modern CDNs are also edge compute platforms — validating auth, routing, and personalizing responses without any origin round trip.</p>
+      </section>
+    </main>
+  </body>
+</html>

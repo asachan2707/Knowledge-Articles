@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JavaScript Fundamentals | Slack App Development</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Slack App Development</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="MacBook displaying lines of code on a developer's desk"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Slack Prereq · Language · 60 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@cgower" target="_blank" rel="noopener">Christopher Gower</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>JavaScript Fundamentals</h1>
+        <p class="summary">
+          The base layer for every Slack app on the JS stack. Programming with Mosh's "JavaScript Tutorial
+          for Beginners" lands the language essentials in a single sitting; this page condenses what to
+          watch for and how each piece shows up in real Bolt code.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Track</span><span class="meta-value">Slack prereq · Tech Stack 1</span></div>
+          <div><span class="meta-label">Goal</span><span class="meta-value">Read &amp; write everyday JavaScript with confidence</span></div>
+          <div><span class="meta-label">Time</span><span class="meta-value">~1 hour video + 1–2 hours practice</span></div>
+          <div><span class="meta-label">Prereq for</span><span class="meta-value">ES6, Node, Express, Bolt for JS</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          JavaScript runs in browsers <em>and</em> on Node.js servers. Every Slack app you'll build —
+          slash commands, modals, event handlers — is JavaScript (or its typed superset, TypeScript)
+          executing inside a Node process. Before any framework, you need fluency in the core language:
+          types, control flow, functions, scope, the DOM (in passing), the event loop, and async.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Why start here:</strong> the Slack docs and Bolt examples assume you can already read
+            and write modern JavaScript without thinking about it. Spending one hour on the fundamentals
+            saves you ten when you're debugging an event handler.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>What the video actually covers</h2>
+        <ul>
+          <li><strong>Variables &amp; types:</strong> <code>let</code>/<code>const</code>/<code>var</code>,
+            primitives (string, number, boolean, null, undefined, symbol, bigint), and reference types (object, array).</li>
+          <li><strong>Operators:</strong> arithmetic, comparison, logical, ternary, optional chaining
+            (<code>?.</code>), nullish coalescing (<code>??</code>).</li>
+          <li><strong>Control flow:</strong> if/else, switch, for, for-of, for-in, while, do-while, break/continue.</li>
+          <li><strong>Functions:</strong> declarations vs. expressions vs. arrow, parameters, default values, rest parameters.</li>
+          <li><strong>Objects &amp; arrays:</strong> property access, methods, destructuring, spread, common array methods (<code>map</code>, <code>filter</code>, <code>reduce</code>, <code>find</code>, <code>some</code>, <code>every</code>).</li>
+          <li><strong>Scope &amp; closures:</strong> block scope, lexical scope, the closure pattern.</li>
+          <li><strong>The DOM:</strong> <code>document.querySelector</code>, events, light browser interactivity.</li>
+          <li><strong>Async basics:</strong> callbacks → promises → async/await.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Three concepts that trip up Slack beginners</h2>
+        <h3>1. <code>this</code> binding</h3>
+        <p>
+          In a regular function, <code>this</code> depends on how the function is called. In an arrow
+          function, <code>this</code> is captured from the surrounding scope. This matters in Bolt
+          listeners — most examples use arrow functions exactly because they don't rebind <code>this</code>.
+        </p>
+
+        <h3>2. The event loop &amp; async</h3>
+        <p>
+          JavaScript is single-threaded but non-blocking. Long synchronous work blocks the event loop and
+          will make your Slack app miss the 3-second ack window. Always <code>await</code> I/O, never block.
+        </p>
+        <p class="code-caption">Block kit: bad vs. good</p>
+        <pre class="code-block"><code>// BAD - blocks the event loop, will time out
+app.command('/report', async ({ command, ack, client }) =&gt; {
+  const data = doExpensiveSyncWork(); // 5 seconds
+  await ack(); // too late!
+});
+
+// GOOD - ack first, then do work
+app.command('/report', async ({ command, ack, client }) =&gt; {
+  await ack();
+  const data = await doWorkAsync(); // can take any time
+  await client.chat.postMessage({ channel: command.channel_id, text: data });
+});</code></pre>
+
+        <h3>3. Equality (<code>==</code> vs. <code>===</code>)</h3>
+        <p>
+          Always use <code>===</code> (strict equality). The double-equals coerces types and produces
+          surprising results (<code>0 == '' == false</code>). The <em>only</em> common exception is
+          <code>x == null</code> as a quick check for both <code>null</code> and <code>undefined</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>How this shows up in a Slack app</h2>
+        <p>
+          Look at any Bolt for JS example and you will see destructuring (<code>{ ack, body, client }</code>),
+          arrow functions, async/await, optional chaining on payloads
+          (<code>body.user?.id</code>), and array methods on Slack data
+          (<code>(await client.conversations.list()).channels.filter(c =&gt; !c.is_archived)</code>).
+          Every one of those patterns is plain JavaScript — the framework doesn't add new syntax.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Practice plan after the video</h2>
+        <ol>
+          <li>Open a Node REPL (<code>node</code>) and try every primitive operator until it feels natural.</li>
+          <li>Write a small script that fetches data with <code>fetch()</code> and uses
+            <code>map</code>/<code>filter</code>/<code>reduce</code> on the response.</li>
+          <li>Build a tiny todo list in plain HTML + JS to feel the DOM and event listeners.</li>
+          <li>Write a function that uses <code>async</code>/<code>await</code> with proper <code>try/catch</code>.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Key takeaways</h2>
+        <ul class="takeaways">
+          <li>Use <code>const</code> by default, <code>let</code> only when you mutate, <code>var</code> never.</li>
+          <li>Always <code>===</code>. Always <code>async</code>/<code>await</code> over raw promise chains.</li>
+          <li>Destructuring + spread are how every modern JS API is shaped.</li>
+          <li>The event loop is non-negotiable Slack knowledge — block it and your handler dies.</li>
+        </ul>
+      </section>
+
+      <section class="content-card detail-references">
+        <h2>References</h2>
+        <ul class="resource-list">
+          <li>
+            <a href="https://www.youtube.com/watch?v=W6NZfCO5SIk" target="_blank" rel="noopener">
+              <span class="resource-kind video">Video</span>
+              JavaScript Tutorial for Beginners: Learn JavaScript (Programming with Mosh)
+            </a>
+          </li>
+          <li>
+            <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide" target="_blank" rel="noopener">
+              <span class="resource-kind docs">Docs</span>
+              MDN JavaScript Guide (canonical reference)
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

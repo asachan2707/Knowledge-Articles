@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Concurrency Control | System Design | Learning Hub</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .dim{color:#64748b}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../system-design-concepts.html">← Back to System Design Concepts</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1600&h=700&fit=crop&auto=format&q=80" alt="Multiple parallel processes competing for resources" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">System Design · Data Architecture · Concept 16 · 12 min</span></div>
+        </figure>
+        <h1>Concurrency Control</h1>
+        <p class="summary">When two clients read the same record, modify it, and write back simultaneously, the second write overwrites the first — silently. Concurrency control is the set of mechanisms that prevent this: optimistic locking, pessimistic locking, and MVCC. The choice shapes your system's throughput, latency, and correctness under load.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Concept</span><span class="meta-value">16 of 33</span></div>
+          <div><span class="meta-label">Category</span><span class="meta-value">Data Architecture</span></div>
+          <div><span class="meta-label">Problem</span><span class="meta-value">Lost updates, dirty reads, phantom reads</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">PostgreSQL, Redis, optimistic version fields</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">In a single-threaded world, reads and writes happen one at a time — no races. In every real production system, multiple clients read the same data, compute changes, and write back. Without control, two concurrent updates can both read version N, independently compute changes, and both write version N+1 — but only the last write survives, silently destroying the first. This is the lost update problem, and it is more common than most developers think.</p>
+        <div class="callout"><p><strong>The classic lost update:</strong> Two users both open a shared document at the same time. User A changes title. User B changes body. Both clients read {title: "Old", body: "Old"}, each modify one field, and write back. Whoever writes last wins the whole record. One change is silently lost — no error, no conflict notification.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Strategies</span>
+        <h2>Optimistic vs Pessimistic locking — and MVCC</h2>
+        <div class="diagram-box">
+<span class="step">Optimistic locking — check version at write time, retry on conflict</span>
+
+READ:  SELECT * FROM inventory WHERE id = 1
+       → { id:1, quantity:100, version:5 }
+
+Client A: quantity = 100 - 3 = 97
+Client B: quantity = 100 - 10 = 90
+
+Client A: UPDATE inventory SET quantity=97, version=6 WHERE id=1 AND version=5  → <span class="ok">1 row updated</span>
+Client B: UPDATE inventory SET quantity=90, version=6 WHERE id=1 AND version=5  → <span class="warn">0 rows updated</span> (version now 6)
+
+Client B retries: re-reads { quantity:97, version:6 }, computes 97-10=87, writes version=7 → <span class="ok">success</span>
+
+<span class="step">Pessimistic locking — lock the row before reading</span>
+
+BEGIN;
+SELECT * FROM inventory WHERE id = 1 FOR UPDATE;  <span class="dim">-- row is LOCKED</span>
+  <span class="dim">-- Client B's SELECT ... FOR UPDATE blocks here until Client A commits</span>
+UPDATE inventory SET quantity = quantity - 3 WHERE id = 1;
+COMMIT;  <span class="dim">-- lock released</span>
+
+<span class="dim">Lower concurrency, simpler logic — one writer at a time.</span>
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Strategy</th><th>Mechanism</th><th>Best for</th><th>Problem</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Optimistic locking</strong></td><td>version/etag field, CAS on write</td><td>Low-conflict workloads (most reads, rare concurrent writes)</td><td>Write contention causes retries; can starve under high conflict</td></tr>
+            <tr><td><strong>Pessimistic locking</strong></td><td>SELECT FOR UPDATE, row-level locks</td><td>High-conflict, short transactions (inventory, counters)</td><td>Deadlocks; reduces concurrency; locks held during network calls cause long waits</td></tr>
+            <tr><td><strong>MVCC</strong></td><td>Multiple row versions, snapshot isolation</td><td>Read-heavy OLTP (PostgreSQL, MySQL InnoDB default)</td><td>Bloat from old versions; vacuum overhead</td></tr>
+            <tr><td><strong>Compare-and-swap (Redis)</strong></td><td>WATCH + MULTI/EXEC transaction</td><td>Distributed counters, rate limiters, leases</td><td>Retry on contention; no partial result</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Optimistic locking and distributed CAS in Node.js</h2>
+        <pre><code class="language-js">import { Pool } from 'pg';
+import { createClient } from 'redis';
+
+const db    = new Pool({ connectionString: process.env.DATABASE_URL });
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+// ─── OPTIMISTIC LOCKING — version field ──────────────────────────────────
+// Schema: products(id, name, stock, version INT DEFAULT 0)
+
+async function decrementStock(productId, quantity) {
+  const MAX_RETRIES = 3;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    // 1. Read current state
+    const { rows } = await db.query(
+      'SELECT stock, version FROM products WHERE id = $1',
+      [productId]
+    );
+    if (!rows.length) throw new Error('Product not found');
+    const { stock, version } = rows[0];
+
+    if (stock < quantity) throw new Error('Insufficient stock');
+
+    // 2. Attempt write, gated on the version we read
+    const result = await db.query(
+      `UPDATE products
+       SET stock = stock - $1, version = version + 1
+       WHERE id = $2 AND version = $3`,
+      [quantity, productId, version]
+    );
+
+    if (result.rowCount === 1) return { success: true, newStock: stock - quantity };
+
+    // Version changed between our read and write — another client updated first
+    // Retry with fresh read
+    if (attempt === MAX_RETRIES - 1) throw new Error('Conflict: too many concurrent updates');
+    // Small delay before retry to reduce contention
+    await new Promise(r => setTimeout(r, Math.random() * 50));
+  }
+}
+
+// ─── PESSIMISTIC LOCKING — SELECT FOR UPDATE ─────────────────────────────
+// Use when conflict rate is HIGH and retries are expensive
+async function transferBalance(fromId, toId, amount) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock BOTH rows in consistent order (lower ID first) to prevent deadlocks
+    const [id1, id2] = [fromId, toId].sort((a, b) => a - b);
+    const { rows } = await client.query(
+      'SELECT id, balance FROM accounts WHERE id = ANY($1) FOR UPDATE',
+      [[id1, id2]]
+    );
+
+    const from = rows.find(r => r.id === fromId);
+    const to   = rows.find(r => r.id === toId);
+
+    if (from.balance < amount) throw new Error('Insufficient funds');
+
+    await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [amount, fromId]);
+    await client.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [amount, toId]);
+
+    await client.query('COMMIT');
+    return { success: true };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ─── REDIS COMPARE-AND-SWAP (WATCH + MULTI/EXEC) ─────────────────────────
+// Distributed optimistic lock: watch a key, abort transaction if it changes
+async function redisCompareAndSwap(key, expectedValue, newValue) {
+  const MAX_RETRIES = 5;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    await redis.watch(key);                // Watch for changes
+
+    const current = await redis.get(key);
+    if (current !== expectedValue) {
+      await redis.unwatch();
+      return { success: false, reason: 'value_changed' };
+    }
+
+    const result = await redis
+      .multi()
+      .set(key, newValue)
+      .exec();                             // null if key changed since WATCH
+
+    if (result !== null) return { success: true };
+    // else: conflict, retry
+  }
+  throw new Error('CAS failed after max retries');
+}
+
+// ─── HTTP ETag-based optimistic locking (REST APIs) ──────────────────────
+// GET /resources/123 → ETag: "abc123"
+// PUT /resources/123, If-Match: "abc123" → 200 OK (no conflict)
+//                                        → 412 Precondition Failed (conflict)
+app.get('/resources/:id', async (req, res) => {
+  const resource = await db.query('SELECT *, version FROM resources WHERE id = $1', [req.params.id]);
+  const etag     = `"${resource.rows[0].version}"`;
+  res.setHeader('ETag', etag);
+  res.json(resource.rows[0]);
+});
+
+app.put('/resources/:id', async (req, res) => {
+  const ifMatch = req.headers['if-match'];
+  if (!ifMatch) return res.status(428).json({ error: 'If-Match header required' });
+
+  const expectedVersion = parseInt(ifMatch.replace(/"/g, ''));
+  const result = await db.query(
+    'UPDATE resources SET data = $1, version = version + 1 WHERE id = $2 AND version = $3 RETURNING version',
+    [req.body, req.params.id, expectedVersion]
+  );
+
+  if (result.rowCount === 0) {
+    return res.status(412).json({ error: 'Precondition Failed — resource was modified by another client' });
+  }
+
+  res.json({ version: result.rows[0].version });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real World</span>
+        <h2>PostgreSQL MVCC, DynamoDB conditional writes, and ETags</h2>
+        <p><strong>PostgreSQL MVCC:</strong> Every UPDATE creates a new row version rather than overwriting in place. Readers see a consistent snapshot from the start of their transaction — they never block on writers and writers never block on readers. The vacuum process periodically cleans up old row versions (called "dead tuples"). This is why high-write PostgreSQL tables need regular vacuuming or you get table bloat.</p>
+        <p><strong>DynamoDB conditional writes:</strong> Every DynamoDB PutItem and UpdateItem can include a ConditionExpression. <code>attribute_exists(version) AND version = :expected</code> is exactly optimistic locking. If the condition fails, DynamoDB returns ConditionalCheckFailedException with zero cost — the write was rejected, not applied. Stripe uses this pattern for idempotency key deduplication.</p>
+        <p><strong>HTTP ETags:</strong> The Web's built-in optimistic locking. GET returns an ETag header (a hash of the resource). PUT with <code>If-Match: &lt;etag&gt;</code> only applies if the server's current ETag matches — otherwise returns 412 Precondition Failed. This is the correct way to handle concurrent edits to REST resources.</p>
+
+        <div class="warn-box"><strong>Never hold a pessimistic lock across a network call.</strong> BEGIN; SELECT FOR UPDATE; [call external API for 3 seconds]; UPDATE; COMMIT. The row is locked for 3 seconds. Under concurrency, this causes lock queues that cascade into timeouts. Keep transactions as short as possible — do all I/O outside the transaction, then enter BEGIN and do only the database work.</div>
+
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Optimistic pros</h4><ul><li>High concurrency — no blocking between readers and writers</li><li>No deadlocks possible</li><li>Works across distributed systems (no central lock manager)</li><li>Simple to implement with a version/etag column</li></ul></div>
+          <div class="trade-col cons"><h4>Optimistic cons</h4><ul><li>Conflict retries increase latency under high contention</li><li>Can starve clients under very high write contention</li><li>Requires application-level retry logic</li><li>Not suitable for operations where retrying has side effects</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Use optimistic locking (version field + CAS on write) as the default — it provides high concurrency with no blocking. Only switch to pessimistic locking (SELECT FOR UPDATE) when conflict rate is genuinely high and retry cost is unacceptable (e.g. financial balance transfers). Never hold a pessimistic lock across a network call. Expose ETag headers on REST resources so clients can do conditional updates correctly. For distributed systems without a shared database, compare-and-swap in Redis provides the same semantics across service boundaries.</p>
+      </section>
+    </main>
+  </body>
+</html>
