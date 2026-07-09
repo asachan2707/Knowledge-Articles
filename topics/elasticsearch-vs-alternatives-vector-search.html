@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Elasticsearch vs Alternatives &amp; Vector/AI Search in ES 8.x | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .comp-table { width:100%; border-collapse:collapse; font-size:.88rem; margin:1rem 0; }
+      .comp-table th { background:#f8fafc; color:#0f172a; font-weight:700; padding:.6rem .9rem; text-align:left; border-bottom:2px solid #e2e8f0; }
+      .comp-table td { padding:.55rem .9rem; border-bottom:1px solid #f1f5f9; vertical-align:top; line-height:1.5; }
+      .comp-table tr:hover td { background:#f8fafc; }
+      .comp-table .yes { color:#16a34a; font-weight:700; }
+      .comp-table .no  { color:#dc2626; font-weight:700; }
+      .comp-table .partial { color:#d97706; font-weight:700; }
+      .verdict-card { border:1px solid #e2e8f0; border-radius:12px; padding:1rem 1.25rem; margin:.75rem 0; background:#fafafa; }
+      .verdict-card h4 { margin:0 0 .4rem; font-size:1rem; color:#0f172a; }
+      .verdict-card p { margin:0; font-size:.9rem; color:#475569; line-height:1.55; }
+      .verdict-label { display:inline-block; font-size:.7rem; font-weight:700; text-transform:uppercase; letter-spacing:.07em; padding:.15rem .5rem; border-radius:999px; margin-bottom:.45rem; }
+      .choose-es { background:#dbeafe; color:#1d4ed8; }
+      .choose-alt { background:#dcfce7; color:#166534; }
+      .choose-both { background:#fef9c3; color:#854d0e; }
+      .code-label { display:inline-block; font-family:Arial,sans-serif; font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:#0f766e; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:4px; padding:.15rem .45rem; margin-bottom:.5rem; }
+      .insight-box { background:#fdf4ff; border-left:4px solid #a855f7; padding:.85rem 1.1rem; border-radius:0 8px 8px 0; margin:1rem 0; font-size:.93rem; }
+      .insight-box strong { color:#7e22ce; }
+      .warn-box { background:#fff7ed; border-left:4px solid #f97316; padding:.85rem 1.1rem; border-radius:0 8px 8px 0; margin:1rem 0; font-size:.93rem; }
+      .warn-box strong { color:#c2410c; }
+      .algo-box { background:#f0f9ff; border-left:4px solid #0ea5e9; padding:.85rem 1.1rem; border-radius:0 8px 8px 0; margin:1rem 0; font-size:.93rem; }
+      .algo-box strong { color:#0369a1; }
+      .feature-row { display:flex; gap:1rem; padding:.75rem 0; border-bottom:1px solid #f1f5f9; align-items:flex-start; }
+      .feature-row:last-child { border-bottom:none; }
+      .feature-icon { min-width:2rem; height:2rem; border-radius:8px; background:#e0f2fe; color:#0369a1; font-weight:700; font-family:Arial,sans-serif; font-size:.8rem; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+      .decision-grid { display:grid; grid-template-columns:1fr 1fr; gap:.75rem; margin:1rem 0; }
+      @media(max-width:640px){ .decision-grid { grid-template-columns:1fr; } }
+      .quant-row { display:grid; grid-template-columns:auto 1fr 1fr 1fr; gap:.5rem .9rem; align-items:center; padding:.5rem 0; border-bottom:1px solid #f1f5f9; font-size:.88rem; }
+      .quant-row:last-child { border-bottom:none; }
+      .quant-label { font-weight:700; font-size:.8rem; background:#f1f5f9; padding:.2rem .6rem; border-radius:6px; white-space:nowrap; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Search infrastructure" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Search &amp; Data · 22 min</span>
+          </div>
+        </figure>
+        <h1>Elasticsearch vs Alternatives &amp; Vector/AI Search in ES 8.x / 9.x</h1>
+        <p class="summary">A production-grade technical reference covering Elasticsearch vs Apache Solr, OpenSearch, Typesense, Meilisearch, Algolia, and PostgreSQL tsvector — with feature comparison tables, a decision guide, and complete JSON examples for kNN vector search, hybrid BM25+kNN with Reciprocal Rank Fusion, ELSER sparse semantic search, and every quantization option (int8_hnsw, int4_hnsw, bbq_hnsw).</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Sources</span><span class="meta-value">Elastic Docs, OpenSearch Docs, Typesense, Meilisearch, Apache Solr · 2024–2025</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Search, Elasticsearch, Vector Search, kNN, HNSW, Semantic Search, OpenSearch, Solr, Algolia</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Node.js Elasticsearch client — kNN indexing, hybrid search, ELSER ingest pipeline</span></div>
+        </div>
+      </header>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <p class="lead">Elasticsearch dominates search infrastructure for a reason: it handles petabyte-scale datasets, ships with the most complete aggregation engine in open-source search, and as of version 8.x has become a first-class vector database with native HNSW, quantization, and hybrid BM25+kNN search — all in a single cluster. But "use Elasticsearch for everything" is wrong. For product search on a startup's 2 M SKUs, Typesense is faster to ship and cheaper to run. For a team already on PostgreSQL with modest search requirements, tsvector avoids the operational overhead of a separate cluster entirely.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> The right search tool depends on three axes — data scale (documents + query volume), feature surface needed (aggregations, geo, analytics, ML), and operational cost budget (team size, infra). Elasticsearch wins when two or more axes are demanding. Alternatives win when you can accept a narrower feature set for a much simpler operational story.</p>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="story-card">
+        <span class="section-label">Real-world scenario</span>
+        <h2>Three teams, three right answers</h2>
+        <p><strong>Team A</strong> (e-commerce, 50 M SKUs, real-time faceting, geo-search, analytics dashboards, ML-powered recommendations) → Elasticsearch. No other tool in this list handles all five simultaneously at that scale.</p>
+        <p><strong>Team B</strong> (SaaS startup, 500 K user records, need instant search with typo tolerance, two engineers, ship in a week) → Typesense Cloud or Meilisearch. Zero JVM, single binary, excellent developer UX, done in an afternoon.</p>
+        <p><strong>Team C</strong> (internal knowledge base, 100 K docs, team already on managed PostgreSQL, search is a secondary feature) → PostgreSQL tsvector + pg_trgm. No new infrastructure, no new operational surface, good enough relevance for internal tooling.</p>
+        <p>This article gives you the exact data to make that call confidently.</p>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 1 — Elasticsearch history &amp; architecture</span>
+        <h2>Elasticsearch: what it is and where it came from</h2>
+        <p>Elasticsearch was created by Shay Banon in 2010 as a REST API wrapper around <strong>Apache Lucene</strong> — the same library that powered Apache Solr (released 2004). Where Solr exposed Lucene through XML configuration files, Elasticsearch made everything JSON over HTTP, added automatic sharding and replication from day one, and introduced a cluster state model that made distributed search feel trivial to deploy.</p>
+        <div class="feature-row">
+          <div class="feature-icon">1</div>
+          <div><strong>Lucene at the core</strong> — Both ES and Solr write Lucene segments on disk. ES adds a distributed coordination layer (master election, shard allocation, cross-cluster replication) on top. Lucene provides inverted indexes, BM25 scoring, and since Lucene 9, HNSW graphs for vector search.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">2</div>
+          <div><strong>REST-first, schema-optional</strong> — ES auto-detects field types on first document. You can define explicit mappings for production accuracy, but the defaults work for prototyping. Solr requires schema.xml or the managed schema API.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">3</div>
+          <div><strong>Aggregations engine</strong> — ES aggregations (bucket, metric, pipeline) are richer and faster than Solr's faceting. Deep nested aggregations, scripted metrics, and percentile calculations are first-class.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">4</div>
+          <div><strong>Elastic Stack</strong> — Kibana (visualization), Logstash (ingest), Beats (lightweight shippers), Fleet (agent management), and the ML/AI capabilities (ELSER, E5, inference API) are all developed by Elastic and tested against the same release cycle.</div>
+        </div>
+        <div class="insight-box">
+          <strong>DB-Engines ranking:</strong> As of mid-2025, Elasticsearch consistently ranks #1 in the search engine category on db-engines.com, ahead of Solr. Both are far ahead of OpenSearch, Typesense, and Meilisearch in raw market presence, though the newer tools are growing faster from a smaller base.
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 2 — Head-to-head comparisons</span>
+        <h2>Elasticsearch vs Apache Solr</h2>
+        <p>Solr (2004) and Elasticsearch (2010) are both Apache Lucene wrappers. Solr got there first and is deeply embedded in enterprise Java shops. Elasticsearch overtook it in developer mindshare around 2016–2018 due to its simpler REST API, better documentation, and Kibana's Logstyash integration story.</p>
+        <table class="comp-table">
+          <thead>
+            <tr><th>Dimension</th><th>Elasticsearch</th><th>Apache Solr</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>First release</td><td>2010</td><td>2004 (Apache, 2010)</td></tr>
+            <tr><td>Core engine</td><td>Apache Lucene</td><td>Apache Lucene</td></tr>
+            <tr><td>Current stable version</td><td>9.x (8.x LTS)</td><td>10.0 (9.x also available)</td></tr>
+            <tr><td>License</td><td>AGPL 3 / Elastic SSPL (proprietary features)</td><td>Apache 2.0</td></tr>
+            <tr><td>Schema management</td><td>Dynamic mapping (explicit optional)</td><td>Managed Schema / Schema Designer GUI</td></tr>
+            <tr><td>Admin UI</td><td>Kibana (separate product)</td><td>Built-in Solr Admin UI</td></tr>
+            <tr><td>Distributed mode</td><td>Native, ZooKeeper-free (own raft-like)</td><td>SolrCloud (requires ZooKeeper)</td></tr>
+            <tr><td>Aggregations</td><td class="yes">Excellent — full bucket/metric/pipeline</td><td class="partial">Solid faceting; fewer pipeline aggregations</td></tr>
+            <tr><td>Vector/semantic search</td><td class="yes">Native HNSW (8.0+), ELSER, quantization</td><td class="partial">Dense vector support (Solr 9.x), less mature</td></tr>
+            <tr><td>REST API</td><td class="yes">JSON over HTTP, ergonomic</td><td class="partial">JSON + XML; SolrJ Java client historically dominant</td></tr>
+            <tr><td>Enterprise governance</td><td class="partial">Elastic Inc. commercial control</td><td class="yes">Apache Foundation governance, community-driven</td></tr>
+            <tr><td>Deployment complexity</td><td>Medium (JVM + config)</td><td>Medium-High (JVM + ZooKeeper for cluster)</td></tr>
+            <tr><td>Best fit</td><td>Logs, APM, e-commerce, AI/semantic search</td><td>Enterprise document management, complex XML/JSON configs, existing Java stacks</td></tr>
+          </tbody>
+        </table>
+        <div class="verdict-card">
+          <span class="verdict-label choose-es">Choose Elasticsearch when</span>
+          <h4>You need modern vector search, a richer aggregation pipeline, or the Elastic Stack (Kibana/ML)</h4>
+          <p>Elasticsearch's developer experience, documentation quality, and AI/vector feature investment are ahead of Solr for new projects. Solr's advantage is its Apache governance model (no license change risk) and its established position in Java enterprise stacks that already use it.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Elasticsearch vs OpenSearch</h2>
+        <p>OpenSearch is the most directly API-compatible alternative to Elasticsearch. Amazon Web Services forked Elasticsearch 7.10.2 in January 2021 after Elastic changed the license from Apache 2.0 to the Server Side Public License (SSPL), which AWS argued was not an open-source license. OpenSearch was released as <strong>Apache 2.0</strong> and is governed by the OpenSearch project (AWS as primary contributor).</p>
+        <table class="comp-table">
+          <thead>
+            <tr><th>Dimension</th><th>Elasticsearch</th><th>OpenSearch</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Fork point</td><td>—</td><td>ES 7.10.2 (Jan 2021)</td></tr>
+            <tr><td>License</td><td>AGPL 3 / SSPL</td><td class="yes">Apache 2.0</td></tr>
+            <tr><td>Governance</td><td>Elastic Inc.</td><td>OpenSearch Project (AWS-led)</td></tr>
+            <tr><td>Current version (2025)</td><td>8.x / 9.x</td><td>2.x</td></tr>
+            <tr><td>API compatibility</td><td>—</td><td class="yes">High at 7.10 baseline; diverging in 2.x features</td></tr>
+            <tr><td>Managed offering</td><td>Elastic Cloud (Elastic Inc.)</td><td>Amazon OpenSearch Service (AWS)</td></tr>
+            <tr><td>Vector search</td><td class="yes">HNSW, ELSER, BBQ quantization, Inference API</td><td class="partial">k-NN plugin (FAISS/NMSLIB/Lucene), less feature parity</td></tr>
+            <tr><td>ML features</td><td class="yes">ELSER, E5, Inference API (30+ providers)</td><td class="partial">ML Commons (growing but behind)</td></tr>
+            <tr><td>Kibana / Dashboards</td><td>Kibana</td><td>OpenSearch Dashboards (Kibana fork)</td></tr>
+            <tr><td>Security</td><td>Requires license (Basic free tier)</td><td class="yes">Security plugin free (TLS, auth, RBAC)</td></tr>
+            <tr><td>AWS integration</td><td class="partial">Available on AWS Marketplace</td><td class="yes">Native: IAM, Bedrock, SageMaker, S3</td></tr>
+            <tr><td>Best fit</td><td>Bleeding-edge AI search, Elastic Stack, ELK logs</td><td>AWS-centric stacks, Apache 2.0 required, avoiding vendor lock-in</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box">
+          <strong>Practical divergence:</strong> OpenSearch 2.x introduced its own features (Security Analytics, ML Commons neural sparse search, Notifications plugin) that have no ES equivalent, and vice versa. Migration between ES 8.x and OpenSearch 2.x requires careful API compatibility testing — they are no longer drop-in replacements for each other.
+        </div>
+        <div class="verdict-card">
+          <span class="verdict-label choose-alt">Choose OpenSearch when</span>
+          <h4>You're on AWS and need Apache 2.0 licensing or deep AWS service integration</h4>
+          <p>Amazon OpenSearch Service is the path-of-least-resistance for AWS-native teams. OpenSearch's Apache 2.0 license also removes any ambiguity for organizations with open-source compliance requirements. If you need the latest Elastic AI features (ELSER v2, BBQ quantization, Inference API with Anthropic/OpenAI), stay on Elasticsearch.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Elasticsearch vs Typesense</h2>
+        <p>Typesense (first commit 2015, written in C++) is purpose-built for <em>instant, typo-tolerant product/document search</em>. It stores the primary index in RAM, requires no JVM, and ships as a single binary. As of v30.x it supports vector/semantic search (HNSW), joins, geo search, and a built-in RAG pipeline.</p>
+        <table class="comp-table">
+          <thead>
+            <tr><th>Dimension</th><th>Elasticsearch</th><th>Typesense</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Language</td><td>Java (JVM)</td><td class="yes">C++ (no JVM)</td></tr>
+            <tr><td>Primary index storage</td><td>Disk (NVMe optimized)</td><td class="yes">RAM (disk backup) — very low latency</td></tr>
+            <tr><td>Setup complexity</td><td>Medium (JVM, reverse proxy required)</td><td class="yes">Single binary; direct frontend exposure OK</td></tr>
+            <tr><td>Typo tolerance</td><td class="partial">Fuzziness param required</td><td class="yes">On by default, no config needed</td></tr>
+            <tr><td>Aggregations / analytics</td><td class="yes">Full bucket/metric/pipeline aggregations</td><td class="partial">Faceting only; no pipeline aggregations</td></tr>
+            <tr><td>Scale ceiling</td><td class="yes">Petabyte-scale, multi-datacenter</td><td class="partial">RAM-constrained; practical ceiling ~hundreds of GB</td></tr>
+            <tr><td>Vector / semantic search</td><td class="yes">HNSW, ELSER, quantization, Inference API</td><td class="yes">HNSW, CLIP image search, Whisper voice</td></tr>
+            <tr><td>JOINs</td><td class="yes">Supported</td><td class="yes">Supported (v0.25+)</td></tr>
+            <tr><td>High availability</td><td class="yes">Native multi-shard, active-active</td><td class="yes">RAFT-based clustering (v0.22+)</td></tr>
+            <tr><td>Hosting</td><td>Self-hosted or Elastic Cloud</td><td>Self-hosted or Typesense Cloud</td></tr>
+            <tr><td>License</td><td>AGPL / SSPL</td><td class="yes">Fully open source (GPL v3)</td></tr>
+            <tr><td>Best fit</td><td>Large-scale, analytics-heavy, multi-use case</td><td>Product search, developer portals, instant search &lt; hundreds of millions of docs</td></tr>
+          </tbody>
+        </table>
+        <div class="verdict-card">
+          <span class="verdict-label choose-alt">Choose Typesense when</span>
+          <h4>You need instant search with zero-config typo tolerance and simple operations</h4>
+          <p>Typesense is genuinely a joy to operate. A single binary, RAM-backed index, direct frontend exposure, and no JVM. For product catalogs and developer-facing search up to a few hundred million documents where the data fits in RAM, it often outperforms Elasticsearch on both latency and operational complexity. Its key limitation: aggregation depth. If you need multi-level pipeline aggregations or petabyte-scale, ES wins.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Elasticsearch vs Meilisearch</h2>
+        <p>Meilisearch (2018, written in Rust) targets the sweet spot of excellent developer UX for small-to-medium datasets. It's a single binary with no external dependencies, completes queries in under 50 ms using memory-mapped disk storage and DiskANN-based vector search, and has excellent SDK coverage (10+ languages). As of recent versions it also includes a built-in RAG mode.</p>
+        <table class="comp-table">
+          <thead>
+            <tr><th>Dimension</th><th>Elasticsearch</th><th>Meilisearch</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Language</td><td>Java</td><td class="yes">Rust (memory-safe, no GC pauses)</td></tr>
+            <tr><td>High availability</td><td class="yes">Native clustering</td><td class="no">Single-node only — no HA in open source</td></tr>
+            <tr><td>Index storage</td><td>Disk</td><td>Disk (memory-mapped)</td></tr>
+            <tr><td>Query latency (small data)</td><td>10–50 ms</td><td class="yes">&lt; 50 ms guaranteed (design goal)</td></tr>
+            <tr><td>Typo tolerance</td><td class="partial">Manual fuzziness config</td><td class="yes">On by default</td></tr>
+            <tr><td>Aggregations</td><td class="yes">Full pipeline aggregations</td><td class="partial">Faceted search (attributes), limited analytics</td></tr>
+            <tr><td>Sweet spot scale</td><td class="yes">Millions to billions of docs</td><td class="partial">Up to ~tens of millions of docs comfortably</td></tr>
+            <tr><td>Vector search</td><td class="yes">HNSW (native Lucene), quantization</td><td class="yes">DiskANN-based, built-in AI embeddings</td></tr>
+            <tr><td>Setup time</td><td>Hours (JVM, cluster config)</td><td class="yes">Minutes (single binary)</td></tr>
+            <tr><td>License</td><td>AGPL / SSPL</td><td class="partial">MIT (community) / BUSL (enterprise)</td></tr>
+            <tr><td>Best fit</td><td>Analytics, logs, large-scale search</td><td>Instant search UIs, internal tools, &lt; 50 M docs</td></tr>
+          </tbody>
+        </table>
+        <div class="verdict-card">
+          <span class="verdict-label choose-alt">Choose Meilisearch when</span>
+          <h4>You need a hosted single-binary search for small-to-medium datasets with excellent UX</h4>
+          <p>Meilisearch's developer experience is exceptional. The API is clean, the binary is tiny, and it just works. Its critical limitation for production is the lack of native high availability in the open-source tier — it is explicitly not production-ready for HA requirements. Use it confidently for internal tools, documentation search, and product catalogs where occasional downtime is acceptable or where you use managed Meilisearch Cloud.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Elasticsearch vs Algolia</h2>
+        <p>Algolia (2012) is SaaS-only — there is no self-hosted option. It is written in C++ (same as Typesense, which was created partly as an open-source alternative to it). Algolia's value proposition is unmatched developer UX, sub-10ms search, excellent InstantSearch UI libraries (React, Vue, Angular, iOS, Android), and a global CDN for search infrastructure.</p>
+        <table class="comp-table">
+          <thead>
+            <tr><th>Dimension</th><th>Elasticsearch</th><th>Algolia</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Hosting model</td><td>Self-hosted or Elastic Cloud</td><td class="no">SaaS only — no self-hosting</td></tr>
+            <tr><td>Search latency</td><td>10–50 ms (self-hosted)</td><td class="yes">&lt; 10 ms (global CDN, RAM-primary index)</td></tr>
+            <tr><td>UI libraries</td><td class="partial">Search-UI (basic)</td><td class="yes">InstantSearch (React/Vue/Angular/iOS/Android)</td></tr>
+            <tr><td>Developer experience</td><td class="partial">Steeper learning curve</td><td class="yes">Best-in-class onboarding and docs</td></tr>
+            <tr><td>Pricing</td><td class="yes">Operational cost at scale, cheaper for large volumes</td><td class="no">Expensive at scale (per-search + per-record pricing)</td></tr>
+            <tr><td>Data privacy</td><td class="yes">Full control (self-hosted)</td><td class="no">Personal data, IPs, analytics collected</td></tr>
+            <tr><td>Aggregations</td><td class="yes">Full analytics aggregations</td><td class="partial">Faceting + Algolia Insights (analytics tier)</td></tr>
+            <tr><td>Record size limit</td><td>Unlimited</td><td class="no">10 KB per record</td></tr>
+            <tr><td>Geo search</td><td class="yes">Multi-point, polygons</td><td class="partial">Single point per record</td></tr>
+            <tr><td>Vector / AI search</td><td class="yes">Native HNSW, ELSER</td><td class="yes">NeuralSearch (hybrid keyword + vector)</td></tr>
+            <tr><td>Best fit</td><td>Cost-conscious at scale, data sovereignty, analytics</td><td>Consumer-facing instant search, tight timelines, top-tier UX required</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box">
+          <strong>Typesense as Algolia alternative:</strong> Typesense explicitly positions itself as a self-hosted, open-source Algolia alternative — same RAM-primary approach, similar C++ foundation, but Apache-licensed and self-hostable. If you like Algolia's UX but not its pricing or lock-in, evaluate Typesense Cloud first.
+        </div>
+        <div class="verdict-card">
+          <span class="verdict-label choose-alt">Choose Algolia when</span>
+          <h4>Time-to-market and consumer UX are the top priority and budget allows</h4>
+          <p>Algolia is the fastest path to production-grade consumer search with beautiful InstantSearch UI components. For startups validating a product, the developer time saved easily justifies the cost. The inflection point where Elasticsearch becomes cheaper depends on query volume and record count — typically at tens of millions of records or millions of searches per month, Elastic self-hosted or Elastic Cloud becomes more economical.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Elasticsearch vs PostgreSQL tsvector</h2>
+        <p>PostgreSQL's full-text search stack — <code>tsvector</code> + <code>tsquery</code> + <code>pg_trgm</code> + GIN indexes — is genuinely capable for moderate search workloads. It adds zero infrastructure overhead for teams already on Postgres, supports BM25-like ranking via <code>ts_rank</code> and <code>ts_rank_cd</code>, and since pgvector (v0.5+) it even supports HNSW vector search on the same data.</p>
+        <table class="comp-table">
+          <thead>
+            <tr><th>Dimension</th><th>Elasticsearch</th><th>PostgreSQL tsvector + pgvector</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Infrastructure overhead</td><td>Separate cluster required</td><td class="yes">Zero — same Postgres instance</td></tr>
+            <tr><td>Relevance scoring</td><td class="yes">BM25, TF-IDF, function score, LTR</td><td class="partial">ts_rank / ts_rank_cd (decent, not BM25)</td></tr>
+            <tr><td>Aggregations</td><td class="yes">Full bucket/metric/pipeline</td><td class="partial">SQL GROUP BY + window functions (manual)</td></tr>
+            <tr><td>Scale</td><td class="yes">Hundreds of TB to PB</td><td class="partial">Good to ~10–50 M docs; degrades beyond that</td></tr>
+            <tr><td>Real-time indexing</td><td class="yes">Near-real-time (1s default)</td><td class="yes">Synchronous (transaction-consistent)</td></tr>
+            <tr><td>Fuzzy / typo search</td><td class="yes">Fuzziness, n-grams</td><td class="partial">pg_trgm similarity (decent for short strings)</td></tr>
+            <tr><td>Vector / semantic search</td><td class="yes">Native HNSW, 4096 dims</td><td class="partial">pgvector HNSW (good, smaller ecosystem)</td></tr>
+            <tr><td>Language analysis</td><td class="yes">50+ built-in language analyzers</td><td class="partial">Per-language dictionaries (manual setup)</td></tr>
+            <tr><td>Highlighting</td><td class="yes">Built-in, customizable</td><td class="partial">ts_headline (basic)</td></tr>
+            <tr><td>Operational cost</td><td class="no">Separate cluster, separate ops</td><td class="yes">Zero incremental ops cost</td></tr>
+            <tr><td>Best fit</td><td>Search as a core product feature, high query volume</td><td>Search as a supporting feature on existing PG data, internal tools</td></tr>
+          </tbody>
+        </table>
+        <div class="verdict-card">
+          <span class="verdict-label choose-alt">Choose PostgreSQL tsvector when</span>
+          <h4>Search is a secondary feature and your data already lives in Postgres</h4>
+          <p>Don't add Elasticsearch to your stack just because you have a search box. If your data is already in PostgreSQL, your query volume is modest (sub-million searches/day), and you don't need deep aggregations or ML-powered ranking, tsvector with a GIN index will get you 80% of the way with 0% of the operational overhead. Reach for Elasticsearch when search is the core value proposition of your product.</p>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 3 — Decision Guide</span>
+        <h2>When to pick each tool: one-page decision guide</h2>
+        <div class="decision-grid">
+          <div class="verdict-card">
+            <span class="verdict-label choose-es">Elasticsearch</span>
+            <h4>Pick ES when you need 3+ of these</h4>
+            <p>Petabyte-scale data · Deep pipeline aggregations · APM/logs/metrics · ML-powered ranking (LTR) · Vector + BM25 hybrid search · ELSER semantic search · Multi-datacenter active-active · Data sovereignty + self-hosting at scale · Full Elastic Stack integration</p>
+          </div>
+          <div class="verdict-card">
+            <span class="verdict-label choose-alt">OpenSearch</span>
+            <h4>Pick OpenSearch when</h4>
+            <p>You're AWS-native · Apache 2.0 license is required · You use Amazon OpenSearch Service already · AWS Bedrock/SageMaker integration needed · You want to avoid Elastic's SSPL licensing risk</p>
+          </div>
+          <div class="verdict-card">
+            <span class="verdict-label choose-alt">Typesense</span>
+            <h4>Pick Typesense when</h4>
+            <p>Instant search with zero JVM · Developer-friendly product/catalog search · Sub-billion documents fit in RAM · You want a self-hosted Algolia alternative · CLIP image search or Whisper voice search needed · Privacy-first (no telemetry)</p>
+          </div>
+          <div class="verdict-card">
+            <span class="verdict-label choose-alt">Meilisearch</span>
+            <h4>Pick Meilisearch when</h4>
+            <p>Small-to-medium datasets (&lt; 50 M docs) · Single-node acceptable (no strict HA) · Fastest developer setup (single binary) · Internal tools, docs search, personal projects · Rust-based performance needed</p>
+          </div>
+          <div class="verdict-card">
+            <span class="verdict-label choose-alt">Algolia</span>
+            <h4>Pick Algolia when</h4>
+            <p>SaaS convenience > self-host control · Consumer-facing instant search UX · InstantSearch UI components needed (React/iOS/Android) · Time-to-market is critical · Budget allows premium SaaS pricing</p>
+          </div>
+          <div class="verdict-card">
+            <span class="verdict-label choose-alt">PostgreSQL tsvector</span>
+            <h4>Pick PG tsvector when</h4>
+            <p>Data already in Postgres · Search is secondary, not core product · &lt; 10–20 M documents · Modest query volume · Zero new infra budget · Internal tooling / admin search</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 4 — Vector/AI Search in Elasticsearch 8.x / 9.x</span>
+        <h2>dense_vector field type: complete reference</h2>
+        <p>Since ES 8.0, <code>dense_vector</code> with <code>"index": true</code> builds an <strong>HNSW graph</strong> (via Lucene's HNSW implementation) enabling approximate nearest-neighbor (ANN) search. Dimensions up to 4096 are supported.</p>
+
+        <h3>Element types</h3>
+        <table class="comp-table">
+          <thead><tr><th>element_type</th><th>Bytes per dim</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>float</code></td><td>4</td><td>Default. Full precision 32-bit float.</td></tr>
+            <tr><td><code>bfloat16</code></td><td>2</td><td>ES 9.3+. Half precision; some accuracy loss.</td></tr>
+            <tr><td><code>byte</code></td><td>1</td><td>Integer per dimension; manual quantization.</td></tr>
+            <tr><td><code>bit</code></td><td>1/8</td><td>dims must be multiples of 8; only l2_norm similarity.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Similarity options</h3>
+        <table class="comp-table">
+          <thead><tr><th>Similarity</th><th>Score formula</th><th>When to use</th></tr></thead>
+          <tbody>
+            <tr><td><code>cosine</code></td><td>(1 + cosine(q, v)) / 2</td><td>Default. Unnormalized embeddings. Most sentence-transformers.</td></tr>
+            <tr><td><code>dot_product</code></td><td>(1 + dot(q, v)) / 2</td><td>When vectors are pre-normalized to unit length (slightly faster).</td></tr>
+            <tr><td><code>l2_norm</code></td><td>1 / (1 + l2_norm(q,v)²)</td><td>Euclidean distance; image embeddings, coordinate-like spaces.</td></tr>
+            <tr><td><code>max_inner_product</code></td><td>Varies (handles negative)</td><td>Asymmetric similarity; product recommendation embeddings.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>HNSW index_options</h3>
+        <div class="algo-box">
+          <strong>HNSW — Hierarchical Navigable Small World</strong><br/>
+          HNSW builds a multi-layer proximity graph. At query time, it starts at the highest layer (fewest nodes, long-range connections) and greedily descends toward the query vector, becoming more fine-grained at each layer. It trades a small recall penalty for dramatically faster search than exact brute-force — O(log N) per query instead of O(N). Key parameters:<br/><br/>
+          <strong>m</strong> (default 16) — the number of bidirectional links per node per layer. Higher m = better recall + more memory.<br/>
+          <strong>ef_construction</strong> (default 100) — candidate list size during graph construction. Higher = better quality graph + slower indexing.
+        </div>
+
+        <h3>Quantization index types</h3>
+        <div class="quant-row" style="font-weight:700;border-bottom:2px solid #e2e8f0;">
+          <span>Type</span><span>Memory reduction</span><span>Accuracy loss</span><span>Constraint</span>
+        </div>
+        <div class="quant-row">
+          <span class="quant-label">hnsw</span><span>1× (none)</span><span>None (exact float)</span><span>—</span>
+        </div>
+        <div class="quant-row">
+          <span class="quant-label">int8_hnsw</span><span>~4×</span><span>Very low</span><span>~25% disk overhead for raw floats retained</span>
+        </div>
+        <div class="quant-row">
+          <span class="quant-label">int4_hnsw</span><span>~8×</span><span>Low</span><span>dims must be even; ~12.5% overhead</span>
+        </div>
+        <div class="quant-row">
+          <span class="quant-label">bbq_hnsw</span><span>~32×</span><span>Moderate (mitigated by reranking)</span><span>dims > 64; ~3.1% overhead; use oversample 3–5×</span>
+        </div>
+        <div class="quant-row">
+          <span class="quant-label">flat / *_flat</span><span>Same as above</span><span>Exact search</span><span>Brute-force; for small or pre-filtered sets</span>
+        </div>
+
+        <div class="warn-box">
+          <strong>ES 9.x default quantization:</strong> In ES 9.0 float vectors default to <code>int8_hnsw</code>. In ES 9.1+ vectors with dims &ge; 384 default to <code>bbq_hnsw</code>. For ES 8.x, <code>hnsw</code> (no quantization) remains the default — you must opt in to quantization explicitly in 8.x.
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <h2>kNN Search API — complete JSON examples</h2>
+
+        <h3>1. Basic kNN query (ES 8.0+)</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">// Index mapping
+PUT /articles
+{
+  "mappings": {
+    "properties": {
+      "title":      { "type": "text" },
+      "body":       { "type": "text" },
+      "embedding":  {
+        "type":       "dense_vector",
+        "dims":       384,
+        "index":      true,
+        "similarity": "cosine",
+        "index_options": {
+          "type":           "int8_hnsw",
+          "m":              16,
+          "ef_construction": 100
+        }
+      }
+    }
+  }
+}
+
+// kNN search — top 10 nearest neighbours
+POST /articles/_search
+{
+  "knn": {
+    "field":          "embedding",
+    "query_vector":   [0.042, 0.856, -0.514, /* ... 384 values ... */],
+    "k":              10,
+    "num_candidates": 100
+  },
+  "fields": ["title"],
+  "_source": false
+}</code></pre>
+
+        <h3>2. kNN with pre-filter (filter applied DURING ANN, not post)</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">POST /articles/_search
+{
+  "knn": {
+    "field":          "embedding",
+    "query_vector":   [0.042, 0.856, -0.514],
+    "k":              5,
+    "num_candidates": 50,
+    "filter": {
+      "term": { "category": "technology" }
+    }
+  }
+}</code></pre>
+
+        <h3>3. kNN with similarity threshold (minimum score gate)</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">POST /articles/_search
+{
+  "knn": {
+    "field":          "embedding",
+    "query_vector":   [0.042, 0.856, -0.514],
+    "k":              10,
+    "num_candidates": 100,
+    "similarity":     0.7
+  }
+}</code></pre>
+
+        <h3>4. query_vector_builder — let ES call the inference model</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">POST /articles/_search
+{
+  "knn": {
+    "field": "embedding",
+    "query_vector_builder": {
+      "text_embedding": {
+        "model_id":   "my-minilm-model",
+        "model_text": "What causes server latency spikes?"
+      }
+    },
+    "k":              10,
+    "num_candidates": 100
+  }
+}</code></pre>
+
+        <h3>5. BBQ quantization with rescore (recommended for bbq_hnsw)</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">// Mapping with bbq_hnsw
+PUT /articles
+{
+  "mappings": {
+    "properties": {
+      "embedding": {
+        "type":       "dense_vector",
+        "dims":       384,
+        "index":      true,
+        "similarity": "cosine",
+        "index_options": { "type": "bbq_hnsw" }
+      }
+    }
+  }
+}
+
+// Query with per-shard rescore (oversample 4×)
+POST /articles/_search
+{
+  "knn": {
+    "field":          "embedding",
+    "query_vector":   [0.042, 0.856, -0.514],
+    "k":              10,
+    "num_candidates": 100,
+    "rescore_vector": { "oversample": 4.0 }
+  }
+}</code></pre>
+
+        <h3>6. Nested kNN for chunked documents (RAG use case)</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">PUT /docs
+{
+  "mappings": {
+    "properties": {
+      "title":     { "type": "text" },
+      "chunks": {
+        "type": "nested",
+        "properties": {
+          "text":   { "type": "text" },
+          "vector": {
+            "type":  "dense_vector",
+            "dims":  384,
+            "index": true,
+            "index_options": { "type": "hnsw" }
+          }
+        }
+      }
+    }
+  }
+}
+
+POST /docs/_search
+{
+  "_source": false,
+  "knn": {
+    "field":          "chunks.vector",
+    "query_vector":   [0.042, 0.856, -0.514],
+    "k":              3,
+    "num_candidates": 30,
+    "inner_hits": {
+      "size":    2,
+      "name":    "top_passages",
+      "_source": false,
+      "fields":  ["chunks.text"]
+    }
+  }
+}</code></pre>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <h2>Hybrid Search: BM25 + kNN</h2>
+        <p>Hybrid search combines keyword relevance (BM25) with vector similarity (kNN). ES supports two patterns: <strong>linear score combination</strong> using boost weights, and <strong>Reciprocal Rank Fusion (RRF)</strong> which is the recommended approach as it requires no manual weight tuning.</p>
+
+        <h3>Pattern A — Linear combination (manual boost weights)</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">POST /articles/_search
+{
+  "query": {
+    "match": {
+      "title": {
+        "query": "vector database performance",
+        "boost": 0.3
+      }
+    }
+  },
+  "knn": {
+    "field":          "embedding",
+    "query_vector":   [0.042, 0.856, -0.514],
+    "k":              10,
+    "num_candidates": 50,
+    "boost":          0.7
+  },
+  "size": 10
+}
+// Final score = 0.3 * bm25_score + 0.7 * knn_score</code></pre>
+
+        <h3>Pattern B — Reciprocal Rank Fusion (RRF) — recommended</h3>
+        <p>RRF ranks documents by their position in each sub-retriever's result list. Formula: <code>score += 1.0 / (rank_constant + rank)</code>. No weight tuning needed — works out-of-the-box for most use cases.</p>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">POST /articles/_search
+{
+  "retriever": {
+    "rrf": {
+      "retrievers": [
+        {
+          "standard": {
+            "query": {
+              "match": {
+                "title": "vector database performance"
+              }
+            }
+          }
+        },
+        {
+          "knn": {
+            "field":          "embedding",
+            "query_vector":   [0.042, 0.856, -0.514],
+            "k":              50,
+            "num_candidates": 100
+          }
+        }
+      ],
+      "rank_window_size": 50,
+      "rank_constant":   20
+    }
+  },
+  "size": 10
+}</code></pre>
+
+        <h3>RRF: BM25 + ELSER (three-way fusion)</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">POST /articles/_search
+{
+  "retriever": {
+    "rrf": {
+      "retrievers": [
+        {
+          "standard": {
+            "query": { "match": { "title": "latency optimization techniques" } }
+          }
+        },
+        {
+          "standard": {
+            "query": {
+              "sparse_vector": {
+                "field":        "content_embedding",
+                "inference_id": "my-elser-endpoint",
+                "query":        "How do I reduce server response times?"
+              }
+            }
+          }
+        },
+        {
+          "knn": {
+            "field":          "embedding",
+            "query_vector":   [0.042, 0.856, -0.514],
+            "k":              50,
+            "num_candidates": 100
+          }
+        }
+      ],
+      "rank_window_size": 50,
+      "rank_constant":   20
+    }
+  }
+}</code></pre>
+
+        <div class="insight-box">
+          <strong>RRF vs linear combination:</strong> RRF is preferred because it eliminates the need to tune boost weights, which are score-scale dependent and shift when you change analyzers or embedding models. RRF only cares about ordinal rank, making it robust to these changes. Use linear combination only when you have a well-validated score normalization pipeline.
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <h2>ELSER — Elastic Learned Sparse Encoder</h2>
+        <p>ELSER is Elastic's own NLP model for <strong>sparse vector semantic search</strong>. Unlike dense vector models (which map text to a fixed 384/768/1536-dimensional float vector), ELSER produces a weighted bag of vocabulary tokens — essentially a learned expansion of the query/document into semantically related terms. This maps naturally to Lucene's inverted index and produces very competitive semantic relevance without the memory overhead of dense HNSW graphs.</p>
+
+        <h3>Step 1 — Index mapping with sparse_vector</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">PUT /articles
+{
+  "mappings": {
+    "_source": {
+      "excludes": ["content_embedding"]
+    },
+    "properties": {
+      "content":           { "type": "text" },
+      "content_embedding": { "type": "sparse_vector" }
+    }
+  }
+}</code></pre>
+
+        <h3>Step 2 — Ingest pipeline to generate embeddings at index time</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">PUT /_ingest/pipeline/elser-ingest
+{
+  "processors": [
+    {
+      "inference": {
+        "model_id": ".elser_model_2",
+        "input_output": [
+          {
+            "input_field":  "content",
+            "output_field": "content_embedding"
+          }
+        ]
+      }
+    }
+  ]
+}
+
+// Index a document through the pipeline
+PUT /articles/_doc/1?pipeline=elser-ingest
+{
+  "content": "HNSW graphs enable approximate nearest-neighbor search in logarithmic time."
+}</code></pre>
+
+        <h3>Step 3 — Query with sparse_vector</h3>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">POST /articles/_search
+{
+  "query": {
+    "sparse_vector": {
+      "field":        "content_embedding",
+      "inference_id": "my-elser-endpoint",
+      "query":        "How does approximate nearest-neighbor search work?"
+    }
+  }
+}
+
+// Boost with keyword fallback for hybrid semantic+lexical
+POST /articles/_search
+{
+  "query": {
+    "bool": {
+      "should": [
+        {
+          "sparse_vector": {
+            "field":        "content_embedding",
+            "inference_id": "my-elser-endpoint",
+            "query":        "How does approximate nearest-neighbor search work?",
+            "boost":        1
+          }
+        },
+        {
+          "match": {
+            "content": {
+              "query": "approximate nearest-neighbor",
+              "boost": 0.3
+            }
+          }
+        }
+      ],
+      "minimum_should_match": 1
+    }
+  },
+  "min_score": 10
+}</code></pre>
+
+        <div class="warn-box">
+          <strong>ELSER token limit:</strong> ELSER only processes the first 512 extracted tokens per field. For long documents, chunk first (e.g., paragraphs of 256–400 tokens), store chunks in a nested field or as separate documents, then use nested kNN or multi-result aggregation.
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <h2>Inference API — connecting external models</h2>
+        <p>The Elasticsearch Inference API (<code>/_inference</code>) lets you route text through external model providers at both index time (via ingest pipeline) and query time (via <code>query_vector_builder</code> or <code>sparse_vector</code>). This eliminates the need to generate embeddings outside Elasticsearch and then insert them.</p>
+        <span class="code-label">Elasticsearch JSON</span>
+        <pre><code class="language-json">// Create an inference endpoint for OpenAI text-embedding-3-small
+PUT /_inference/text_embedding/my-openai-embeddings
+{
+  "service": "openai",
+  "service_settings": {
+    "model_id":  "text-embedding-3-small",
+    "api_key":   "sk-..."
+  }
+}
+
+// Create an ELSER endpoint
+PUT /_inference/sparse_embedding/my-elser-endpoint
+{
+  "service": "elser",
+  "service_settings": {
+    "num_allocations": 1,
+    "num_threads":     1
+  }
+}
+
+// Use inference endpoint at query time (no pre-computed vector needed)
+POST /articles/_search
+{
+  "knn": {
+    "field": "embedding",
+    "query_vector_builder": {
+      "text_embedding": {
+        "model_id":   "my-openai-embeddings",
+        "model_text": "What are the best practices for database indexing?"
+      }
+    },
+    "k":              10,
+    "num_candidates": 100
+  }
+}</code></pre>
+        <p>Supported providers as of ES 8.x/9.x: OpenAI, Azure OpenAI, Cohere, Google Vertex AI, Google AI Studio, Amazon Bedrock, Amazon SageMaker, Anthropic, Hugging Face, Mistral, DeepSeek, Groq, Llama, ELSER (built-in), E5 (built-in), and more.</p>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Node.js: full semantic search pipeline with Elasticsearch client</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import { Client } from "@elastic/elasticsearch";
+import { pipeline } from "@xenova/transformers";
+
+const es = new Client({ node: "http://localhost:9200" });
+const INDEX = "knowledge-articles";
+
+// ── 1. Create index with int8_hnsw quantized dense vector ──────────────────
+async function createIndex() {
+  await es.indices.create({
+    index: INDEX,
+    mappings: {
+      properties: {
+        title:     { type: "text" },
+        body:      { type: "text" },
+        category:  { type: "keyword" },
+        embedding: {
+          type:       "dense_vector",
+          dims:       384,
+          index:      true,
+          similarity: "cosine",
+          index_options: {
+            type:            "int8_hnsw",
+            m:               16,
+            ef_construction: 100,
+          },
+        },
+      },
+    },
+  });
+  console.log(`Index "${INDEX}" created.`);
+}
+
+// ── 2. Generate embedding using all-MiniLM-L6-v2 (384 dims) ───────────────
+async function embed(text) {
+  const extractor = await pipeline(
+    "feature-extraction",
+    "Xenova/all-MiniLM-L6-v2"
+  );
+  const output = await extractor(text, { pooling: "mean", normalize: true });
+  return Array.from(output.data); // Float32Array → plain array
+}
+
+// ── 3. Index documents ─────────────────────────────────────────────────────
+async function indexDocuments(docs) {
+  const operations = await Promise.all(
+    docs.map(async (doc) => [
+      { index: { _index: INDEX } },
+      { ...doc, embedding: await embed(`${doc.title} ${doc.body}`) },
+    ])
+  );
+
+  const { errors } = await es.bulk({
+    operations: operations.flat(),
+    refresh: true,
+  });
+
+  if (errors) throw new Error("Bulk indexing errors detected");
+  console.log(`Indexed ${docs.length} documents.`);
+}
+
+// ── 4. kNN semantic search ─────────────────────────────────────────────────
+async function semanticSearch(queryText, k = 5) {
+  const queryVector = await embed(queryText);
+
+  const { hits } = await es.search({
+    index: INDEX,
+    knn: {
+      field:          "embedding",
+      query_vector:   queryVector,
+      k,
+      num_candidates: k * 10,
+    },
+    fields: ["title", "category"],
+    _source: false,
+  });
+
+  return hits.hits.map((h) => ({
+    score: h._score,
+    title: h.fields.title?.[0],
+    category: h.fields.category?.[0],
+  }));
+}
+
+// ── 5. Hybrid search: BM25 + kNN via Reciprocal Rank Fusion ───────────────
+async function hybridSearch(queryText, size = 5) {
+  const queryVector = await embed(queryText);
+
+  const { hits } = await es.search({
+    index: INDEX,
+    retriever: {
+      rrf: {
+        retrievers: [
+          {
+            standard: {
+              query: {
+                multi_match: {
+                  query:  queryText,
+                  fields: ["title^2", "body"],
+                },
+              },
+            },
+          },
+          {
+            knn: {
+              field:          "embedding",
+              query_vector:   queryVector,
+              k:              50,
+              num_candidates: 100,
+            },
+          },
+        ],
+        rank_window_size: 50,
+        rank_constant:    20,
+      },
+    },
+    size,
+    fields: ["title", "category"],
+    _source: false,
+  });
+
+  return hits.hits.map((h) => ({
+    score:    h._score,
+    title:    h.fields.title?.[0],
+    category: h.fields.category?.[0],
+  }));
+}
+
+// ── 6. ELSER sparse vector search ─────────────────────────────────────────
+async function elserSearch(queryText, size = 5) {
+  const { hits } = await es.search({
+    index: INDEX,
+    query: {
+      sparse_vector: {
+        field:        "content_embedding",
+        inference_id: "my-elser-endpoint",
+        query:        queryText,
+      },
+    },
+    size,
+    min_score: 5,
+  });
+
+  return hits.hits.map((h) => ({ score: h._score, id: h._id }));
+}
+
+// ── 7. Demo run ────────────────────────────────────────────────────────────
+const docs = [
+  { title: "HNSW Explained",   body: "Hierarchical Navigable Small World graphs enable ANN search.", category: "ml" },
+  { title: "BM25 vs TF-IDF",   body: "BM25 adds term frequency saturation and document length normalisation.", category: "search" },
+  { title: "Vector Databases", body: "Pinecone, Weaviate, Qdrant, and Elasticsearch for vector storage.", category: "databases" },
+];
+
+await createIndex();
+await indexDocuments(docs);
+
+const results = await hybridSearch("approximate nearest neighbor algorithms");
+console.log("Hybrid search results:", results);</code></pre>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Production vector search checklist</h2>
+        <div class="feature-row">
+          <div class="feature-icon">1</div>
+          <div><strong>Choose the right similarity metric up front</strong> — cosine for most sentence-transformers (outputs are not unit-normalized by default), dot_product only if you explicitly L2-normalize before indexing, l2_norm for coordinate or image embeddings. Changing similarity requires reindexing.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">2</div>
+          <div><strong>Pick quantization for your scale</strong> — Start with <code>int8_hnsw</code> (4× memory savings, negligible accuracy loss). Use <code>bbq_hnsw</code> with <code>rescore_vector.oversample: 4.0</code> at very large scale (&gt; 100 M vectors). Avoid unquantized <code>hnsw</code> for float vectors in production unless you've measured that int8 accuracy is insufficient.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">3</div>
+          <div><strong>Set num_candidates = k × 10 as a baseline</strong> — Recall improves as num_candidates increases relative to k. For most production workloads, num_candidates = 5×–10× k is a reasonable starting point. Benchmark recall@k to tune further.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">4</div>
+          <div><strong>Use RRF for hybrid search, not manual boosts</strong> — RRF is score-scale-agnostic and requires no re-tuning when you change analyzers or embedding models. Reserve linear combination only for cases where you have robust score normalization.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">5</div>
+          <div><strong>Chunk long documents for ELSER</strong> — ELSER processes only the first 512 tokens. For documents longer than ~400 words, chunk at paragraph boundaries and store chunks as nested objects or separate documents.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">6</div>
+          <div><strong>Use the Inference API for model management</strong> — Configuring inference endpoints in ES (not in your application code) makes embedding model changes a single PUT request and eliminates embedding generation latency from your application layer.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">7</div>
+          <div><strong>Filters should be pre-filters, not post-filters</strong> — Pass <code>filter</code> inside the <code>knn</code> block. ES applies the filter during HNSW traversal, guaranteeing exactly k results. A post-filter (boolean query wrapping knn) can return fewer than k results.</div>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Frequently asked questions</h2>
+
+        <details open>
+          <summary><strong>What is the difference between kNN search and semantic search?</strong></summary>
+          <p style="margin:.6rem 0 0">kNN search is the algorithm: find the k nearest vectors in a dense vector space using HNSW. Semantic search is the application: represent text as dense embeddings using a language model (e.g., all-MiniLM-L6-v2), then use kNN to find semantically similar documents. Semantic search requires kNN, but kNN can be used for any dense vector (images, audio, user behavior) — not just semantic text search.</p>
+        </details>
+
+        <details>
+          <summary><strong>Can I upgrade from hnsw to bbq_hnsw without reindexing?</strong></summary>
+          <p style="margin:.6rem 0 0">Yes. You can upgrade index_options along the progression: <code>flat → int8_flat → int4_flat → bbq_flat → hnsw → int8_hnsw → int4_hnsw → bbq_hnsw</code> using the Update Mapping API. You cannot downgrade. The upgrade triggers a background segment merge to apply quantization.</p>
+        </details>
+
+        <details>
+          <summary><strong>When should I use ELSER vs a dense embedding model?</strong></summary>
+          <p style="margin:.6rem 0 0">ELSER (sparse) is better for domain-general keyword-centric searches where precision matters and you can't afford the memory overhead of a 1536-dim dense model. It also works well in hybrid with BM25 via RRF. Dense models (e.g., all-MiniLM-L6-v2, OpenAI text-embedding-3-small) are better when semantic intent is the primary signal, especially for question-answering or RAG pipelines. At large scale, dense + bbq_hnsw can be more memory-efficient than ELSER's sparse inverted index if vectors are highly compressed.</p>
+        </details>
+
+        <details>
+          <summary><strong>Does OpenSearch support the same kNN syntax as Elasticsearch?</strong></summary>
+          <p style="margin:.6rem 0 0">No. OpenSearch uses its own k-NN plugin with different syntax: <code>"knn": true</code> in the index mapping and a <code>knn</code> query type with <code>vector</code> and <code>k</code> fields. It supports multiple algorithms (HNSW via Lucene, FAISS, NMSLIB) but the configuration and query syntax differ significantly from ES 8.x. Migration between ES 8.x and OpenSearch 2.x vector search requires query rewriting.</p>
+        </details>
+
+        <details>
+          <summary><strong>What's the maximum vector dimension in Elasticsearch?</strong></summary>
+          <p style="margin:.6rem 0 0">4096 dimensions for float/bfloat16/byte element types. For bit vectors, dimensions must be a multiple of 8 with no stated ceiling beyond the 4096 cap. Most production embedding models fit well within this limit: all-MiniLM-L6-v2 is 384 dims, OpenAI text-embedding-3-small is 1536 dims, text-embedding-3-large is 3072 dims.</p>
+        </details>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Elasticsearch is the most complete search and AI-search platform in open source — but "most complete" means most complex. The right call is to match tool to workload: use Typesense or Meilisearch when simplicity and developer speed matter more than scale, use OpenSearch when Apache 2.0 licensing or AWS-native integration is non-negotiable, use Algolia when you need consumer-grade UX delivered yesterday, and use PostgreSQL tsvector when search is secondary and your data is already in Postgres. When you do choose Elasticsearch, the modern vector search stack — int8_hnsw or bbq_hnsw mappings, kNN queries with rescore_vector, and RRF-based hybrid retrieval — closes the gap with purpose-built vector databases while keeping all your analytics, aggregations, and operational tooling in one cluster.</p>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card" style="font-size:.82rem;color:#64748b;border-top:1px solid #e2e8f0;padding-top:1rem;margin-top:0;">
+        <strong>Sources &amp; references:</strong>
+        <ul style="margin:.5rem 0 0;padding-left:1.2rem;line-height:1.8;">
+          <li><a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/dense-vector.html" target="_blank" rel="noopener">Elasticsearch Reference — dense_vector field type</a></li>
+          <li><a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/knn-search.html" target="_blank" rel="noopener">Elasticsearch Reference — kNN search</a></li>
+          <li><a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/rrf.html" target="_blank" rel="noopener">Elasticsearch Reference — Reciprocal Rank Fusion (RRF)</a></li>
+          <li><a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/semantic-search-elser.html" target="_blank" rel="noopener">Elasticsearch Reference — Semantic search with ELSER</a></li>
+          <li><a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/inference-apis.html" target="_blank" rel="noopener">Elasticsearch Reference — Inference APIs</a></li>
+          <li><a href="https://typesense.org/typesense-vs-algolia-vs-elasticsearch-vs-meilisearch/" target="_blank" rel="noopener">Typesense — Feature comparison: Typesense vs Algolia vs Elasticsearch vs Meilisearch</a></li>
+          <li><a href="https://opensearch.org/blog/opensearch-2-0-is-now-available/" target="_blank" rel="noopener">OpenSearch — OpenSearch 2.0 release announcement</a></li>
+          <li><a href="https://solr.apache.org/guide/solr/latest/" target="_blank" rel="noopener">Apache Solr — Reference guide (v10.x)</a></li>
+          <li><a href="https://www.meilisearch.com/docs/learn/what_is_meilisearch/overview" target="_blank" rel="noopener">Meilisearch — Overview documentation</a></li>
+        </ul>
+      </section>
+
+    </main>
+  </body>
+</html>

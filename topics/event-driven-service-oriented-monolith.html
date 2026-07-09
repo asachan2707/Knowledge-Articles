@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Event-Driven Service-Oriented Monolith: PoC with RabbitMQ | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .arch-note{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:.85rem 1.1rem;margin:1rem 0;font-size:.9rem}
+      .arch-note strong{color:#15803d}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .tech-pill{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;background:#e0f2fe;color:#0369a1;border-radius:999px;padding:.12rem .55rem;margin:.1rem;text-transform:uppercase;letter-spacing:.04em}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1505682634904-d7c8d95cdc50?w=1600&h=700&fit=crop&auto=format&q=80" alt="Event-driven architecture" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · Engineering · 13 min</span>
+          </div>
+        </figure>
+        <h1>Event-Driven Service-Oriented Monolith: PoC with RabbitMQ</h1>
+        <p class="summary">A proof-of-concept architecture that uses internal RabbitMQ pub/sub inside a Python monolith to decouple modules without splitting into microservices. Built with FastAPI, CouchDB, and Pydantic — demonstrating how event-driven communication can work within a monolith as a stepping stone to full microservices decomposition.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Armando Baratti · LinkedIn · 2024</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Architecture, Engineering, Event-Driven, Monolith</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Event bus inside a modular monolith in Node.js</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Most event-driven architecture discussions assume you're building microservices. But event-driven communication is equally valuable <em>inside</em> a monolith — it decouples modules, makes cross-cutting concerns like audit logging trivially composable, and creates the seams you'll need if you later split into services.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> An event-driven service-oriented monolith is a monolith whose internal modules communicate only through events rather than direct function calls. Each module publishes events; other modules subscribe. The modules are independently deployable in theory — and when the time comes to extract them, the event contracts already exist.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The architecture</span>
+        <h2>What the PoC looks like</h2>
+        <div class="arch-note">
+          <strong>Stack in the original PoC:</strong> Python · FastAPI · RabbitMQ (internal pub/sub) · CouchDB (document store) · Pydantic (schema validation). The JavaScript equivalent below uses Node.js with an EventEmitter as the internal bus — no external broker required for a monolith.
+        </div>
+        <p>The system is divided into modules:</p>
+        <ul>
+          <li><strong>API Layer</strong> — FastAPI routes receive HTTP requests and dispatch commands to the event bus</li>
+          <li><strong>Order Module</strong> — handles order creation, subscribes to payment events</li>
+          <li><strong>Payment Module</strong> — processes payment requests, publishes payment results</li>
+          <li><strong>Notification Module</strong> — subscribes to any event it cares about (order created, payment failed, etc.) and sends notifications — with no knowledge of other modules</li>
+          <li><strong>Audit Module</strong> — subscribes to all events and writes an immutable audit log — completely decoupled, can be added/removed without touching any other module</li>
+        </ul>
+        <div class="arch-note">
+          <strong>Key trade-off:</strong> Modules communicate via events, not return values. This means a module publishing an event has no direct knowledge of what happens next. The flow is traceable only through logs/tracing — not by reading the call stack. This is the same trade-off as full microservices, just without the network overhead.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Internal event bus in a Node.js modular monolith</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>import EventEmitter from 'events';
+
+// Internal event bus — same process, no network
+// When ready to split to microservices, replace this with a Kafka/RabbitMQ client
+class InternalEventBus extends EventEmitter {
+  publish(eventType, payload) {
+    const envelope = {
+      eventType,
+      payload,
+      timestamp: new Date().toISOString(),
+      eventId: Math.random().toString(36).slice(2),
+    };
+    console.log(`[bus] publish: ${eventType}`, envelope.eventId);
+    this.emit(eventType, envelope);
+    this.emit('*', envelope); // wildcard for audit/logging
+  }
+
+  subscribe(eventType, handler) {
+    this.on(eventType, handler);
+    return () => this.off(eventType, handler); // returns unsubscribe fn
+  }
+}
+
+const bus = new InternalEventBus();
+
+// ── Order Module ──
+class OrderModule {
+  constructor(db, bus) {
+    this._db = db;
+    this._bus = bus;
+    // React to payment results
+    bus.subscribe('payment.completed', this._onPaymentCompleted.bind(this));
+    bus.subscribe('payment.failed',    this._onPaymentFailed.bind(this));
+  }
+
+  async createOrder(data) {
+    const order = await this._db.orders.insert({ ...data, status: 'pending' });
+    // Publish — doesn't know or care who handles this
+    this._bus.publish('order.created', { orderId: order.id, amount: data.amount, userId: data.userId });
+    return order;
+  }
+
+  async _onPaymentCompleted({ payload }) {
+    await this._db.orders.update(payload.orderId, { status: 'confirmed' });
+    this._bus.publish('order.confirmed', { orderId: payload.orderId });
+  }
+
+  async _onPaymentFailed({ payload }) {
+    await this._db.orders.update(payload.orderId, { status: 'payment_failed' });
+    this._bus.publish('order.cancelled', { orderId: payload.orderId, reason: 'payment_failed' });
+  }
+}
+
+// ── Payment Module ──
+class PaymentModule {
+  constructor(paymentGateway, bus) {
+    this._gateway = paymentGateway;
+    this._bus = bus;
+    bus.subscribe('order.created', this._onOrderCreated.bind(this));
+  }
+
+  async _onOrderCreated({ payload }) {
+    const result = await this._gateway.charge(payload.amount, payload.userId)
+      .catch(err => ({ success: false, error: err.message }));
+
+    const eventType = result.success ? 'payment.completed' : 'payment.failed';
+    this._bus.publish(eventType, { orderId: payload.orderId, ...result });
+  }
+}
+
+// ── Notification Module — knows nothing about Order or Payment modules ──
+class NotificationModule {
+  constructor(mailer, bus) {
+    this._mailer = mailer;
+    bus.subscribe('order.confirmed', ({ payload }) =>
+      this._mailer.send(payload.userId, 'Order confirmed', `Order ${payload.orderId} is confirmed`));
+    bus.subscribe('order.cancelled', ({ payload }) =>
+      this._mailer.send(payload.userId, 'Order cancelled', `Order ${payload.orderId} was cancelled: ${payload.reason}`));
+  }
+}
+
+// ── Audit Module — subscribes to everything via wildcard ──
+class AuditModule {
+  constructor(auditDb, bus) {
+    bus.subscribe('*', (envelope) => {
+      auditDb.insert({ ...envelope, receivedAt: new Date().toISOString() });
+    });
+  }
+}</code></pre>
+        <div class="insight-box">
+          <strong>Migration path to microservices:</strong> When ready to extract the Payment Module to a separate service, replace <code>bus.subscribe('order.created', ...)</code> with a Kafka consumer and replace <code>bus.publish('payment.completed', ...)</code> with a Kafka producer. The event schema is already defined — the only change is the transport layer. This is why building event-driven inside the monolith first pays off: the contracts exist before the split.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pydantic schema validation</span>
+        <h2>Why schema validation on events matters</h2>
+        <p>In the original Python PoC, every event payload was validated with a Pydantic model. In JavaScript, this maps to validating event payloads with Zod or similar. The benefit: an event published with the wrong shape fails immediately at the publisher, not silently at the subscriber — and the error appears in the right place in the stack trace.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Event schema validation with simple runtime checks
+const eventSchemas = {
+  'order.created': (p) => {
+    if (!p.orderId || !p.amount || !p.userId)
+      throw new Error('order.created missing required fields: orderId, amount, userId');
+    if (typeof p.amount !== 'number' || p.amount <= 0)
+      throw new Error('order.created: amount must be a positive number');
+  },
+  'payment.completed': (p) => {
+    if (!p.orderId) throw new Error('payment.completed missing orderId');
+  },
+};
+
+class ValidatedEventBus extends InternalEventBus {
+  publish(eventType, payload) {
+    const validate = eventSchemas[eventType];
+    if (validate) validate(payload); // throws immediately if invalid
+    super.publish(eventType, payload);
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>An event-driven modular monolith is not a halfway measure — it's a legitimate architecture pattern that combines the operational simplicity of a monolith with the decoupling benefits of event-driven design. Modules that communicate only through published events are independently testable, independently replaceable, and — when the time is right — independently extractable to microservices. The Notification and Audit modules in particular become trivially composable: any new concern subscribes to existing events without touching any other module's code.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Loop Engineering in Claude Code | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .compare-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin:1rem 0}
+      .compare-col{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:1rem}
+      .compare-col h4{margin:0 0 .6rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em;color:#0f766e}
+      .compare-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}
+      .compare-col li+li{margin-top:.3rem}
+      .loop-diagram{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .loop-diagram .dim{color:#64748b}.loop-diagram .hi{color:#38bdf8;font-weight:700}.loop-diagram .ok{color:#4ade80;font-weight:700}.loop-diagram .warn{color:#fb923c;font-weight:700}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1518432031352-d6fc5c10da5a?w=1600&h=700&fit=crop&auto=format&q=80" alt="Infinite loop concept" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Claude Code · Agents · Automation · 18 min</span>
+          </div>
+        </figure>
+        <h1>Loop Engineering: Stop Prompting Claude, Start Automating</h1>
+        <p class="summary">The shift from reactive prompting to autonomous loop engineering — where Claude finds work, acts on it, and escalates only when genuinely blocked. Covers Claude Code, Codex, and Cursor approaches, the "inspector problem" nobody ships, and how to build durable agentic loops in JavaScript.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Sources</span><span class="meta-value">Medium · levelup.gitconnected · itnext.io · Curated</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Claude Code, Agents, Automation, Loop Engineering</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Agentic loop with inspector pattern</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Most people use Claude Code like a very fast intern: ask, receive, review, ask again. That's not agentic programming — it's manual programming with autocomplete. Loop engineering replaces the cycle of "prompt → output → prompt again" with an autonomous agent that decides what to do next, executes, checks its own work, and surfaces to you only when it's genuinely stuck.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> The loop itself — receive task, act, evaluate, repeat — is now commoditized across Claude Code, Codex, and Cursor. The only differentiating part is the <em>exit condition</em>: the inspector that decides "done." No tool ships that for you. It's yours to design.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Why manual prompting is a bottleneck</span>
+        <p>A developer spent her morning running Claude Code in a rhythm: write feature → prompt Claude to write tests → prompt Claude to fix one failing test → prompt Claude to update docs → next feature. Each prompt took 30 seconds of attention. Multiply by 40 rounds per day and she was spending 20 minutes just switching context between prompts.</p>
+        <p>Loop engineering collapsed that. She defined a task manifest, set an acceptance criterion ("all tests green, docs updated"), and let Claude work the loop. She checked back when her coffee was ready. This isn't science fiction — it's a configuration change.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The anatomy of a loop</span>
+        <h2>What every agentic loop contains</h2>
+        <div class="loop-diagram">
+<span class="dim">┌─────────────────────────────────────────────────────┐</span>
+<span class="dim">│</span>  <span class="hi">LOOP ENGINEERING CYCLE</span>                               <span class="dim">│</span>
+<span class="dim">├─────────────────────────────────────────────────────┤</span>
+<span class="dim">│</span>  1. <span class="ok">RECEIVE</span>     task / objective / constraint          <span class="dim">│</span>
+<span class="dim">│</span>  2. <span class="ok">ACT</span>         edit code, run tests, call tools        <span class="dim">│</span>
+<span class="dim">│</span>  3. <span class="warn">EVALUATE</span>   did the output meet the criterion?      <span class="dim">│</span>
+<span class="dim">│</span>  4. <span class="hi">BRANCH</span>     yes → done │ no → loop │ stuck → escalate<span class="dim">│</span>
+<span class="dim">└─────────────────────────────────────────────────────┘</span>
+        </div>
+        <p>Step 3 — evaluation — is where all three tools differ and where most loops break. Claude Code evaluates via test output in the terminal. Codex evaluates in a cloud sandbox. Cursor evaluates in the IDE. But the <strong>criterion for "done"</strong> is something you set, not something the tool provides.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Tool comparison</span>
+        <h2>Claude Code vs Codex vs Cursor: How Each Does Loops</h2>
+        <div class="compare-grid">
+          <div class="compare-col">
+            <h4>Claude Code</h4>
+            <ul>
+              <li>Terminal-native</li>
+              <li>Single <code>claude</code> command entry point</li>
+              <li>Reads files, runs bash, loops until tests pass</li>
+              <li>Exit condition: you define in CLAUDE.md</li>
+              <li>Best for: repo-wide refactors, backend automation</li>
+            </ul>
+          </div>
+          <div class="compare-col">
+            <h4>Codex</h4>
+            <ul>
+              <li>Cloud-sandboxed execution</li>
+              <li>Isolated environment per task</li>
+              <li>No local state side-effects during run</li>
+              <li>Exit condition: CI pass / diff review</li>
+              <li>Best for: safe autonomous tasks, PRs from spec</li>
+            </ul>
+          </div>
+          <div class="compare-col">
+            <h4>Cursor</h4>
+            <ul>
+              <li>IDE-embedded loop</li>
+              <li>Background agents in editor context</li>
+              <li>Visual diff inline</li>
+              <li>Exit condition: accept/reject in UI</li>
+              <li>Best for: feature development with visual feedback</li>
+            </ul>
+          </div>
+        </div>
+        <div class="insight-box">
+          <strong>The inspector insight:</strong> All three tools gave away the loop because it's a commodity. The part no vendor ships — "is this output actually correct?" — is the only part with competitive value. Your acceptance function is your moat.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The naming trap</span>
+        <h2>Context Engineering → Harness Engineering → Loop Engineering</h2>
+        <p>The AI tooling world renames the same underlying skill every six months. Context engineering became harness engineering, which is now loop engineering. The underlying skill hasn't changed: <strong>how well can you define "done" for an AI agent, and how robustly can you detect deviation from it?</strong></p>
+        <div class="warn-box">
+          <strong>Watch out:</strong> Learning the tool names is not the same as learning the skill. Someone who can define a precise acceptance criterion for any task is worth 10x someone who knows three framework names.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Building a durable agentic loop with an inspector function</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>import Anthropic from "@anthropic-ai/sdk";
+import { execSync } from "child_process";
+import fs from "fs";
+
+const client = new Anthropic();
+
+// The inspector — the only part you must write yourself
+function inspect(taskOutput) {
+  // Run tests and check for zero failures
+  try {
+    const result = execSync("npm test -- --reporter=json 2>&1", {
+      encoding: "utf8",
+    });
+    const report = JSON.parse(result);
+    if (report.numFailedTests === 0) {
+      return { done: true, reason: `All ${report.numPassedTests} tests pass` };
+    }
+    return {
+      done: false,
+      reason: `${report.numFailedTests} test(s) failing`,
+      failures: report.testResults?.flatMap((r) => r.testResults || []).filter((t) => t.status === "failed").map((t) => t.fullName),
+    };
+  } catch (e) {
+    return { done: false, reason: "Test runner error", detail: e.message };
+  }
+}
+
+// The loop
+async function runAgenticLoop(task, maxTurns = 10) {
+  const messages = [{ role: "user", content: task }];
+
+  for (let turn = 0; turn < maxTurns; turn++) {
+    const response = await client.messages.create({
+      model: "claude-opus-4-8",
+      max_tokens: 4096,
+      system:
+        "You are an autonomous coding agent. Edit files using your tools, run tests, and iterate until all tests pass. When you believe you are done, say DONE.",
+      messages,
+    });
+
+    const assistantText = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    messages.push({ role: "assistant", content: assistantText });
+
+    // Run the inspector after each turn
+    const verdict = inspect(assistantText);
+    console.log(`Turn ${turn + 1} — ${verdict.done ? "✓ DONE" : "✗ " + verdict.reason}`);
+
+    if (verdict.done) return { success: true, turns: turn + 1 };
+
+    // Feed failures back into the loop as context
+    messages.push({
+      role: "user",
+      content: `Inspector result: ${JSON.stringify(verdict, null, 2)}\n\nContinue fixing.`,
+    });
+  }
+
+  return { success: false, reason: "Max turns reached" };
+}
+
+// Usage
+runAgenticLoop(
+  "Refactor auth.js to use async/await instead of callbacks. All existing tests must still pass."
+).then(console.log);</code></pre>
+        <p>The key insight: the inspector runs <em>after every turn</em>, not just at the end. Feeding the failure details back into the conversation as a user message gives Claude precise error context for the next iteration — much better than letting it guess what went wrong.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>How to apply loop engineering today</h2>
+        <ul class="check-list">
+          <li>Write your acceptance criterion <em>before</em> writing your task prompt — if you can't describe "done", neither can Claude.</li>
+          <li>Start with tests as the inspector: zero test failures is the most objective signal you have.</li>
+          <li>Cap your loops at 5–10 turns and escalate to human review on breach — infinite loops waste tokens and hide real design problems.</li>
+          <li>Feed the inspector's output back verbatim as the next user message — precise error text beats generic "keep trying".</li>
+          <li>Log each turn's verdict to a file so you can audit why a loop stalled.</li>
+          <li>Use <code>claude --headless</code> with a task file for CI integration — the loop runs unattended on every PR.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+        <p><strong>Isn't this just an agentic loop with a different name?</strong> Exactly. The name "loop engineering" is new; the pattern is the ReAct loop from 2022. What's new is that mainstream tools now ship it by default, so you can build on it without a framework.</p>
+        <p><strong>What if the inspector itself is wrong?</strong> This is the real design challenge. A bad inspector (tests that pass without verifying the actual requirement) defeats the whole system. Invest in your tests before investing in your loops.</p>
+        <p><strong>Should I use Claude Code, Codex, or Cursor?</strong> For server-side/CLI work with precise acceptance criteria: Claude Code. For safe, isolated task execution from a spec: Codex. For feature development where visual diff matters: Cursor. All three can be configured to run unattended.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>The agentic coding loop — receive, act, evaluate, repeat — is now a commodity baked into every major AI coding tool. What isn't commoditized is the inspector: the function that decides whether output actually meets your standard. Master that one thing — how to express "done" as a precise, machine-readable criterion — and you can delegate entire workflows to Claude, Codex, or Cursor and get back only what genuinely needs your judgment.</p>
+      </section>
+    </main>
+  </body>
+</html>

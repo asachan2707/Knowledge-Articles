@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Microservices Design Patterns — Crash Course | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .pattern-row{display:grid;grid-template-columns:180px 1fr;gap:1rem;padding:.85rem 0;border-bottom:1px solid #f1f5f9;align-items:start}
+      .pattern-row:last-child{border-bottom:none}
+      .pattern-name{font-weight:700;color:#0f766e;font-size:.93rem}
+      .pattern-problem{font-size:.75rem;font-family:Arial,sans-serif;color:#64748b;margin-top:.15rem}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=1600&h=700&fit=crop&auto=format&q=80" alt="Microservices patterns" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · System Design · Quick Read · 10 min</span>
+          </div>
+        </figure>
+        <h1>A Crash Course on Microservices Design Patterns</h1>
+        <p class="summary">Eight essential microservices patterns — Database Per Service, API Gateway, BFF, CQRS, Event Sourcing, Saga, Sidecar, and Circuit Breaker — each explained with the problem it solves, when to use it, and a JavaScript example showing how it works in practice.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Dr. Sayed Peerzade · LinkedIn · Aug 2024</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Architecture, System Design, Microservices, Patterns</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Saga orchestration, Circuit Breaker, CQRS</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Microservices patterns are not decoration — each one exists because a specific failure mode bit someone hard enough that they built a reusable solution. Understanding the failure mode first makes the pattern obvious; memorising the pattern name without the failure mode gives you vocabulary without judgment.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Patterns are frequently combined. CQRS + Event Sourcing is one of the most common pairings. Saga + API Gateway handles distributed transactions with a clean client interface. Choose patterns based on the problem, not based on what sounds architecturally impressive.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The 8 patterns</span>
+        <h2>Pattern reference</h2>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">1. Database Per Service</div><div class="pattern-problem">Solves: shared DB coupling</div></div>
+          <div>Each microservice owns a dedicated database. Data exchange happens only through well-defined APIs. Prevents the "shared DB = shared fate" problem where one service's schema change breaks every other service. Requires bounded context definition and distributed transaction management (→ Saga).</div>
+        </div>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">2. API Gateway</div><div class="pattern-problem">Solves: client complexity</div></div>
+          <div>Single entry point routing, aggregating, and securing client-to-microservice communication. Handles cross-cutting concerns — auth, rate limiting, caching — centrally rather than duplicating them in every service. Can translate between protocols (REST → gRPC). Risk: becomes a SPOF if not load-balanced.</div>
+        </div>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">3. Backends for Frontends (BFF)</div><div class="pattern-problem">Solves: UI-specific data needs</div></div>
+          <div>Separate backend service per client type (web, mobile, partner API). Each BFF aggregates and shapes data specifically for its consumer. Mobile BFF reduces payload for bandwidth; web BFF serves richer data. Prevents one-size-fits-all API bloat.</div>
+        </div>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">4. CQRS</div><div class="pattern-problem">Solves: read/write contention</div></div>
+          <div>Separates read (Query) and write (Command) paths with separate data models. Write path optimised for consistency; read path optimised for query performance via denormalised projections. A microservice publishes domain events on writes; a listener updates the read-optimised store.</div>
+        </div>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">5. Event Sourcing</div><div class="pattern-problem">Solves: lost history &amp; audit gaps</div></div>
+          <div>Every state change is stored as an immutable event rather than updating a record. Current state is reconstructed by replaying the event log. Enables full audit trail, time-travel queries, and replay for new read models. Often paired with CQRS. Cost: event replay can be slow for large histories.</div>
+        </div>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">6. Saga Pattern</div><div class="pattern-problem">Solves: distributed transactions</div></div>
+          <div>Breaks a distributed transaction into a sequence of local transactions. Each step publishes an event; the next service reacts. Failures trigger compensating transactions that undo prior steps. Two forms: <em>Choreography</em> (services react to events autonomously) and <em>Orchestration</em> (a central coordinator directs each step).</div>
+        </div>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">7. Sidecar Pattern</div><div class="pattern-problem">Solves: cross-cutting operational concerns</div></div>
+          <div>A helper container runs alongside the main service, sharing its filesystem and network. Handles logging, config refresh, certificate rotation, service mesh proxying — without any changes to the application code. The sidecar is created and retired with the parent service.</div>
+        </div>
+
+        <div class="pattern-row">
+          <div><div class="pattern-name">8. Circuit Breaker</div><div class="pattern-problem">Solves: cascading failures</div></div>
+          <div>A proxy monitors failure rates between services. When failures exceed a threshold, the circuit "trips" (opens), returning a graceful fallback immediately rather than waiting for a timeout. After a configured period, it enters half-open state and allows limited test requests. Closes again when requests succeed.</div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Saga orchestration + Circuit Breaker in Node.js</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Saga orchestrator for e-commerce order flow
+// Order → Payment → Inventory → Shipping (each is a local transaction)
+
+class OrderSaga {
+  constructor(services) {
+    this.order = services.orderService;
+    this.payment = services.paymentService;
+    this.inventory = services.inventoryService;
+    this.shipping = services.shippingService;
+  }
+
+  async execute(orderData) {
+    const saga = { orderId: null, paymentId: null, inventoryReserved: false };
+
+    try {
+      // Step 1: Create order
+      saga.orderId = await this.order.create(orderData);
+
+      // Step 2: Charge payment
+      saga.paymentId = await this.payment.charge({
+        orderId: saga.orderId,
+        amount: orderData.amount,
+        userId: orderData.userId,
+      });
+
+      // Step 3: Reserve inventory
+      await this.inventory.reserve({ orderId: saga.orderId, items: orderData.items });
+      saga.inventoryReserved = true;
+
+      // Step 4: Create shipment
+      const shipmentId = await this.shipping.create({ orderId: saga.orderId });
+
+      return { success: true, orderId: saga.orderId, shipmentId };
+
+    } catch (err) {
+      // Compensating transactions — undo in reverse order
+      console.error(`[saga] Step failed: ${err.message} — running compensation`);
+      await this._compensate(saga, err);
+      throw new Error(`Order saga failed: ${err.message}`);
+    }
+  }
+
+  async _compensate(saga, originalError) {
+    if (saga.inventoryReserved) {
+      await this.inventory.release({ orderId: saga.orderId }).catch(console.error);
+    }
+    if (saga.paymentId) {
+      await this.payment.refund({ paymentId: saga.paymentId }).catch(console.error);
+    }
+    if (saga.orderId) {
+      await this.order.cancel({ orderId: saga.orderId, reason: originalError.message }).catch(console.error);
+    }
+  }
+}
+
+// CQRS: separate write and read paths
+class OrderCommandService {
+  async createOrder(data, eventBus) {
+    const order = await db.orders.insert(data);
+    // Publish event so read-side projection can update
+    await eventBus.publish('order.created', { orderId: order.id, ...data });
+    return order.id;
+  }
+}
+
+class OrderQueryService {
+  // Read from denormalised, query-optimised projection
+  async getOrderDashboard(userId) {
+    return db.order_projections.findAll({ userId, include: ['user', 'items', 'shipment'] });
+  }
+}</code></pre>
+        <div class="insight-box">
+          <strong>Orchestration vs Choreography:</strong> Choreography feels elegant but becomes an untraceable web of events as system complexity grows. Orchestration (explicit saga coordinator) is easier to reason about, test, and monitor — especially for multi-step workflows where partial failure is common. Start with orchestration.
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>These eight patterns address the four core challenges of microservices: data ownership (Database Per Service), client complexity (API Gateway, BFF), state management (CQRS, Event Sourcing, Saga), and operational resilience (Sidecar, Circuit Breaker). They are frequently combined — a production system might use all eight simultaneously. Understand the failure each pattern prevents, then decide which failures are worth spending complexity budget on for your specific system's scale and team size.</p>
+      </section>
+    </main>
+  </body>
+</html>

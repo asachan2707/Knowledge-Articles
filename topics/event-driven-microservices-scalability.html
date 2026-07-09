@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Event-Driven Architecture in Microservices: Scalability & Resilience | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .principle-row{display:flex;gap:.75rem;padding:.75rem 0;border-bottom:1px solid #f1f5f9;align-items:flex-start}
+      .principle-row:last-child{border-bottom:none}
+      .p-badge{min-width:2.2rem;height:2.2rem;border-radius:8px;background:#0f766e;color:#fff;font-weight:700;font-family:Arial,sans-serif;font-size:.82rem;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .eda-table{width:100%;border-collapse:collapse;font-size:.87rem;margin:1rem 0}
+      .eda-table th{background:#f1f5f9;padding:.5rem .75rem;text-align:left;border-bottom:2px solid #e2e8f0;font-family:Arial,sans-serif;font-size:.75rem;text-transform:uppercase;color:#64748b}
+      .eda-table td{padding:.5rem .75rem;border-bottom:1px solid #f1f5f9;vertical-align:top}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Event-driven architecture" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · Engineering · 13 min</span>
+          </div>
+        </figure>
+        <h1>Event-Driven Architecture in Microservices: Scalability, Resilience &amp; Efficiency</h1>
+        <p class="summary">How event-driven architecture solves the core microservices scaling challenges — producer independence, consumer decoupling, immutability, replay, and resilience — using an event intermediary. Covers Kafka vs RabbitMQ vs SQS trade-offs, delivery guarantees, and a production-ready event pipeline in Node.js.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Chinmaya Kumar Biswal · LinkedIn · 2024</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Architecture, Engineering, Event-Driven, Kafka</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Kafka consumer group, event replay, idempotent handler</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Synchronous microservice communication creates hidden coupling: Producer A directly calls Consumer B. If B is slow, A is slow. If B is down, A's requests fail. Event-driven architecture breaks this coupling by introducing an intermediary — the event broker — between every producer and consumer.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> In event-driven architecture, producers publish immutable events to a broker and immediately return. Consumers subscribe independently and process at their own pace. Neither knows the other exists. This one change — replacing synchronous calls with event publication — eliminates cascading timeouts, enables horizontal consumer scaling, and makes the system's state history observable.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">EDA principles</span>
+        <h2>What makes event-driven different</h2>
+        <div class="principle-row">
+          <div class="p-badge">1</div>
+          <div><strong>Immutability</strong> — Events are facts: "OrderCreated at 14:23:01 with these items at this amount." They never change. Consumers can replay from any point in history, retroactively build new projections, and reconstruct state at any past timestamp. Mutable state is a projection, not a source of truth.</div>
+        </div>
+        <div class="principle-row">
+          <div class="p-badge">2</div>
+          <div><strong>Producer independence</strong> — Producers publish an event and return. They don't wait, don't know who consumes the event, and don't care if consumption fails. A producer deploying a new version doesn't require consumers to deploy simultaneously.</div>
+        </div>
+        <div class="principle-row">
+          <div class="p-badge">3</div>
+          <div><strong>Event intermediary</strong> — The broker (Kafka, RabbitMQ, SQS) is the only shared dependency. Producers and consumers are decoupled from each other — they're both only coupled to the broker. Adding a new consumer (e.g., an analytics service) requires no changes to the producer.</div>
+        </div>
+        <div class="principle-row">
+          <div class="p-badge">4</div>
+          <div><strong>Consumer groups</strong> — Multiple instances of a consumer form a consumer group. The broker distributes events across the group — each event is processed by exactly one instance. Scaling means adding instances to the group, no producer changes needed.</div>
+        </div>
+        <div class="principle-row">
+          <div class="p-badge">5</div>
+          <div><strong>Replay</strong> — Kafka retains events for a configurable period (default: 7 days, configurable to infinite). Any consumer can reset its offset and replay all events from the beginning — to backfill a new service, fix a processing bug, or build a new read model.</div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Broker comparison</span>
+        <h2>Kafka vs RabbitMQ vs SQS</h2>
+        <table class="eda-table">
+          <thead><tr><th>Feature</th><th>Kafka</th><th>RabbitMQ</th><th>AWS SQS</th></tr></thead>
+          <tbody>
+            <tr><td>Retention</td><td>Configurable (7 days to infinite)</td><td>Until consumed (or TTL)</td><td>14 days max</td></tr>
+            <tr><td>Replay</td><td>Yes — offset-based</td><td>No (deleted after consume)</td><td>No (deleted after process)</td></tr>
+            <tr><td>Throughput</td><td>Millions/sec (partitioned)</td><td>High, but lower ceiling</td><td>Very high (managed)</td></tr>
+            <tr><td>Ordering</td><td>Per-partition</td><td>Per-queue (single consumer)</td><td>FIFO queues only</td></tr>
+            <tr><td>Consumer model</td><td>Pull (poll)</td><td>Push (subscribe)</td><td>Pull (poll)</td></tr>
+            <tr><td>Best for</td><td>High-throughput streaming, replay, event sourcing</td><td>Complex routing, RPC patterns, flexible topologies</td><td>Simple async queues on AWS, managed zero-infra</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Kafka consumer with idempotent processing and replay support</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Idempotent Kafka consumer — safe to replay or process twice
+// Uses a processed-events set to detect duplicates
+
+class IdempotentKafkaConsumer {
+  constructor(topic, handler, processedEventsStore) {
+    this.topic = topic;
+    this.handler = handler;
+    this._processed = processedEventsStore; // Redis SET or DB table
+  }
+
+  async processMessage(message) {
+    const event = JSON.parse(message.value.toString());
+    const { eventId, eventType, payload } = event;
+
+    // Idempotency check: skip if already processed
+    const alreadyProcessed = await this._processed.exists(eventId);
+    if (alreadyProcessed) {
+      console.log(`[consumer] skipping duplicate event: ${eventId}`);
+      return;
+    }
+
+    try {
+      await this.handler(eventType, payload);
+      // Mark as processed AFTER successful handling
+      await this._processed.add(eventId, { ttl: 7 * 24 * 3600 }); // 7 days
+    } catch (err) {
+      // Don't mark processed — will be retried on next poll
+      console.error(`[consumer] failed to process ${eventId}:`, err.message);
+      throw err; // let Kafka know to retry (don't commit offset)
+    }
+  }
+}
+
+// Event handlers by type
+const handlers = {
+  'order.confirmed': async (payload) => {
+    await emailService.sendConfirmation(payload.userId, payload.orderId);
+  },
+  'order.cancelled': async (payload) => {
+    await inventoryService.release(payload.orderId, payload.items);
+    await emailService.sendCancellation(payload.userId, payload.orderId);
+  },
+  'payment.failed': async (payload) => {
+    await orderService.markPaymentFailed(payload.orderId, payload.reason);
+  },
+};
+
+async function handleEvent(eventType, payload) {
+  const handler = handlers[eventType];
+  if (!handler) {
+    console.warn(`[consumer] no handler for event type: ${eventType}`);
+    return;
+  }
+  await handler(payload);
+}
+
+// Replay from offset 0 to rebuild state (e.g. for a new analytics service)
+async function replayFromBeginning(kafkaConsumer, topic, handler) {
+  // In kafkajs: set fromBeginning: true when subscribing
+  await kafkaConsumer.subscribe({ topic, fromBeginning: true });
+  await kafkaConsumer.run({
+    eachMessage: async ({ message }) => {
+      const event = JSON.parse(message.value.toString());
+      await handler(event.eventType, event.payload);
+    },
+  });
+}</code></pre>
+        <div class="insight-box">
+          <strong>At-least-once vs exactly-once:</strong> Kafka guarantees at-least-once delivery by default. Your handlers <em>must</em> be idempotent — processing the same event twice must produce the same outcome as processing it once. The easiest way to achieve this is a processed-events store (Redis or DB) keyed by eventId. Exactly-once delivery in Kafka (transactions) is available but expensive; idempotent handlers are simpler and sufficient for most use cases.
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Event-driven architecture solves the core microservices coupling problem by making producer and consumer independent through an intermediary broker. The five properties that make this work are immutability, producer independence, the intermediary pattern, consumer groups, and replay. Kafka's replay capability in particular is transformative: the ability to re-process all historical events enables building new services retroactively, fixing processing bugs without data loss, and evolving the system without coordinated migrations.</p>
+      </section>
+    </main>
+  </body>
+</html>

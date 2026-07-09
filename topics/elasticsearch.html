@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Elasticsearch: Search & Analytics Engine Deep Dive | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .es-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      @media(max-width:600px){.es-grid{grid-template-columns:1fr}}
+      .es-tile{border:1px solid #e2e8f0;border-radius:10px;padding:.9rem}
+      .es-tile h4{margin:0 0 .4rem;font-size:.93rem;font-weight:700;color:#0f766e}
+      .es-tile ul{margin:0;padding-left:1.1rem;font-size:.85rem;color:#475569}
+      .path-row{display:flex;align-items:flex-start;gap:.85rem;padding:.7rem 0;border-bottom:1px solid #f1f5f9}
+      .path-row:last-child{border-bottom:none}
+      .path-num{min-width:1.8rem;height:1.8rem;border-radius:50%;background:#7c3aed;color:#fff;font-weight:700;font-size:.78rem;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+      .path-body h4{margin:0 0 .2rem;font-size:.9rem;font-weight:700}
+      .path-body p{margin:0;font-size:.84rem;color:#475569}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+      .pro-con-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      @media(max-width:600px){.pro-con-grid{grid-template-columns:1fr}}
+      .pro-tile{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:.9rem}
+      .con-tile{background:#fff1f2;border:1px solid #fecdd3;border-radius:10px;padding:.9rem}
+      .pro-tile h4{color:#166534;margin:0 0 .5rem;font-size:.9rem}
+      .con-tile h4{color:#9f1239;margin:0 0 .5rem;font-size:.9rem}
+      .pro-tile li,.con-tile li{font-size:.84rem;color:#475569;margin-bottom:.3rem}
+      .cmp-table{width:100%;border-collapse:collapse;font-size:.84rem;margin:1rem 0}
+      .cmp-table th{background:#f1f5f9;padding:.5rem .7rem;text-align:left;font-weight:700;font-size:.79rem}
+      .cmp-table td{padding:.45rem .7rem;border-bottom:1px solid #f1f5f9;vertical-align:top}
+      .cmp-table tr:last-child td{border-bottom:none}
+      .phase-pill{display:inline-block;font-size:.72rem;font-weight:700;border-radius:999px;padding:.15rem .55rem;margin:.1rem}
+      .phase-hot{background:#fef9c3;color:#854d0e;border:1px solid #fde68a}
+      .phase-warm{background:#fff7ed;color:#9a3412;border:1px solid #fed7aa}
+      .phase-cold{background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe}
+      .phase-frozen{background:#f0f9ff;color:#0c4a6e;border:1px solid #bae6fd}
+      .phase-delete{background:#fff1f2;color:#9f1239;border:1px solid #fecdd3}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1555949963-ff9fe0c870eb?w=1600&h=700&fit=crop&auto=format&q=80" alt="Search and analytics" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Data Engineering · Architecture · 20 min</span>
+          </div>
+        </figure>
+        <h1>Elasticsearch: Search &amp; Analytics Engine Deep Dive</h1>
+        <p class="summary">A production-grade guide to Elasticsearch — covering the inverted index, distributed architecture (shards/replicas/nodes), the write and read paths, Query DSL, data modeling (mappings, keyword/text/nested/join), ELK stack integrations, Index Lifecycle Management, shard sizing, vector search (k-NN/HNSW), and real-world deployments at Wikipedia, GitHub, Netflix, and Uber.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Elastic Official Docs · Engineering Blogs · DB-Engines</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Backend, Data Engineering, Architecture, Search, Distributed Systems</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Full @elastic/elasticsearch client: mappings, bulk index, bool query, aggregations, kNN vector search</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Elasticsearch is a distributed search and analytics engine built on Apache Lucene. It is the most widely adopted search engine in the world (DB-Engines rank #12; 77,500+ GitHub stars), powering full-text search, log analytics (ELK stack), APM, security (SIEM), and increasingly vector/semantic search with its k-NN capabilities.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Elasticsearch wraps Lucene's inverted index in a distributed, RESTful shell. Every piece of data is stored as a JSON document in an index. Indices are split into shards (each shard is a self-contained Lucene instance); shards are distributed across nodes. A query fans out to all relevant shards (scatter phase), each scores locally, then results are merged at the coordinator (gather/reduce phase).</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>Distributed node model</h2>
+        <div class="es-grid">
+          <div class="es-tile">
+            <h4>Node Roles</h4>
+            <ul>
+              <li><strong>Master-eligible</strong> — participates in leader election; stores cluster state, manages shard allocation. Keep dedicated masters for clusters &gt;5 nodes</li>
+              <li><strong>Data</strong> — stores shards, handles CRUD and search. Split into data_hot / data_warm / data_cold / data_frozen for tiered storage</li>
+              <li><strong>Coordinating-only</strong> — routes requests, merges results; no data; acts as a smart load balancer</li>
+              <li><strong>Ingest</strong> — runs ingest pipelines (Grok, Gsub, Set processors) before indexing</li>
+              <li><strong>ML</strong> — runs anomaly detection and trained model inference</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Shards &amp; Replicas</h4>
+            <ul>
+              <li><strong>Primary shard</strong> — receives all writes; default 1 shard per index (since ES 7.0; was 5 before)</li>
+              <li><strong>Replica shard</strong> — copy of primary; serves reads; default 1 replica per primary</li>
+              <li>Shard count is <strong>fixed at index creation</strong> — requires reindex to change primaries</li>
+              <li>Recommended shard size: <strong>10–50 GB</strong> (Elastic guidance); smaller = more overhead</li>
+              <li>Over-sharding is a common anti-pattern: too many small shards consume heap and slow queries</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Cluster Coordination (Zen2 / 7.x+)</h4>
+            <ul>
+              <li>Raft-based consensus for master election (replaced Zen1 in 7.0)</li>
+              <li><code>cluster.initial_master_nodes</code> bootstraps first election; must list all master-eligible nodes</li>
+              <li>Quorum = majority of master-eligible nodes → split-brain prevention</li>
+              <li>Cluster state (mappings, shard assignments) replicated via Raft log</li>
+              <li>Minimum 3 master-eligible nodes in production</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Index Anatomy</h4>
+            <ul>
+              <li><strong>Index</strong> — logical namespace; maps to one or more shards</li>
+              <li><strong>Shard</strong> — a Lucene index; contains segments, translog, bloom filter</li>
+              <li><strong>Segment</strong> — immutable on-disk Lucene unit; accumulates until merge</li>
+              <li><strong>Translog</strong> — write-ahead log for durability before segment flush</li>
+              <li><strong>Alias</strong> — named pointer to one or more indices; enables zero-downtime reindexing</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Inverted Index &amp; Scoring</span>
+        <h2>How Lucene finds and ranks documents</h2>
+        <p>The inverted index maps each unique term to the list of documents containing that term (the posting list), plus optional frequency, position, and offset data. When you index a document, the text is passed through an <strong>analyzer</strong> (tokenizer → token filters) to produce terms. Each term is added to the inverted index for its field.</p>
+        <div class="es-grid">
+          <div class="es-tile">
+            <h4>Inverted Index Components</h4>
+            <ul>
+              <li><strong>Term dictionary</strong> — sorted FST (Finite State Transducer) of all terms; loaded into memory for fast lookup</li>
+              <li><strong>Posting list</strong> — per-term: doc IDs, term frequency, positions (for phrase queries), offsets (for highlighting)</li>
+              <li><strong>doc_values</strong> — columnar on-disk store for sorting, aggregations, scripting on <code>keyword</code>, numeric, date fields</li>
+              <li><strong>fielddata</strong> — heap-resident columnar store for text fields (expensive; avoid unless necessary)</li>
+              <li><strong>_source</strong> — original JSON document stored as-is; not used for search</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>BM25 Scoring (default since ES 5.0)</h4>
+            <ul>
+              <li>Okapi BM25 replaces TF-IDF as the default similarity algorithm</li>
+              <li><strong>TF component:</strong> saturates at high frequencies (parameter k1, default 1.2)</li>
+              <li><strong>IDF component:</strong> inverse document frequency — rare terms score higher</li>
+              <li><strong>Length normalization:</strong> shorter fields score higher (parameter b, default 0.75)</li>
+              <li>Override per field: <code>"similarity": "boolean"</code> or custom BM25 with different k1/b</li>
+              <li>Use <code>explain: true</code> in queries to see per-doc score breakdown</li>
+            </ul>
+          </div>
+        </div>
+        <p>Lucene segments are <strong>immutable</strong> — deletes mark documents as deleted in a bitmap; the segment is not rewritten. Updates = delete old + write new. Background <strong>segment merges</strong> consolidate small segments, reclaim space from deleted docs, and improve read performance.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Write &amp; Read Path</span>
+        <h2>How documents flow from client to disk</h2>
+        <h3 style="font-size:1rem;margin-bottom:.5rem">Write Path</h3>
+        <div class="path-row">
+          <div class="path-num">1</div>
+          <div class="path-body"><h4>Coordinating node receives request</h4><p>Any node can be coordinator. Routes to the correct primary shard using a hash of the document ID (or custom routing key).</p></div>
+        </div>
+        <div class="path-row">
+          <div class="path-num">2</div>
+          <div class="path-body"><h4>Primary shard writes translog + in-memory buffer</h4><p>The translog is fsync'd every 5 seconds (or on each request for <code>write_concern: true</code>). Guards against data loss on crash.</p></div>
+        </div>
+        <div class="path-row">
+          <div class="path-num">3</div>
+          <div class="path-body"><h4>Forwarded to replica shards</h4><p>Primary waits for all in-sync replicas to acknowledge before returning success to the client (controlled by <code>wait_for_active_shards</code>).</p></div>
+        </div>
+        <div class="path-row">
+          <div class="path-num">4</div>
+          <div class="path-body"><h4>Refresh (default every 1 second)</h4><p>In-memory buffer is written to a new Lucene segment and made searchable. This is what makes ES <strong>near real-time (NRT)</strong> — not truly real-time. Disable or increase <code>index.refresh_interval</code> during bulk indexing for 2–3× throughput improvement.</p></div>
+        </div>
+        <div class="path-row">
+          <div class="path-num">5</div>
+          <div class="path-body"><h4>Flush (periodic or when translog grows)</h4><p>Segments are fsync'd to disk; translog is cleared. Default translog flush threshold: 512 MB or 30 minutes.</p></div>
+        </div>
+        <h3 style="font-size:1rem;margin:.85rem 0 .5rem">Read Path (Query → Fetch)</h3>
+        <div class="insight-box">
+          <strong>Two-phase search:</strong> <strong>Query phase</strong> — coordinator fans out to all relevant shards; each shard returns a lightweight list of matching doc IDs + scores (not the full documents). Coordinator merges, sorts, and selects the top N. <strong>Fetch phase</strong> — coordinator requests full document sources for only the top N doc IDs. This separation minimizes network transfer — only scores travel in phase 1, full docs in phase 2.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Query DSL</span>
+        <h2>Key query types and aggregations</h2>
+        <span class="code-label">Query DSL Examples</span>
+        <pre><code>// 1. bool query — the Swiss Army knife
+// must=AND(scored), filter=AND(not scored, cached), should=OR, must_not=AND NOT
+{
+  "query": {
+    "bool": {
+      "must":     [{ "match": { "title": "elasticsearch tutorial" } }],
+      "filter":   [{ "term":  { "status": "published" } },
+                   { "range": { "date": { "gte": "2024-01-01" } } }],
+      "should":   [{ "match": { "tags": "search" } }],
+      "must_not": [{ "term":  { "archived": true } }],
+      "minimum_should_match": 1
+    }
+  }
+}
+
+// 2. match — full-text search, applies analyzer
+{ "query": { "match": { "body": { "query": "quick brown fox", "operator": "and" } } } }
+
+// 3. multi_match — search across multiple fields with boost
+{
+  "query": {
+    "multi_match": {
+      "query": "elasticsearch",
+      "fields": ["title^3", "body", "tags^2"],
+      "type": "best_fields"
+    }
+  }
+}
+
+// 4. term / terms — exact match (no analysis); use on keyword fields
+{ "query": { "term":  { "status.keyword": "published" } } }
+{ "query": { "terms": { "category": ["news", "tech"] } } }
+
+// 5. range query
+{ "query": { "range": { "price": { "gte": 10, "lte": 100 } } } }
+
+// 6. nested query — preserves object-array relationships
+{
+  "query": {
+    "nested": {
+      "path": "comments",
+      "query": {
+        "bool": {
+          "must": [
+            { "match": { "comments.author": "Alice" } },
+            { "range": { "comments.score": { "gte": 4 } } }
+          ]
+        }
+      },
+      "inner_hits": {}
+    }
+  }
+}
+
+// 7. function_score — boost by recency, popularity, geo distance
+{
+  "query": {
+    "function_score": {
+      "query": { "match": { "title": "search" } },
+      "functions": [
+        { "gauss": { "date": { "origin": "now", "scale": "7d", "decay": 0.5 } } },
+        { "field_value_factor": { "field": "views", "modifier": "log1p", "factor": 0.5 } }
+      ],
+      "score_mode": "multiply"
+    }
+  }
+}
+
+// 8. Aggregations: terms + date_histogram + nested avg
+{
+  "aggs": {
+    "by_category": {
+      "terms": { "field": "category.keyword", "size": 10 },
+      "aggs": {
+        "per_day": {
+          "date_histogram": { "field": "date", "calendar_interval": "day" }
+        }
+      }
+    },
+    "avg_price": { "avg": { "field": "price" } },
+    "price_ranges": {
+      "range": {
+        "field": "price",
+        "ranges": [{ "to": 50 }, { "from": 50, "to": 100 }, { "from": 100 }]
+      }
+    }
+  }
+}
+
+// 9. Highlight — returns matched fragment with HTML tags
+{
+  "query": { "match": { "body": "elasticsearch" } },
+  "highlight": {
+    "fields": { "body": { "fragment_size": 150, "number_of_fragments": 3 } }
+  }
+}
+
+// 10. suggest — autocomplete via completion suggester
+{
+  "suggest": {
+    "product_suggest": {
+      "prefix": "elast",
+      "completion": { "field": "suggest", "size": 5 }
+    }
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Data Modeling</span>
+        <h2>Mappings, field types, and design patterns</h2>
+        <div class="es-grid">
+          <div class="es-tile">
+            <h4>text vs keyword</h4>
+            <ul>
+              <li><code>text</code> — analyzed (tokenized + lowercased); full-text search; no sorting/aggregation by default</li>
+              <li><code>keyword</code> — not analyzed; exact match, sorting, aggregations, term queries</li>
+              <li><strong>Multi-field pattern:</strong> map as <code>text</code> + sub-field <code>.keyword</code> as <code>keyword</code> — search on <code>title</code>, sort/aggregate on <code>title.keyword</code></li>
+              <li>Dynamic mapping creates <code>.keyword</code> sub-field with <code>ignore_above: 256</code></li>
+              <li>Use <code>wildcard</code> type for high-cardinality machine-generated strings requiring leading-wildcard searches</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>object vs nested</h4>
+            <ul>
+              <li><code>object</code> (default) — flattens arrays of objects; destroys per-object field association</li>
+              <li><code>nested</code> — each object indexed as a hidden Lucene document; preserves associations</li>
+              <li>Nested objects stored separately: 1 parent + N objects = N+1 Lucene docs</li>
+              <li>Default limits: 100 distinct nested field types, 10,000 nested objects per document</li>
+              <li>Use <code>nested</code> query to query nested; use <code>reverse_nested</code> agg to aggregate back to parent</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>join (parent-child)</h4>
+            <ul>
+              <li>Parent and child documents in same index; child must route to same shard as parent</li>
+              <li>Use when one entity significantly outnumbers the other (e.g., products → offers)</li>
+              <li><code>has_child</code> / <code>has_parent</code> queries are expensive — adds significant query overhead</li>
+              <li>Only 1 join field per index; relations can be extended but not modified</li>
+              <li>Prefer denormalization over join for most workloads</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Index Templates &amp; Data Streams</h4>
+            <ul>
+              <li><strong>Index templates</strong> — auto-apply mappings + settings to indices matching a pattern</li>
+              <li><strong>Component templates</strong> — reusable mapping/settings fragments composed into index templates</li>
+              <li><strong>Data streams</strong> — append-only time-series abstraction; write to current backing index; auto-rollover via ILM</li>
+              <li>Data stream name used as write alias; search queries all backing indices</li>
+              <li>Recommended for logs, metrics, traces — any time-series workload</li>
+            </ul>
+          </div>
+        </div>
+        <div class="warn-box">
+          <strong>Dynamic mapping caution:</strong> Dynamic mapping is <code>true</code> by default — Elasticsearch auto-detects types. This convenience causes mapping explosion in production (e.g., log ingest creating thousands of field mappings). Use <code>"dynamic": "strict"</code> on production indices and define all fields explicitly. The default limit is <strong>1,000 total fields</strong> per index (<code>index.mapping.total_fields.limit</code>).
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">ELK Stack &amp; Integrations</span>
+        <h2>The Elastic ecosystem</h2>
+        <div class="es-grid">
+          <div class="es-tile">
+            <h4>Beats — Lightweight Shippers</h4>
+            <ul>
+              <li><strong>Filebeat</strong> — tails log files; handles backpressure; sends to Logstash or ES directly</li>
+              <li><strong>Metricbeat</strong> — system/service metrics (CPU, memory, MySQL, Nginx, Docker)</li>
+              <li><strong>Packetbeat</strong> — network traffic analysis (HTTP, DNS, MySQL protocols)</li>
+              <li><strong>Elastic Agent</strong> — unified agent replacing individual Beats; centrally managed via Fleet</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Logstash — Ingest Pipeline</h4>
+            <ul>
+              <li>Input plugins: Filebeat, Kafka, S3, JDBC, HTTP</li>
+              <li>Filter plugins: Grok (regex parsing), Mutate (rename/type-cast), GeoIP, Date</li>
+              <li>Output plugins: Elasticsearch, S3, Kafka, email</li>
+              <li>For simple transformations, prefer ES <strong>ingest pipelines</strong> (built-in, lower ops overhead)</li>
+              <li>Logstash for complex multi-source fan-in, conditional routing, and heavy transformation</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Elasticsearch Ingest Pipelines</h4>
+            <ul>
+              <li>Processors run on the ingest node before indexing</li>
+              <li>Common processors: Grok, GeoIP, Date, Rename, Remove, Set, Enrich, Script</li>
+              <li>Defined via <code>PUT _ingest/pipeline/my-pipeline</code></li>
+              <li>Reference in index template or per-request via <code>?pipeline=my-pipeline</code></li>
+              <li>On-failure handling: per-processor fallback chains</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Kafka → Elasticsearch</h4>
+            <ul>
+              <li>Kafka Connect Elasticsearch Sink Connector (Elastic or Confluent)</li>
+              <li>Reads Kafka topics → batches → bulk API to ES</li>
+              <li>Configurable: batch size, retry logic, index naming from topic name</li>
+              <li>Alternative: Logstash Kafka input → Elasticsearch output</li>
+              <li>For real-time search on streaming data: Kafka event → Logstash → ES → Kibana</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Index Lifecycle Management (ILM)</span>
+        <h2>Automated data tiering for time-series data</h2>
+        <p>ILM automates index management through five phases based on age, document count, or size — moving data from fast expensive storage to cheap cold storage, then deleting it.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:.4rem;margin:.5rem 0 1rem">
+          <span class="phase-pill phase-hot">HOT — Active writes + reads; fastest nodes (NVMe SSD)</span>
+          <span class="phase-pill phase-warm">WARM — Read-only; forcemerge to 1 segment; lower-spec nodes</span>
+          <span class="phase-pill phase-cold">COLD — Infrequent reads; searchable snapshots optional; HDDs</span>
+          <span class="phase-pill phase-frozen">FROZEN — Rarely accessed; data stays in object storage (S3); mounted on demand</span>
+          <span class="phase-pill phase-delete">DELETE — Index deleted</span>
+        </div>
+        <span class="code-label">ILM Policy Example</span>
+        <pre><code>PUT _ilm/policy/logs-30d-policy
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "min_age": "0ms",
+        "actions": {
+          "rollover": {
+            "max_primary_shard_size": "50gb",  // roll when any shard hits 50 GB
+            "max_age": "1d"                    // or after 1 day, whichever first
+          },
+          "set_priority": { "priority": 100 }
+        }
+      },
+      "warm": {
+        "min_age": "3d",                       // 3 days after rollover
+        "actions": {
+          "shrink":      { "number_of_shards": 1 },  // reduce to 1 shard
+          "forcemerge":  { "max_num_segments": 1 },   // 1 segment = optimal read
+          "set_priority": { "priority": 50 }
+        }
+      },
+      "cold": {
+        "min_age": "14d",
+        "actions": {
+          "searchable_snapshot": { "snapshot_repository": "s3-repo" },
+          "set_priority": { "priority": 0 }
+        }
+      },
+      "delete": {
+        "min_age": "30d",
+        "actions": { "delete": {} }
+      }
+    }
+  }
+}</code></pre>
+        <div class="insight-box">
+          <strong>Rollover triggers:</strong> ILM rolls an index when <em>any</em> rollover condition is met (first match). Common triggers: <code>max_age</code>, <code>max_primary_shard_size</code> (50 GB is a good default), <code>max_docs</code>. After rollover, the alias points to the new index; the old index progresses through ILM phases.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Shard Sizing &amp; Performance</span>
+        <h2>Operational tuning guide</h2>
+        <div class="es-grid">
+          <div class="es-tile">
+            <h4>Shard Sizing Rules</h4>
+            <ul>
+              <li>Target <strong>10–50 GB per shard</strong> (Elastic's guidance)</li>
+              <li>Each shard has overhead: Lucene segments, heap metadata (~few MBs each)</li>
+              <li>Over-sharding: 1,000 × 1 GB shards is far worse than 20 × 50 GB shards</li>
+              <li>Max shard count per GB of heap: ~20 shards/GB (watch for OOM)</li>
+              <li>Rule: Total shards ≤ 20 × heap in GB</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Heap &amp; JVM</h4>
+            <ul>
+              <li>Set heap to <strong>50% of available RAM</strong>, never exceed <strong>31 GB</strong> (compressed OOPs limit)</li>
+              <li>Above 31 GB: JVM disables compressed object pointers → pointer size doubles → more GC pressure</li>
+              <li>Remaining 50% RAM: used by OS page cache for Lucene file access (critical for performance)</li>
+              <li>G1GC is default; ZGC available for large heaps with lower pause requirements</li>
+              <li>Circuit breakers prevent OOM: field data, request, in-flight bytes limits</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Query Performance</h4>
+            <ul>
+              <li><strong>filter context</strong> queries are cached (no scoring); use for non-relevance predicates</li>
+              <li>Shard request cache: caches full aggregation results for non-changed shards</li>
+              <li>Query cache (node level): caches bitsets for frequently used filter clauses</li>
+              <li>Enable <code>_routing</code> to route related docs to same shard → avoid full scatter-gather</li>
+              <li>Use <code>search_after</code> for deep pagination instead of <code>from+size</code> (avoids heap cost of large priority queues)</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Bulk Indexing Tuning</h4>
+            <ul>
+              <li>Set <code>index.refresh_interval: -1</code> during bulk load (disable refresh); reset after</li>
+              <li>Set <code>index.number_of_replicas: 0</code> during initial load; re-enable after</li>
+              <li>Bulk API batch size: 5–15 MB per request (not document count)</li>
+              <li>Use multiple concurrent bulk threads: typically 2× data node count</li>
+              <li>Monitor for <code>429 Too Many Requests</code> (indexing queue full) — back off and retry</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Vector Search</span>
+        <h2>k-NN and semantic search (ES 8.x+)</h2>
+        <div class="es-grid">
+          <div class="es-tile">
+            <h4>dense_vector field type</h4>
+            <ul>
+              <li>Stores floating-point vector embeddings (e.g., 768-dim BERT, 1536-dim OpenAI)</li>
+              <li>Supports HNSW (Hierarchical Navigable Small World) for approximate k-NN</li>
+              <li>Index parameters: <code>m</code> (graph connectivity, default 16), <code>ef_construction</code> (build accuracy, default 100)</li>
+              <li>Similarity: <code>cosine</code>, <code>dot_product</code>, <code>l2_norm</code>, <code>max_inner_product</code></li>
+              <li>Exact k-NN (brute-force): set <code>"index": false</code> — no HNSW overhead, full accuracy, slower for large corpora</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Hybrid Search (BM25 + Vector)</h4>
+            <ul>
+              <li>Combine lexical BM25 relevance with semantic vector similarity</li>
+              <li>Use <code>sub_searches</code> with Reciprocal Rank Fusion (RRF) normalizer (ES 8.14+)</li>
+              <li>Or: <code>knn</code> + <code>query</code> in same request with explicit <code>boost</code> weights</li>
+              <li><strong>ELSER</strong> (Elastic Learned Sparse Encoder) — in-house sparse vector model for semantic search without dense vectors; uses <code>sparse_vector</code> field type</li>
+              <li><code>semantic_text</code> field (ES 8.15+) — one-stop mapping for automatic chunking + inference pipeline</li>
+            </ul>
+          </div>
+        </div>
+        <span class="code-label">k-NN mapping and query example</span>
+        <pre><code>// Mapping with dense_vector for HNSW approximate k-NN
+PUT articles
+{
+  "mappings": {
+    "properties": {
+      "title":     { "type": "text" },
+      "category":  { "type": "keyword" },
+      "embedding": {
+        "type":       "dense_vector",
+        "dims":       768,
+        "index":      true,
+        "similarity": "cosine"
+      }
+    }
+  }
+}
+
+// Hybrid search: BM25 keyword + k-NN vector (boosted)
+POST articles/_search
+{
+  "query": {
+    "bool": {
+      "should": [
+        { "match": { "title": { "query": "machine learning", "boost": 1.5 } } }
+      ],
+      "filter": [{ "term": { "category": "tech" } }]
+    }
+  },
+  "knn": {
+    "field":          "embedding",
+    "query_vector":   [0.12, -0.34, 0.56, /* ...768 dims */],
+    "k":              10,
+    "num_candidates": 50
+  },
+  "size": 10,
+  "highlight": { "fields": { "title": {} } }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Full @elastic/elasticsearch client integration</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>import { Client } from '@elastic/elasticsearch';
+
+// Client setup with authentication
+const es = new Client({
+  node: process.env.ES_URL || 'https://localhost:9200',
+  auth: {
+    apiKey: process.env.ES_API_KEY,   // preferred for cloud
+    // OR: { username: 'elastic', password: 'changeme' }
+  },
+  tls: { rejectUnauthorized: true },
+  maxRetries: 3,
+  requestTimeout: 30_000,
+  compression: true,                  // gzip request/response bodies
+});
+
+// Create index with explicit mappings — never rely on dynamic mapping in production
+async function createProductIndex() {
+  await es.indices.create({
+    index: 'products',
+    settings: {
+      number_of_shards:   2,
+      number_of_replicas: 1,
+      refresh_interval:   '1s',
+    },
+    mappings: {
+      dynamic: 'strict',              // reject documents with unmapped fields
+      properties: {
+        title:       { type: 'text', fields: { keyword: { type: 'keyword' } } },
+        description: { type: 'text', analyzer: 'english' },
+        category:    { type: 'keyword' },
+        price:       { type: 'double' },
+        tags:        { type: 'keyword' },
+        in_stock:    { type: 'boolean' },
+        created_at:  { type: 'date' },
+        embedding:   { type: 'dense_vector', dims: 128, index: true, similarity: 'cosine' },
+      },
+    },
+  });
+}
+
+// Bulk indexing — most efficient way to ingest large volumes
+async function bulkIndex(products) {
+  const operations = products.flatMap(doc =&gt; [
+    { index: { _index: 'products', _id: doc.id } },
+    {
+      title:       doc.title,
+      description: doc.description,
+      category:    doc.category,
+      price:       doc.price,
+      tags:        doc.tags,
+      in_stock:    doc.inStock,
+      created_at:  doc.createdAt,
+      embedding:   doc.embedding,     // pre-computed vector from ML model
+    },
+  ]);
+
+  const { items, errors } = await es.bulk({ operations, refresh: false });
+  if (errors) {
+    const failed = items.filter(i =&gt; i.index?.error);
+    console.error(`${failed.length} bulk items failed`, failed);
+  }
+  return items.length / 2;
+}
+
+// Full-text search with filters, relevance boost, aggregations
+async function searchProducts(params) {
+  const { query, category, minPrice, maxPrice, page = 1, size = 20 } = params;
+
+  const result = await es.search({
+    index: 'products',
+    from:  (page - 1) * size,
+    size,
+    query: {
+      bool: {
+        must: query
+          ? [{ multi_match: { query, fields: ['title^3', 'description', 'tags^2'] } }]
+          : [{ match_all: {} }],
+        filter: [
+          ...(category  ? [{ term:  { category } }] : []),
+          ...(minPrice != null || maxPrice != null
+            ? [{ range: { price: { gte: minPrice, lte: maxPrice } } }]
+            : []),
+          { term: { in_stock: true } },
+        ],
+      },
+    },
+    aggs: {
+      by_category: {
+        terms: { field: 'category', size: 20 },
+        aggs: { avg_price: { avg: { field: 'price' } } },
+      },
+      price_histogram: {
+        histogram: { field: 'price', interval: 50 },
+      },
+    },
+    highlight: {
+      fields: { title: { fragment_size: 100 }, description: { fragment_size: 150 } },
+    },
+    sort: [{ _score: 'desc' }, { created_at: 'desc' }],
+  });
+
+  return {
+    total:        result.hits.total.value,
+    hits:         result.hits.hits.map(h =&gt; ({ id: h._id, score: h._score, ...h._source, highlights: h.highlight })),
+    aggregations: result.aggregations,
+  };
+}
+
+// k-NN vector search — find similar products by embedding
+async function findSimilar(queryEmbedding, topK = 10) {
+  const result = await es.search({
+    index: 'products',
+    knn: {
+      field:          'embedding',
+      query_vector:   queryEmbedding,
+      k:              topK,
+      num_candidates: topK * 5,       // num_candidates &gt; k for better accuracy
+    },
+    _source: ['title', 'category', 'price'],
+  });
+  return result.hits.hits.map(h =&gt; ({ id: h._id, score: h._score, ...h._source }));
+}
+
+// Index lifecycle management — update settings for bulk load then restore
+async function bulkLoadOptimized(products) {
+  await es.indices.putSettings({
+    index: 'products',
+    settings: { refresh_interval: '-1', number_of_replicas: 0 },
+  });
+
+  try {
+    await bulkIndex(products);
+  } finally {
+    await es.indices.putSettings({
+      index: 'products',
+      settings: { refresh_interval: '1s', number_of_replicas: 1 },
+    });
+    await es.indices.refresh({ index: 'products' });
+  }
+}</code></pre>
+        <div class="insight-box">
+          <strong>Client best practices:</strong> (1) Use API key auth — scoped, revocable, no password in config. (2) Always use <code>"dynamic": "strict"</code> on production indices. (3) For bulk indexing, disable refresh and replicas, then restore after load. (4) Use <code>search_after</code> for pagination beyond 10k docs (not <code>from+size</code>). (5) Use filter context for non-scoring predicates — it enables caching. (6) Set <code>num_candidates</code> to 5–10× k for k-NN accuracy vs performance trade-off.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pros &amp; Cons</span>
+        <h2>Trade-off summary</h2>
+        <div class="pro-con-grid">
+          <div class="pro-tile">
+            <h4>Advantages</h4>
+            <ul>
+              <li><strong>Best-in-class full-text search</strong> — BM25, analyzed text, multi-field queries, highlighting, suggestions</li>
+              <li><strong>Powerful aggregations</strong> — terms, histograms, nested, pipeline, composite; real-time analytics</li>
+              <li><strong>Schema flexibility</strong> — dynamic mapping for prototyping; explicit mapping for production</li>
+              <li><strong>ELK ecosystem</strong> — Beats, Logstash, Kibana, Fleet — complete observability stack out of box</li>
+              <li><strong>Distributed, horizontally scalable</strong> — add nodes to scale read throughput linearly</li>
+              <li><strong>Vector search native</strong> — HNSW k-NN, hybrid BM25+vector, ELSER semantic search</li>
+              <li><strong>ILM data tiering</strong> — automatic hot/warm/cold/frozen lifecycle; Elastic searchable snapshots</li>
+              <li><strong>Near real-time</strong> — documents searchable within ~1 second of indexing</li>
+            </ul>
+          </div>
+          <div class="con-tile">
+            <h4>Limitations</h4>
+            <ul>
+              <li><strong>Not a primary database</strong> — no ACID transactions; writes may be lost on crash without replicas; eventual consistency</li>
+              <li><strong>Complexity at scale</strong> — shard tuning, heap sizing, ILM, mapping management require expertise</li>
+              <li><strong>Mapping immutability</strong> — cannot change existing field types; must reindex to change schema</li>
+              <li><strong>Over-sharding danger</strong> — too many small shards exhaust heap and slow queries</li>
+              <li><strong>High memory requirements</strong> — heap + page cache; production nodes typically 32–64 GB RAM</li>
+              <li><strong>Licensing</strong> — Elastic changed to SSPL/Elastic License 2.0 in 2021; AWS forked as OpenSearch</li>
+              <li><strong>Aggregation on text fields</strong> — requires fielddata (heap-resident) or <code>.keyword</code> multi-field (indexed twice)</li>
+              <li><strong>No update-in-place</strong> — updates are delete + reindex under the hood; high update rate → segment bloat</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real-World Deployments</span>
+        <h2>How major companies use Elasticsearch</h2>
+        <div class="es-grid">
+          <div class="es-tile">
+            <h4>Wikipedia</h4>
+            <ul>
+              <li>Powers Wikipedia's search across 60M+ articles in 300+ languages</li>
+              <li>Custom CirrusSearch extension on top of Elasticsearch</li>
+              <li>Uses multi-language analyzers, stemming, fuzzy matching</li>
+              <li>Open-source: entire search stack documented at mediawiki.org</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>GitHub</h4>
+            <ul>
+              <li>Code search across 200M+ repositories, 8B+ files</li>
+              <li>Migrated from Elasticsearch to custom search engine (Blackbird) in 2023 for code-specific ranking</li>
+              <li>Previously: custom tokenizers for code symbols, method names, class paths</li>
+              <li>Still uses Elasticsearch for issue/PR/discussion search</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>Netflix / Uber / Airbnb</h4>
+            <ul>
+              <li><strong>Netflix:</strong> Log aggregation (ELK), APM traces, security event analysis — petabyte-scale ingest</li>
+              <li><strong>Uber:</strong> Marketplace search (restaurants, drivers), trip data analytics, Cadence workflow search</li>
+              <li><strong>Airbnb:</strong> Listing search with geo-distance + amenity filters + availability calendar</li>
+              <li>All use tiered storage (ILM) to manage long-term log retention cost</li>
+            </ul>
+          </div>
+          <div class="es-tile">
+            <h4>eBay</h4>
+            <ul>
+              <li>Powers product search for 1.4B+ live listings</li>
+              <li>Real-time price, availability, location-based relevance</li>
+              <li>Custom relevance models on top of function_score</li>
+              <li>Heavy use of aggregations for faceted navigation (category, price range, seller rating)</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Comparison</span>
+        <h2>Elasticsearch vs alternatives</h2>
+        <table class="cmp-table">
+          <thead>
+            <tr><th>Engine</th><th>Foundation</th><th>Licensing</th><th>Best For</th><th>Avoid When</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Elasticsearch</strong></td>
+              <td>Lucene (sharded)</td>
+              <td>Elastic License 2.0 / SSPL</td>
+              <td>Full-text search, log analytics, ELK stack, vector/semantic search, complex aggregations</td>
+              <td>Primary OLTP database, cost-sensitive small projects (resource-heavy)</td>
+            </tr>
+            <tr>
+              <td><strong>Apache Solr</strong></td>
+              <td>Lucene (sharded via SolrCloud)</td>
+              <td>Apache 2.0</td>
+              <td>Enterprise search with rich faceting, existing Hadoop/Spark ecosystem, fully open-source requirement</td>
+              <td>Real-time analytics, ELK-style logging, teams wanting managed cloud offering</td>
+            </tr>
+            <tr>
+              <td><strong>OpenSearch</strong></td>
+              <td>Elasticsearch 7.10 fork</td>
+              <td>Apache 2.0</td>
+              <td>AWS-native deployments (OpenSearch Service), need truly open-source ES compatible API</td>
+              <td>Needing latest Elastic features (vector search, ELSER, Fleet) — OpenSearch has gaps</td>
+            </tr>
+            <tr>
+              <td><strong>Algolia</strong></td>
+              <td>Proprietary SaaS</td>
+              <td>SaaS subscription</td>
+              <td>Instant search UI (typo tolerance, sub-10ms), e-commerce product search, minimal ops</td>
+              <td>Log analytics, self-hosted requirement, large data volumes (cost scales fast)</td>
+            </tr>
+            <tr>
+              <td><strong>Typesense</strong></td>
+              <td>Custom C++ engine</td>
+              <td>GPL-3 (OSS) / SaaS</td>
+              <td>Typo-tolerant instant search, easy ops (single binary), Algolia alternative</td>
+              <td>Complex aggregations, log analytics, vector search at scale</td>
+            </tr>
+            <tr>
+              <td><strong>Meilisearch</strong></td>
+              <td>Custom Rust engine</td>
+              <td>MIT</td>
+              <td>Developer-friendly, easy setup, typo tolerance, small-to-medium datasets</td>
+              <td>Very large datasets (&gt;10M docs), complex analytics, production SLAs</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="insight-box">
+          <strong>Choosing between ES and Solr:</strong> Both are Lucene-based and offer similar core search capabilities. Elasticsearch has a larger ecosystem (ELK), better REST API ergonomics, stronger cloud offerings (Elastic Cloud), and leads in vector search. Solr has fully open-source licensing (Apache 2.0 vs SSPL) and is preferred in existing Hadoop/enterprise environments. DB-Engines score: Elasticsearch 94 vs Solr 33 — Elasticsearch has ~3× greater adoption.
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Elasticsearch is the right choice when you need powerful full-text search with relevance tuning, real-time log analytics at scale (ELK stack), or a unified platform that now also handles vector/semantic search. Its distributed architecture (shards + replicas + nodes) enables horizontal read scalability and fault tolerance. The key operational challenges are: shard sizing (10–50 GB per shard; total shards ≤ 20× heap GB), mapping discipline (<code>dynamic: strict</code> + explicit field types in production), and data tiering (ILM hot/warm/cold/frozen). Elasticsearch is not a primary operational database — it is a search and analytics layer that sits alongside a source-of-truth store (PostgreSQL, Cassandra, MongoDB). The data flow is: primary database → change stream → Elasticsearch. Never treat ES as the system of record.</p>
+      </section>
+    </main>
+  </body>
+</html>

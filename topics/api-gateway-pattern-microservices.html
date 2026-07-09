@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Gateway Pattern in Microservices Architecture | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .feature-row{display:flex;gap:1rem;padding:.75rem 0;border-bottom:1px solid #f1f5f9;align-items:flex-start}
+      .feature-row:last-child{border-bottom:none}
+      .feature-icon{min-width:2rem;height:2rem;border-radius:8px;background:#e0f2fe;color:#0369a1;font-weight:700;font-family:Arial,sans-serif;font-size:.8rem;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1461749280684-dccba630e2f6?w=1600&h=700&fit=crop&auto=format&q=80" alt="API Gateway" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · System Design · 13 min</span>
+          </div>
+        </figure>
+        <h1>API Gateway Pattern in Microservices Architecture</h1>
+        <p class="summary">A deep-dive into the API Gateway pattern: what it is, the six core responsibilities it takes on (routing, auth, rate limiting, load balancing, caching, transformation), routing strategies, security implementations, failure handling, and a full Node.js gateway implementation with JWT auth and circuit breaker.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Alok Kumar · LinkedIn · 2024</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Architecture, System Design, API Gateway, Microservices</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Full API Gateway with routing, auth, rate limiting, circuit breaker</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">The API Gateway is the most commonly discussed microservices pattern — and the most commonly under-implemented. Most teams deploy a reverse proxy and call it a gateway. A real API Gateway is a programmatic layer that handles routing, authentication, rate limiting, load balancing, request transformation, and graceful failure — all configurable per route, per consumer, or per tenant.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> The API Gateway is the single entry point. Every concern that would otherwise be duplicated across all services — auth verification, rate limiting, request correlation IDs — belongs here. Services behind the gateway assume requests have already been authenticated and can focus entirely on business logic.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">What the gateway does</span>
+        <h2>Six responsibilities of an API Gateway</h2>
+        <div class="feature-row">
+          <div class="feature-icon">1</div>
+          <div><strong>Request Routing</strong> — Directs requests to the correct microservice based on path, method, headers, or query parameters. A single gateway can route <code>/api/orders/*</code> to the order service and <code>/api/payments/*</code> to the payment service.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">2</div>
+          <div><strong>Authentication &amp; Authorization</strong> — Validates JWT tokens, API keys, or OAuth sessions before the request reaches any service. Services never see unauthenticated requests. The gateway also enforces coarse-grained authorization (does this token have access to this service?); fine-grained authorization stays in each service.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">3</div>
+          <div><strong>Rate Limiting</strong> — Enforces per-consumer, per-route, or global request limits using token bucket or sliding window algorithms. Protects backend services from traffic spikes and prevents API abuse without any rate-limiting code in individual services.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">4</div>
+          <div><strong>Load Balancing</strong> — Distributes requests across multiple instances of a service. Strategies: Round Robin (even distribution), Least Connections (send to least loaded), IP Hash (sticky sessions), Random. The gateway health-checks instances and removes unhealthy ones from rotation.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">5</div>
+          <div><strong>Response Caching</strong> — Caches responses for GET endpoints with known TTLs. Reduces downstream service load for frequently-requested, slowly-changing data. Cache invalidation must be explicit — the gateway must invalidate on relevant write operations.</div>
+        </div>
+        <div class="feature-row">
+          <div class="feature-icon">6</div>
+          <div><strong>Request/Response Transformation</strong> — Translates between client-facing API contracts and internal service contracts. Aggregates multiple service responses into one. Handles protocol translation (REST → gRPC). Enables API versioning by routing v1 and v2 requests to different services.</div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>API Gateway with JWT auth, rate limiting, and circuit breaker</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>import { createServer } from 'http';
+
+// Route table: maps path patterns to services
+const ROUTES = [
+  { pattern: /^\/api\/orders/, service: 'http://order-service:3001' },
+  { pattern: /^\/api\/payments/, service: 'http://payment-service:3002' },
+  { pattern: /^\/api\/users/, service: 'http://user-service:3003', public: true },
+];
+
+// Simple token bucket rate limiter per client IP
+class RateLimiter {
+  constructor(tokensPerWindow = 100, windowMs = 60_000) {
+    this.limit = tokensPerWindow;
+    this.windowMs = windowMs;
+    this._buckets = new Map();
+  }
+
+  allow(clientId) {
+    const now = Date.now();
+    let bucket = this._buckets.get(clientId);
+    if (!bucket || now - bucket.windowStart > this.windowMs) {
+      bucket = { tokens: this.limit, windowStart: now };
+      this._buckets.set(clientId, bucket);
+    }
+    if (bucket.tokens <= 0) return false;
+    bucket.tokens--;
+    return true;
+  }
+}
+
+// Per-service circuit breaker state
+class CircuitBreaker {
+  constructor(service, threshold = 5, resetMs = 30_000) {
+    this.service = service;
+    this.threshold = threshold;
+    this.resetMs = resetMs;
+    this.failures = 0;
+    this.state = 'closed'; // closed | open | half-open
+    this.openedAt = null;
+  }
+
+  canRequest() {
+    if (this.state === 'closed') return true;
+    if (this.state === 'open') {
+      if (Date.now() - this.openedAt > this.resetMs) {
+        this.state = 'half-open';
+        return true;
+      }
+      return false;
+    }
+    return true; // half-open: allow one test request
+  }
+
+  recordSuccess() {
+    this.failures = 0;
+    this.state = 'closed';
+  }
+
+  recordFailure() {
+    this.failures++;
+    if (this.state === 'half-open' || this.failures >= this.threshold) {
+      this.state = 'open';
+      this.openedAt = Date.now();
+    }
+  }
+}
+
+// JWT validation (simplified — use jsonwebtoken in production)
+function validateJWT(authHeader) {
+  if (!authHeader?.startsWith('Bearer ')) return null;
+  const token = authHeader.slice(7);
+  // Decode without verification for demo — use jwt.verify() with secret in production
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+    return payload.exp > Date.now() / 1000 ? payload : null;
+  } catch { return null; }
+}
+
+const rateLimiter = new RateLimiter();
+const breakers = new Map(ROUTES.map(r => [r.service, new CircuitBreaker(r.service)]));
+
+createServer(async (req, res) => {
+  const clientIp = req.socket.remoteAddress;
+
+  // Rate limiting
+  if (!rateLimiter.allow(clientIp)) {
+    res.writeHead(429, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Too many requests' }));
+  }
+
+  // Find route
+  const route = ROUTES.find(r => r.pattern.test(req.url));
+  if (!route) {
+    res.writeHead(404); return res.end('Not found');
+  }
+
+  // Auth (skip for public routes)
+  if (!route.public) {
+    const user = validateJWT(req.headers.authorization);
+    if (!user) {
+      res.writeHead(401); return res.end('Unauthorized');
+    }
+    req.headers['x-user-id'] = user.sub;
+  }
+
+  // Circuit breaker check
+  const breaker = breakers.get(route.service);
+  if (!breaker.canRequest()) {
+    res.writeHead(503); return res.end('Service temporarily unavailable');
+  }
+
+  // Proxy the request
+  try {
+    const upstream = await fetch(`${route.service}${req.url}`, {
+      method: req.method,
+      headers: { ...req.headers, 'x-trace-id': req.headers['x-trace-id'] || crypto.randomUUID() },
+    });
+    breaker.recordSuccess();
+    res.writeHead(upstream.status, Object.fromEntries(upstream.headers));
+    res.end(await upstream.text());
+  } catch (err) {
+    breaker.recordFailure();
+    res.writeHead(502); res.end('Bad gateway');
+  }
+}).listen(8080);</code></pre>
+        <div class="warn-box">
+          <strong>Gateway as SPOF:</strong> The API Gateway is the entry point for everything — which makes it a potential single point of failure. Mitigation: run multiple gateway instances behind a load balancer. Use a managed gateway (Kong, AWS API Gateway, Nginx Plus) rather than a hand-rolled one in production. Reserve custom gateway code for logic that managed gateways can't support.
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>The API Gateway is not a router — it's a programmatic contract between external clients and internal services. Its six responsibilities (routing, auth, rate limiting, load balancing, caching, transformation) are all concerns that would otherwise be duplicated across every service. Centralising them in the gateway trades a potential single point of failure for architectural simplicity in every service behind it. The trade-off is acceptable when the gateway itself is made highly available — which it must be.</p>
+      </section>
+    </main>
+  </body>
+</html>

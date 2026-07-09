@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Apache Cassandra: Distributed NoSQL Deep Dive | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .cass-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      @media(max-width:600px){.cass-grid{grid-template-columns:1fr}}
+      .cass-tile{border:1px solid #e2e8f0;border-radius:10px;padding:.9rem}
+      .cass-tile h4{margin:0 0 .4rem;font-size:.93rem;font-weight:700;color:#0f766e}
+      .cass-tile ul{margin:0;padding-left:1.1rem;font-size:.85rem;color:#475569}
+      .path-row{display:flex;align-items:flex-start;gap:.85rem;padding:.7rem 0;border-bottom:1px solid #f1f5f9}
+      .path-row:last-child{border-bottom:none}
+      .path-num{min-width:1.8rem;height:1.8rem;border-radius:50%;background:#0284c7;color:#fff;font-weight:700;font-size:.78rem;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+      .path-body h4{margin:0 0 .2rem;font-size:.9rem;font-weight:700}
+      .path-body p{margin:0;font-size:.84rem;color:#475569}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#eff6ff;border-left:4px solid #3b82f6;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#1d4ed8}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+      .pro-con-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      @media(max-width:600px){.pro-con-grid{grid-template-columns:1fr}}
+      .pro-tile{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:.9rem}
+      .con-tile{background:#fff1f2;border:1px solid #fecdd3;border-radius:10px;padding:.9rem}
+      .pro-tile h4{color:#166534;margin:0 0 .5rem;font-size:.9rem}
+      .con-tile h4{color:#9f1239;margin:0 0 .5rem;font-size:.9rem}
+      .pro-tile li,.con-tile li{font-size:.84rem;color:#475569;margin-bottom:.3rem}
+      .cl-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:1rem 0}
+      .cl-table th{background:#f1f5f9;padding:.5rem .7rem;text-align:left;font-weight:700;font-size:.8rem}
+      .cl-table td{padding:.45rem .7rem;border-bottom:1px solid #f1f5f9}
+      .cl-table tr:last-child td{border-bottom:none}
+      .badge-row{display:flex;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}
+      .badge-inline{display:inline-block;font-size:.75rem;font-weight:600;background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;border-radius:4px;padding:.15rem .45rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Distributed database cluster" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Data Engineering · Architecture · 18 min</span>
+          </div>
+        </figure>
+        <h1>Apache Cassandra: Distributed NoSQL Deep Dive</h1>
+        <p class="summary">A production-grade guide to Apache Cassandra — covering the masterless ring topology, LSM-tree write/read paths, tunable consistency, query-driven data modeling, CQL, compaction strategies, Node.js integration patterns, and real-world deployments at Netflix, Discord, and Apple.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Apache Cassandra Official Docs · DataStax · Engineering Blogs</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Backend, Data Engineering, Architecture, Distributed Systems</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Full cassandra-driver integration: session management, prepared statements, time-series insert, pagination</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Apache Cassandra is a masterless, distributed wide-column NoSQL database designed for extreme write throughput, multi-datacenter replication, and linear horizontal scalability. Originally built at Facebook in 2007–2008 for inbox search, it became an Apache top-level project in 2010 and is now the backbone of platforms serving petabyte-scale data with zero downtime.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Cassandra combines Amazon Dynamo's distribution model (consistent hashing, masterless ring, tunable consistency) with Google Bigtable's data model (wide-column sorted tables). Every node is identical — there is no primary, no secondary, no SPOF. All writes go to an LSM-tree (append-only), making Cassandra one of the fastest databases for write-heavy workloads at scale.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>Masterless ring topology</h2>
+        <p>The cluster is organized as a logical <strong>ring</strong> of token values spanning <code>[−2⁶³, 2⁶³−1]</code>. Each node owns one or more <strong>token ranges</strong> — contiguous arcs of that ring. When a write arrives at any node (which becomes the <strong>coordinator</strong>), it applies MurmurHash3 to the partition key to derive a token, then routes the mutation to all replica nodes whose token ranges include that value.</p>
+        <div class="cass-grid">
+          <div class="cass-tile">
+            <h4>Consistent Hashing</h4>
+            <ul>
+              <li>Partition key → MurmurHash3 → 64-bit token</li>
+              <li>Token determines primary + replica nodes</li>
+              <li>Adding/removing a node only moves a fraction of data</li>
+              <li>No full reshuffle on cluster changes</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Virtual Nodes (Vnodes)</h4>
+            <ul>
+              <li>Each physical node holds multiple token positions</li>
+              <li>Default: <strong>256 vnodes</strong> (v3.x), <strong>16 vnodes</strong> (v4.x+)</li>
+              <li>Enables parallel streaming on join/leave</li>
+              <li>Cassandra 4.0 uses deterministic token allocator</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Gossip Protocol</h4>
+            <ul>
+              <li>Each node contacts up to 3 peers every second</li>
+              <li>Propagates EndpointState: tokens, DC, rack, load, schema</li>
+              <li>Phi Accrual Failure Detector (threshold: φ=8)</li>
+              <li>UP/DOWN is a local judgment — not gossip-propagated</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Snitch (Topology Awareness)</h4>
+            <ul>
+              <li>Teaches Cassandra about DC and rack topology</li>
+              <li>Production: <strong>GossipingPropertyFileSnitch</strong></li>
+              <li>DC and rack are case-sensitive ("DC1" ≠ "dc1")</li>
+              <li>Dynamic snitching adds real-time latency scoring</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Write &amp; Read Path</span>
+        <h2>How data flows through the LSM-tree</h2>
+        <h3 style="font-size:1rem;margin-bottom:.5rem">Write Path (per replica node)</h3>
+        <div class="path-row">
+          <div class="path-num">1</div>
+          <div class="path-body"><h4>Commit Log (sequential, disk)</h4><p>Written first for durability. 32 MiB segments, synced every 10 seconds. Segment is released only after all mutations flush to SSTables.</p></div>
+        </div>
+        <div class="path-row">
+          <div class="path-num">2</div>
+          <div class="path-body"><h4>Memtable (in-memory)</h4><p>Mutations accumulate here — fast, sorted by clustering key. A single memtable per table per node.</p></div>
+        </div>
+        <div class="path-row">
+          <div class="path-num">3</div>
+          <div class="path-body"><h4>Flush → SSTable (immutable, disk)</h4><p>Triggered by: memtable size threshold, commit log full, or <code>nodetool flush</code>. Writes an immutable SSTable file. Updates and deletes create new entries — data is never modified in-place.</p></div>
+        </div>
+        <div class="path-row">
+          <div class="path-num">4</div>
+          <div class="path-body"><h4>Compaction (background)</h4><p>Merges multiple SSTables, evicts expired tombstones, resolves Last-Write-Wins conflicts. Three strategies: STCS (write-optimized), LCS (read-optimized), TWCS (time-series).</p></div>
+        </div>
+        <h3 style="font-size:1rem;margin:.85rem 0 .5rem">Read Path (on each replica)</h3>
+        <div class="insight-box">
+          <strong>Read path order:</strong> Memtable → Row cache (if enabled) → Bloom filter → Partition key cache → Partition index (disk) → Compression offset map → Data.db. The bloom filter skips SSTables that definitely don't contain a partition key — no false negatives, configurable false positive rate (default 1% for STCS).
+        </div>
+        <p>Because SSTables are immutable, the same partition's data may span many files. Reads must merge all matching SSTable entries using <strong>Last Write Wins per column</strong> (highest client timestamp wins). Compaction reduces this merge work over time.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Consistency Model</span>
+        <h2>Tunable consistency &amp; CAP position</h2>
+        <p>Cassandra is an <strong>AP system</strong> (Availability + Partition tolerance). During a network partition, both sides continue accepting reads and writes; divergent replicas converge via hinted handoff, read repair, and anti-entropy repair after healing. Conflict resolution is Last Write Wins per column — NTP synchronization across clients is critical.</p>
+        <p>For <strong>strong consistency</strong>: <code>W + R &gt; RF</code> (write replicas + read replicas must exceed replication factor).</p>
+        <table class="cl-table">
+          <thead><tr><th>Consistency Level</th><th>Required ACKs</th><th>Use Case</th></tr></thead>
+          <tbody>
+            <tr><td><code>LOCAL_QUORUM</code></td><td>Quorum in local DC</td><td>Production standard for multi-DC — strong local consistency without cross-DC latency</td></tr>
+            <tr><td><code>QUORUM</code></td><td>floor(RF/2)+1 globally</td><td>RF=3 → 2 ACKs; globally strong consistency</td></tr>
+            <tr><td><code>LOCAL_ONE</code></td><td>1 in local DC</td><td>Low-latency reads; eventual consistency</td></tr>
+            <tr><td><code>ONE</code></td><td>1 replica</td><td>Maximum throughput; reliant on repair for convergence</td></tr>
+            <tr><td><code>ALL</code></td><td>Every replica</td><td>Fails if any replica is down — avoid in production</td></tr>
+            <tr><td><code>ANY</code></td><td>0 (hint counts)</td><td>Highest availability; write may not be immediately readable</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box">
+          <strong>Hinted handoff limit:</strong> When a replica is down during a write, the coordinator stores a compressed hint for up to <strong>3 hours</strong>. If the node is down longer, you must run <code>nodetool repair</code> — otherwise that replica permanently diverges. Schedule weekly full repairs (within the <code>gc_grace_seconds</code> window, default 10 days).
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">When to Use</span>
+        <h2>Best fit vs anti-patterns</h2>
+        <div class="cass-grid">
+          <div class="cass-tile">
+            <h4>Best Use Cases</h4>
+            <ul>
+              <li><strong>Time-series / IoT</strong> — TWCS compaction + TTL; append-only; millions of writes/sec</li>
+              <li><strong>Messaging / chat history</strong> — Discord: 1 trillion messages on 177-node cluster</li>
+              <li><strong>User profiles &amp; sessions</strong> — Key-value by user_id; TTL auto-expires sessions</li>
+              <li><strong>Activity feeds / timelines</strong> — Sorted within partition by time; single-partition reads</li>
+              <li><strong>Product catalogs</strong> — Fast single-partition lookups by product_id</li>
+              <li><strong>Leaderboards</strong> — Clustered by score DESC; fast top-N within partition</li>
+              <li><strong>Multi-region applications</strong> — NetworkTopologyStrategy natively spans DCs</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Anti-Patterns (Avoid When…)</h4>
+            <ul>
+              <li><strong>Complex JOINs needed</strong> — No native JOIN; requires application-side joins</li>
+              <li><strong>Ad-hoc / analytics queries</strong> — Schema must match queries; ALLOW FILTERING = full scan</li>
+              <li><strong>Strong ACID transactions</strong> — LWT (Paxos) is ~4–10x slower; no multi-row ACID</li>
+              <li><strong>Small datasets</strong> — JVM + compaction overhead not justified for GBs of data</li>
+              <li><strong>Queue workloads</strong> — Insert-delete pattern accumulates tombstones unboundedly</li>
+              <li><strong>Reporting with GROUP BY/aggregations</strong> — Use Spark; coordinator-side aggs are memory-intensive</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pros &amp; Cons</span>
+        <h2>Trade-off summary</h2>
+        <div class="pro-con-grid">
+          <div class="pro-tile">
+            <h4>Advantages</h4>
+            <ul>
+              <li><strong>Linear scalability</strong> — Adding nodes linearly increases throughput + storage; Apple: 75,000+ nodes</li>
+              <li><strong>No SPOF</strong> — Masterless; any node can die; automatic failover</li>
+              <li><strong>Multi-DC native</strong> — NetworkTopologyStrategy with per-DC replication factor</li>
+              <li><strong>Extreme write throughput</strong> — Append-only LSM; millions of writes/sec before any disk seek</li>
+              <li><strong>Tunable consistency</strong> — Per-operation CL from eventual to strong</li>
+              <li><strong>Efficient time-series</strong> — TWCS drops entire expired SSTables wholesale</li>
+              <li><strong>Zero-downtime scaling</strong> — Bootstrap new nodes online without maintenance windows</li>
+            </ul>
+          </div>
+          <div class="con-tile">
+            <h4>Limitations</h4>
+            <ul>
+              <li><strong>No JOINs</strong> — Every query must touch one table; requires denormalization</li>
+              <li><strong>No multi-row ACID</strong> — Only single-partition atomic batches</li>
+              <li><strong>Denormalization tax</strong> — Same data duplicated across multiple tables</li>
+              <li><strong>Tombstone accumulation</strong> — Deletes create markers; warn at 1,000/query, fail at 100,000</li>
+              <li><strong>JVM GC pressure</strong> — Heap recommended 8–16 GB; Discord migrated to ScyllaDB citing GC pauses</li>
+              <li><strong>Partition size limits</strong> — Recommended &lt;100 MB / &lt;100k rows per partition</li>
+              <li><strong>Operational complexity</strong> — Repair scheduling, compaction tuning, JVM config require deep expertise</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Data Modeling</span>
+        <h2>Query-driven design — the Cassandra way</h2>
+        <p>Cassandra inverts relational modeling: <strong>define queries first, then model tables to serve those exact queries</strong>. One table per query pattern. Every query must be satisfiable from a single partition (or at worst a small bounded number of partitions).</p>
+        <h3 style="font-size:.95rem;margin:.75rem 0 .4rem">Partition Key Rules</h3>
+        <div class="insight-box">
+          <strong>Key rules:</strong> (1) High cardinality — UUIDs distribute data uniformly. (2) Even write distribution — avoid sequential/monotonic keys (timestamps, auto-increment) which create write hotspots at ring boundaries. (3) Avoid low-cardinality keys (<code>status</code> = 3 huge partitions; <code>is_active</code> = 2 nodes bear all traffic). (4) Keep partitions under <strong>100 MB / 100k rows</strong>.
+        </div>
+        <span class="code-label">CQL — Schema Design Examples</span>
+        <pre><code>-- Messages: query "get conversation history" efficiently
+-- sent_at DESC = newest first; bounded by conversation_id partition
+CREATE TABLE messages_by_conversation (
+    conversation_id uuid,
+    sent_at         timeuuid,
+    sender_id       uuid,
+    body            text,
+    PRIMARY KEY (conversation_id, sent_at)
+) WITH CLUSTERING ORDER BY (sent_at DESC)
+  AND gc_grace_seconds = 864000;
+
+-- Time-series: composite partition key prevents unbounded partition growth
+-- (sensor_id, week) bounds each partition to ~7 days of data
+CREATE TABLE sensor_readings (
+    sensor_id  uuid,
+    week       text,       -- '2024-W01'
+    event_time timeuuid,
+    value      double,
+    tags       map&lt;text, text&gt;,
+    PRIMARY KEY ((sensor_id, week), event_time)
+) WITH CLUSTERING ORDER BY (event_time DESC)
+  AND compaction = {
+    'class': 'TimeWindowCompactionStrategy',
+    'compaction_window_unit': 'DAYS',
+    'compaction_window_size': 7
+  }
+  AND default_time_to_live = 7776000;  -- 90 days TTL
+
+-- Denormalization: same reservation stored in 3 tables for 3 different queries
+CREATE TABLE reservations_by_confirmation (
+    confirmation_no text PRIMARY KEY,
+    guest_id uuid, hotel_id text, check_in date
+);
+CREATE TABLE reservations_by_hotel_date (
+    hotel_id text, date date, reservation_id uuid,
+    guest_id uuid, confirmation_no text,
+    PRIMARY KEY ((hotel_id), date, reservation_id)
+);
+CREATE TABLE reservations_by_guest (
+    guest_id uuid, check_in_date date, reservation_id uuid,
+    hotel_id text, confirmation_no text,
+    PRIMARY KEY ((guest_id), check_in_date, reservation_id)
+);</code></pre>
+        <h3 style="font-size:.95rem;margin:.75rem 0 .4rem">LWT — Lightweight Transactions (Paxos)</h3>
+        <pre><code>-- Prevent duplicate registration (IF NOT EXISTS)
+INSERT INTO users (user_id, email, name)
+VALUES (uuid(), 'alice@example.com', 'Alice')
+IF NOT EXISTS;
+-- Returns [applied]=true on success, false (+ current row) if email already taken
+
+-- Compare-and-swap — update only if condition holds
+UPDATE inventory
+SET quantity = quantity - 1
+WHERE product_id = ?
+IF quantity &gt; 0;
+-- ~4–10x slower than regular writes — never use on hot paths</code></pre>
+        <div class="warn-box">
+          <strong>ALLOW FILTERING anti-pattern:</strong> <code>SELECT * FROM users WHERE country = 'US' ALLOW FILTERING</code> reads the entire table and filters in memory. Cassandra rejects such queries by default — ALLOW FILTERING overrides the safety check. Only acceptable on small, static tables in development tooling. Never on tables that grow over time.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Compaction Strategies</span>
+        <h2>Choosing the right compaction strategy</h2>
+        <div class="cass-grid">
+          <div class="cass-tile">
+            <h4>STCS — Size-Tiered (default)</h4>
+            <ul>
+              <li>Groups SSTables of similar size into tiers; merges tiers together</li>
+              <li>Optimized for <strong>write-heavy</strong> workloads</li>
+              <li>Can temporarily <strong>double disk space</strong> during major compaction</li>
+              <li>More SSTables → slower reads over time without compaction</li>
+              <li>Good for: append-only write streams, ingest pipelines</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>LCS — Leveled</h4>
+            <ul>
+              <li>Organizes SSTables into levels (L0=overlapping, L1+ non-overlapping)</li>
+              <li>Optimized for <strong>read-heavy</strong> workloads; predictable read latency</li>
+              <li>Higher write amplification (~10× vs STCS)</li>
+              <li>Low false-positive bloom filter rate (0.1% default — less overlap)</li>
+              <li>Good for: user profile reads, session store lookups</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>TWCS — Time-Window</h4>
+            <ul>
+              <li>Groups SSTables by configurable time window; compacts within windows</li>
+              <li>Designed for <strong>time-series with TTL</strong></li>
+              <li>Drops entire expired windows wholesale — no row-level GC</li>
+              <li>Configure <code>compaction_window_size</code> to match your TTL granularity</li>
+              <li>Good for: IoT, metrics, logs, events with predictable expiry</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>STCS Bloom Filter FP Rates</h4>
+            <ul>
+              <li>STCS/TWCS default: <strong>1% false positive</strong> (<code>bloom_filter_fp_chance=0.01</code>)</li>
+              <li>LCS default: <strong>10%</strong> (less overlap makes it acceptable)</li>
+              <li>Bloom filter lives in off-heap memory: ~1–2 GB per billion partitions</li>
+              <li>Lower FP = larger filter = more memory</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Integration Patterns</span>
+        <h2>Cassandra with Kafka, Spark, and Node.js</h2>
+        <div class="cass-grid">
+          <div class="cass-tile">
+            <h4>Kafka → Cassandra (CDC pipeline)</h4>
+            <ul>
+              <li>Kafka Connect Cassandra Sink connector (DataStax)</li>
+              <li>Consumer group reads Kafka topic → upserts into Cassandra</li>
+              <li>Use idempotent writes (upsert semantics by default)</li>
+              <li>Ideal for: event sourcing, CDC from RDBMS, IoT ingestion</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Spark + Cassandra (Analytics)</h4>
+            <ul>
+              <li>spark-cassandra-connector — reads Cassandra as Spark RDD/DataFrame</li>
+              <li>Token-range aware: each Spark partition maps to a Cassandra token range</li>
+              <li>Data locality: Spark executors on same nodes as Cassandra data</li>
+              <li>Use for: batch analytics, ML feature extraction, ad-hoc reporting</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Node.js integration with cassandra-driver</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>import cassandra from 'cassandra-driver';
+
+// Connection setup — contact points are seed nodes; driver discovers the rest
+const client = new cassandra.Client({
+  contactPoints: ['cassandra-node-1:9042', 'cassandra-node-2:9042'],
+  localDataCenter: 'DC1',
+  credentials: { username: 'app_user', password: 'secret' },
+  keyspace: 'iot_app',
+  queryOptions: {
+    consistency: cassandra.types.consistencies.localQuorum,  // LOCAL_QUORUM default
+    prepare: true,                                            // use prepared statements
+  },
+  pooling: {
+    coreConnectionsPerHost: { [cassandra.types.distance.local]: 2 },
+  },
+});
+
+await client.connect();
+console.log('Connected to Cassandra cluster:', client.metadata.clusterName);
+
+// Create keyspace and table if not exists
+await client.execute(`
+  CREATE KEYSPACE IF NOT EXISTS iot_app
+  WITH replication = {'class': 'NetworkTopologyStrategy', 'DC1': 3}
+  AND durable_writes = true
+`);
+
+await client.execute(`
+  CREATE TABLE IF NOT EXISTS iot_app.sensor_readings (
+    sensor_id  uuid,
+    week       text,
+    event_time timeuuid,
+    value      double,
+    tags       map&lt;text, text&gt;,
+    PRIMARY KEY ((sensor_id, week), event_time)
+  ) WITH CLUSTERING ORDER BY (event_time DESC)
+    AND compaction = {
+      'class': 'org.apache.cassandra.db.compaction.TimeWindowCompactionStrategy',
+      'compaction_window_unit': 'DAYS',
+      'compaction_window_size': '7'
+    }
+    AND default_time_to_live = 7776000
+`);
+
+// Prepared statement — compiled once, reused across requests
+// Parameterized queries prevent CQL injection
+const insertStmt = await client.prepare(
+  `INSERT INTO sensor_readings (sensor_id, week, event_time, value, tags)
+   VALUES (?, ?, now(), ?, ?)`
+);
+
+// Batch insert for a burst of readings from the same sensor
+async function insertReadings(sensorId, readings) {
+  const week = getCurrentWeek();    // e.g., '2026-W28'
+  const queries = readings.map(r =&gt; ({
+    query: insertStmt,
+    params: [sensorId, week, r.value, r.tags],
+  }));
+
+  // UNLOGGED BATCH: performance optimization only when all go to ONE partition
+  // All rows share (sensor_id, week) → same partition → safe to batch
+  await client.batch(queries, { logged: false });
+}
+
+// Paginated range query within a partition — efficient single-node read
+async function getReadings(sensorId, week, options = {}) {
+  const { limit = 100, pageState = null } = options;
+
+  const result = await client.execute(
+    `SELECT event_time, value, tags
+     FROM sensor_readings
+     WHERE sensor_id = ? AND week = ?
+     LIMIT ?`,
+    [sensorId, week, limit],
+    {
+      prepare: true,
+      fetchSize: limit,      // Cassandra-native pagination
+      pageState,             // pass previous result.pageState to get next page
+    }
+  );
+
+  return {
+    rows: result.rows,
+    nextPageState: result.pageState,  // null when last page
+    hasMore: result.pageState !== null,
+  };
+}
+
+// Lightweight Transaction — prevent duplicate device registration
+async function registerDevice(deviceId, ownerId, name) {
+  const result = await client.execute(
+    `INSERT INTO devices (device_id, owner_id, name, registered_at)
+     VALUES (?, ?, ?, toTimestamp(now()))
+     IF NOT EXISTS`,
+    [deviceId, ownerId, name],
+    { prepare: true, consistency: cassandra.types.consistencies.localSerial }
+  );
+
+  const applied = result.rows[0]['[applied]'];
+  if (!applied) {
+    throw new Error(`Device ${deviceId} already registered`);
+  }
+  return applied;
+}
+
+// Counter table — atomic increment without LWT overhead
+async function recordEvent(sensorId, eventType) {
+  await client.execute(
+    `UPDATE sensor_event_counts SET count = count + 1
+     WHERE sensor_id = ? AND event_type = ?`,
+    [sensorId, eventType],
+    { prepare: true }
+  );
+}
+
+function getCurrentWeek() {
+  const now = new Date();
+  const jan1 = new Date(now.getFullYear(), 0, 1);
+  const weekNum = String(Math.ceil(((now - jan1) / 86400000 + jan1.getDay() + 1) / 7)).padStart(2, '0');
+  return `${now.getFullYear()}-W${weekNum}`;
+}
+
+// Always shut down gracefully — flushes connection pool
+process.on('SIGTERM', async () =&gt; {
+  await client.shutdown();
+});</code></pre>
+        <div class="insight-box">
+          <strong>Driver best practices:</strong> (1) Always use prepared statements — compiled once per node, avoids repeated parsing. (2) Use <code>localDataCenter</code> — the driver routes requests to the local DC by default, avoiding cross-DC latency. (3) Set <code>fetchSize</code> for pagination — never fetch unbounded result sets. (4) Unlogged batches are only a performance optimization when ALL rows share the same partition key. (5) Shut down the client gracefully before process exit — it flushes the connection pool.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Real-World Deployments</span>
+        <h2>How major companies use Cassandra</h2>
+        <div class="cass-grid">
+          <div class="cass-tile">
+            <h4>Netflix</h4>
+            <ul>
+              <li>Petabyte-scale clusters for viewing history, metadata, user state</li>
+              <li>Pioneered Cassandra chaos testing — kill nodes intentionally to validate failover</li>
+              <li>Open-sourced Priam (Cassandra cluster manager) and Astyanax (Java client)</li>
+              <li>Multi-region active-active with NetworkTopologyStrategy</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Discord</h4>
+            <ul>
+              <li>Stored 1 trillion messages; 177-node Cassandra cluster</li>
+              <li>Migrated to ScyllaDB (C++ Cassandra-compatible) in 2023 due to JVM GC pause latency</li>
+              <li>Used Cassandra's wide-column model for channel message history by (channel_id, bucket)</li>
+              <li>Migrated 177 nodes → 72 ScyllaDB nodes with same throughput</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Apple</h4>
+            <ul>
+              <li>Largest known Cassandra deployment: <strong>75,000+ nodes</strong> across hundreds of clusters</li>
+              <li>iCloud metadata, Siri data, app store backend</li>
+              <li>Heavily invested in upstream Apache Cassandra development</li>
+              <li>Custom tooling for cluster management at this scale</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Uber / Instagram / Twitter</h4>
+            <ul>
+              <li><strong>Uber:</strong> Schemaless (MySQL + Cassandra hybrid) for trip data; geo-partitioned</li>
+              <li><strong>Instagram:</strong> User data, direct messages — high write throughput needed</li>
+              <li><strong>Twitter:</strong> Manhattan (internal Cassandra-like system) for tweets and timelines</li>
+              <li>All chose Cassandra for write scalability + multi-DC native replication</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Comparison</span>
+        <h2>Cassandra vs alternatives</h2>
+        <table class="cl-table">
+          <thead>
+            <tr><th>Database</th><th>Model</th><th>Consistency</th><th>Best For</th><th>Avoid When</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Cassandra</strong></td>
+              <td>Wide-column</td>
+              <td>Tunable (AP)</td>
+              <td>Extreme write throughput, multi-DC, time-series, IoT</td>
+              <td>JOINs, ad-hoc queries, ACID transactions</td>
+            </tr>
+            <tr>
+              <td><strong>DynamoDB</strong></td>
+              <td>Key-value / document</td>
+              <td>Eventual / strong (CP option)</td>
+              <td>Serverless, AWS-native, variable traffic (on-demand billing)</td>
+              <td>Multi-cloud, large complex items, low-cost dev</td>
+            </tr>
+            <tr>
+              <td><strong>MongoDB</strong></td>
+              <td>Document (BSON)</td>
+              <td>Eventual → strong (CP)</td>
+              <td>Rich documents, flexible schema, complex queries with indexes</td>
+              <td>Extremely high write throughput, multi-DC active-active</td>
+            </tr>
+            <tr>
+              <td><strong>Redis</strong></td>
+              <td>In-memory key-value</td>
+              <td>Eventual (cluster mode)</td>
+              <td>Sub-millisecond reads/writes, caching, pub/sub, leaderboards</td>
+              <td>Datasets larger than RAM, durability as primary store</td>
+            </tr>
+            <tr>
+              <td><strong>HBase</strong></td>
+              <td>Wide-column (HDFS)</td>
+              <td>Strong (CP, single master)</td>
+              <td>Hadoop ecosystem, HDFS co-location, batch + random access</td>
+              <td>Low-latency reads/writes, teams without Hadoop ops expertise</td>
+            </tr>
+            <tr>
+              <td><strong>ScyllaDB</strong></td>
+              <td>Wide-column (C++)</td>
+              <td>Tunable (AP)</td>
+              <td>Cassandra workloads with lower tail latency; no JVM GC</td>
+              <td>Teams needing Apache Cassandra ecosystem parity (some gaps)</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Operations</span>
+        <h2>Essential operational guidance</h2>
+        <div class="cass-grid">
+          <div class="cass-tile">
+            <h4>nodetool commands</h4>
+            <ul>
+              <li><code>nodetool status</code> — ring topology, node states, token ownership</li>
+              <li><code>nodetool repair</code> — anti-entropy repair; run weekly within gc_grace_seconds</li>
+              <li><code>nodetool flush</code> — force memtable flush to SSTables</li>
+              <li><code>nodetool compactstatus</code> — check compaction progress</li>
+              <li><code>nodetool tpstats</code> — thread pool stats (dropped messages indicate overload)</li>
+              <li><code>nodetool cfstats</code> — per-table read/write latencies, SSTable count</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>JVM &amp; Heap Sizing</h4>
+            <ul>
+              <li>Recommended heap: <strong>8–16 GB</strong> (never exceed 32 GB — pointer compression lost)</li>
+              <li>GC: G1GC default for heap ≤ 16 GB; consider ZGC for larger heaps</li>
+              <li>Off-heap: bloom filters, key cache, row cache, compression offsets</li>
+              <li>Total RAM: heap + off-heap + OS page cache (leave 20% for OS)</li>
+              <li>Discord: cited GC pauses as primary reason to migrate to ScyllaDB</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Repair Strategy</h4>
+            <ul>
+              <li>Run full repair at least once per <code>gc_grace_seconds</code> (default 10 days)</li>
+              <li>Without repair: tombstones can resurface on rejoining nodes</li>
+              <li>Use incremental repair (4.0+) to reduce repair overhead</li>
+              <li>Cassandra 4.1+: auto repair scheduler via <code>nodetool autorepair</code></li>
+              <li>Reaper (open-source) for automated repair scheduling in production</li>
+            </ul>
+          </div>
+          <div class="cass-tile">
+            <h4>Monitoring Signals</h4>
+            <ul>
+              <li><strong>Dropped messages</strong> — request queue overflow (scale or tune thread pools)</li>
+              <li><strong>Tombstone warnings</strong> — log entries at 1,000+ tombstones/query</li>
+              <li><strong>SSTable count per table</strong> — high count → compaction lagging</li>
+              <li><strong>P99 read/write latency</strong> — track via JMX or Prometheus exporter</li>
+              <li><strong>Pending compactions</strong> — should stay near 0; growing = I/O bottleneck</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Cassandra is the right choice when you need extreme write throughput, multi-datacenter active-active replication, linear horizontal scalability, and high availability — particularly for time-series, IoT, messaging, and user-profile workloads. Its masterless ring topology eliminates SPOFs; its LSM-tree write path absorbs millions of writes per second before any disk seek. The trade-off is a strict data modeling discipline: schema-first, query-driven, with denormalization as a first-class design pattern rather than an anti-pattern. Get the partition key wrong, and you'll have hot spots, oversized partitions, and tombstone accumulation. Get it right, and you have one of the most scalable and available databases on the planet — as Apple (75,000+ nodes), Netflix (petabyte scale), and Discord (1 trillion messages) have demonstrated in production.</p>
+      </section>
+    </main>
+  </body>
+</html>

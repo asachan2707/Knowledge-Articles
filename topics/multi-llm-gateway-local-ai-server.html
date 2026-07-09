@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Multi-LLM Gateway & Private AI Server | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .two-col{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      @media(max-width:640px){.two-col{grid-template-columns:1fr}}
+      .box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:1rem}
+      .box h4{margin:0 0 .4rem;color:#0f766e;font-size:.95rem}
+      .box ul{margin:0;padding-left:1.1rem;font-size:.88rem;color:#475569}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .provider-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:1rem 0}
+      .provider-table th{background:#f1f5f9;padding:.45rem .75rem;text-align:left;border-bottom:2px solid #e2e8f0;font-family:Arial,sans-serif;font-size:.75rem;text-transform:uppercase;color:#64748b}
+      .provider-table td{padding:.45rem .75rem;border-bottom:1px solid #f1f5f9;vertical-align:top}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Server rack and AI infrastructure" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Local LLM · Tools · Architecture · 17 min</span>
+          </div>
+        </figure>
+        <h1>Build a Multi-LLM Gateway + Turn Your Laptop Into a Private AI Server</h1>
+        <p class="summary">Two merged topics: how to build a provider-agnostic LLM gateway in JavaScript so switching from Anthropic to OpenAI to a local model is a one-line change — and how to set up a private Ollama AI server on any laptop in 30 minutes with no GPU required.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Sources</span><span class="meta-value">Dataquest · Towards AI · YouTube · Merged</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">AI, Local LLM, Architecture, Tools, JavaScript</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Multi-provider gateway, Ollama client</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Building your application around a single LLM provider is the fastest way to become hostage to their pricing, availability, and API changes. A gateway layer decouples your application from any specific provider — your code calls one function, the gateway handles the provider-specific headers, authentication, and response format differences.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Abstract provider differences behind a single <code>generate(provider, model, messages)</code> interface. Adding a new provider becomes a one-function addition. Switching the whole app to a different model takes one config change.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The provider lock-in trap</span>
+        <p>A startup built their AI product entirely on GPT-4. When OpenAI changed their rate limits and pricing in Q1 2026, the team needed two weeks to migrate to Claude — every API call had different headers, message formats, and system prompt handling. A gateway layer would have made it a 4-hour change. They paid the price of skipping abstraction.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1: Multi-LLM Gateway</span>
+        <h2>Gateway architecture</h2>
+        <div class="two-col">
+          <div class="box">
+            <h4>Your application</h4>
+            <ul>
+              <li>Always calls <code>generate(provider, model, messages)</code></li>
+              <li>Receives <code>{ provider, model, text }</code> back</li>
+              <li>Never touches provider-specific code</li>
+              <li>Switch provider = change one string</li>
+            </ul>
+          </div>
+          <div class="box">
+            <h4>Gateway layer</h4>
+            <ul>
+              <li>Provider-specific auth headers</li>
+              <li>Message format normalisation</li>
+              <li>System message handling (Anthropic separates this)</li>
+              <li>Error normalisation across providers</li>
+              <li>Retry logic and fallback chains</li>
+            </ul>
+          </div>
+        </div>
+
+        <p><strong>Critical Anthropic difference:</strong> Unlike most providers, Anthropic requires system messages in a separate top-level field, not inline in the messages array. Your gateway must extract and re-route them.</p>
+
+        <table class="provider-table">
+          <thead><tr><th>Provider</th><th>Auth header</th><th>System message</th><th>Version header</th></tr></thead>
+          <tbody>
+            <tr><td>Anthropic (Claude)</td><td><code>x-api-key</code></td><td>Separate <code>system</code> field</td><td><code>anthropic-version</code> required</td></tr>
+            <tr><td>OpenAI / Together</td><td><code>Authorization: Bearer</code></td><td>Inline in messages array</td><td>Not required</td></tr>
+            <tr><td>Ollama (local)</td><td>None</td><td>Inline in messages array</td><td>Not required</td></tr>
+          </tbody>
+        </table>
+
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Multi-provider LLM gateway in Node.js
+const PROVIDERS = {
+  anthropic: {
+    url: "https://api.anthropic.com/v1/messages",
+    headers: (key) => ({
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    }),
+  },
+  openai: {
+    url: "https://api.openai.com/v1/chat/completions",
+    headers: (key) => ({
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    }),
+  },
+  together: {
+    url: "https://api.together.xyz/v1/chat/completions",
+    headers: (key) => ({
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    }),
+  },
+  ollama: {
+    url: "http://localhost:11434/api/chat",
+    headers: () => ({ "Content-Type": "application/json" }),
+  },
+};
+
+class LLMGateway {
+  constructor(apiKeys = {}) {
+    this.apiKeys = apiKeys;
+  }
+
+  async generate(provider, model, messages, options = {}) {
+    provider = provider.toLowerCase().trim();
+    const config = PROVIDERS[provider];
+    if (!config) throw new Error(`Unknown provider: ${provider}`);
+
+    const apiKey = this.apiKeys[provider] || process.env[`${provider.toUpperCase()}_API_KEY`];
+    const headers = config.headers(apiKey);
+
+    // Build provider-specific payload
+    let payload;
+    if (provider === "anthropic") {
+      // Anthropic: extract system messages to top-level field
+      const systemMessages = messages.filter((m) => m.role === "system");
+      const chatMessages = messages.filter((m) => m.role !== "system");
+      payload = {
+        model,
+        max_tokens: options.maxTokens ?? 1024,
+        messages: chatMessages,
+        ...(systemMessages.length && { system: systemMessages.map((m) => m.content).join("\n") }),
+      };
+    } else {
+      // OpenAI-compatible (OpenAI, Together, Ollama)
+      payload = { model, messages, max_tokens: options.maxTokens ?? 1024 };
+    }
+
+    const res = await fetch(config.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`${provider} API error ${res.status}: ${err}`);
+    }
+
+    const data = await res.json();
+
+    // Normalise response format
+    const text =
+      provider === "anthropic"
+        ? data.content?.find((b) => b.type === "text")?.text
+        : data.choices?.[0]?.message?.content ?? data.message?.content;
+
+    return { provider, model, text };
+  }
+
+  // Fallback chain: try providers in order until one succeeds
+  async generateWithFallback(chain, messages, options = {}) {
+    for (const { provider, model } of chain) {
+      try {
+        return await this.generate(provider, model, messages, options);
+      } catch (err) {
+        console.warn(`[gateway] ${provider}/${model} failed: ${err.message} — trying next`);
+      }
+    }
+    throw new Error("All providers in fallback chain failed");
+  }
+}
+
+// Usage
+const gateway = new LLMGateway();
+
+// Simple call
+const result = await gateway.generate("anthropic", "claude-opus-4-8", [
+  { role: "user", content: "Explain CAP theorem in one paragraph." },
+]);
+
+// With automatic fallback
+const fallbackResult = await gateway.generateWithFallback(
+  [
+    { provider: "anthropic", model: "claude-opus-4-8" },
+    { provider: "openai", model: "gpt-4o" },
+    { provider: "ollama", model: "llama3.2" }, // free local fallback
+  ],
+  [{ role: "user", content: "Summarise this document." }]
+);
+
+console.log(result.text);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 2: Private AI Server on Your Laptop</span>
+        <h2>Ollama setup in 30 minutes — no GPU required</h2>
+        <p>Ollama runs quantised open-source models locally using CPU + Metal/CUDA if available. On an M-series Mac or a modern Intel/AMD laptop you can run capable models for free with no data leaving your machine.</p>
+
+        <div class="two-col">
+          <div class="box">
+            <h4>Good models for CPU-only</h4>
+            <ul>
+              <li><strong>llama3.2:3b</strong> — fast, low RAM (4 GB)</li>
+              <li><strong>mistral:7b</strong> — strong reasoning, needs 8 GB</li>
+              <li><strong>qwen2.5-coder:7b</strong> — best local coding model</li>
+              <li><strong>phi3:mini</strong> — Microsoft, tiny but capable</li>
+            </ul>
+          </div>
+          <div class="box">
+            <h4>Setup steps</h4>
+            <ul>
+              <li>Install: <code>brew install ollama</code></li>
+              <li>Start server: <code>ollama serve</code></li>
+              <li>Pull model: <code>ollama pull llama3.2</code></li>
+              <li>Test: <code>ollama run llama3.2</code></li>
+              <li>API available at <code>http://localhost:11434</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Connect to local Ollama — OpenAI-compatible API
+import OpenAI from "openai"; // works with local Ollama too
+
+const ollama = new OpenAI({
+  baseURL: "http://localhost:11434/v1",
+  apiKey: "ollama", // required by the client but ignored locally
+});
+
+async function askLocal(question, model = "llama3.2") {
+  const response = await ollama.chat.completions.create({
+    model,
+    messages: [{ role: "user", content: question }],
+    stream: true,
+  });
+
+  let fullText = "";
+  process.stdout.write(`\n[${model}] `);
+  for await (const chunk of response) {
+    const delta = chunk.choices[0]?.delta?.content ?? "";
+    process.stdout.write(delta);
+    fullText += delta;
+  }
+  console.log();
+  return fullText;
+}
+
+// Use the gateway to switch seamlessly between local and cloud
+const gateway = new LLMGateway();
+
+const answer = await gateway.generate(
+  process.env.USE_LOCAL === "true" ? "ollama" : "anthropic",
+  process.env.USE_LOCAL === "true" ? "llama3.2" : "claude-opus-4-8",
+  [{ role: "user", content: "What is vector similarity search?" }]
+);
+
+console.log(answer.text);</code></pre>
+        <div class="warn-box">
+          <strong>RAM reality check:</strong> A 7B model needs ~8 GB of free RAM to run at reasonable speed. A 13B model needs ~16 GB. Running on a machine with less causes heavy swap I/O and makes the model painfully slow — use a 3B model if RAM is limited.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">When to use local vs cloud</span>
+        <h2>Decision guide</h2>
+        <div class="two-col">
+          <div class="box">
+            <h4>Use local (Ollama)</h4>
+            <ul>
+              <li>Sensitive data that must not leave your machine</li>
+              <li>High-volume tasks where API costs add up</li>
+              <li>Offline development environments</li>
+              <li>Iterating rapidly on prompts without cost anxiety</li>
+            </ul>
+          </div>
+          <div class="box">
+            <h4>Use cloud (Anthropic/OpenAI)</h4>
+            <ul>
+              <li>Complex reasoning requiring the best models</li>
+              <li>Long context windows (&gt;32K tokens)</li>
+              <li>Production applications with SLA requirements</li>
+              <li>Tasks where model quality directly affects revenue</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>The gateway pattern and local model infrastructure are two sides of the same coin: provider flexibility. The gateway lets you switch cloud providers in one line; Ollama lets you run the whole stack locally for free. Together, they mean you can develop, test, and prototype without cloud API costs, then deploy to the best available model for production — all without changing a line of your application code.</p>
+      </section>
+    </main>
+  </body>
+</html>

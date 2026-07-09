@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cloud-Native Architecture & Service Mesh | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .mesh-compare{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      @media(max-width:600px){.mesh-compare{grid-template-columns:1fr}}
+      .mesh-tile{border:1px solid #e2e8f0;border-radius:10px;padding:.9rem}
+      .mesh-tile h4{margin:0 0 .4rem;font-size:.93rem;font-weight:700;color:#0f766e}
+      .mesh-tile ul{margin:0;padding-left:1.1rem;font-size:.85rem;color:#475569}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .arch-badge{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;background:#f1f5f9;color:#334155;border-radius:4px;padding:.12rem .5rem;margin:.1rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Cloud native mesh" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · DevOps · Cloud · 13 min</span>
+          </div>
+        </figure>
+        <h1>Cloud-Native Architecture &amp; Service Mesh Design</h1>
+        <p class="summary">An in-depth look at cloud-native architecture principles (microservices, containers, dynamic orchestration, DevOps culture) and service mesh design — covering service mesh vs event mesh, the control plane vs data plane split, sidecar proxies (Istio/Linkerd), mTLS, observability, and traffic management patterns.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Shivakumar R. Goniwada · LinkedIn · 2024</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Architecture, DevOps, Cloud, Service Mesh</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Service mesh control plane config, traffic shifting</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Cloud-native architecture is not about running containers. It's about building systems that are designed to fail, designed to scale horizontally, and designed to evolve without downtime. The service mesh is the infrastructure layer that makes distributed microservices operationally tractable at scale — handling traffic routing, mTLS, observability, and fault tolerance transparently, without any application code changes.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> The service mesh moves operational concerns — mutual TLS, retries, circuit breaking, distributed tracing, traffic splitting — out of application code and into the infrastructure layer. Service code only handles business logic. The mesh handles everything else between services.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Cloud-native principles</span>
+        <h2>What cloud-native actually means</h2>
+        <ul>
+          <li><strong>Microservices</strong> — applications decomposed into small, independently deployable services</li>
+          <li><strong>Containers</strong> — consistent packaging and isolation via Docker; eliminates "works on my machine"</li>
+          <li><strong>Dynamic orchestration</strong> — Kubernetes manages scheduling, scaling, self-healing, and service discovery automatically</li>
+          <li><strong>Immutable infrastructure</strong> — never modify running instances; replace with new images; builds are reproducible</li>
+          <li><strong>DevOps culture</strong> — teams own development and operations; no handoffs to ops team; "you build it, you run it"</li>
+          <li><strong>Declarative configuration</strong> — describe desired state (Kubernetes manifests, Terraform); the system converges to that state</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Service mesh vs event mesh</span>
+        <h2>Two different mesh concepts</h2>
+        <div class="mesh-compare">
+          <div class="mesh-tile">
+            <h4>Service Mesh</h4>
+            <ul>
+              <li>Manages synchronous request/response traffic between services</li>
+              <li>Implemented as sidecar proxies (Envoy) alongside each service</li>
+              <li>Handles: mTLS, retries, circuit breaking, traffic splitting, distributed tracing</li>
+              <li>Control plane (Istio istiod) configures data plane (Envoy sidecars)</li>
+              <li>Examples: Istio, Linkerd, Consul Connect</li>
+            </ul>
+          </div>
+          <div class="mesh-tile">
+            <h4>Event Mesh</h4>
+            <ul>
+              <li>Manages asynchronous event routing between producers and consumers</li>
+              <li>Implemented as a network of event brokers</li>
+              <li>Handles: event routing, filtering, transformation, fan-out across regions</li>
+              <li>Enables hybrid cloud event routing</li>
+              <li>Examples: Solace PubSub+, AWS EventBridge</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Service mesh architecture</span>
+        <h2>Control plane vs data plane</h2>
+        <p><strong>Data Plane</strong> — The sidecar proxies (Envoy in Istio, linkerd-proxy in Linkerd) that sit alongside every service instance. All network traffic enters and exits through the sidecar, not directly. The sidecar enforces mTLS, collects telemetry, applies retry policies, and implements circuit breaking — without any changes to application code.</p>
+        <p><strong>Control Plane</strong> — The central coordinator (Istio's istiod) that manages the configuration of all sidecars. You declare desired policies (traffic splitting rules, retry policies, access control) via Kubernetes CRDs (VirtualService, DestinationRule). The control plane distributes these policies to the sidecars via xDS APIs.</p>
+        <div class="mesh-compare">
+          <div class="mesh-tile">
+            <h4>Istio capabilities</h4>
+            <ul>
+              <li>mTLS between all services (zero-trust networking)</li>
+              <li>Traffic shifting (canary deploys, A/B testing)</li>
+              <li>Distributed tracing (Jaeger/Zipkin integration)</li>
+              <li>Circuit breaking via Envoy</li>
+              <li>Access control policies (RBAC per service)</li>
+              <li>Rate limiting at the proxy level</li>
+            </ul>
+          </div>
+          <div class="mesh-tile">
+            <h4>Linkerd capabilities</h4>
+            <ul>
+              <li>Lighter weight than Istio (rust-based proxy, lower overhead)</li>
+              <li>Automatic mTLS</li>
+              <li>Per-route metrics (golden signals per service)</li>
+              <li>Traffic splitting for canary deployments</li>
+              <li>No custom CRDs — uses standard Kubernetes SMI</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Traffic shifting config + health check wiring</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Service mesh traffic management — typically configured via YAML CRDs
+// This JavaScript shows the equivalent logic for understanding the concepts
+
+// VirtualService equivalent: traffic splitting for canary deployment
+// Route 90% of traffic to v1, 10% to v2 (canary rollout)
+const virtualServiceConfig = {
+  apiVersion: 'networking.istio.io/v1alpha3',
+  kind: 'VirtualService',
+  metadata: { name: 'order-service' },
+  spec: {
+    hosts: ['order-service'],
+    http: [{
+      route: [
+        { destination: { host: 'order-service', subset: 'v1' }, weight: 90 },
+        { destination: { host: 'order-service', subset: 'v2' }, weight: 10 },
+      ],
+    }],
+  },
+};
+
+// DestinationRule: defines v1 and v2 subsets, circuit breaker settings
+const destinationRule = {
+  apiVersion: 'networking.istio.io/v1alpha3',
+  kind: 'DestinationRule',
+  metadata: { name: 'order-service' },
+  spec: {
+    host: 'order-service',
+    trafficPolicy: {
+      connectionPool: { tcp: { maxConnections: 100 }, http: { h2UpgradePolicy: 'UPGRADE' } },
+      outlierDetection: {
+        consecutiveErrors: 5,        // open circuit after 5 consecutive errors
+        interval: '30s',             // check interval
+        baseEjectionTime: '30s',     // minimum ejection duration
+        maxEjectionPercent: 50,      // max 50% of instances ejected at once
+      },
+    },
+    subsets: [
+      { name: 'v1', labels: { version: 'v1' } },
+      { name: 'v2', labels: { version: 'v2' } },
+    ],
+  },
+};
+
+// Health check endpoint — required for liveness/readiness probes
+// Kubernetes and Istio use these to determine if a pod is healthy
+import { createServer } from 'http';
+
+function createHealthServer(checkFns) {
+  return createServer(async (req, res) => {
+    if (req.url === '/health/live') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ status: 'alive' }));
+    }
+
+    if (req.url === '/health/ready') {
+      const checks = await Promise.allSettled(Object.entries(checkFns).map(async ([name, fn]) => {
+        await fn();
+        return name;
+      }));
+
+      const failed = checks.filter(c => c.status === 'rejected').map(c => c.reason?.message);
+      if (failed.length > 0) {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ status: 'not ready', failures: failed }));
+      }
+
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ status: 'ready' }));
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+}
+
+// Usage: start health server on a dedicated port alongside the main service
+const healthServer = createHealthServer({
+  database: async () => db.query('SELECT 1'),
+  cache: async () => redis.ping(),
+});
+healthServer.listen(8081);</code></pre>
+        <div class="insight-box">
+          <strong>mTLS in a service mesh:</strong> The sidecar proxy handles certificate provisioning, rotation, and validation automatically. Application code doesn't need to know about TLS at all — it sends plain HTTP to the sidecar on localhost, and the sidecar encrypts and mutually authenticates with the destination's sidecar. This enables zero-trust networking (every service-to-service connection is authenticated) without any changes to application code.
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Cloud-native architecture is a set of practices — microservices, containers, orchestration, immutable infrastructure, DevOps culture — not a technology. The service mesh (Istio, Linkerd) is the infrastructure layer that makes running many microservices operationally tractable by centralising traffic management, security (mTLS), observability, and fault tolerance in the infrastructure rather than in application code. The control plane/data plane split — where the control plane distributes policies to sidecar proxies — is the architectural pattern that makes this scale to hundreds of services without proportional operational complexity.</p>
+      </section>
+    </main>
+  </body>
+</html>

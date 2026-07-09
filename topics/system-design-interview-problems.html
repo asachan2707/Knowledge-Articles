@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>System Design Interview Problems | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .problem-header{background:#0f172a;color:#e2e8f0;border-radius:10px 10px 0 0;padding:.85rem 1.25rem;font-family:'Courier New',monospace;font-size:.82rem}
+      .problem-body{background:#1e293b;color:#e2e8f0;border-radius:0 0 10px 10px;padding:1.25rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin-bottom:1.25rem}
+      .problem-body .hi{color:#38bdf8;font-weight:700}.problem-body .ok{color:#4ade80;font-weight:700}.problem-body .warn{color:#fb923c;font-weight:700}.problem-body .dim{color:#64748b}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .scale-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:1rem 0}
+      .scale-table th{background:#f1f5f9;padding:.45rem .75rem;text-align:left;border-bottom:2px solid #e2e8f0;font-family:Arial,sans-serif;font-size:.75rem;text-transform:uppercase;color:#64748b}
+      .scale-table td{padding:.45rem .75rem;border-bottom:1px solid #f1f5f9;vertical-align:top}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=1600&h=700&fit=crop&auto=format&q=80" alt="System design whiteboard" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Interview · System Design · Problems · 22 min</span>
+          </div>
+        </figure>
+        <h1>System Design Interview Problems — Notification System, File Upload, Instagram, SQL Optimization</h1>
+        <p class="summary">Four real FAANG-level system design questions with full architectural answers: sending 1M notifications without overwhelming servers, resumable large file upload, Instagram at 500M DAU, and joining 10 tables in SQL. Each includes a problem framing, architecture diagram, key trade-offs, and JavaScript implementation sketches.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Sources</span><span class="meta-value">CodeFarm · Rocky Bhatia · Curated</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Interview, System Design, Problems, Architecture</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Chunked upload, notification queue, SQL hints</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">System design interviews test whether you can reason about trade-offs under constraints — not whether you can recite architecture diagrams. The pattern that separates good answers from great ones: start with the scale numbers, derive the bottleneck, then choose the architecture that solves <em>that specific bottleneck</em> and nothing more.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Every system design problem is a capacity planning problem in disguise. Size the load first, find what breaks at that load, and pick the minimal architecture that prevents that breakage while leaving room to scale further.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The "just use Kafka" trap</span>
+        <p>A candidate in a system design round was asked how to send 1M notifications. He immediately said "Use Kafka." The interviewer waited. He kept describing the Kafka cluster configuration. The interviewer finally asked: "What happens when Firebase throttles you at 500 req/s?" Silence. The candidate had answered a different question — how to queue messages — and never addressed the actual constraint: provider rate limits.</p>
+        <p>The correct architecture wasn't just "add a queue." It was: rate-limited consumer workers + per-provider concurrency control + exponential backoff + delivery status tracking. Knowing <em>why</em> each piece exists is what separates a passing answer from a failing one.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Problem 1</span>
+        <h2>Send 1 Million Notifications Without Overwhelming Your Servers</h2>
+        <div class="problem-header">Problem · Scale: 1M users · Time constraint: Black Friday campaign burst · Provider: Firebase (rate limited)</div>
+        <div class="problem-body">
+<span class="hi">Requirements:</span>
+- Send personalized push/email to 1M users within 1 hour
+- Firebase rate limit: ~500 req/s per key
+- Workers may crash mid-campaign → must be fault-tolerant
+- Delivery status must be trackable
+- Must scale to 100M users in future
+
+<span class="hi">Architecture:</span>
+API → <span class="ok">Kafka topic: notifications</span> → Rate-limited Workers → Firebase / Email Provider
+                                              ↓
+                                   <span class="warn">Dead Letter Queue</span> (failed deliveries)
+                                              ↓
+                                   <span class="ok">Status Webhook → DB</span> (tracking)
+        </div>
+
+        <p><strong>Key layers and why each exists:</strong></p>
+        <table class="scale-table">
+          <thead><tr><th>Challenge</th><th>Solution</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>Provider rate limits</td><td>Rate-limited Kafka consumers (token bucket)</td><td>Firebase throttles at 500/s — without control your workers get 429s and waste time on retries</td></tr>
+            <tr><td>Worker crashes</td><td>Kafka manual offset commit after successful send</td><td>Uncommitted offsets replay on restart — at-least-once delivery</td></tr>
+            <tr><td>Personalization</td><td>Per-user message rendering in worker, not at API</td><td>Keeps API fast; rendering is CPU work, done asynchronously</td></tr>
+            <tr><td>Delivery tracking</td><td>Provider callback webhook → status DB</td><td>Firebase and SendGrid both offer delivery callbacks — wire them up from day one</td></tr>
+            <tr><td>Scale to 100M</td><td>Partition Kafka topic by user_id hash</td><td>N workers consume N partitions in parallel — linear scale</td></tr>
+          </tbody>
+        </table>
+
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Rate-limited Kafka consumer for notification delivery
+import { Kafka } from "kafkajs";
+
+const kafka = new Kafka({ brokers: ["kafka:9092"] });
+const consumer = kafka.consumer({ groupId: "notification-workers" });
+
+// Token bucket — enforces Firebase's 500 req/s limit
+class TokenBucket {
+  constructor(rate, capacity) {
+    this.tokens = capacity;
+    this.capacity = capacity;
+    setInterval(() => { this.tokens = Math.min(this.capacity, this.tokens + rate / 10); }, 100);
+  }
+  async consume() {
+    while (this.tokens < 1) await new Promise((r) => setTimeout(r, 50));
+    this.tokens -= 1;
+  }
+}
+
+const bucket = new TokenBucket(500, 500); // 500 tokens/sec
+
+await consumer.connect();
+await consumer.subscribe({ topic: "notifications", fromBeginning: false });
+
+await consumer.run({
+  eachMessage: async ({ message, heartbeat, commitOffsetsIfNecessary }) => {
+    const notification = JSON.parse(message.value.toString());
+
+    // Render personalised message
+    const body = renderTemplate(notification.templateId, notification.userId);
+
+    // Wait for a rate-limit token
+    await bucket.consume();
+
+    try {
+      await sendToFirebase(notification.deviceToken, body);
+      // Only commit offset AFTER successful send
+      await commitOffsetsIfNecessary();
+    } catch (err) {
+      if (err.status === 429) {
+        // Back off and retry — do NOT commit offset
+        await new Promise((r) => setTimeout(r, 2000));
+      } else {
+        await sendToDeadLetterQueue(notification, err.message);
+        await commitOffsetsIfNecessary();
+      }
+    }
+    await heartbeat();
+  },
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Problem 2</span>
+        <h2>Resumable Large File Upload (Disconnect-Safe)</h2>
+        <div class="problem-header">Problem · Files up to 10 GB · Mobile clients on flaky connections · Must resume from exact byte offset</div>
+        <div class="problem-body">
+<span class="hi">Core mechanism:</span>  Chunked multipart upload with server-side chunk manifest
+
+1. Client → POST /upload/init         → receives <span class="ok">session_id</span>
+2. Client splits file into 10 MB chunks
+3. Client → PUT /upload/{session_id}/chunk/{n}  (with SHA-256 checksum)
+4. On disconnect → GET /upload/{session_id}/status → <span class="warn">{ received: [0,1,3], missing: [2,4,5...] }</span>
+5. Client re-uploads only missing chunks
+6. Client → POST /upload/{session_id}/complete → server assembles + finalises
+        </div>
+
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Client-side chunked upload with resume
+async function uploadWithResume(file, options = {}) {
+  const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+  // Step 1: Initialise session
+  const { sessionId } = await fetch("/upload/init", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: file.name, size: file.size, totalChunks }),
+  }).then((r) => r.json());
+
+  // Step 2: Check what the server already has (resume support)
+  const { received } = await fetch(`/upload/${sessionId}/status`).then((r) => r.json());
+  const receivedSet = new Set(received);
+
+  // Step 3: Upload only missing chunks
+  for (let i = 0; i < totalChunks; i++) {
+    if (receivedSet.has(i)) continue; // already uploaded
+
+    const start = i * CHUNK_SIZE;
+    const chunk = file.slice(start, start + CHUNK_SIZE);
+    const checksum = await sha256(chunk);
+
+    const form = new FormData();
+    form.append("chunk", chunk);
+
+    await fetch(`/upload/${sessionId}/chunk/${i}`, {
+      method: "PUT",
+      headers: { "X-Checksum": checksum },
+      body: form,
+    });
+
+    options.onProgress?.(Math.round(((i + 1) / totalChunks) * 100));
+  }
+
+  // Step 4: Finalise
+  return fetch(`/upload/${sessionId}/complete`, { method: "POST" }).then((r) => r.json());
+}
+
+async function sha256(blob) {
+  const buf = await blob.arrayBuffer();
+  const hash = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}</code></pre>
+        <div class="insight-box">
+          <strong>Server side:</strong> Store received chunks in Redis as a Set keyed by session_id. Use S3 multipart upload API — it natively handles chunk assembly and the <code>CompleteMultipartUpload</code> call. TTL sessions after 24h of inactivity to reclaim storage.
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Problem 3</span>
+        <h2>Instagram System Design at 500M DAU</h2>
+        <p><strong>Scale targets:</strong> 175K feed reads/sec · 350K like/comment writes/sec · 750 TB/day storage ingestion</p>
+        <table class="scale-table">
+          <thead><tr><th>Layer</th><th>Technology</th><th>Key decision</th></tr></thead>
+          <tbody>
+            <tr><td>Feed generation</td><td>Hybrid fan-out</td><td>Fan-out on write for regular users (pre-built feed); fan-in on read for celebrities (>1M followers) to avoid write amplification</td></tr>
+            <tr><td>Media storage</td><td>Blob store (S3) + CDN</td><td>Pre-signed upload URLs bypass app servers. CDN reduces origin traffic by 90–95%. Hot/cold tiering migrates aging content automatically.</td></tr>
+            <tr><td>Database</td><td>Sharded PostgreSQL + Cassandra</td><td>Shard by user_id (consistent hashing). Cassandra feed timeline: partition key = user_id, clustering key = created_at DESC for efficient pagination.</td></tr>
+            <tr><td>Cache</td><td>Redis with randomised TTLs</td><td>Randomised expiry prevents cache stampedes on popular content expiring simultaneously.</td></tr>
+            <tr><td>Search</td><td>Elasticsearch</td><td>Full-text and hashtag search. Do not use your primary DB for this.</td></tr>
+            <tr><td>Async processing</td><td>Kafka + workers</td><td>Video transcoding, notification fan-out, ML re-ranking all run asynchronously off the critical write path.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Problem 4</span>
+        <h2>Google L5: Optimize a 10-Table SQL JOIN</h2>
+        <p>Joining 10 tables naively produces a query that PostgreSQL cannot execute in under a second at any meaningful scale. The optimization layers, applied in order:</p>
+        <ol>
+          <li><strong>Indexes on join columns</strong> — every foreign key and every column in a WHERE clause used in the join needs an index. Without this, each join is a sequential scan.</li>
+          <li><strong>Filter early with CTEs or subqueries</strong> — push the most selective filter closest to the raw table scan. If only 0.1% of orders are in status <code>DISPUTED</code>, filter that before joining to users, products, and shipping.</li>
+          <li><strong>Avoid SELECT *</strong> — retrieve only the columns you need. Fewer bytes → smaller memory footprint for hash joins → faster execution.</li>
+          <li><strong>EXPLAIN ANALYZE before optimizing</strong> — read the actual row estimates vs actual rows. Stale table statistics (run <code>ANALYZE</code>) cause the query planner to pick wrong join orders.</li>
+          <li><strong>Materialise expensive subqueries</strong> — use <code>WITH MATERIALIZED</code> in PostgreSQL to force a CTE to materialise once rather than being re-evaluated per outer row.</li>
+          <li><strong>Consider denormalisation for read-heavy paths</strong> — if this query runs 10K times/second, maintaining a pre-joined summary table via a trigger or CDC pipeline is often the right answer.</li>
+        </ol>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// Node.js: push filtering to the DB, don't pull everything and filter in memory
+const { rows } = await db.query(`
+  -- Filter first (most selective condition), join after
+  WITH disputed_orders AS MATERIALIZED (
+    SELECT id, user_id, product_id, amount
+    FROM orders
+    WHERE status = 'DISPUTED'           -- ~0.1% of rows
+      AND created_at > NOW() - INTERVAL '30 days'
+  )
+  SELECT
+    u.name, u.email,
+    p.title AS product,
+    do.amount,
+    s.carrier, s.tracking_number
+  FROM disputed_orders do
+  JOIN users u         ON u.id = do.user_id
+  JOIN products p      ON p.id = do.product_id
+  LEFT JOIN shipments s ON s.order_id = do.id
+  -- Only 2 more joins after filtering to ~0.1% of data
+  ORDER BY do.created_at DESC
+  LIMIT 100;
+`);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>How to approach any system design interview</h2>
+        <ul class="check-list">
+          <li>Always start with scale numbers — DAU, writes/sec, reads/sec, data size — before drawing any boxes.</li>
+          <li>Identify the single bottleneck at that scale. Every architecture decision should trace back to relieving that bottleneck.</li>
+          <li>Say "for now I'd start with X; here's when I'd upgrade to Y" — interviewers reward awareness of over-engineering.</li>
+          <li>Address failure modes explicitly: what happens when a service is down? How do you detect it? How do you recover?</li>
+          <li>Never forget delivery guarantees — at-least-once vs exactly-once, and the idempotency keys you'd need for each.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>The four problems here — notification fan-out, resumable upload, Instagram architecture, SQL join optimization — share one underlying skill: capacity reasoning under constraints. Know the numbers, find the bottleneck, solve exactly that. A simple, correctly-sized architecture beats a sophisticated one that solves the wrong problem. In interviews and in production.</p>
+      </section>
+    </main>
+  </body>
+</html>

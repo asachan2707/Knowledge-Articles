@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Microservices + Serverless Hybrid Architectures | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .hybrid-table{width:100%;border-collapse:collapse;font-size:.87rem;margin:1rem 0}
+      .hybrid-table th{background:#f1f5f9;padding:.5rem .75rem;text-align:left;border-bottom:2px solid #e2e8f0;font-family:Arial,sans-serif;font-size:.75rem;text-transform:uppercase;color:#64748b}
+      .hybrid-table td{padding:.5rem .75rem;border-bottom:1px solid #f1f5f9;vertical-align:top}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .scenario-card{border:1px solid #e2e8f0;border-radius:10px;padding:.9rem 1rem;margin:.75rem 0}
+      .scenario-card h4{margin:0 0 .3rem;font-size:.93rem;font-weight:700}
+      .scenario-card p{margin:.2rem 0;font-size:.87rem;color:#475569}
+      .micro-badge{background:#dcfce7;color:#166534;font-family:Arial,sans-serif;font-size:.7rem;font-weight:700;border-radius:999px;padding:.1rem .45rem}
+      .fn-badge{background:#dbeafe;color:#1e40af;font-family:Arial,sans-serif;font-size:.7rem;font-weight:700;border-radius:999px;padding:.1rem .45rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=1600&h=700&fit=crop&auto=format&q=80" alt="Cloud hybrid architecture" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · Cloud · 11 min</span>
+          </div>
+        </figure>
+        <h1>Microservices + Serverless Hybrid Architectures: When They Work Well</h1>
+        <p class="summary">A practical guide to combining microservices and serverless functions: which workloads belong in each tier, when the hybrid architecture makes economic and operational sense, the integration patterns that connect them (event bridge, async triggers, API composition), and a Node.js example of a hybrid order processing system.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Karthik Chakravarthy · LinkedIn · 2024</span></div>
+          <div><span class="meta-label">Tags</span><span class="meta-value">Architecture, Cloud, Microservices, Serverless</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Hybrid order pipeline: microservice core + Lambda side reactions</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Microservices and serverless are not competing architectures — they serve different workloads. Microservices excel at long-running, stateful, latency-sensitive core domains. Serverless excels at event-triggered, stateless, spiky, or infrequent workloads. A hybrid architecture uses each where it fits, with a clean event bridge between them.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Microservices = core domain (always-on, latency-sensitive, stateful). Serverless functions = reactions and edges (event-triggered, bursty, stateless, cost-sensitive). The integration point is an event stream (Kafka, SQS, EventBridge). The microservice publishes events; serverless functions react.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The trade-off matrix</span>
+        <h2>When to use each tier</h2>
+        <table class="hybrid-table">
+          <thead><tr><th>Dimension</th><th>Microservices</th><th>Serverless Functions</th></tr></thead>
+          <tbody>
+            <tr><td>Startup latency</td><td>Milliseconds (pre-warmed)</td><td>50ms–3s cold start (problematic for synchronous APIs)</td></tr>
+            <tr><td>Concurrency</td><td>Controlled, predictable</td><td>Auto-scaled to thousands; may hit downstream limits</td></tr>
+            <tr><td>State</td><td>Can maintain connection pools, caches</td><td>Stateless — no local state between invocations</td></tr>
+            <tr><td>Cost at scale</td><td>Predictable (compute per hour)</td><td>Pay-per-invocation — can be dramatically cheaper or more expensive depending on invocation frequency</td></tr>
+            <tr><td>Deployment</td><td>Container or VM — requires orchestration</td><td>Function deployment — no infra to manage</td></tr>
+            <tr><td>Long-running</td><td>Supported</td><td>15-minute max (AWS Lambda); not suitable for long tasks</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Workload allocation</span>
+        <h2>What belongs in each tier</h2>
+        <div class="scenario-card">
+          <h4><span class="micro-badge">MICROSERVICE</span> Core domain transactions</h4>
+          <p>Order creation, payment processing, inventory management, user authentication — any workflow that is latency-sensitive, stateful, or high-volume. These need pre-warmed instances, connection pools, and predictable latency. Cold starts are unacceptable.</p>
+        </div>
+        <div class="scenario-card">
+          <h4><span class="fn-badge">SERVERLESS</span> Event reactions and side effects</h4>
+          <p>Send confirmation email after order created, generate invoice PDF, notify warehouse, update analytics — these are side effects triggered by events. They don't need to block the primary transaction and can tolerate a few hundred milliseconds of latency. Perfectly suited to Lambda/Cloud Functions.</p>
+        </div>
+        <div class="scenario-card">
+          <h4><span class="fn-badge">SERVERLESS</span> Scheduled and infrequent jobs</h4>
+          <p>Daily report generation, weekly data cleanup, monthly billing reconciliation. Running a container 24/7 for a job that runs once a day is wasteful. Serverless functions cost nothing when idle.</p>
+        </div>
+        <div class="scenario-card">
+          <h4><span class="fn-badge">SERVERLESS</span> Spiky, unpredictable traffic</h4>
+          <p>Image processing, file conversions, webhook receivers, notification bursts. Serverless auto-scales instantly to thousands of concurrent executions without pre-provisioning — ideal for traffic that varies by 100x with no notice.</p>
+        </div>
+        <div class="scenario-card">
+          <h4><span class="micro-badge">MICROSERVICE</span> APIs with tight latency SLAs</h4>
+          <p>Any user-facing API that needs sub-100ms P99 latency. Cold starts in serverless make this unpredictable unless provisioned concurrency is used — at which point the cost advantage disappears and a microservice is simpler.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Hybrid order pipeline: microservice core + serverless reactions</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>// ── ORDER SERVICE (Microservice — long-running, pre-warmed) ──
+// Handles the core transaction: create order, charge payment, reserve inventory
+class OrderService {
+  constructor(db, paymentService, inventoryService, eventBus) {
+    this._db = db;
+    this._payment = paymentService;
+    this._inventory = inventoryService;
+    this._bus = eventBus; // Kafka or AWS EventBridge
+  }
+
+  async createOrder(data) {
+    // Core transaction — must be fast and consistent
+    const [order, payment] = await Promise.all([
+      this._db.orders.insert({ ...data, status: 'pending' }),
+      this._payment.charge({ amount: data.amount, userId: data.userId }),
+    ]);
+    await this._inventory.reserve({ orderId: order.id, items: data.items });
+    await this._db.orders.update(order.id, { status: 'confirmed', paymentId: payment.id });
+
+    // Publish event — serverless functions react to this asynchronously
+    // The HTTP response does NOT wait for these side effects
+    await this._bus.publish('order.confirmed', {
+      orderId: order.id,
+      userId: data.userId,
+      items: data.items,
+      total: data.amount,
+    });
+
+    return { orderId: order.id, status: 'confirmed' };
+    // Response time: ~50ms (no email, no PDF, no warehouse call)
+  }
+}
+
+// ── SERVERLESS FUNCTIONS — react to 'order.confirmed' event ──
+// These run independently and don't affect order creation latency
+
+// Lambda 1: Send confirmation email
+export async function sendOrderConfirmationEmail(event) {
+  const { orderId, userId, total } = event.detail;
+  const user = await userService.getById(userId);
+  await mailer.send({
+    to: user.email,
+    subject: `Order ${orderId} confirmed`,
+    body: `Your order of $${total} has been confirmed.`,
+  });
+}
+
+// Lambda 2: Generate invoice PDF and store in S3
+export async function generateInvoicePdf(event) {
+  const { orderId, items, total } = event.detail;
+  const pdf = await pdfGenerator.createInvoice({ orderId, items, total });
+  await s3.put(`invoices/${orderId}.pdf`, pdf);
+}
+
+// Lambda 3: Notify warehouse system (external, slow API)
+export async function notifyWarehouse(event) {
+  const { orderId, items } = event.detail;
+  await warehouseApi.createPickList({ orderId, items });
+}
+
+// Lambda 4: Update analytics (fire-and-forget, can fail silently)
+export async function trackOrderAnalytics(event) {
+  await analytics.track('order_created', {
+    orderId: event.detail.orderId,
+    amount: event.detail.total,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+// All four Lambda functions trigger from the same 'order.confirmed' event
+// independently, in parallel, without any changes to the Order Service</code></pre>
+        <div class="insight-box">
+          <strong>The integration point is critical:</strong> The event bus between microservices and serverless functions (Kafka, SQS, EventBridge) must be highly available and durable. An event lost here means a missed email, missing invoice, or unnotified warehouse — all invisible to the user and the order service. Use at-least-once delivery with idempotent serverless handlers that can safely process the same event twice.
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>The hybrid microservices/serverless pattern is not about choosing one or the other — it's about recognizing which workload characteristics favor each approach. Core domain transactions with tight latency SLAs belong in always-on microservices. Event-triggered side effects, infrequent jobs, and spiky workloads belong in serverless functions. The event bus is the seam that lets them collaborate without coupling: the microservice publishes a fact, the serverless tier reacts, and neither knows about the other.</p>
+      </section>
+    </main>
+  </body>
+</html>

