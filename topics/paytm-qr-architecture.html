@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Paytm QR Code Architecture | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="QR code payment scan at a retail counter"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Architecture · 14 min</span>
+          </div>
+        </figure>
+
+        <h1>Paytm QR Code Architecture</h1>
+        <p class="summary">
+          How Paytm engineered a QR-based payment system capable of handling hundreds of millions of daily
+          transactions — covering static vs. dynamic QR generation, the payment routing pipeline, idempotency
+          guarantees, and the real-time settlement backbone.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: YouTube — System Design Deep Dive</span>
+          <span class="meta-item">Domain: Payments / Fintech</span>
+          <span class="meta-item">Published: 2024</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          India's UPI ecosystem processes over 10 billion transactions a month. Paytm's QR infrastructure sits
+          at the entry point of that flow — every scan kicks off a chain of identity resolution, fraud checks,
+          routing decisions, and ledger updates that must all complete in under 2 seconds. Building that at scale
+          required rethinking every layer from QR generation to final settlement.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> A QR code is just a URL. The hard engineering is everything that happens
+            after the scan — authenticating both parties, routing to the right bank, ensuring exactly-once
+            debit/credit, and reconciling in real time across a distributed ledger.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The chai stall problem</span>
+        <p>
+          Imagine 50 million small merchants — chai stalls, auto-rickshaw drivers, vegetable vendors — each
+          with a printed QR code stuck to a wall with tape. That QR cannot expire. It cannot rotate. It cannot
+          carry session state. Yet when a customer scans it at 8 AM on a Tuesday and again at 3 PM on Friday,
+          Paytm's system must resolve the correct merchant, apply any active cashback offer, prevent double
+          charges, and credit the merchant's wallet — all within the 2-second UPI timeout window.
+        </p>
+        <p>
+          That constraint — static QR, dynamic transaction — shaped every architectural decision in the stack.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Layer 1</span>
+        <h2>Static vs. Dynamic QR Generation</h2>
+        <p>
+          Paytm operates two QR modes with fundamentally different lifecycles:
+        </p>
+        <ul>
+          <li>
+            <strong>Static QR (merchant QR):</strong> Generated once at merchant onboarding. Encodes a
+            <code>payee VPA</code> (Virtual Payment Address) and an optional <code>merchant ID</code>. The QR
+            itself never changes — it is a printed artefact. All dynamic data (amount, invoice reference, offer
+            ID) is entered by the customer or resolved server-side on scan.
+          </li>
+          <li>
+            <strong>Dynamic QR (invoice QR):</strong> Generated per-transaction by the merchant's POS or
+            Paytm Business app. Encodes a session token, pre-filled amount, and an expiry TTL (typically 5–15
+            minutes). Used by larger merchants (fuel pumps, restaurants, retail chains) where the POS controls
+            the flow.
+          </li>
+        </ul>
+        <p>
+          Static QRs account for the vast majority of Paytm's merchant base. The system must resolve the
+          merchant's current account status, KYC tier, and settlement preferences at scan time — none of that
+          is baked into the QR itself.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Layer 2</span>
+        <h2>The Scan-to-Payment Pipeline</h2>
+        <p>
+          When a customer opens the Paytm app and scans a QR, the following sequence fires:
+        </p>
+        <ol>
+          <li>
+            <strong>QR decode &amp; parse:</strong> The mobile client parses the QR payload (UPI deep-link
+            format: <code>upi://pay?pa=vpa&amp;pn=name&amp;am=amount&amp;cu=INR</code>). The VPA is the key
+            lookup identifier.
+          </li>
+          <li>
+            <strong>Merchant resolution:</strong> A read-heavy microservice maps the VPA to an internal
+            merchant profile (account ID, KYC status, settlement account, active limits). This is served from
+            an in-memory cache (Redis) backed by a primary store; cache TTL is short (~60 s) to pick up
+            account suspensions in near real-time.
+          </li>
+          <li>
+            <strong>Fraud &amp; risk check:</strong> The transaction metadata (payer, payee, amount,
+            device fingerprint, GPS, time-of-day) is evaluated by a risk engine before the payment is
+            submitted to UPI. High-risk signals trigger step-up authentication (PIN re-entry, OTP).
+          </li>
+          <li>
+            <strong>UPI routing:</strong> Paytm acts as a TPAP (Third Party Application Provider) on the UPI
+            rails. The payment request is forwarded to the NPCI (National Payments Corporation of India) switch,
+            which routes it to the payer's bank (debit) and payee's bank (credit). NPCI returns a transaction
+            reference (TRN) and a final status.
+          </li>
+          <li>
+            <strong>Callback &amp; notification:</strong> NPCI sends a webhook to Paytm's callback service.
+            The result is written to the transaction store, the merchant's passbook is updated, and both
+            parties receive push notifications.
+          </li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Layer 3</span>
+        <h2>Idempotency and Exactly-Once Semantics</h2>
+        <p>
+          Network failures between Paytm and NPCI are the hardest problem. A request can succeed at NPCI but
+          the success callback may never arrive — leaving Paytm's system uncertain whether money moved.
+        </p>
+        <p>
+          The solution is a two-phase idempotency design:
+        </p>
+        <ul>
+          <li>
+            <strong>Idempotency key:</strong> Every payment initiation generates a UUID written to a
+            distributed lock store (Redis with TTL) before the UPI call goes out. Duplicate scan events with
+            the same key are rejected immediately.
+          </li>
+          <li>
+            <strong>Transaction status reconciliation:</strong> A background reconciliation job polls NPCI's
+            Transaction Status API for all payments in a <em>pending</em> or <em>unknown</em> state older than
+            30 seconds. This is the safety net when callbacks are lost or delayed.
+          </li>
+          <li>
+            <strong>Debit-before-credit ordering:</strong> The system never marks a transaction as successful
+            to either party until NPCI confirms both legs (debit from payer bank, credit to payee bank) are
+            committed. Partial confirmations are held in a reconciliation queue.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Layer 4</span>
+        <h2>Scale Architecture — Handling Peak Load</h2>
+        <p>
+          Paytm's transaction volume spikes sharply on festival days (Diwali, Dhanteras) and paydays. The
+          infrastructure is designed around horizontal statelessness:
+        </p>
+        <ul>
+          <li>
+            <strong>Stateless payment processors:</strong> The core payment microservices hold no session
+            state. All state lives in Redis (hot path: idempotency keys, merchant cache) or the primary RDBMS
+            (cold path: audit records). Services auto-scale behind a load balancer.
+          </li>
+          <li>
+            <strong>Event-driven settlement:</strong> After a payment success callback, settlement is handled
+            asynchronously via a Kafka event. The settlement service consumes these events and updates ledger
+            balances in batches, decoupling the synchronous payment path from the slower accounting path.
+          </li>
+          <li>
+            <strong>Read replicas for merchant resolution:</strong> The merchant profile store uses a
+            leader-follower RDBMS setup. Payment flow reads go to followers; writes (KYC updates, account
+            changes) go to the leader.
+          </li>
+          <li>
+            <strong>Circuit breakers on NPCI calls:</strong> If NPCI latency spikes, the circuit breaker
+            opens and payments are fast-failed with a user-friendly "try again" message rather than piling up
+            threads waiting on a slow upstream.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Layer 5</span>
+        <h2>Settlement and Ledger Architecture</h2>
+        <p>
+          Paytm maintains a dual-ledger model: the <strong>wallet ledger</strong> for Paytm wallet balances
+          and the <strong>bank passbook</strong> for UPI transactions that flow bank-to-bank through Paytm's
+          VPA infrastructure.
+        </p>
+        <p>
+          Merchant settlements are batched — by default, a T+1 settlement cycle is used for small merchants
+          (money hits their bank account next business day). Paytm Payment Bank or large enterprise merchants
+          can access T+0 instant settlement for a fee.
+        </p>
+        <p>
+          The settlement pipeline is a classic <strong>event sourcing</strong> pattern: each payment event is
+          immutable and appended to a log. Settlement totals are computed by replaying or aggregating the log,
+          not by mutating balance rows in place. This makes the audit trail tamper-evident and rollback trivial.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Idempotency Key Generation and Lock Check</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>import { createClient } from 'redis';
+import { randomUUID } from 'crypto';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+const LOCK_TTL_MS = 30_000; // 30 seconds — covers UPI round-trip + buffer
+
+/**
+ * Initiates a payment with idempotency protection.
+ * Returns { initiated: true, key } or { initiated: false, reason }
+ */
+async function initiatePayment({ payerVpa, payeeVpa, amountPaise }) {
+  const idempotencyKey = `pay:${payerVpa}:${payeeVpa}:${amountPaise}:${randomUUID()}`;
+
+  // SET key "" EX ttl NX  — only succeeds if key does not exist
+  const acquired = await redis.set(idempotencyKey, 'pending', {
+    PX: LOCK_TTL_MS,
+    NX: true,
+  });
+
+  if (!acquired) {
+    return { initiated: false, reason: 'duplicate_request' };
+  }
+
+  try {
+    // Fire-and-forget UPI call — result comes via NPCI callback
+    const trn = await sendToUpiSwitch({ payerVpa, payeeVpa, amountPaise, idempotencyKey });
+
+    // Update lock value to the TRN so reconciliation job can match callbacks
+    await redis.set(idempotencyKey, trn, { PX: LOCK_TTL_MS, XX: true });
+
+    return { initiated: true, key: idempotencyKey, trn };
+  } catch (err) {
+    // Release lock on client-side error so user can retry
+    await redis.del(idempotencyKey);
+    throw err;
+  }
+}
+
+// Reconciliation: check pending payments older than 30s
+async function reconcilePending(pendingKeys) {
+  const results = await Promise.allSettled(
+    pendingKeys.map(async (key) => {
+      const trn = await redis.get(key);
+      if (!trn || trn === 'pending') return;
+
+      const status = await queryNpciStatus(trn);
+      if (status === 'SUCCESS' || status === 'FAILURE') {
+        await finaliseTransaction(trn, status);
+        await redis.del(key);
+      }
+    })
+  );
+  return results.filter((r) => r.status === 'rejected').map((r) => r.reason);
+}
+
+async function sendToUpiSwitch(payload) { /* NPCI API call */ return 'TRN_' + randomUUID(); }
+async function queryNpciStatus(trn) { return 'SUCCESS'; }
+async function finaliseTransaction(trn, status) { console.log(trn, status); }
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Designing a QR payment system — what to nail</h2>
+        <ul class="check-list">
+          <li>Separate QR generation (static/dynamic) from transaction processing — they have different lifecycles.</li>
+          <li>Use an idempotency key with a distributed lock before any external payment API call.</li>
+          <li>Always have a reconciliation job for the "callback never arrived" case.</li>
+          <li>Cache merchant/VPA resolution aggressively but with a short TTL (~60 s) to catch account suspensions.</li>
+          <li>Decouple settlement from payment confirmation — use an event queue (Kafka/SQS).</li>
+          <li>Put circuit breakers on every call to an external switch (NPCI, bank APIs).</li>
+          <li>Design for T+1 batch settlement as the default; T+0 as an opt-in premium tier.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Why not make all QRs dynamic to simplify server logic?</h3>
+        <p>
+          Dynamic QR requires a running POS device or smartphone. The bulk of Paytm's merchant base is
+          micro-merchants who print a QR once and stick it on their stall. Static QR with server-side
+          resolution is the only practical option at that scale.
+        </p>
+
+        <h3>What happens if NPCI is down?</h3>
+        <p>
+          Paytm queues the transaction in a durable store, shows the user a "payment processing" state, and
+          retries when NPCI recovers. UPI mandates a 2-second response SLA; if that window expires, the
+          transaction is auto-reversed by NPCI to prevent ambiguous states.
+        </p>
+
+        <h3>How does fraud detection work without slowing down the 2-second UPI window?</h3>
+        <p>
+          The risk engine runs in-process on the payment service, not as a remote call. Feature vectors
+          (device fingerprint, velocity counters, location delta) are pre-computed and cached on the user's
+          session. The rule evaluation is a fast in-memory lookup — typically under 10 ms.
+        </p>
+
+        <h3>How is the merchant settlement ledger kept consistent?</h3>
+        <p>
+          Event sourcing: every payment event is written to an immutable append-only log. Settlement balances
+          are derived by aggregating this log, not by mutating balance rows. This makes the ledger auditable
+          and makes rollback or correction trivially safe.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Paytm's QR architecture is a masterclass in separating concerns across time: QR generation is a
+          one-time operation, merchant resolution is a read-heavy hot-path, payment routing is a
+          latency-critical synchronous call, and settlement is a correctness-critical async process.
+          Each of those layers scales and fails independently. The two design choices that enable everything
+          else are <strong>stateless payment processors with Redis-backed idempotency</strong> and
+          <strong>event-sourced ledgers with async settlement</strong> — together they deliver both the
+          sub-2-second UPI response and the tamper-evident financial record.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

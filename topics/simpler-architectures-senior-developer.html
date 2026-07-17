@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How Simpler Architectures Made Me a Better Senior Developer | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1507238691740-187a5b1d37b8?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Engineer working at a clean desk with focused expression"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · Engineering · Career · 18 min</span>
+          </div>
+        </figure>
+
+        <h1>How Simpler Architectures Made Me a Better Senior Developer</h1>
+        <p class="summary">
+          The trap most engineers fall into: adding complexity to signal competence. The best senior engineers
+          do the opposite — they ruthlessly eliminate accidental complexity, resist the pull of distributed
+          systems when a monolith would do, and measure architecture success not by elegance but by how
+          rarely it wakes them up at 3 AM.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Architecture / Engineering Career</span>
+          <span class="meta-item">Published: 2026-07-16</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          I spent the first few years of my career adding things. New framework. New service. New message
+          queue. I thought good engineers built sophisticated systems. I was wrong. The engineers I respect
+          most today are ruthless subtracters. Every new component is a liability until proven otherwise.
+          Simplicity is not laziness — it is discipline. This is what I had to unlearn to become a better
+          engineer.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The senior engineer's definition of success:</strong> A system is successful not when
+            it is impressive at the architecture review, but when it runs quietly without requiring human
+            intervention. The best systems are boring. The most boring system often wins.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The over-engineered disaster</span>
+        <p>
+          A team of five engineers built a startup product. They were good engineers — two had FAANG backgrounds,
+          one had a PhD in distributed systems. They made what seemed like smart decisions. Kubernetes for
+          container orchestration, because "we'll need to scale." Twelve microservices, each owning a bounded
+          context, because "that's how Netflix does it." Kafka for event streaming between services, because
+          "events are more decoupled than direct calls." A service mesh (Istio) for observability and
+          mutual TLS, because "security and tracing are non-negotiable."
+        </p>
+        <p>
+          The system had 94% test coverage. Perfect CI/CD pipelines. Zero-downtime rolling deployments.
+          OpenAPI documentation for every endpoint. Distributed tracing with Jaeger. Grafana dashboards
+          with 40 panels.
+        </p>
+        <p>
+          It also went down every other day. Sometimes a service mesh configuration change caused all
+          mTLS connections to fail simultaneously. Sometimes a Kafka consumer group rebalance triggered
+          during a deployment and messages piled up in the dead-letter queue. Sometimes a network policy
+          change in Kubernetes silently blocked one service from reaching another — no error, just timeouts.
+        </p>
+        <p>
+          The product had 200 daily active users. Two hundred. A single laptop could have served them all.
+        </p>
+        <p>
+          After six months, the team spent 40% of their engineering time on infrastructure. Features were
+          late. Users churned. The company pivoted. Two of the FAANG engineers left because they were
+          burned out from debugging distributed systems instead of building product.
+        </p>
+        <p>
+          I was one of those engineers. That experience changed how I think about architecture forever.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 1</span>
+        <h2>Complexity Is a Debt, Not an Investment</h2>
+        <p>
+          Fred Brooks, in "No Silver Bullet" (1986), distinguishes between <em>essential complexity</em>
+          (inherent in the problem — a payment system is genuinely complex) and <em>accidental complexity</em>
+          (introduced by our tools and choices — the payment system does not need 12 microservices to be correct).
+        </p>
+        <p>
+          Every abstraction layer has an operational cost. Kubernetes adds a control plane that can fail, a
+          networking model that can misconfigure, and a concept surface area that takes weeks to learn. Kafka
+          adds broker management, consumer group coordination, partition rebalancing, and a whole new failure
+          mode — consumer lag. A service mesh adds mTLS certificate management, sidecar proxy overhead, and
+          traffic policy complexity.
+        </p>
+        <p>
+          These costs are real and they are ongoing. The engineer who adds Kafka "for scalability" at 1,000
+          requests per day is taking out a loan. The interest payments are the on-call hours, the debugging
+          sessions, the onboarding time for new engineers, and the features that did not get built while
+          you were fixing the broker.
+        </p>
+        <p>
+          <strong>How to calculate complexity cost:</strong> Count the number of independently failable
+          components times their blast radius. A monolith with a PostgreSQL database has 2 failable components.
+          If the monolith fails, the service is down. If the database fails, the service is down. Blast radius
+          is one service. Twelve microservices with Kafka, Redis, and a service mesh might have 20+ independently
+          failable components, each with failure modes that interact. The blast radius per component may be
+          smaller, but the probability that <em>something</em> is failing at any given time is much higher.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The question to ask before every addition:</strong> Does the operational cost of this
+            component over its lifetime exceed the benefit it provides? For a startup with 200 DAU, Kafka's
+            operational cost is infinite relative to its benefit.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 2</span>
+        <h2>Start with a Monolith, Earn Your Microservices</h2>
+        <p>
+          DHH (David Heinemeier Hansson), creator of Rails and co-founder of Basecamp, wrote "The Majestic
+          Monolith" in 2016 — a polemic against premature microservice decomposition that holds up even better
+          today. The key argument: a well-structured monolith with clear module boundaries is often faster to
+          develop, easier to deploy, and simpler to debug than a microservices architecture with the same
+          functionality.
+        </p>
+        <p>
+          Shopify, one of the largest e-commerce platforms in the world, runs on a Rails monolith.
+          Stack Overflow, serving millions of developers per month, runs on a monolith. GitHub ran as
+          a monolith for many years. These are not failures of ambition — they are pragmatic choices
+          that allowed fast iteration.
+        </p>
+        <p>
+          <strong>When microservices actually pay off:</strong> The "2 pizza rule" is a useful heuristic —
+          microservices make sense when a team cannot fit around a single table. More concretely:
+        </p>
+        <ul>
+          <li>Team autonomy requires independent deployment — different teams need to deploy their code on their own schedule without coordinating with others</li>
+          <li>Deployment frequency per service exceeds 5 per week — if each service deploys independently that often, tight coupling would cause deployment coordination overhead</li>
+          <li>Components have genuinely different scaling profiles — the image thumbnail service needs 10x more CPU than the user profile service, and scaling them together wastes money</li>
+          <li>Different runtime requirements — one component needs Python for ML, another needs Go for performance, another needs Node.js for an existing library</li>
+        </ul>
+        <p>
+          If none of those are true, you probably do not need microservices yet.
+        </p>
+        <p>
+          <strong>The strangler fig pattern — the only safe path to microservices:</strong> Never decompose
+          a monolith by splitting it. Put an HTTP proxy in front of the monolith. Route specific paths to
+          new services as you extract them. The monolith handles everything not yet extracted. Gradually
+          move functionality to new services. At no point does the whole system go offline for a "big bang
+          migration." The strangler fig metaphor: a vine that grows around a tree and eventually replaces it.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 3</span>
+        <h2>The Database Is Almost Never the Bottleneck You Think It Is</h2>
+        <p>
+          I have seen this pattern more times than I can count. A system is slow. The engineer suspects
+          the database. The proposed solution: add Redis, add a read replica, add an in-memory cache.
+          The root cause: a missing index on a column used in every WHERE clause.
+        </p>
+        <p>
+          PostgreSQL is extraordinarily capable. A properly configured PostgreSQL instance on a single
+          EC2 r6i.2xlarge (8 vCPUs, 64 GB RAM) can handle 10,000+ read requests per second for indexed
+          queries. A query that takes 500ms without an index can take 0.5ms with a covering index —
+          a 1000x improvement. No Redis cluster can match that gain for queries that were already
+          fast enough to need no network round-trip.
+        </p>
+        <p>
+          <strong>The diagnostic sequence before adding infrastructure:</strong>
+        </p>
+        <ol>
+          <li>
+            <strong>Run EXPLAIN ANALYZE:</strong> Identify queries with Seq Scan (full table scan) on
+            large tables. These are your index opportunities. Look for "cost=..." rows with very high
+            estimated cost relative to row count.
+          </li>
+          <li>
+            <strong>Check pg_stat_statements:</strong> This PostgreSQL extension tracks query execution
+            statistics. Run
+            <code>SELECT query, total_time, calls, total_time/calls AS avg_time FROM pg_stat_statements ORDER BY total_time DESC LIMIT 20</code>
+            to find your top time-consuming queries.
+          </li>
+          <li>
+            <strong>Add missing indexes:</strong> For queries filtered on (user_id, created_at), add
+            <code>CREATE INDEX CONCURRENTLY ON events (user_id, created_at DESC)</code>. The
+            <code>CONCURRENTLY</code> keyword builds the index without locking writes.
+          </li>
+          <li>
+            <strong>Fix N+1 queries:</strong> If your ORM is generating one query per row in a loop
+            ("get all orders, then for each order get the user"), replace with a JOIN or use eager
+            loading. A 1,000-row result with N+1 generates 1,001 queries; with JOIN it is 1.
+          </li>
+          <li>
+            <strong>Only then consider caching or replicas:</strong> If after proper indexing the
+            database is still a bottleneck (measured, not assumed), then add a read replica for
+            read-heavy workloads, or Redis for data that genuinely benefits from sub-millisecond
+            access (session state, real-time counters).
+          </li>
+        </ol>
+        <div class="callout">
+          <p>
+            <strong>True story:</strong> A team spent 3 weeks building a custom caching layer with
+            Redis, cache invalidation logic, and a cache warmup job. The system was still slow after
+            launch. A consultant ran EXPLAIN ANALYZE and found a missing index on the
+            <code>created_at</code> column in the main query. Adding the index took 4 minutes.
+            The custom caching layer was removed 2 weeks later.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 4</span>
+        <h2>Synchronous Is Simpler — Until It Isn't</h2>
+        <p>
+          Async message queues are powerful. They also introduce a new category of debugging hell. Consider
+          what you gain and lose:
+        </p>
+        <p>
+          <strong>When async is not worth it:</strong> The flow is a simple request-response where the
+          user wants a result right now (search, form submission, data fetch). The operation completes
+          in under 2 seconds. Your team does not have experience with Kafka or RabbitMQ. You have fewer
+          than 1,000 requests per second. Adding a message queue here means:
+        </p>
+        <ul>
+          <li>Debugging a distributed trace (span 1 in service A → message in Kafka → span 2 in service B) instead of a simple stack trace</li>
+          <li>Dealing with message ordering (Kafka guarantees order within a partition, not globally)</li>
+          <li>Designing exactly-once or at-least-once semantics and building idempotent consumers</li>
+          <li>Operating a dead-letter queue and writing logic to retry or alert on failed messages</li>
+          <li>Monitoring consumer lag and writing alerts when lag grows unexpectedly</li>
+        </ul>
+        <p>
+          <strong>When async genuinely pays off:</strong>
+        </p>
+        <ul>
+          <li>
+            <strong>Team decoupling:</strong> Service A and Service B are owned by different teams with
+            different deployment schedules. Async messaging means A can publish without knowing if B is
+            running — they are never blocking each other.
+          </li>
+          <li>
+            <strong>Spike absorption:</strong> You have 100 messages per second normally but 10,000
+            during a flash sale. A queue absorbs the spike; consumers process at their own rate.
+            Without a queue, the spike hits your database directly.
+          </li>
+          <li>
+            <strong>Long-running tasks:</strong> Sending emails, generating PDFs, encoding video,
+            running ML inference — anything that takes more than 2 seconds should be async. Return
+            202 Accepted immediately, process in the background, notify via webhook or polling.
+          </li>
+          <li>
+            <strong>Fan-out:</strong> One event (order placed) needs to trigger multiple independent
+            downstream actions (send confirmation email, update inventory, notify logistics). Pub/sub
+            is cleaner than chained synchronous calls.
+          </li>
+        </ul>
+        <p>
+          A useful rule of thumb: if you cannot name specifically which of those four benefits applies
+          to your use case, you probably do not need the message queue.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 5</span>
+        <h2>Operational Simplicity Is a Feature</h2>
+        <p>
+          Dan McKinley's "Choose Boring Technology" (2015) is the most important architecture essay I have
+          read. The core argument: every novel technology you choose depletes your "innovation tokens" —
+          the finite capacity your team has for learning and debugging unfamiliar systems. PostgreSQL, Linux,
+          and NGINX are boring. They are boring because thousands of engineers have debugged them, documented
+          every failure mode, and written runbooks for every incident. Choosing a trendy alternative to
+          PostgreSQL costs you all of that accumulated knowledge.
+        </p>
+        <p>
+          The best architecture is one that a junior engineer can understand at 3 AM. Not because 3 AM
+          incidents are common, but because they are the test that reveals whether your system is truly
+          observable and operable. If the person on call needs the original architect to debug a production
+          issue, that is an architectural smell.
+        </p>
+        <p>
+          <strong>The "bus factor" for architecture:</strong> How many engineers on your team need to be
+          hit by a bus before nobody understands the system? For our 12-microservice startup: the answer
+          was one — the engineer who built the service mesh config. When she went on vacation, every
+          infrastructure issue was blocked on her. That is an architecture failure.
+        </p>
+        <p>
+          <strong>Runbook-driven design:</strong> If you cannot write a 1-page runbook for a component
+          — what it does, how it fails, how to restart it, how to check its health — it is too complex.
+          Write the runbook before you build the component. If you struggle to write it, the component
+          is too complex. A well-designed system has runbooks that any engineer can follow.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 6</span>
+        <h2>Measure Before You Architect</h2>
+        <p>
+          Almost every premature optimization I have witnessed started with a sentence that contained
+          the word "eventually." "We'll eventually need to scale." "This will eventually be a bottleneck."
+          "We should eventually shard this database." The word "eventually" is load-bearing — it means
+          you have not measured anything, you are guessing.
+        </p>
+        <p>
+          <strong>Load test before you shard:</strong> Run k6 or Locust against your production stack
+          (or a staging environment that mirrors production). Ramp traffic from 10x to 100x expected
+          peak. Watch where the system breaks. Only optimize the actual bottleneck. In my experience,
+          80% of the time the bottleneck is a slow query, not the database capacity.
+        </p>
+        <p>
+          <strong>Profile before you cache:</strong> Use flame graphs (Brendan Gregg's perf + FlameGraph,
+          or clinic.js for Node.js) to find where your CPU time actually goes. I have seen teams add Redis
+          caching to a function that was spending 95% of its time serializing a large JSON response to
+          string — the cache hit rate was 0% because the cache key included user-specific data. The actual
+          fix was streaming the response instead of buffering.
+        </p>
+        <p>
+          <strong>Monitor before you add circuit breakers:</strong> Circuit breakers protect against
+          cascading failures from slow or failing downstream services. But if your monitoring does not show
+          that a particular downstream is causing failures, adding a circuit breaker is adding complexity
+          without evidence. Add monitoring first. Observe. Then add circuit breakers only around services
+          that the monitoring shows actually fail.
+        </p>
+        <p>
+          <strong>The measurement toolkit:</strong>
+        </p>
+        <ul>
+          <li><strong>Load testing:</strong> k6 (scripted in JavaScript, great CI integration), Locust (Python, easy to customize scenarios), Gatling (Scala, used for very high load)</li>
+          <li><strong>Query analysis:</strong> <code>pg_stat_statements</code> (PostgreSQL), <code>EXPLAIN ANALYZE</code> (any SQL DB), Percona pt-query-digest (MySQL)</li>
+          <li><strong>CPU profiling:</strong> clinic.js + flame graph (Node.js), py-spy (Python), async-profiler (JVM)</li>
+          <li><strong>Memory profiling:</strong> Node.js <code>--inspect</code> + Chrome DevTools heap snapshot, Valgrind (C/C++), jmap (JVM)</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 7</span>
+        <h2>The Right Architecture for Your Team Size</h2>
+        <p>
+          Conway's Law (1968) states: "Any organization that designs a system will produce a design whose
+          structure is a copy of the organization's communication structure." This is not a suggestion —
+          it is an observation that has been confirmed repeatedly in practice. Your microservice boundaries
+          will naturally follow your team boundaries because people communicate more easily within a team
+          than between teams.
+        </p>
+        <p>
+          The corollary: design your architecture for your <em>current</em> team size, not your aspired
+          future size. Building microservices for a 5-person team because Netflix has microservices and
+          Netflix has 2,000 engineers is not a logical inference.
+        </p>
+        <div class="callout">
+          <p><strong>Architecture by team size:</strong></p>
+          <ul>
+            <li><strong>Solo or 2-3 engineers:</strong> Monolith + PostgreSQL + Redis + background job queue (Sidekiq, BullMQ). One process. One database. Fast deploys. Zero coordination overhead.</li>
+            <li><strong>5-8 engineers:</strong> Modular monolith with clear domain boundaries (separate modules/packages per domain, same process). Add a caching layer only after profiling. Background jobs for async operations.</li>
+            <li><strong>10-20 engineers:</strong> 2-4 services split along team ownership boundaries. Not "one service per API resource" — one service per team that can deploy independently. Shared database is still OK if only one team writes to each table.</li>
+            <li><strong>20-50 engineers:</strong> Consider splitting services where teams have genuinely different deployment cadences or scaling profiles. Use the strangler fig pattern for any extraction.</li>
+            <li><strong>50+ engineers:</strong> Microservices are justified now. Teams deploy independently, each service has a clear owner, and the coordination overhead of a monolith exceeds the operational overhead of distributed services.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The Framework</span>
+        <h2>The Senior Engineer's Architecture Decision Framework</h2>
+        <p>
+          Before every significant architectural decision — adding a new service, adopting a new database,
+          introducing a message queue — I ask five questions:
+        </p>
+        <ol>
+          <li>
+            <strong>What specific problem does this solve today?</strong> Not "might solve" or "will eventually
+            solve." Today. If the answer is vague ("it will make things more scalable"), it is not specific
+            enough to justify the cost.
+          </li>
+          <li>
+            <strong>What new problems does this introduce?</strong> Every technology has failure modes. Write
+            them down. Kafka introduces consumer lag, message ordering complexity, and broker management.
+            Redis introduces memory limits, eviction policy decisions, and the need to handle cache misses.
+            Do you have capacity to operate these new problems?
+          </li>
+          <li>
+            <strong>Can a junior engineer on my team debug this at 3 AM without my help?</strong> If the
+            answer is no, either the component is too complex or your documentation and runbooks are insufficient.
+            Fix whichever is true.
+          </li>
+          <li>
+            <strong>What is the rollback plan if this turns out to be a mistake?</strong> Can you remove this
+            component without rewriting dependent systems? Can you migrate data back? "We can't roll back"
+            is a flag — that means you are permanently committed to the operational cost of this decision,
+            regardless of what you learn later.
+          </li>
+          <li>
+            <strong>Have we measured that this is actually the bottleneck?</strong> Show me the load test
+            result, the profiler output, the p99 latency graph. If you are solving a theoretical future
+            bottleneck, defer the solution until the bottleneck is real.
+          </li>
+        </ol>
+        <p>
+          Most proposed architecture additions fail at question 1 or question 5. That is not a reason to
+          stop asking them.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Boring vs. Over-Engineered: The Same Feature, Two Ways</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * A feature: "Get the top 10 products by view count for a given category."
+ *
+ * VERSION A: The "boring" version — direct DB call + in-process cache.
+ * VERSION B: The over-engineered version — Redis + Kafka + microservice.
+ *
+ * Count the lines of code, failure modes, and operational dependencies in each.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERSION A: BORING (44 lines, 2 failure modes, 1 dependency)
+// ─────────────────────────────────────────────────────────────────────────────
+import { Pool } from 'pg';
+
+const db    = new Pool({ connectionString: process.env.DATABASE_URL });
+const cache = new Map(); // In-process LRU-style cache
+const CACHE_TTL_MS = 60_000; // 1 minute
+
+async function getTopProducts_boring(category) {
+  const cacheKey = `top-products:${category}`;
+  const cached = cache.get(cacheKey);
+
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+    return cached.data; // Cache hit — return immediately
+  }
+
+  // Cache miss — query PostgreSQL directly
+  const { rows } = await db.query(`
+    SELECT id, name, view_count
+    FROM products
+    WHERE category = $1
+      AND is_active = true
+    ORDER BY view_count DESC
+    LIMIT 10
+  `, [category]);
+
+  cache.set(cacheKey, { data: rows, at: Date.now() });
+  return rows;
+}
+
+/*
+ * FAILURE MODES (2 total):
+ *   1. PostgreSQL is down → function throws, caller handles error
+ *   2. Application crashes → cache lost, next request re-warms from DB
+ *
+ * DEPENDENCIES: PostgreSQL
+ * LINES: ~25
+ * DEBUGGABILITY: console.log + stack trace
+ * 3AM RUNBOOK: "Is PostgreSQL running? Run: SELECT 1"
+ */
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERSION B: OVER-ENGINEERED (sketch — actual impl would be ~300+ lines)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Architecture:
+//   products-service  → publishes ProductViewed events to Kafka
+//   view-counter-service → consumes events, aggregates view counts, writes to Redis sorted set
+//   query-service → reads from Redis sorted set, falls back to PostgreSQL
+//   cache-invalidation-service → subscribes to ProductUpdated events, purges Redis keys
+//
+// Pseudocode (each service is a separate deployment):
+
+// products-service: publish event on every product view
+async function trackView_overengineered(productId, category) {
+  await kafka.producer.send({
+    topic: 'product-events',
+    messages: [{ value: JSON.stringify({ type: 'ProductViewed', productId, category, timestamp: Date.now() }) }],
+  });
+}
+
+// view-counter-service: consume events, update Redis sorted set
+async function consumeProductViewed_overengineered(event) {
+  const { productId, category } = JSON.parse(event.value.toString());
+  await redis.zIncrBy(`top-products:${category}`, 1, productId);
+  // Also need: TTL management, hot key handling, Redis memory limits...
+}
+
+// query-service: read from Redis, fall back to PostgreSQL
+async function getTopProducts_overengineered(category) {
+  try {
+    const results = await redis.zRangeWithScores(`top-products:${category}`, -10, -1, { REV: true });
+    if (results.length === 10) return results;
+    // Fall back to PostgreSQL...
+  } catch {
+    // Redis is down? Fall back to PostgreSQL...
+  }
+  return await db.query('SELECT ...'); // Same query as Version A
+}
+
+/*
+ * FAILURE MODES (8+ total):
+ *   1. PostgreSQL down
+ *   2. Redis down
+ *   3. Kafka broker down
+ *   4. view-counter-service consumer group rebalancing
+ *   5. view-counter-service crashes → events pile up in dead-letter queue
+ *   6. Redis key evicted under memory pressure → stale top-products list
+ *   7. Kafka partition skew → some categories updated slowly
+ *   8. Cache invalidation service falls behind → stale data
+ *   + all the failure interactions between the above
+ *
+ * DEPENDENCIES: PostgreSQL + Redis + Kafka + 3 services
+ * LINES: ~300+ (across 3 services)
+ * DEBUGGABILITY: distributed trace across 3 services + Kafka + Redis
+ * 3AM RUNBOOK: 6 pages
+ *
+ * APPROPRIATE WHEN: 10M+ product views/day, dedicated platform team,
+ * 50+ engineers, different teams own query-service vs view-counter-service.
+ * NOT appropriate for: a startup with 200 DAU.
+ */
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Strangler Fig Pattern: Monolith to Microservice Extraction</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * Strangler fig pattern implementation.
+ * An HTTP proxy sits in front of the monolith and gradually routes
+ * specific paths to new extracted services.
+ *
+ * Step 1: Put this proxy in front of the existing monolith.
+ * Step 2: Extract "user profiles" to a new service.
+ * Step 3: Route /api/users/* to the new service; everything else stays in monolith.
+ * Step 4: Gradually extract more paths as teams and services are ready.
+ * Step 5: When the monolith is empty, decommission it.
+ */
+import express from 'express';
+import { createProxyMiddleware } from 'http-proxy-middleware';
+
+const router = express.Router();
+
+// ── Route registry ─────────────────────────────────────────────────────────
+// Add new entries here as each service is extracted from the monolith.
+// Format: { pathPattern, targetUrl, extractedOn, owner }
+const extractedRoutes = [
+  {
+    pattern:     /^\/api\/users/,
+    target:      'http://user-service:3001',
+    extractedOn: '2026-02-15',
+    owner:       'platform-team',
+  },
+  {
+    pattern:     /^\/api\/orders/,
+    target:      'http://order-service:3002',
+    extractedOn: '2026-04-10',
+    owner:       'commerce-team',
+  },
+  // Add more extracted services here as you migrate them
+];
+
+const MONOLITH_URL = 'http://monolith:8080';
+
+// ── Proxy middleware factory ────────────────────────────────────────────────
+function makeProxy(target) {
+  return createProxyMiddleware({
+    target,
+    changeOrigin: true,
+    on: {
+      error: (err, req, res) => {
+        console.error(`[StranglerProxy] Error proxying to ${target}: ${err.message}`);
+        // If the extracted service is down, fallback to monolith
+        // (optional — depends on whether you trust the monolith as fallback)
+        res.status(502).json({ error: 'Service temporarily unavailable', retryable: true });
+      },
+      proxyReq: (proxyReq, req) => {
+        // Propagate trace context so distributed traces connect
+        proxyReq.setHeader('X-Trace-Id', req.headers['x-trace-id'] || crypto.randomUUID());
+        proxyReq.setHeader('X-Forwarded-By', 'strangler-proxy');
+      },
+    },
+  });
+}
+
+// ── Route matching ──────────────────────────────────────────────────────────
+router.use((req, res, next) => {
+  // Check if this path has been extracted to a new service
+  const match = extractedRoutes.find(r => r.pattern.test(req.path));
+
+  if (match) {
+    console.log(`[StranglerProxy] ${req.method} ${req.path} → ${match.target} (${match.owner})`);
+    return makeProxy(match.target)(req, res, next);
+  }
+
+  // Fall through to the monolith
+  console.log(`[StranglerProxy] ${req.method} ${req.path} → monolith`);
+  return makeProxy(MONOLITH_URL)(req, res, next);
+});
+
+// ── Health endpoint (shows extraction progress) ─────────────────────────────
+router.get('/meta/extraction-status', (req, res) => {
+  res.json({
+    extractedRoutes: extractedRoutes.map(r => ({
+      pattern:     r.pattern.toString(),
+      target:      r.target,
+      extractedOn: r.extractedOn,
+      owner:       r.owner,
+    })),
+    monolithUrl: MONOLITH_URL,
+    advice: 'Add new entries to extractedRoutes as services are extracted.',
+  });
+});
+
+export default router;
+
+// ── Usage ────────────────────────────────────────────────────────────────────
+// const app = express();
+// app.use('/', router);
+// app.listen(80);
+//
+// The proxy now handles all traffic. Extracted services get their paths.
+// The monolith handles everything else — no change needed to the monolith.
+// As you extract more services, add entries to extractedRoutes.
+// When extractedRoutes covers all paths, you can decommission the monolith.
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Before Adding Complexity — 10 Questions</h2>
+        <ul class="check-list">
+          <li>Have I measured the current bottleneck, or am I optimizing a theoretical future problem?</li>
+          <li>What specific problem does this addition solve <em>today</em> — not eventually, today?</li>
+          <li>What new failure modes does this component introduce, and do I have the capacity to operate them?</li>
+          <li>Can I write a 1-page runbook for this component right now? If not, it is too complex.</li>
+          <li>Can a junior engineer on my team debug this at 3 AM without waking me up?</li>
+          <li>What is the rollback plan if this turns out to be a mistake in 6 months?</li>
+          <li>Am I solving a scale problem before I have scale? (Do I have 100x more users than my current system can handle?)</li>
+          <li>Is this the "boring" solution, or is there a simpler technology that 10,000 engineers have battle-tested?</li>
+          <li>Does my team have experience operating this technology, or will this be a learning-curve tax on delivery?</li>
+          <li>If I removed this component tomorrow, would users notice? If no — do I need it?</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Does "start with a monolith" mean I should never use microservices?</h3>
+        <p>
+          No. Microservices are the right choice at the right scale. The argument is against
+          <em>premature</em> decomposition — starting with microservices when a monolith would serve you
+          better for years. Most products will never reach the scale at which microservices become
+          necessary. Of those that do, the strangler fig pattern gives you a safe migration path.
+        </p>
+
+        <h3>What about serverless? Is that simpler than a monolith?</h3>
+        <p>
+          Serverless (Lambda, Cloud Functions) reduces operational overhead — no servers to manage. But
+          it introduces its own complexity: cold starts, function-level deployment, cold-start latency spikes,
+          VPC networking for database access, and the challenge of tracing across many small functions.
+          For simple CRUD APIs, serverless can genuinely be simpler. For complex event-driven systems with
+          many interconnected functions, it can become the worst of both worlds — the operational complexity
+          of microservices plus the cold-start tax.
+        </p>
+
+        <h3>How do I convince my team to resist premature optimization?</h3>
+        <p>
+          Show them the data. When someone proposes a new architectural component, ask them to demonstrate
+          the problem it solves with a load test or profiler output. "This will eventually be a bottleneck"
+          is not sufficient. If they cannot demonstrate the problem, propose deferring the solution until
+          the problem is measurable. Teams that have been burned by over-engineering usually need only one
+          incident to change their approach.
+        </p>
+
+        <h3>Is it ever too late to simplify an architecture?</h3>
+        <p>
+          Almost never — but the cost increases over time. The best time to simplify was before you built
+          the complexity. The second best time is now. Start by identifying the components that cause the
+          most operational pain (the ones that generate the most on-call alerts) and ask whether removing
+          them would simplify the system without losing a measurable benefit. Often the answer is yes.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaways</h2>
+        <p>
+          The hardest lesson I learned as an engineer was that <strong>adding things is easy, removing
+          things is hard, and the best engineers are ruthless about the latter</strong>. Accidental complexity
+          compounds — every component added to solve a theoretical future problem is a component that has
+          to be operated, debugged, documented, and explained to every engineer who joins after you.
+          The frameworks for avoiding this trap are: measure before you optimize, start with the boring
+          technology, match architecture to team size (not aspirational team size), and treat every
+          new component as a liability until it proves its value. Senior engineering is not about knowing
+          how to build complex systems — it is about knowing when not to.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Further exploration</h2>
+        <ul>
+          <li><a href="./microservices-architecture-patterns.html">Microservices Architecture Patterns — Merged Guide</a></li>
+          <li><a href="./scaling-to-1-million-users.html">Scaling to 1 Million Users — Architecture Evolution</a></li>
+          <li><a href="./28-system-design-failure-prevention.html">28 System Design Failure Prevention Concepts</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>URL Shortener System Design — TinyURL Architecture + Crash Recovery During Peak Traffic | Learning Hub</title>
+  <link rel="stylesheet" href="../styles.css" />
+  <script src="../read-state.js" defer></script>
+  <script src="../highlight.js" defer></script>
+  <script src="../chat-widget.js" defer></script>
+</head>
+<body>
+  <div class="topic-page">
+
+    <!-- Hero -->
+    <div class="hero" style="background-image: url('https://images.unsplash.com/photo-1562577309-4932fdd64cd1?w=1600&h=700&fit=crop&auto=format&q=80');">
+      <div class="hero-overlay"></div>
+      <div class="hero-content">
+        <p class="kicker">System Design &middot; Interview &middot; Backend &middot; 28 min</p>
+        <h1>URL Shortener System Design</h1>
+        <p class="subtitle">TinyURL Architecture + Crash Recovery During Peak Traffic</p>
+      </div>
+    </div>
+
+    <!-- Article body -->
+    <div class="topic-body">
+
+      <!-- Summary -->
+      <div class="summary-card">
+        <p>A complete URL shortener design covering short code generation (Base62 vs hashing vs random), the redirect pipeline, Redis caching, analytics via Kafka, rate limiting, and — critically — what happens when the service crashes during IPL Finals with 100M concurrent users, and how to engineer the recovery.</p>
+        <p class="source-tag">Source: <span>System Design Interview Prep</span> &middot; Domain: <span>Backend Architecture / System Design</span></p>
+      </div>
+
+      <!-- 1. Story Card -->
+      <section class="story-card">
+        <span class="section-label">War Story</span>
+        <h2>IPL Finals 2024: The Cascade Nobody Planned For</h2>
+        <p>It was 7:28 PM IST. The IPL Finals were seventeen minutes away from the first ball. A sports media company had embedded shortened links across every push notification, SMS campaign, and sponsored tweet sent to 180 million subscribers. The link format: <code>lnk.example.in/ipl24</code>. By all pre-game estimates, peak traffic was supposed to reach 12,000 requests per second. The system was sized for 15,000. Engineers felt comfortable.</p>
+        <p>At 7:31 PM, Redis memory utilisation crossed 95%. The <code>allkeys-lru</code> eviction policy kicked in — exactly as configured. The problem was not the policy itself but what it chose to evict. IPL campaign URLs had been pre-warmed that morning, but they were accessed in sharp bursts with quiet periods between bursts. LRU saw those quiet periods as staleness and evicted the very URLs that 100 million users were about to click simultaneously. In two minutes, the Redis cache miss rate went from its normal 2% to 87%.</p>
+        <p>Each cache miss became a direct PostgreSQL query. At 87% miss rate and 12,000 req/s, that translated to roughly 10,440 DB queries per second against a pool of 200 connections. The pool filled in under four seconds. New requests queued. Queue depth grew faster than it drained. At queue depth 5,000, application servers began timing out while waiting for a connection. The timeout error was swallowed by a retry loop — each retry requesting another connection, accelerating the death spiral.</p>
+        <p>At 7:39 PM — nine minutes after the first alert — all three application server clusters started failing health checks. The load balancer took them out of rotation. Every shortened link in every notification returned a 502. Users hammered refresh. The match started. The outage lasted 40 minutes. Post-incident analysis identified three root causes that were each independently preventable: no PgBouncer connection pooler, a single-shard Redis instance with no horizontal overflow, and no event-aware pre-warming policy that guaranteed minimum TTLs for campaign-critical codes. This article is the system design that would have prevented all three.</p>
+      </section>
+
+      <!-- 2. Requirements -->
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>Functional and Non-Functional Requirements</h2>
+        <h3>Functional Requirements</h3>
+        <ul>
+          <li><strong>Shorten URL</strong> — Given a long URL, produce a unique short code (7 characters). Optionally accept a custom alias.</li>
+          <li><strong>Redirect</strong> — Given a short code, redirect the user to the original long URL with HTTP 302.</li>
+          <li><strong>Custom Alias</strong> — Users with accounts can choose a vanity slug (e.g., <code>/ipl24</code>) subject to availability and blocklist checks.</li>
+          <li><strong>Link Expiry</strong> — Every link can have an optional expiry timestamp. After expiry, the short code returns 410 Gone.</li>
+          <li><strong>Analytics</strong> — Record click events (timestamp, IP, referrer, user-agent) and expose aggregate counts per link.</li>
+          <li><strong>Deactivation</strong> — Link owners can deactivate a code before expiry.</li>
+        </ul>
+        <h3>Non-Functional Requirements</h3>
+        <ul>
+          <li><strong>Availability:</strong> 99.99% uptime (&lt;52 minutes downtime per year). No single points of failure.</li>
+          <li><strong>Latency:</strong> Redirect p99 &lt; 50 ms. Shorten API p99 &lt; 200 ms.</li>
+          <li><strong>Scale:</strong> 100 million daily active users. Up to 15,000 redirect requests per second at peak.</li>
+          <li><strong>Durability:</strong> No shortened link may silently disappear. Deletions are soft-deletes.</li>
+          <li><strong>Security:</strong> Phishing URL scanning, rate limiting per IP and per user account, reserved-word blocklist.</li>
+        </ul>
+      </section>
+
+      <!-- 3. Capacity Estimation -->
+      <section class="content-card">
+        <span class="section-label">Capacity Estimation</span>
+        <h2>Numbers That Drive Architecture Decisions</h2>
+        <p>Capacity estimation is not box-ticking. Every number below directly determines an architecture choice later in this document. Work through them before designing anything.</p>
+
+        <h3>Write Path (URL Creation)</h3>
+        <ul>
+          <li>1 million new shortened URLs per day</li>
+          <li>1,000,000 / 86,400 seconds ≈ <strong>11.6 writes/sec</strong> average</li>
+          <li>Peak writes (campaigns launching at the same time): ~100 writes/sec</li>
+        </ul>
+
+        <h3>Read Path (Redirects)</h3>
+        <ul>
+          <li>100 million DAU, average 1 redirect click per user per day</li>
+          <li>100,000,000 / 86,400 ≈ <strong>1,157 req/sec</strong> average</li>
+          <li>Peak (prime-time, live events): <strong>10,000–15,000 req/sec</strong></li>
+          <li>Read-to-write ratio: 1,157 / 11.6 ≈ <strong>100:1</strong></li>
+        </ul>
+
+        <div class="callout"><p>90% of all traffic is reads. Every architectural investment should prioritise read latency and read availability first. The write path can tolerate more latency.</p></div>
+
+        <h3>Storage</h3>
+        <ul>
+          <li>Average row size: ~500 bytes (code 7B + long URL 200B + metadata 293B)</li>
+          <li>5-year URL retention: 1M/day × 365 × 5 = 1.825 billion rows</li>
+          <li>1.825B × 500 bytes ≈ <strong>912 GB</strong> (≈ 1 TB with indexes)</li>
+          <li>PostgreSQL on a managed cloud instance: fits comfortably on a 2TB SSD volume</li>
+        </ul>
+
+        <h3>Cache Sizing</h3>
+        <ul>
+          <li>Observation: top 20% of URLs account for 80% of traffic (Pareto principle)</li>
+          <li>Total active URL rows at any time: ~5 million (rolling 30-day active window)</li>
+          <li>Top 20% = 1 million URLs × 500 bytes = <strong>500 MB hot set</strong></li>
+          <li>With expiry metadata and Redis overhead, provision <strong>10 GB Redis RAM</strong> for safety headroom</li>
+          <li>At 95% hit rate, DB receives ~580 req/sec instead of 11,570 — a 20× reduction in DB load</li>
+        </ul>
+      </section>
+
+      <!-- 4. Short Code Generation -->
+      <section class="content-card">
+        <span class="section-label">Core Algorithm</span>
+        <h2>Short Code Generation — Three Strategies</h2>
+        <p>Generating a collision-free, short, opaque code is the most interview-discussed part of URL shortener design. There are three serious strategies, and each has a different failure mode.</p>
+
+        <h3>Strategy 1: Sequential ID + Base62 Encoding</h3>
+        <p>A database auto-increment ID (e.g., <code>1,000,000</code>) is encoded in Base62 (characters <code>0-9</code>, <code>a-z</code>, <code>A-Z</code>) to produce a short string. ID 1,000,000 encodes to <code>4c92</code>.</p>
+        <ul>
+          <li><strong>Pros:</strong> Zero collision risk, simple implementation, natural ordering.</li>
+          <li><strong>Cons:</strong> Sequential codes are guessable — an attacker can enumerate all active links by incrementing the code. Race conditions exist in distributed writes (two app servers requesting the next ID simultaneously). Requires a centralised sequence generator (single point of failure unless you use a distributed counter like Zookeeper or Snowflake).</li>
+        </ul>
+        <p><strong>Verdict:</strong> Acceptable for internal tools. Avoid for public-facing links where enumeration is a threat.</p>
+
+        <h3>Strategy 2: MD5 Hash Truncation</h3>
+        <p>Hash the long URL with MD5, take the first 7 characters of the hex digest, and use that as the code. The same long URL always produces the same code (deterministic deduplication is free).</p>
+        <ul>
+          <li><strong>Pros:</strong> Deterministic — shortening the same URL twice returns the same code. Naturally distributed, no central counter needed.</li>
+          <li><strong>Cons:</strong> Collision probability is non-trivial at scale. With 7 hex characters (16^7 = 268M combinations) and 100M URLs, the birthday paradox gives ~15% collision probability. Requires a bloom filter or DB lookup on every write to check collisions. If collision, must append a counter and rehash — complicating the determinism property.</li>
+        </ul>
+        <p><strong>Verdict:</strong> Workable with a bloom filter but adds write-path complexity.</p>
+
+        <h3>Strategy 3: Random 7-Character Alphanumeric (Recommended)</h3>
+        <p>Generate a cryptographically random 7-character string from the Base62 alphabet. The key space is 62^7 ≈ 3.5 trillion combinations. At 1 billion URLs, the collision probability is less than 0.03%.</p>
+        <ul>
+          <li><strong>Pros:</strong> Non-enumerable, truly distributed (no central counter), simple implementation.</li>
+          <li><strong>Cons:</strong> Requires collision detection on every write. Use a bloom filter (in-memory probabilistic structure) to check if a code has been used before hitting the DB. Bloom filter false-positive rate at 1 billion elements is tunable — a 10 GB bloom filter gives &lt;0.001% false positives.</li>
+        </ul>
+        <p><strong>Verdict:</strong> Best for production public-facing services. Pair with a bloom filter in Redis and a DB unique constraint as the authoritative backstop.</p>
+
+        <div class="callout"><p>A bloom filter is your first line of collision defence. If the filter says "not seen," insert immediately. If it says "possibly seen," do a DB lookup to confirm. Only ~0.001% of writes need the DB lookup. The DB unique constraint is your safety net, not your primary check.</p></div>
+      </section>
+
+      <!-- 5. Redirect Pipeline -->
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>The Redirect Pipeline</h2>
+        <p>The redirect is the hottest path in the system — it must complete in under 50 ms at the p99. Every component in the pipeline must be chosen with that budget in mind.</p>
+
+        <h3>Full Request Path</h3>
+        <ol>
+          <li><strong>DNS</strong> — Short domain resolves to Anycast IP of a global CDN (e.g., CloudFront, Fastly). Latency: ~5 ms for cached DNS.</li>
+          <li><strong>CDN Edge Node</strong> — For static redirects (permanent campaigns), a CDN can cache the 302 response at the edge and serve it without hitting the origin. Cache-Control: max-age=300 for non-personalised links. Latency: ~2 ms at edge hit.</li>
+          <li><strong>Load Balancer</strong> — Layer-7 (e.g., NGINX, AWS ALB) distributes requests across app server pool. Health checks every 5 seconds.</li>
+          <li><strong>Application Server</strong> — Receives <code>GET /:code</code>, extracts the 7-character code. Budget: &lt;40 ms for full application logic.</li>
+          <li><strong>Redis Cache Lookup</strong> — Hash lookup: <code>HGETALL url:{code}</code>. Returns <code>long_url</code>, <code>expires_at</code>, <code>is_active</code>. If HIT and not expired and active: proceed to step 6. If MISS: proceed to step 7. Redis latency: ~0.5 ms on localhost, ~2 ms across VPC.</li>
+          <li><strong>Cache HIT Path</strong> — Check expiry (in-process calculation, no I/O). Emit Kafka click event asynchronously. Return HTTP 302 with <code>Location: {long_url}</code>. Done. Total latency: ~10–15 ms.</li>
+          <li><strong>Cache MISS Path</strong> — Query PostgreSQL: <code>SELECT long_url, expires_at, is_active FROM short_urls WHERE code = $1</code>. DB latency: ~5–10 ms. Populate Redis cache with TTL = min(remaining_expiry, 86400 seconds). Return HTTP 302. Total latency: ~20–30 ms.</li>
+        </ol>
+
+        <h3>Why 302 Not 301?</h3>
+        <p>HTTP 301 is a permanent redirect. Browsers cache it indefinitely and will never re-request the short URL. This means: no analytics (you never see the click again), no ability to update the destination URL, and no expiry enforcement (the browser will keep redirecting forever even after the link expires). HTTP 302 is temporary — the browser always re-requests the short URL, giving you click analytics, destination update capability, and expiry enforcement. The tiny extra roundtrip is worth every one of those capabilities.</p>
+
+        <h3>Latency Budget</h3>
+        <table style="width:100%; border-collapse: collapse; margin-top: 12px;">
+          <thead>
+            <tr style="background: var(--surface-alt, #f3f4f6);">
+              <th style="padding: 8px 12px; text-align: left;">Component</th>
+              <th style="padding: 8px 12px; text-align: left;">Cache HIT</th>
+              <th style="padding: 8px 12px; text-align: left;">Cache MISS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td style="padding: 8px 12px;">DNS + CDN</td><td style="padding: 8px 12px;">5 ms</td><td style="padding: 8px 12px;">5 ms</td></tr>
+            <tr style="background: var(--surface-alt, #f3f4f6);"><td style="padding: 8px 12px;">LB + App Server</td><td style="padding: 8px 12px;">3 ms</td><td style="padding: 8px 12px;">3 ms</td></tr>
+            <tr><td style="padding: 8px 12px;">Redis Lookup</td><td style="padding: 8px 12px;">2 ms</td><td style="padding: 8px 12px;">2 ms</td></tr>
+            <tr style="background: var(--surface-alt, #f3f4f6);"><td style="padding: 8px 12px;">DB Query</td><td style="padding: 8px 12px;">—</td><td style="padding: 8px 12px;">8 ms</td></tr>
+            <tr><td style="padding: 8px 12px;">Response</td><td style="padding: 8px 12px;">1 ms</td><td style="padding: 8px 12px;">2 ms</td></tr>
+            <tr style="font-weight: bold;"><td style="padding: 8px 12px;">Total p50</td><td style="padding: 8px 12px;">11 ms</td><td style="padding: 8px 12px;">20 ms</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- 6. Database Schema -->
+      <section class="content-card">
+        <span class="section-label">Data Model</span>
+        <h2>Database Schema</h2>
+        <p>PostgreSQL is the authoritative store. Redis is the read cache. ClickHouse stores analytics events. All three have different schemas designed for their specific access patterns.</p>
+
+        <h3>PostgreSQL — short_urls table</h3>
+        <pre><code class="language-sql">CREATE TABLE short_urls (
+  id           BIGSERIAL PRIMARY KEY,
+  code         CHAR(7)      NOT NULL UNIQUE,
+  long_url     TEXT         NOT NULL,
+  user_id      BIGINT       REFERENCES users(id) ON DELETE SET NULL,
+  custom_alias BOOLEAN      NOT NULL DEFAULT FALSE,
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  expires_at   TIMESTAMPTZ,               -- NULL means no expiry
+  is_active    BOOLEAN      NOT NULL DEFAULT TRUE,
+  click_count  BIGINT       NOT NULL DEFAULT 0  -- approximate, updated async
+);
+
+-- Primary lookup index (used on every redirect)
+CREATE UNIQUE INDEX idx_short_urls_code ON short_urls (code);
+
+-- Expiry cleanup job index
+CREATE INDEX idx_short_urls_expires_at ON short_urls (expires_at)
+  WHERE expires_at IS NOT NULL AND is_active = TRUE;
+
+-- User dashboard: list all links by owner
+CREATE INDEX idx_short_urls_user_id_created ON short_urls (user_id, created_at DESC);
+</code></pre>
+
+        <h3>Redis — per-code hash</h3>
+        <pre><code class="language-text">HSET url:{code}
+  long_url     "https://example.com/very/long/path"
+  expires_at   "2025-12-31T23:59:59Z"   (or "never")
+  is_active    "1"
+
+EXPIRE url:{code} 86400   -- 24-hour TTL, refreshed on access
+</code></pre>
+
+        <h3>Index Strategy</h3>
+        <p>The <code>idx_short_urls_code</code> unique index on the 7-character <code>CHAR(7)</code> column is the only index that needs to be fast for the redirect hot path. Because <code>CHAR(7)</code> values are fixed-width and the index is B-tree, a lookup is O(log n) — at 1 billion rows it is approximately 30 comparisons, well under 1 ms of CPU time. The DB latency you see in production is dominated by network and connection overhead, not the lookup itself — which is why PgBouncer (connection pooling) matters more than index tuning at scale.</p>
+      </section>
+
+      <!-- 7. Analytics Pipeline -->
+      <section class="content-card">
+        <span class="section-label">Analytics</span>
+        <h2>Analytics Pipeline: Kafka + ClickHouse</h2>
+        <p>Analytics must never touch the redirect critical path. Every millisecond added to the redirect for analytics purposes is a latency regression affecting 100 million users. The architecture is: fire-and-forget on the critical path, process asynchronously.</p>
+
+        <h3>Event Flow</h3>
+        <ol>
+          <li>Application server handles redirect (Redis HIT or DB MISS). After writing the 302 response header, it publishes a Kafka event to the <code>url.clicks</code> topic. This publish is non-blocking — the response is sent to the client before the Kafka acknowledgement returns. If Kafka is temporarily unavailable, events are buffered in a local in-process queue (max 10,000 events, drop oldest on overflow).</li>
+          <li>Kafka consumers (a separate service) read from <code>url.clicks</code>, enrich events (reverse IP geolookup, UA parsing), and batch-insert into ClickHouse.</li>
+          <li>ClickHouse stores raw click events in a MergeTree table partitioned by day. Materialised views compute per-link aggregates (total clicks, unique IPs, top referrers) every 5 minutes.</li>
+          <li>The analytics API reads from ClickHouse materialised views — never from PostgreSQL <code>click_count</code>. The <code>click_count</code> column in PostgreSQL is an approximate counter updated by a background job every 15 minutes, used only for quick sorting in the user dashboard.</li>
+        </ol>
+
+        <div class="callout"><p>Analytics events are always asynchronous. If the analytics pipeline fails completely, no user sees a broken redirect. Decouple write latency from analytics latency by making analytics a side effect, never a dependency.</p></div>
+
+        <h3>Kafka Topic Design</h3>
+        <ul>
+          <li>Topic: <code>url.clicks</code>, 24 partitions (1 per hour-of-day allows time-based routing)</li>
+          <li>Partition key: <code>code</code> — ensures all clicks for a given URL land on the same partition for in-order processing</li>
+          <li>Retention: 7 days (allows replay if ClickHouse consumer falls behind)</li>
+          <li>Replication factor: 3 (tolerates 2 broker failures)</li>
+        </ul>
+      </section>
+
+      <!-- 8. Rate Limiting and Security -->
+      <section class="content-card">
+        <span class="section-label">Security</span>
+        <h2>Rate Limiting and Security</h2>
+
+        <h3>Rate Limiting</h3>
+        <p>Rate limiting is applied at two layers: the CDN edge (coarse-grained, IP-based, protects against DDoS) and the application layer (fine-grained, per-user and per-IP, protects against abuse).</p>
+        <ul>
+          <li><strong>Shorten API (POST /api/v1/shorten):</strong> Token bucket, 10 req/min per IP for unauthenticated users, 100 req/min per user account for authenticated users. Burst allowance: 3× for the first 5 seconds. Implemented via a Redis sorted set with sliding window counters.</li>
+          <li><strong>Redirect API (GET /:code):</strong> No rate limiting on individual redirects (it would break normal browsing). DDoS protection via CDN rate limiting at the edge (e.g., Cloudflare rate limiting at 1,000 req/min per IP).</li>
+          <li><strong>Analytics API:</strong> 60 req/min per authenticated user. Results are cached for 5 minutes per code.</li>
+        </ul>
+
+        <h3>Phishing and Malware Prevention</h3>
+        <ul>
+          <li><strong>Google Safe Browsing API</strong> — checked asynchronously within 10 seconds of URL creation. If flagged, the link is deactivated and the creator is notified. Re-scan every 24 hours for active links.</li>
+          <li><strong>Domain blocklist</strong> — maintained list of known phishing/malware domains. Checked synchronously at creation time (in-process hash set lookup, O(1)). Updated from threat intelligence feeds every hour.</li>
+          <li><strong>Custom alias reserved words</strong> — blocked from use as custom aliases: <code>api</code>, <code>admin</code>, <code>help</code>, <code>login</code>, <code>logout</code>, <code>signup</code>, <code>www</code>, <code>blog</code>, <code>status</code>, and ~200 others. Stored in a static file loaded at startup.</li>
+          <li><strong>URL length limit</strong> — Maximum long URL length: 2,048 characters (matches browser URL bar limits). Longer URLs are rejected with 400 Bad Request.</li>
+        </ul>
+      </section>
+
+      <!-- 9. THE CRASH SCENARIO -->
+      <section class="content-card">
+        <span class="section-label">Incident Analysis</span>
+        <h2>THE CRASH SCENARIO — IPL Finals: A Three-Phase Failure</h2>
+        <p>This is the section that separates good system design from great system design. Understanding failure cascades — not just happy-path architecture — is what makes the difference between a system that survives peak events and one that becomes a post-mortem.</p>
+
+        <h3>Phase 1: Redis Memory Exhaustion and LRU Betrayal (T+0 to T+8 min)</h3>
+        <p>The system was configured with a single Redis instance: 8 GB memory, <code>maxmemory-policy allkeys-lru</code>. Campaign URLs for the IPL Finals had been pre-warmed at 6:00 AM that morning. By 7:00 PM, 13 hours of normal traffic had filled Redis to 94% capacity with a mix of URLs: news articles, sports scores, e-commerce links, and the IPL campaign codes.</p>
+        <p>When the first wave of pre-match traffic arrived at 7:15 PM, Redis started evicting. The <code>allkeys-lru</code> policy evicts the key that was least recently accessed. IPL campaign URLs — <code>url:ipl24</code>, <code>url:match7</code>, <code>url:mvp</code> — had been pre-warmed but were accessed in burst patterns (pre-match hype, halftime, post-match). Between those bursts, LRU saw them as cold and evicted them. Meanwhile, a steady stream of e-commerce short links kept those keys warm.</p>
+        <p>By 7:31 PM, all pre-warmed IPL codes had been evicted at least once. As the 7:45 PM match-start rush began, every IPL code was a cache miss. Cache miss rate: 2% (baseline) → 87% (during peak).</p>
+
+        <h3>Phase 2: DB Connection Pool Exhaustion (T+8 to T+15 min)</h3>
+        <p>Each cache miss caused the application server to open a connection to PostgreSQL and query the <code>short_urls</code> table. PostgreSQL was configured with <code>max_connections = 200</code>. The application servers had no PgBouncer — every application thread held its own direct connection.</p>
+        <p>At 12,000 req/s and 87% miss rate: <strong>10,440 DB queries/second</strong>. With each query taking ~8 ms, the number of concurrent in-flight queries at any instant was 10,440 × 0.008 ≈ <strong>84 concurrent connections just for redirects</strong>. Combined with write traffic, analytics API connections, and dashboard queries, the 200-connection pool was exhausted within 4 seconds of peak traffic arriving.</p>
+        <p>New connection attempts from application servers were queued by the PostgreSQL accept queue. The application servers used a synchronous connection model with a 5-second timeout. As the queue depth grew, connections started timing out before they could execute any query. The timeout error was logged but the application server's retry logic issued a fresh connection request — <em>which also needed a new connection from the already-exhausted pool</em>. Each retry made the problem worse.</p>
+
+        <h3>Phase 3: Application Server Failure and Full Outage (T+15 to T+55 min)</h3>
+        <p>With PostgreSQL accepting no new connections, the redirect handler began returning 500 errors on cache misses. But 87% of requests were cache misses. So 87% of requests returned 500. The load balancer health check endpoint was <code>GET /health</code> — which itself required a Redis ping and a DB health check. With DB connections unavailable, the health check failed. The load balancer marked all three app server clusters as unhealthy and stopped routing traffic. All users received 502 Bad Gateway from the load balancer itself.</p>
+        <p>Recovery required: (1) identifying the root cause (took 22 minutes — engineers initially suspected the DB itself had crashed, not connection exhaustion), (2) manually restarting application servers to release connection leaks, (3) manually pre-warming Redis from a DB snapshot, (4) gradually re-enabling traffic. Total outage: 40 minutes.</p>
+
+        <div class="callout"><p>Three changes would have prevented this entirely: PgBouncer (connection pooling), Redis Cluster (horizontal memory scaling to avoid OOM), and event-aware pre-warming (guaranteed minimum TTL for VIP campaign codes). None of them are complex. All of them were known best practices. The failure was a planning failure, not a technical one.</p></div>
+
+        <h3>Recovery Steps (What Was Actually Done)</h3>
+        <ol>
+          <li><strong>Immediate:</strong> Scale Redis vertically (emergency resize to 32 GB). This took 8 minutes and required a Redis restart.</li>
+          <li><strong>Immediate:</strong> Restart application servers to release leaked connections.</li>
+          <li><strong>Immediate:</strong> Manually re-insert top 10,000 URLs into Redis via a one-time script pulling from PostgreSQL.</li>
+          <li><strong>Short-term:</strong> Add PgBouncer in transaction-pooling mode between app servers and PostgreSQL. Pool size: 20 connections per app server, max 400 total. Each query holds a connection for ~8 ms, then releases it — allowing 1 physical connection to serve hundreds of application threads.</li>
+          <li><strong>Medium-term:</strong> Deploy Redis Cluster with 3 primary shards + 3 replicas. Each shard holds ~3.3 GB of URL data. No single shard can OOM without triggering failover. Horizontal scaling is additive.</li>
+        </ol>
+
+        <h3>Prevention Architecture (What Should Have Been Built)</h3>
+        <ul>
+          <li><strong>Event-Aware Capacity Planning:</strong> A pre-event runbook triggers 24 hours before any scheduled peak event (sports, sales, launches). It identifies all short codes associated with the event and sets a minimum TTL floor of 7,200 seconds (2 hours) on those Redis keys. LRU cannot evict a key with a TTL floor because the key is continuously re-expired before it appears cold. The runbook is triggered by the campaign management system automatically when any link is tagged with a peak-event label.</li>
+          <li><strong>PgBouncer in Transaction Pooling Mode:</strong> Every app server connects to PgBouncer on localhost. PgBouncer maintains a pool of 20 long-lived connections to PostgreSQL per app server. Each application query borrows a connection for the duration of one query (~8 ms), then returns it. 200 application threads can share 20 physical connections with no queuing at normal loads. At extreme loads, PgBouncer queues requests and applies backpressure, rather than exhausting the DB.</li>
+          <li><strong>Circuit Breaker Pattern:</strong> The DB lookup code path has a circuit breaker. If the error rate exceeds 50% over a 10-second window, the circuit opens and the redirect handler immediately returns 503 with a <code>Retry-After: 30</code> header, rather than hanging connections. Users see a fast failure with a retry hint, rather than a 40-second timeout hanging their browser.</li>
+          <li><strong>Redis Memory Alert at 70%:</strong> PagerDuty alert fires when Redis memory hits 70%. On-call engineer has 30 minutes to scale before LRU eviction becomes aggressive. At 95%, automated horizontal shard addition kicks in (Redis Cluster resharding).</li>
+          <li><strong>Graceful Degradation:</strong> If Redis is unavailable AND the DB circuit breaker is open, the service returns 503 with <code>Retry-After: 60</code> instead of hanging. A static fallback page explains the service is temporarily overloaded. This prevents cascading browser retries from amplifying the load.</li>
+        </ul>
+      </section>
+
+      <!-- 10. API Design -->
+      <section class="content-card">
+        <span class="section-label">API Design</span>
+        <h2>REST API Endpoints</h2>
+
+        <h3>POST /api/v1/shorten</h3>
+        <pre><code class="language-json">// Request
+{
+  "long_url": "https://example.com/very/long/path?with=query&params=here",
+  "custom_alias": "ipl24",      // optional
+  "expires_at": "2025-12-31",   // optional ISO 8601 date
+  "tags": ["campaign", "ipl"]   // optional metadata
+}
+
+// Response 201 Created
+{
+  "code": "ipl24",
+  "short_url": "https://lnk.example.in/ipl24",
+  "long_url": "https://example.com/very/long/path?with=query&params=here",
+  "expires_at": "2025-12-31T23:59:59Z",
+  "created_at": "2024-03-15T10:30:00Z"
+}
+</code></pre>
+
+        <h3>GET /:code</h3>
+        <pre><code class="language-text">// Success
+HTTP/1.1 302 Found
+Location: https://example.com/very/long/path?with=query&params=here
+Cache-Control: no-store
+
+// Not Found
+HTTP/1.1 404 Not Found
+
+// Expired
+HTTP/1.1 410 Gone
+
+// Service Overloaded (circuit open)
+HTTP/1.1 503 Service Unavailable
+Retry-After: 30
+</code></pre>
+
+        <h3>GET /api/v1/info/:code</h3>
+        <pre><code class="language-json">// Response 200 OK
+{
+  "code": "ipl24",
+  "long_url": "https://example.com/very/long/path",
+  "created_at": "2024-03-15T10:30:00Z",
+  "expires_at": "2025-12-31T23:59:59Z",
+  "is_active": true,
+  "click_count": 4820341,
+  "last_clicked_at": "2024-03-15T19:45:12Z"
+}
+</code></pre>
+
+        <h3>DELETE /api/v1/urls/:code</h3>
+        <pre><code class="language-text">// Soft-deletes the link (sets is_active = false)
+// Requires authentication as link owner or admin
+// Response 204 No Content on success
+</code></pre>
+      </section>
+
+      <!-- 11. JavaScript Code Example -->
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>Redirect Handler Implementation</h2>
+        <p>The following handler implements the full redirect pipeline: Redis cache-aside, circuit breaker, PostgreSQL fallback, and async Kafka event publish. This is production-ready Node.js using <code>ioredis</code> and <code>pg</code>.</p>
+
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">const Redis = require('ioredis');
+const { Pool } = require('pg');
+const { Kafka } = require('kafkajs');
+
+const redis = new Redis({ host: process.env.REDIS_HOST, port: 6379 });
+const pgPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 20 });
+const kafka = new Kafka({ brokers: [process.env.KAFKA_BROKER] });
+const kafkaProducer = kafka.producer();
+kafkaProducer.connect();
+
+// Circuit breaker state
+const circuit = { state: 'CLOSED', failures: 0, lastAttempt: 0 };
+const FAILURE_THRESHOLD = 5;
+const RESET_TIMEOUT_MS = 30_000;
+
+async function redirectHandler(req, res) {
+  const code = req.params.code;
+
+  // 1. Redis cache lookup
+  const cached = await redis.hgetall(`url:${code}`);
+  if (cached && cached.long_url) {
+    if (cached.is_active === '0') return res.status(410).end();
+    if (cached.expires_at !== 'never' && new Date(cached.expires_at) < new Date()) {
+      return res.status(410).end();
+    }
+    publishClickEvent(code, req);  // fire-and-forget
+    return res.redirect(302, cached.long_url);
+  }
+
+  // 2. Circuit breaker check
+  if (circuit.state === 'OPEN') {
+    const elapsed = Date.now() - circuit.lastAttempt;
+    if (elapsed < RESET_TIMEOUT_MS) {
+      res.set('Retry-After', '30');
+      return res.status(503).json({ error: 'Service temporarily unavailable' });
+    }
+    circuit.state = 'HALF_OPEN';
+  }
+
+  // 3. DB fallback
+  try {
+    const { rows } = await pgPool.query(
+      'SELECT long_url, expires_at, is_active FROM short_urls WHERE code = $1',
+      [code]
+    );
+    if (!rows.length) return res.status(404).end();
+
+    const row = rows[0];
+    if (!row.is_active) return res.status(410).end();
+    if (row.expires_at && new Date(row.expires_at) < new Date()) return res.status(410).end();
+
+    // 4. Populate Redis cache
+    const ttl = row.expires_at
+      ? Math.floor((new Date(row.expires_at) - Date.now()) / 1000)
+      : 86400;
+    await redis.hset(`url:${code}`, {
+      long_url: row.long_url,
+      expires_at: row.expires_at ? row.expires_at.toISOString() : 'never',
+      is_active: row.is_active ? '1' : '0',
+    });
+    if (ttl > 0) await redis.expire(`url:${code}`, Math.min(ttl, 86400));
+
+    circuit.state = 'CLOSED';
+    circuit.failures = 0;
+
+    publishClickEvent(code, req);  // fire-and-forget
+    return res.redirect(302, row.long_url);
+
+  } catch (err) {
+    circuit.failures++;
+    circuit.lastAttempt = Date.now();
+    if (circuit.failures >= FAILURE_THRESHOLD) circuit.state = 'OPEN';
+    res.set('Retry-After', '30');
+    return res.status(503).json({ error: 'Service temporarily unavailable' });
+  }
+}
+
+function publishClickEvent(code, req) {
+  setImmediate(async () => {
+    try {
+      await kafkaProducer.send({
+        topic: 'url.clicks',
+        messages: [{
+          key: code,
+          value: JSON.stringify({
+            code,
+            timestamp: new Date().toISOString(),
+            ip: req.ip,
+            userAgent: req.headers['user-agent'],
+            referrer: req.headers['referer'] || null,
+          }),
+        }],
+      });
+    } catch (_) { /* analytics failure must never affect redirect */ }
+  });
+}
+
+module.exports = { redirectHandler };
+</code></pre>
+      </section>
+
+      <!-- 12. Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Production Readiness Checklist</h2>
+        <ul class="check-list">
+          <li>Always use 302 not 301 redirects — 301 caching breaks analytics, expiry, and destination updates</li>
+          <li>Pre-warm event-critical URLs 24 hours before any scheduled peak event</li>
+          <li>Set a minimum TTL floor (7,200 seconds) for VIP and campaign-linked codes to prevent LRU eviction during burst gaps</li>
+          <li>Use PgBouncer in transaction-pooling mode between all application servers and PostgreSQL</li>
+          <li>Deploy Redis Cluster with at least 3 primary shards for horizontal memory scaling — a single Redis instance is a memory ceiling and a single point of failure</li>
+          <li>Put all analytics on the async Kafka path — never block a redirect on analytics I/O</li>
+          <li>Set Redis memory alert at 70% capacity (PagerDuty) and automated resharding at 85%</li>
+          <li>Use a bloom filter for collision detection during short code generation — DB unique constraint is the backstop, not the primary check</li>
+        </ul>
+      </section>
+
+      <!-- 13. FAQ -->
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Frequently Asked Questions</h2>
+
+        <div class="faq-item">
+          <h3>Why 302 not 301?</h3>
+          <p>HTTP 301 is a permanent redirect that browsers cache indefinitely. Once a browser caches a 301, it will never send another request to your short URL — meaning you lose all click analytics, cannot update the destination URL, and cannot enforce link expiry. HTTP 302 is temporary: the browser always re-requests the short URL, giving you full control and visibility. The cost is one extra DNS + TCP roundtrip per click, which is negligible compared to the capabilities you gain. Always use 302 for user-facing shortened links.</p>
+        </div>
+
+        <div class="faq-item">
+          <h3>How to prevent link enumeration?</h3>
+          <p>With random Base62 7-character codes (key space: 62^7 ≈ 3.5 trillion), brute-force enumeration is computationally infeasible — an attacker requesting 1,000 codes/sec would need 111 years to cover 1% of the space. Additionally: rate limit unauthenticated redirect attempts to 1,000 req/min per IP (anything beyond that pattern is scanning, not browsing), return 404 for all invalid codes (do not distinguish "never existed" from "expired"), and log enumeration attempts for security alerting.</p>
+        </div>
+
+        <div class="faq-item">
+          <h3>How to handle link expiry at scale?</h3>
+          <p>Two mechanisms work together. First, Redis TTL is set to <code>min(time_until_expiry, 86400)</code> on every cache write — Redis will automatically evict expired keys, so no expired key will ever be served from cache. Second, a background PostgreSQL job runs every hour and soft-deletes rows where <code>expires_at &lt; NOW() AND is_active = TRUE</code>. Use the partial index <code>CREATE INDEX ... WHERE expires_at IS NOT NULL AND is_active = TRUE</code> to make this job fast even at billions of rows. Never check expiry by running a full table scan.</p>
+        </div>
+
+        <div class="faq-item">
+          <h3>What is the read-to-write ratio?</h3>
+          <p>At 100M DAU with 1M new URLs/day: approximately 100:1 read-to-write ratio (1,157 redirects/sec average vs 11.6 writes/sec). At peak events this can reach 1,000:1 (15,000 redirects/sec vs the same 11.6 writes/sec — campaign launches do not scale with event traffic). This extreme read dominance is why the entire architecture optimises for read latency: Redis caching, CDN edge caching, read replicas, and connection pooling are all read-path investments.</p>
+        </div>
+      </section>
+
+      <!-- 14. Related Reading -->
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Go Deeper</h2>
+        <div class="related-links">
+          <a href="cache-stampede-hot-key.html" class="related-link">
+            <span class="related-link-title">Cache Stampede and Hot Key Problems</span>
+            <span class="related-link-desc">When every client requests the same key simultaneously — the mechanics of cache stampede, hot key overload, and probabilistic early expiration.</span>
+          </a>
+          <a href="redis-production-guide.html" class="related-link">
+            <span class="related-link-title">Redis in Production</span>
+            <span class="related-link-desc">Memory management, eviction policies, Redis Cluster topology, persistence tradeoffs (RDB vs AOF), and operational runbooks for on-call engineers.</span>
+          </a>
+          <a href="system-design-for-beginners.html" class="related-link">
+            <span class="related-link-title">System Design for Beginners</span>
+            <span class="related-link-desc">The mental framework for approaching any system design interview: requirements gathering, capacity estimation, component selection, and trade-off articulation.</span>
+          </a>
+        </div>
+      </section>
+
+      <!-- 15. Takeaways -->
+      <section class="content-card takeaways">
+        <span class="section-label">Key Takeaways</span>
+        <h2>What This System Teaches</h2>
+        <p>The URL shortener is a deceptively simple system with a deceptively brutal failure mode. On the surface it is a key-value lookup with a redirect. Under the hood it is a read-heavy, latency-critical, cache-dependent service that must sustain 15,000 req/sec with &lt;50 ms p99 and 99.99% availability — including during the moments when 100 million users all click the same link at the same time.</p>
+        <p>The IPL Finals crash is the canonical lesson: event-aware capacity planning is not optional. The system was technically correct on a normal day. It was operationally incomplete on a peak day. The gap between those two states is exactly what distinguishes a junior system design from a senior one.</p>
+        <p>Three changes would have prevented the 40-minute outage: PgBouncer (converts connection exhaustion from a hard wall into graceful backpressure), Redis Cluster (converts a single-shard OOM from a total cache failure into a partial one), and event-aware pre-warming with TTL floors (converts LRU eviction during burst gaps from a silent killer into a non-issue). None of them are exotic. All of them are known best practices.</p>
+        <p>Apply this pattern to every read-heavy system you design: identify the hottest cache keys, guarantee their residency before peak events, pool your connections, and implement circuit breakers so fast failures beat slow timeouts every time.</p>
+
+        <div class="callout"><p>System design is not about knowing the right answer. It is about knowing which failure modes matter and which three changes would prevent the most damage. In any interview, the scenario you trace through a failure cascade will always be remembered more than the happy-path architecture.</p></div>
+      </section>
+
+    </div><!-- /.topic-body -->
+  </div><!-- /.topic-page -->
+</body>
+</html>

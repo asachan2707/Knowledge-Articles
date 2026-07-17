@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Build an LLM Gateway in Python: Connect OpenAI and Anthropic with One Function | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract network visualization with glowing nodes and connections"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Backend · Engineering · Python · 20 min</span>
+          </div>
+        </figure>
+
+        <h1>Build an LLM Gateway in Python: Connect OpenAI and Anthropic with One Function</h1>
+        <p class="summary">
+          An LLM gateway is a single internal API that abstracts over multiple LLM providers — so
+          your application code calls one function and the gateway handles model routing, fallbacks,
+          cost tracking, and rate limiting. This guide builds one from scratch in Python with FastAPI,
+          supporting OpenAI and Anthropic with automatic failover.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: AI / Backend Engineering / Python</span>
+          <span class="meta-item">Published: 2026-07-16</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every AI product eventually faces the same architectural pressure: too much of your application
+          is directly coupled to a single LLM provider. Building an LLM gateway is the fix — a thin
+          abstraction layer that lets you swap providers, manage costs, and handle failures without
+          touching your application code.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Should you use LiteLLM instead?</strong> LiteLLM is excellent — it supports 100+
+            providers and has a rich feature set. This guide builds from scratch for two reasons: you
+            learn how the plumbing works, and you understand the trade-offs when evaluating LiteLLM
+            for production. The design principles here apply whether you use LiteLLM or build your own.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The provider lock-in problem</span>
+        <p>
+          The startup had been using the OpenAI API since the beginning. Twelve months in, the product
+          was live with 8,000 daily active users, and OpenAI was deeply woven into the codebase.
+          Every feature that touched AI called <code>openai.chat.completions.create(...)</code> directly.
+          Retry logic was written against OpenAI's specific error codes. The streaming handler parsed
+          OpenAI's specific SSE format. The prompt engineering had been tuned for GPT-4o's behavior.
+        </p>
+        <p>
+          Then, on the day of a product launch — front page of Hacker News, a TechCrunch article going
+          live — OpenAI had a partial outage. Not down completely, but 429s (rate limit exceeded) for
+          half of requests, with 30-second timeouts on the rest. The product was effectively unusable
+          for four hours.
+        </p>
+        <p>
+          The engineering team tried to add an Anthropic fallback in the middle of the incident. They
+          discovered that migrating even one endpoint required rewriting the prompt format (Anthropic
+          uses a slightly different system prompt structure), the error handling logic, the streaming
+          parser, and the token counting code. What should have been a two-hour emergency migration took
+          two weeks of careful engineering.
+        </p>
+        <p>
+          The LLM gateway is the architectural decision that prevents this. When you add a new LLM
+          feature, it calls your gateway. The gateway handles provider selection, fallbacks, and
+          response normalization. Provider migrations become a gateway configuration change, not an
+          application code change.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">What Is an LLM Gateway</span>
+        <h2>The abstraction layer between your app and LLM providers</h2>
+        <p>
+          An LLM gateway is an internal proxy service that sits between your application code and
+          the LLM providers you use. Your application sends requests to the gateway in a standard
+          format; the gateway handles everything else:
+        </p>
+        <ul>
+          <li>
+            <strong>Provider abstraction</strong> — normalize request/response formats across providers.
+            Your app always uses OpenAI format; the gateway translates to Anthropic, Cohere, or any
+            other provider when routing there.
+          </li>
+          <li>
+            <strong>Model routing</strong> — route simple requests to cheaper/faster models, complex
+            requests to more capable models. Route by user tier, feature, or cost budget.
+          </li>
+          <li>
+            <strong>Fallback chains</strong> — if OpenAI returns 429 or 503, automatically retry then
+            failover to Anthropic. Your application code never sees the failure.
+          </li>
+          <li>
+            <strong>Cost tracking</strong> — log token usage per feature, user, and model. Build dashboards
+            that show cost by feature so you know which prompts are expensive.
+          </li>
+          <li>
+            <strong>Rate limiting</strong> — protect your API keys from runaway loops. A bug that calls
+            the LLM in an infinite loop costs money; a gateway rate limiter contains the blast radius.
+          </li>
+          <li>
+            <strong>Caching</strong> — exact-match cache for identical prompts. A help bot that answers
+            the same FAQ question 1,000 times a day should only call the LLM once.
+          </li>
+          <li>
+            <strong>Observability</strong> — log all prompts and completions for debugging. When a user
+            reports a bad response, you can look it up and understand exactly what the model saw.
+          </li>
+        </ul>
+        <p>
+          Open-source options: <strong>LiteLLM</strong> (Python, most popular, supports 100+ providers),
+          <strong>OpenRouter</strong> (hosted gateway with pay-per-token billing), <strong>PortKey</strong>
+          (hosted + SDK, focused on observability). This guide builds a custom gateway for educational
+          purposes and for teams that need custom routing logic.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>Gateway design: the five layers</h2>
+        <p>
+          The gateway is a FastAPI service. Requests from application code arrive at a
+          <code>/v1/chat/completions</code> endpoint using OpenAI's request format — this is the
+          universal format because most providers now support OpenAI-compatible APIs or can be
+          adapted to it with minimal translation. The five internal layers:
+        </p>
+        <ol>
+          <li>
+            <strong>API endpoint</strong> — accepts OpenAI-format <code>ChatCompletionRequest</code>,
+            validates input, checks rate limits, queries cache, dispatches to router.
+          </li>
+          <li>
+            <strong>Router</strong> — selects the provider and model based on the request's model name,
+            user tier, or routing policy. Returns a (provider, model) pair.
+          </li>
+          <li>
+            <strong>Provider adapters</strong> — translate the OpenAI-format request to the target
+            provider's format, call the provider API, and translate the response back to OpenAI format.
+          </li>
+          <li>
+            <strong>Retry + fallback logic</strong> — wraps provider adapter calls with exponential
+            backoff (up to 2 retries on the same provider) then failover to the secondary provider.
+          </li>
+          <li>
+            <strong>Cost tracker</strong> — after a successful response, log model, token counts,
+            cost, user ID, feature ID, and timestamp to SQLite.
+          </li>
+        </ol>
+        <p>
+          The response always returns in OpenAI format with an additional <code>X-Provider</code>
+          header indicating which provider actually served the request. This lets you monitor
+          failover rates without changing application code.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Provider Adapters</span>
+        <h2>Translating between OpenAI and Anthropic formats</h2>
+        <p>
+          The OpenAI Chat Completions format is the lingua franca of LLM APIs. The key differences
+          between OpenAI and Anthropic that the adapter must handle:
+        </p>
+        <ul>
+          <li>
+            <strong>System prompt placement:</strong> OpenAI includes system as a message with
+            <code>role: "system"</code>. Anthropic takes system as a top-level field, separate from
+            the messages array. The adapter must extract the system message and place it correctly.
+          </li>
+          <li>
+            <strong>Response shape:</strong> OpenAI returns <code>choices[0].message.content</code>
+            (a string). Anthropic returns <code>content[0].text</code> (inside a content blocks array).
+            Both must be normalized to the same <code>choices[0].message.content</code> shape on output.
+          </li>
+          <li>
+            <strong>Model naming:</strong> When routing from an OpenAI model name (e.g., <code>"gpt-4o"</code>)
+            to Anthropic, the router translates the name to the appropriate Anthropic model
+            (e.g., <code>"claude-opus-4-8"</code>). The adapter receives the already-translated name.
+          </li>
+          <li>
+            <strong>Token counting fields:</strong> OpenAI uses <code>usage.prompt_tokens</code> and
+            <code>usage.completion_tokens</code>. Anthropic uses <code>usage.input_tokens</code> and
+            <code>usage.output_tokens</code>. Normalize to OpenAI naming on output.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Model Routing</span>
+        <h2>Four routing strategies</h2>
+        <p>
+          The router selects a (provider, model) pair for each request. Four common strategies,
+          in increasing sophistication:
+        </p>
+        <ol>
+          <li>
+            <strong>Name-prefix routing (simplest):</strong> if the requested model starts with
+            <code>gpt-</code>, route to OpenAI. If it starts with <code>claude-</code>, route to
+            Anthropic. No translation needed — the caller specifies the model directly.
+          </li>
+          <li>
+            <strong>Task complexity routing:</strong> use a heuristic (prompt length, presence of
+            reasoning keywords) to classify the request as simple or complex. Route simple requests
+            to a cheap fast model (GPT-4o-mini, Claude Haiku); complex requests to a capable model
+            (GPT-4o, Claude Opus).
+          </li>
+          <li>
+            <strong>User tier routing:</strong> premium users get the best model, free users get
+            the cheapest. Read the <code>X-User-Tier</code> request header and select accordingly.
+            Requires no prompt analysis — pure business logic.
+          </li>
+          <li>
+            <strong>Cost-optimized routing:</strong> maintain a table of model costs (price per 1M
+            input and output tokens). Given a latency SLA (e.g., p95 under 3s), route to the
+            cheapest model that historically meets the SLA. Requires logging latency per model per
+            request and updating the routing table dynamically.
+          </li>
+        </ol>
+        <p>
+          For most teams starting out, name-prefix routing plus user tier routing covers 90% of cases
+          with minimal complexity.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Fallback Chains</span>
+        <h2>Automatic failover without application changes</h2>
+        <p>
+          The fallback chain runs when the primary provider fails. The sequence:
+        </p>
+        <ol>
+          <li>Call primary provider. On success: return response with <code>X-Provider: openai</code>.</li>
+          <li>On failure (429, 503, timeout): wait and retry up to 2 times with exponential backoff (0.5s, 1.5s).</li>
+          <li>If all retries exhausted: log the failover event, call the secondary provider (Anthropic).</li>
+          <li>On secondary success: return response with <code>X-Provider: anthropic</code>.</li>
+          <li>On secondary failure: return 503 to the caller with error details.</li>
+        </ol>
+        <p>
+          The <code>X-Provider</code> response header is important for monitoring. Track the ratio of
+          requests served by each provider over time. A spike in Anthropic traffic tells you OpenAI
+          is degraded before your monitoring alerts fire.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Failover caveat:</strong> switching providers mid-session can produce inconsistent
+            results if the session has conversation history. Sticky routing (always use the same provider
+            for a given <code>session_id</code>) avoids this at the cost of reduced failover protection.
+            For stateless requests (single-turn, no history), failover is safe.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Streaming</span>
+        <h2>Proxying streaming responses</h2>
+        <p>
+          Both OpenAI and Anthropic support server-sent events (SSE) for streaming completions. The
+          gateway must proxy the stream rather than buffering the entire response — buffering defeats
+          the purpose of streaming and increases time-to-first-token significantly.
+        </p>
+        <p>
+          In FastAPI, streaming responses use <code>StreamingResponse</code> with an async generator.
+          The generator calls the provider's streaming API and yields normalized chunks as they arrive.
+        </p>
+        <p>
+          The normalization challenge: Anthropic stream events have a different shape than OpenAI stream
+          events. Anthropic emits <code>content_block_delta</code> events with a <code>delta.text</code>
+          field. OpenAI emits <code>choices[0].delta.content</code>. The gateway adapter normalizes both
+          to OpenAI format before yielding to the client, so client code does not need to know which
+          provider is serving.
+        </p>
+        <p>
+          The hard edge case: error detection mid-stream. Once you have sent <code>200 OK</code> and
+          started streaming, you cannot change the status code. If the provider returns an error after
+          the stream starts, inject an error event into the stream with a well-known format that your
+          client can detect, and log the partial failure.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Cost Tracking</span>
+        <h2>Per-feature, per-user cost attribution</h2>
+        <p>
+          Every request that completes successfully is logged to a SQLite database with these fields:
+          <code>model</code>, <code>provider</code>, <code>input_tokens</code>, <code>output_tokens</code>,
+          <code>cost_usd</code>, <code>latency_ms</code>, <code>user_id</code>, <code>feature_id</code>,
+          <code>timestamp</code>.
+        </p>
+        <p>
+          The <code>cost_usd</code> is computed at request time from a <code>model_costs</code> table
+          that maps (model, provider) to (input_price_per_1m, output_price_per_1m). Cost is:
+          <code>(input_tokens / 1_000_000) * input_price + (output_tokens / 1_000_000) * output_price</code>.
+        </p>
+        <p>
+          The <code>feature_id</code> is passed as an <code>X-Feature-Id</code> header by the calling
+          application. This enables cost attribution queries like "how much did the PR review feature
+          cost last week?" — essential for product decisions about which AI features are worth their cost.
+        </p>
+        <p>
+          The <code>/costs</code> endpoint supports aggregation by time range, user, feature, and model.
+          Add a daily spend alert: if the 24-hour rolling cost exceeds a threshold, emit a webhook or
+          Slack notification.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Caching</span>
+        <h2>Exact-match cache for identical prompts</h2>
+        <p>
+          The cache key is a SHA-256 hash of the normalized request: <code>model + system_prompt + messages</code>.
+          On cache hit, return the cached response immediately without calling any provider.
+        </p>
+        <p>
+          Cache storage options:
+        </p>
+        <ul>
+          <li><strong>In-memory dict</strong> — simplest, zero dependencies, lost on restart. Good for development.</li>
+          <li><strong>Redis</strong> — persistent, shared across gateway instances, supports TTL natively. Good for production.</li>
+        </ul>
+        <p>
+          Cache invalidation rules:
+        </p>
+        <ul>
+          <li>TTL: configurable per model. Factual/deterministic prompts can cache for hours; creative or time-sensitive prompts for minutes or not at all.</li>
+          <li>Streaming requests bypass cache entirely — you cannot cache a stream.</li>
+          <li>Requests with <code>Cache-Control: no-cache</code> header bypass cache.</li>
+          <li>Requests with non-zero <code>temperature</code> above 0.0 may optionally bypass cache (configurable).</li>
+        </ul>
+        <p>
+          <strong>Semantic cache (advanced):</strong> embed the query, find the nearest cached query
+          above a similarity threshold, and return that cached response. Handles paraphrased duplicates.
+          This requires a vector store (pgvector, Qdrant, or in-memory FAISS) and an embedding model
+          call per request — trade off latency for cache hit rate.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Python Implementation</span>
+        <h2>Complete LLM Gateway in FastAPI</h2>
+        <span class="code-label">Python Implementation</span>
+        <pre><code class="language-python">"""
+LLM Gateway — FastAPI service with OpenAI + Anthropic support.
+Run: uvicorn main:app --host 0.0.0.0 --port 8000
+
+Requirements:
+    pip install fastapi uvicorn httpx pydantic sqlite3
+    OPENAI_API_KEY=sk-...
+    ANTHROPIC_API_KEY=sk-ant-...
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import time
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Optional
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+OPENAI_API_KEY    = os.environ["OPENAI_API_KEY"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+DB_PATH           = "./gateway_costs.db"
+
+# Cost per 1M tokens (input, output) — update when prices change
+MODEL_COSTS: dict[str, tuple[float, float]] = {
+    "gpt-4o":             (5.00, 15.00),
+    "gpt-4o-mini":        (0.15,  0.60),
+    "claude-opus-4-8":    (15.00, 75.00),
+    "claude-sonnet-4-5":  (3.00,  15.00),
+    "claude-haiku-3-5":   (0.80,   4.00),
+}
+
+# Routing: which Anthropic model to use when failing over from an OpenAI model
+FAILOVER_MAP: dict[str, str] = {
+    "gpt-4o":       "claude-sonnet-4-5",
+    "gpt-4o-mini":  "claude-haiku-3-5",
+}
+
+# ── Pydantic models (OpenAI format) ────────────────────────────────────────────
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: list[Message]
+    temperature: float = 1.0
+    max_tokens: int = 1024
+    stream: bool = False
+    user: Optional[str] = None  # user_id for cost tracking
+
+# ── SQLite cost tracker ────────────────────────────────────────────────────────
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS usage_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           REAL,
+            model        TEXT,
+            provider     TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cost_usd     REAL,
+            latency_ms   REAL,
+            user_id      TEXT,
+            feature_id   TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def log_usage(model: str, provider: str, input_tokens: int, output_tokens: int,
+              latency_ms: float, user_id: str | None, feature_id: str | None):
+    costs = MODEL_COSTS.get(model, (0.0, 0.0))
+    cost = (input_tokens / 1_000_000) * costs[0] + (output_tokens / 1_000_000) * costs[1]
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO usage_log VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (time.time(), model, provider, input_tokens, output_tokens, cost, latency_ms, user_id, feature_id)
+    )
+    conn.commit()
+    conn.close()
+
+# ── In-memory cache (swap for Redis in production) ────────────────────────────
+
+_cache: dict[str, dict] = {}
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+def cache_key(req: ChatCompletionRequest) -> str:
+    payload = f"{req.model}|{json.dumps([m.model_dump() for m in req.messages], sort_keys=True)}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+def get_cached(key: str) -> dict | None:
+    entry = _cache.get(key)
+    if entry and time.time() - entry["at"] < CACHE_TTL_SECONDS:
+        return entry["data"]
+    return None
+
+def set_cached(key: str, data: dict):
+    _cache[key] = {"data": data, "at": time.time()}
+
+# ── OpenAI adapter ─────────────────────────────────────────────────────────────
+
+async def call_openai(req: ChatCompletionRequest, client: httpx.AsyncClient) -> dict:
+    payload = {
+        "model":       req.model,
+        "messages":    [m.model_dump() for m in req.messages],
+        "temperature": req.temperature,
+        "max_tokens":  req.max_tokens,
+    }
+    resp = await client.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        json=payload,
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    # Already in OpenAI format — return as-is
+    return data
+
+# ── Anthropic adapter ──────────────────────────────────────────────────────────
+
+def _openai_to_anthropic(req: ChatCompletionRequest) -> dict:
+    """Translate OpenAI-format request to Anthropic Messages API format."""
+    system_content = None
+    messages = []
+    for m in req.messages:
+        if m.role == "system":
+            system_content = m.content
+        else:
+            messages.append({"role": m.role, "content": m.content})
+
+    payload: dict = {
+        "model":      req.model,
+        "messages":   messages,
+        "max_tokens": req.max_tokens,
+    }
+    if system_content:
+        payload["system"] = system_content
+    if req.temperature != 1.0:
+        payload["temperature"] = req.temperature
+    return payload
+
+def _anthropic_to_openai(anthropic_resp: dict, model: str) -> dict:
+    """Normalize Anthropic response to OpenAI Chat Completion format."""
+    text = anthropic_resp["content"][0]["text"]
+    usage = anthropic_resp.get("usage", {})
+    return {
+        "id":      anthropic_resp.get("id", ""),
+        "object":  "chat.completion",
+        "model":   model,
+        "choices": [{
+            "index":         0,
+            "message":       {"role": "assistant", "content": text},
+            "finish_reason": anthropic_resp.get("stop_reason", "stop"),
+        }],
+        "usage": {
+            "prompt_tokens":     usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens":      usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        },
+    }
+
+async def call_anthropic(req: ChatCompletionRequest, client: httpx.AsyncClient) -> dict:
+    payload = _openai_to_anthropic(req)
+    resp = await client.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key":         ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        json=payload,
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    return _anthropic_to_openai(resp.json(), req.model)
+
+# ── Retry + fallback logic ─────────────────────────────────────────────────────
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+async def call_with_fallback(
+    req: ChatCompletionRequest,
+    client: httpx.AsyncClient,
+) -> tuple[dict, str]:
+    """Returns (normalized_openai_response, provider_name)."""
+
+    async def attempt(call_fn, model_name: str):
+        for attempt_num in range(3):
+            try:
+                return await call_fn(req, client)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in RETRYABLE_STATUS and attempt_num < 2:
+                    await asyncio.sleep(0.5 * (2 ** attempt_num))
+                    continue
+                raise
+        raise RuntimeError("Max retries exceeded")  # unreachable but satisfies type checker
+
+    # Determine primary provider from model name
+    is_openai = req.model.startswith("gpt-") or not req.model.startswith("claude-")
+
+    try:
+        if is_openai:
+            return (await attempt(call_openai, req.model), "openai")
+        else:
+            return (await attempt(call_anthropic, req.model), "anthropic")
+    except Exception:
+        # Failover to the other provider
+        fallback_model = FAILOVER_MAP.get(req.model, "claude-sonnet-4-5")
+        fallback_req = req.model_copy(update={"model": fallback_model})
+        if is_openai:
+            return (await call_anthropic(fallback_req, client), "anthropic-fallback")
+        else:
+            return (await call_openai(fallback_req, client), "openai-fallback")
+
+# ── FastAPI app ────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    app.state.http_client = httpx.AsyncClient()
+    yield
+    await app.state.http_client.aclose()
+
+app = FastAPI(title="LLM Gateway", lifespan=lifespan)
+
+@app.post("/v1/chat/completions")
+async def chat_completions(req: ChatCompletionRequest, request: Request, response: Response):
+    feature_id = request.headers.get("X-Feature-Id")
+    client     = request.app.state.http_client
+
+    # Streaming bypass — no cache, direct proxy
+    if req.stream:
+        return StreamingResponse(
+            _stream_response(req, client, feature_id),
+            media_type="text/event-stream",
+        )
+
+    # Check cache (non-streaming only)
+    key = cache_key(req)
+    cached = get_cached(key)
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+        return cached
+
+    # Call with fallback
+    t0 = time.time()
+    result, provider = await call_with_fallback(req, client)
+    latency_ms = (time.time() - t0) * 1000
+
+    # Log cost
+    usage = result.get("usage", {})
+    log_usage(
+        model         = result.get("model", req.model),
+        provider      = provider,
+        input_tokens  = usage.get("prompt_tokens", 0),
+        output_tokens = usage.get("completion_tokens", 0),
+        latency_ms    = latency_ms,
+        user_id       = req.user,
+        feature_id    = feature_id,
+    )
+
+    set_cached(key, result)
+    response.headers["X-Provider"] = provider
+    response.headers["X-Cache"]    = "MISS"
+    return result
+
+async def _stream_response(
+    req: ChatCompletionRequest,
+    client: httpx.AsyncClient,
+    feature_id: str | None,
+) -> AsyncGenerator[str, None]:
+    """Proxy a streaming response. Normalizes Anthropic chunks to OpenAI SSE format."""
+    is_openai = req.model.startswith("gpt-")
+    t0 = time.time()
+
+    if is_openai:
+        payload = {"model": req.model, "messages": [m.model_dump() for m in req.messages],
+                   "stream": True, "max_tokens": req.max_tokens}
+        url     = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    else:
+        payload = {**_openai_to_anthropic(req), "stream": True}
+        url     = "https://api.anthropic.com/v1/messages"
+        headers = {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01"}
+
+    async with client.stream("POST", url, headers=headers, json=payload, timeout=120.0) as resp:
+        async for line in resp.aiter_lines():
+            if not line or line == "data: [DONE]":
+                if line:
+                    yield f"{line}\n\n"
+                continue
+            if line.startswith("data: "):
+                raw = line[6:]
+                try:
+                    chunk = json.loads(raw)
+                    if not is_openai:
+                        # Normalize Anthropic chunk to OpenAI delta format
+                        if chunk.get("type") == "content_block_delta":
+                            text = chunk.get("delta", {}).get("text", "")
+                            chunk = {"choices": [{"delta": {"content": text}, "index": 0}]}
+                        elif chunk.get("type") == "message_stop":
+                            yield "data: [DONE]\n\n"
+                            break
+                        else:
+                            continue
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                except json.JSONDecodeError:
+                    pass
+
+    log_usage(req.model, "openai" if is_openai else "anthropic",
+              0, 0, (time.time() - t0) * 1000, req.user, feature_id)
+
+@app.get("/v1/costs")
+async def get_costs(hours: int = 24, user_id: str | None = None, feature_id: str | None = None):
+    conn  = sqlite3.connect(DB_PATH)
+    since = time.time() - (hours * 3600)
+    query = "SELECT model, provider, SUM(input_tokens), SUM(output_tokens), SUM(cost_usd), COUNT(*) FROM usage_log WHERE ts > ?"
+    args: list = [since]
+    if user_id:
+        query += " AND user_id = ?"; args.append(user_id)
+    if feature_id:
+        query += " AND feature_id = ?"; args.append(feature_id)
+    query += " GROUP BY model, provider"
+    rows = conn.execute(query, args).fetchall()
+    conn.close()
+    return [{"model": r[0], "provider": r[1], "input_tokens": r[2],
+             "output_tokens": r[3], "cost_usd": round(r[4], 6), "requests": r[5]} for r in rows]
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Your app calls the gateway — not the providers directly</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * The LLM gateway exposes an OpenAI-compatible API.
+ * Your application code can use the OpenAI SDK pointed at the gateway URL —
+ * no changes needed when the gateway switches providers on your behalf.
+ */
+import OpenAI from "openai";
+
+// Point the OpenAI SDK at your gateway
+const llm = new OpenAI({
+  baseURL: "http://localhost:8000/v1",
+  apiKey:  "not-needed",  // Gateway handles actual API keys internally
+  defaultHeaders: {
+    "X-Feature-Id": "pr-review-bot",   // Cost attribution
+    "X-User-Tier":  "premium",          // Routing hint
+  },
+});
+
+// Application code — identical regardless of which provider the gateway routes to
+async function reviewPullRequest(diff: string, context: string): Promise<string> {
+  const response = await llm.chat.completions.create({
+    model:    "gpt-4o",           // Gateway may route this to Claude if OpenAI is degraded
+    messages: [
+      {
+        role:    "system",
+        content: "You are a senior engineer reviewing a pull request. Be concise and constructive.",
+      },
+      {
+        role:    "user",
+        content: `Review this diff:\n\n${diff}\n\nContext: ${context}`,
+      },
+    ],
+    max_tokens: 800,
+  });
+
+  const provider = response.headers?.get?.("x-provider") ?? "unknown";
+  console.log(`Served by: ${provider}`);  // "openai" or "anthropic-fallback"
+
+  return response.choices[0].message.content ?? "";
+}
+
+// Streaming — same interface, streaming just works
+async function* streamSummary(text: string): AsyncGenerator<string> {
+  const stream = await llm.chat.completions.create({
+    model:    "gpt-4o-mini",
+    messages: [{ role: "user", content: `Summarize in 3 bullet points: ${text}` }],
+    stream:   true,
+  });
+
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta?.content;
+    if (delta) yield delta;
+  }
+}
+
+// Cost monitoring — call the gateway's /costs endpoint
+async function getDailyCosts(featureId: string): Promise<void> {
+  const resp = await fetch(`http://localhost:8000/v1/costs?hours=24&feature_id=${featureId}`);
+  const costs = await resp.json();
+  const total = costs.reduce((sum: number, row: any) => sum + row.cost_usd, 0);
+  console.log(`Feature "${featureId}" cost last 24h: $${total.toFixed(4)}`);
+}
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Testing</span>
+        <h2>Testing the gateway: adapters, fallbacks, and cost logging</h2>
+        <p>
+          Three test categories matter most for a gateway:
+        </p>
+        <ol>
+          <li>
+            <strong>Unit tests for adapters:</strong> verify that <code>_openai_to_anthropic</code>
+            correctly extracts the system message, and that <code>_anthropic_to_openai</code>
+            correctly maps <code>content[0].text</code> to <code>choices[0].message.content</code>.
+            These are pure functions — no I/O required.
+          </li>
+          <li>
+            <strong>Integration tests with mock transport:</strong> use <code>httpx.MockTransport</code>
+            (or <code>respx</code> library) to simulate provider responses without real API calls.
+            Test: (a) normal response returns correct shape; (b) 429 on first attempt retries; (c)
+            two 429s in a row triggers Anthropic failover; (d) streaming chunks are correctly normalized.
+          </li>
+          <li>
+            <strong>Cost tracking verification:</strong> after a mocked successful call, query the
+            SQLite database and assert that the logged row has correct <code>model</code>,
+            <code>input_tokens</code>, <code>output_tokens</code>, and <code>cost_usd</code> values.
+            Use a test database path (<code>:memory:</code> or a temp file) to avoid polluting dev data.
+          </li>
+        </ol>
+        <span class="code-label">Python Implementation</span>
+        <pre><code class="language-python">import pytest
+from httpx import AsyncClient, MockTransport, Response
+
+# Test: Anthropic adapter translates system message correctly
+def test_openai_to_anthropic_extracts_system():
+    from main import _openai_to_anthropic, ChatCompletionRequest, Message
+    req = ChatCompletionRequest(
+        model    = "claude-sonnet-4-5",
+        messages = [
+            Message(role="system",    content="You are helpful."),
+            Message(role="user",      content="Hello"),
+        ],
+        max_tokens = 100,
+    )
+    payload = _openai_to_anthropic(req)
+    assert payload["system"] == "You are helpful."
+    assert len(payload["messages"]) == 1          # system removed from messages array
+    assert payload["messages"][0]["role"] == "user"
+
+# Test: 429 on primary triggers Anthropic fallback
+@pytest.mark.asyncio
+async def test_fallback_on_rate_limit():
+    call_log = []
+
+    def handler(request):
+        call_log.append(request.url.host)
+        if "openai.com" in request.url.host:
+            return Response(429, json={"error": "rate_limit_exceeded"})
+        return Response(200, json={
+            "id": "msg_123", "type": "message", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Hello from Anthropic"}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        })
+
+    transport = MockTransport(handler)
+    async with AsyncClient(transport=transport) as client:
+        from main import call_with_fallback, ChatCompletionRequest, Message
+        req = ChatCompletionRequest(model="gpt-4o", messages=[Message(role="user", content="hi")])
+        result, provider = await call_with_fallback(req, client)
+        assert "anthropic" in provider
+        assert result["choices"][0]["message"]["content"] == "Hello from Anthropic"
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>LLM Gateway — Production Readiness</h2>
+        <ul class="check-list">
+          <li>All API keys in environment variables, not hardcoded — use a secrets manager (Vault, AWS Secrets Manager) in production.</li>
+          <li>Rate limiting implemented per API key and per user to prevent runaway loops from costing thousands of dollars.</li>
+          <li>Streaming responses tested end-to-end — buffer size, SSE heartbeat, and error-mid-stream handling verified.</li>
+          <li>Cost tracking deployed and alerting configured — daily spend threshold alert fires before your bill surprises you.</li>
+          <li>Fallback chain tested with provider outage simulation — manually 429 the primary provider and verify Anthropic serves the request.</li>
+          <li>Cache keys exclude user-specific data you do not want shared across users — review what is hashed into the cache key.</li>
+          <li>The <code>/costs</code> endpoint is not publicly accessible — requires internal auth or network-level restriction.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Why not just use LiteLLM?</h3>
+        <p>
+          You probably should. LiteLLM supports 100+ providers, has battle-tested retry logic, and is
+          actively maintained. Build your own gateway when: you need custom routing logic (route by
+          customer tier from your own database), you need to avoid the LiteLLM dependency for
+          infrastructure reasons, or you want to understand how the abstraction works. For most teams,
+          LiteLLM saves weeks of engineering time. Understanding this guide helps you evaluate, configure,
+          and debug LiteLLM effectively.
+        </p>
+
+        <h3>Does failover violate the providers' ToS?</h3>
+        <p>
+          No. You are a customer of both providers and can choose which to use for each request.
+          The failover decision is yours. What ToS typically prohibits is reselling API access to
+          third parties without authorization — which is not what a gateway does for internal use.
+        </p>
+
+        <h3>Can I use this gateway with the Claude API directly (not Claude Desktop)?</h3>
+        <p>
+          Yes — this is exactly the pattern for the Claude API. The gateway is a server-side
+          service. Your application code calls your gateway; your gateway calls Anthropic's
+          Messages API. The Claude SDK is not involved — you call the API directly with httpx.
+        </p>
+
+        <h3>How do I handle different context windows across providers?</h3>
+        <p>
+          Maintain a <code>model_context_windows</code> table (GPT-4o: 128K, Claude Opus: 200K, etc.).
+          Before routing, check that the request's estimated token count fits within the target model's
+          context window. If not, either truncate the context (with user warning) or route to a model
+          with a larger context window.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaways</h2>
+        <p>
+          The LLM gateway is a straightforward but high-leverage architectural pattern. The core insight
+          is that your application code should be written against a stable internal interface, not
+          against the specific API conventions of a provider that can change its pricing, have an
+          outage, or be superseded by a better option next quarter. The five components — provider
+          adapters, router, fallback chain, cost tracker, and cache — each solve a real production
+          problem. You do not need all five on day one: start with the adapter and fallback chain
+          (which solve the lock-in problem), add cost tracking once you have usage to measure, and
+          add caching when you identify high-volume repeated queries. The pattern scales from a single
+          <code>asyncio</code> module to a full microservice without changing the application contract.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Further exploration</h2>
+        <ul>
+          <li><a href="./become-ai-engineer-2026.html">Become an AI Engineer in 2026 — Roadmap and Skills</a></li>
+          <li><a href="./api-design-architecture-complete-guide.html">API Design Architecture — Complete Guide</a></li>
+          <li><a href="./cache-stampede-hot-key.html">Cache Stampede and Hot Key Problems</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

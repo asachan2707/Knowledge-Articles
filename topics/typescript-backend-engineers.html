@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TypeScript for Backend Engineers — Practical Deep Dive | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Code on a dark terminal screen"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Engineering · 18 min</span>
+          </div>
+        </figure>
+
+        <h1>TypeScript for Backend Engineers — Practical Deep Dive</h1>
+        <p class="summary">
+          The TypeScript features that actually matter in production Node.js: utility types, generics,
+          discriminated unions, branded types, type guards, and the tsconfig settings that prevent
+          runtime surprises. Covers Express, Fastify, and tRPC integration patterns plus a
+          side-by-side comparison of ts-node, tsx, and esbuild for dev and CI workflows.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: TypeScript Handbook · Matt Pocock · tRPC Docs</span>
+          <span class="meta-item">Domain: Backend / Engineering</span>
+          <span class="meta-item">Published: 2026</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Most backend engineers learn TypeScript from frontend tutorials — and then spend months
+          unlearning habits that don't translate. On the backend, TypeScript's value isn't just
+          autocomplete; it's catching the class of bugs that only show up under load at 2 AM: a
+          <code>undefined</code> property access on a DB row, a mistyped event payload from a queue,
+          an API response shape that drifted from the client's expectation. This guide covers the
+          type-system tools that close those gaps.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> TypeScript is most valuable at system boundaries — where data
+            enters your code from the outside (HTTP requests, database rows, queue messages, config).
+            Model those boundaries precisely and let TypeScript propagate the guarantees inward.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The silent <code>undefined</code></span>
+        <p>
+          A team ships a new billing service. The payment handler reads <code>req.body.amount</code>
+          and passes it to the Stripe SDK. Everything works in staging. In production, a specific
+          client sends <code>amount</code> as a string (<code>"2500"</code>) instead of a number —
+          Stripe silently coerces it in some contexts, throws in others. Three weeks later, a charge
+          dispute reveals that 0.3% of transactions used the wrong amount.
+        </p>
+        <p>
+          The fix is two lines of TypeScript: a Zod schema at the request boundary that narrows
+          <code>amount</code> to <code>number</code> and rejects strings. But you only write that
+          fix if you understand that TypeScript's <code>any</code>-typed <code>req.body</code>
+          silently opted out of all type checking — and that branded types could prevent the
+          string-as-number confusion further downstream.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Utility Types</span>
+        <h2>The Utility Types You'll Actually Use</h2>
+        <p>
+          TypeScript ships ~20 utility types. On the backend, a handful cover 90% of use-cases:
+        </p>
+
+        <h3>Partial&lt;T&gt; and Required&lt;T&gt;</h3>
+        <p>
+          <code>Partial&lt;T&gt;</code> makes every field optional — perfect for PATCH endpoint
+          bodies. <code>Required&lt;T&gt;</code> makes every field required — useful for asserting
+          that a DB row with nullable columns has been validated.
+        </p>
+
+        <h3>Pick&lt;T, K&gt; and Omit&lt;T, K&gt;</h3>
+        <p>
+          <code>Pick</code> selects a subset of fields; <code>Omit</code> removes fields.
+          Use <code>Omit&lt;User, 'passwordHash' | 'totpSecret'&gt;</code> to derive a
+          <code>PublicUser</code> type that can safely be serialised into an API response without
+          leaking credentials — the compiler enforces that no secret field slips through.
+        </p>
+
+        <h3>Record&lt;K, V&gt;</h3>
+        <p>
+          Shorthand for <code>{ [key in K]: V }</code>. Ideal for lookup maps:
+          <code>Record&lt;UserId, UserProfile&gt;</code>. Prefer it over <code>{ [key: string]: V }</code>
+          because <code>Record&lt;K, V&gt;</code> constrains the key type.
+        </p>
+
+        <h3>ReturnType&lt;T&gt; and Awaited&lt;T&gt;</h3>
+        <p>
+          <code>ReturnType&lt;typeof fn&gt;</code> extracts the return type of a function — useful
+          when you want to type a variable to hold a function's result without importing a separate
+          type. <code>Awaited&lt;T&gt;</code> unwraps a <code>Promise&lt;T&gt;</code> to <code>T</code>,
+          making it the right tool for typing async function results:
+          <code>Awaited&lt;ReturnType&lt;typeof findUser&gt;&gt;</code>.
+        </p>
+
+        <h3>Parameters&lt;T&gt; and ConstructorParameters&lt;T&gt;</h3>
+        <p>
+          Extracts the argument tuple of a function. Useful in middleware composition where you want
+          to forward the exact arguments of a wrapped function without redeclaring them.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Generics</span>
+        <h2>Generics — Reusable Types That Don't Lie</h2>
+        <p>
+          Generics let you write one function (or class) that works correctly with multiple types,
+          without falling back to <code>any</code>. The key insight for backend use is that generics
+          are most powerful at wrapping infrastructure: HTTP handlers, repository patterns, event
+          emitters.
+        </p>
+
+        <h3>Generic constraints</h3>
+        <p>
+          <code>function fn&lt;T extends { id: string }&gt;(item: T): T</code> — the constraint
+          <code>extends { id: string }</code> tells the compiler that <code>T</code> always has an
+          <code>id</code> field. Inside <code>fn</code> you can safely access <code>item.id</code>.
+          Without the constraint, accessing <code>item.id</code> would be a type error.
+        </p>
+
+        <h3>Generic repository pattern</h3>
+        <p>
+          Define a <code>Repository&lt;T&gt;</code> interface with methods like
+          <code>findById(id: string): Promise&lt;T | null&gt;</code>. Implement it once with a
+          concrete class, and the database layer is type-safe across all models without duplicating
+          query methods. The ORM (Prisma, TypeORM, Drizzle) already generates generic-safe types
+          from your schema — leverage them rather than re-typing models by hand.
+        </p>
+
+        <h3>keyof and mapped types</h3>
+        <p>
+          <code>keyof T</code> produces a union of all keys of <code>T</code>. Combined with mapped
+          types (<code>{ [K in keyof T]: ... }</code>), you can derive transformation types:
+          a <code>Nullable&lt;T&gt;</code> that adds <code>| null</code> to every field, a
+          <code>ReadonlyDeep&lt;T&gt;</code> that recursively freezes an object type, or a
+          <code>Serialised&lt;T&gt;</code> that replaces <code>Date</code> fields with
+          <code>string</code> for JSON output.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Type Safety Patterns</span>
+        <h2>Discriminated Unions, Branded Types, and Type Guards</h2>
+
+        <h3>Discriminated unions</h3>
+        <p>
+          A discriminated union is a union of types that all share a literal discriminant field:
+        </p>
+        <pre><code class="language-javascript">type ApiResult&lt;T&gt; =
+  | { status: 'ok'; data: T }
+  | { status: 'error'; code: number; message: string };
+</code></pre>
+        <p>
+          When you check <code>result.status === 'ok'</code>, TypeScript narrows <code>result</code>
+          to the first branch, making <code>result.data</code> available without a cast. This pattern
+          is essential for HTTP response types, event payloads, and state machines.
+        </p>
+
+        <h3>Branded types (nominal typing)</h3>
+        <p>
+          TypeScript uses structural typing — two types with the same shape are interchangeable even
+          if conceptually different. Branded types add a phantom nominal tag to prevent mix-ups:
+        </p>
+        <pre><code class="language-javascript">type UserId = string &amp; { readonly __brand: 'UserId' };
+type OrderId = string &amp; { readonly __brand: 'OrderId' };
+
+function getUser(id: UserId): Promise&lt;User&gt; { /* ... */ }
+
+const orderId = '123' as OrderId;
+// getUser(orderId); // TypeScript error: OrderId is not assignable to UserId
+</code></pre>
+        <p>
+          Branded types catch the class of bugs where two <code>string</code> IDs are accidentally
+          swapped — the kind of bug that passes unit tests and only surfaces in production data corruption.
+        </p>
+
+        <h3>Type guards and assertion functions</h3>
+        <p>
+          A <strong>type guard</strong> is a function with return type <code>value is T</code>:
+        </p>
+        <pre><code class="language-javascript">function isUser(value: unknown): value is User {
+  return (
+    typeof value === 'object' &amp;&amp;
+    value !== null &amp;&amp;
+    typeof (value as Record&lt;string, unknown&gt;).id === 'string'
+  );
+}
+</code></pre>
+        <p>
+          After calling <code>if (isUser(data))</code>, the compiler knows <code>data</code> is
+          <code>User</code> inside the block. Pair type guards with Zod or Valibot for runtime
+          validation at API boundaries.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Advanced Types</span>
+        <h2>Template Literal Types, Conditional Types, and Declaration Merging</h2>
+
+        <h3>Template literal types</h3>
+        <p>
+          TypeScript 4.1+ supports template literal types: <code>type EventName = `${string}:created`</code>
+          produces a type that matches any string ending in <code>:created</code>. In an event bus
+          implementation, you can use this to enforce that all event names follow a
+          <code>resource:action</code> convention at compile time.
+        </p>
+
+        <h3>Conditional types and <code>infer</code></h3>
+        <p>
+          <code>T extends Promise&lt;infer U&gt; ? U : T</code> — the <code>infer</code> keyword
+          captures a type within a conditional match. This is how <code>Awaited&lt;T&gt;</code> and
+          <code>ReturnType&lt;T&gt;</code> are implemented. Useful for extracting the element type
+          of an array (<code>T extends Array&lt;infer E&gt; ? E : never</code>) or the resolved
+          value of a generic promise wrapper.
+        </p>
+
+        <h3>Declaration merging and module augmentation</h3>
+        <p>
+          Module augmentation lets you add properties to existing types without modifying the
+          library. The classic Express pattern: <code>declare global { namespace Express { interface Request { user?: AuthUser } } }</code>
+          adds a <code>user</code> field to every <code>req</code> object after your authentication
+          middleware runs. Without this, you're casting to <code>any</code> every time you access
+          the authenticated user — exactly the kind of hole that leads to <code>undefined</code>
+          access errors.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Type-Safe Express + Zod Request Parsing</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import express, { Request, Response, NextFunction } from 'express';
+import { z, ZodSchema } from 'zod';
+
+// ── Branded types ────────────────────────────────────────────────────────────
+type UserId = string &amp; { readonly __brand: 'UserId' };
+type AmountCents = number &amp; { readonly __brand: 'AmountCents' };
+
+function toUserId(s: string): UserId { return s as UserId; }
+function toAmountCents(n: number): AmountCents { return n as AmountCents; }
+
+// ── Generic validated handler ────────────────────────────────────────────────
+function validateBody&lt;T&gt;(schema: ZodSchema&lt;T&gt;) {
+  return (req: Request, res: Response, next: NextFunction) =&gt; {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      res.status(400).json({ errors: result.error.flatten() });
+      return;
+    }
+    (req as Request &amp; { validatedBody: T }).validatedBody = result.data;
+    next();
+  };
+}
+
+// ── Request/response discriminated union ────────────────────────────────────
+type ApiResult&lt;T&gt; =
+  | { status: 'ok'; data: T }
+  | { status: 'error'; code: number; message: string };
+
+function ok&lt;T&gt;(data: T): ApiResult&lt;T&gt; { return { status: 'ok', data }; }
+function err(code: number, message: string): ApiResult&lt;never&gt; {
+  return { status: 'error', code, message };
+}
+
+// ── Schemas ──────────────────────────────────────────────────────────────────
+const CreateOrderSchema = z.object({
+  userId: z.string().min(1).transform(toUserId),
+  amountCents: z.number().int().positive().transform(toAmountCents),
+  description: z.string().max(200),
+});
+type CreateOrderDto = z.infer&lt;typeof CreateOrderSchema&gt;;
+
+// ── Route handler ────────────────────────────────────────────────────────────
+const app = express();
+app.use(express.json());
+
+app.post(
+  '/orders',
+  validateBody(CreateOrderSchema),
+  async (req: Request &amp; { validatedBody: CreateOrderDto }, res: Response) =&gt; {
+    const { userId, amountCents, description } = req.validatedBody;
+    // userId is UserId, amountCents is AmountCents — can't mix them up
+    const order = await createOrder({ userId, amountCents, description });
+    res.json(ok(order));
+  }
+);
+
+// ── Utility: safe async wrapper ──────────────────────────────────────────────
+function asyncHandler&lt;T extends Request = Request&gt;(
+  fn: (req: T, res: Response) =&gt; Promise&lt;void&gt;
+) {
+  return (req: T, res: Response, next: NextFunction) =&gt; {
+    fn(req, res).catch(next);
+  };
+}
+
+async function createOrder(dto: CreateOrderDto) {
+  return { id: 'ord_' + Math.random().toString(36).slice(2), ...dto };
+}
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Toolchain</span>
+        <h2>tsconfig for Production Node.js, and ts-node vs tsx vs esbuild</h2>
+
+        <h3>Essential tsconfig settings</h3>
+        <ul>
+          <li><strong><code>strict: true</code></strong> — enables <code>strictNullChecks</code>, <code>noImplicitAny</code>, <code>strictFunctionTypes</code>, and more. Non-negotiable in new projects. Migration in existing codebases: enable one flag at a time.</li>
+          <li><strong><code>target: "ES2022"</code></strong> — keeps modern syntax (top-level await, class fields) instead of down-compiling to verbose ES5. Node 18+ supports ES2022 natively.</li>
+          <li><strong><code>module: "Node16"</code> or <code>"NodeNext"</code></strong> — required for correct ESM/CJS interop with Node's native module resolution. Avoids the "cannot use import outside module" surprises.</li>
+          <li><strong><code>moduleResolution: "Node16"</code></strong> — matches Node's actual resolution algorithm. Enforces that relative imports include the file extension (<code>import './utils.js'</code>) in ESM mode.</li>
+          <li><strong><code>paths</code> + <code>baseUrl</code></strong> — enables <code>@/models</code> style aliases. Pair with the corresponding loader option in ts-node or the build tool's alias config so it works at runtime too.</li>
+          <li><strong><code>outDir: "dist"</code></strong> — keep compiled output separate from source.</li>
+          <li><strong><code>sourceMap: true</code></strong> — essential for readable error stack traces in production.</li>
+          <li><strong><code>skipLibCheck: true</code></strong> — skip type-checking of <code>.d.ts</code> files in <code>node_modules</code>. Speeds up builds; the library's own CI already checked those types.</li>
+        </ul>
+
+        <h3>ts-node vs tsx vs esbuild — which one when</h3>
+        <ul>
+          <li>
+            <strong>ts-node</strong> — runs TypeScript directly via the TypeScript compiler. Full
+            type-checking during execution. Slow startup (type-checks on every run). Use for scripts
+            where correctness matters more than speed, or with <code>--transpile-only</code> to skip
+            type-checking and match tsx speed.
+          </li>
+          <li>
+            <strong>tsx</strong> — uses esbuild under the hood to transpile TypeScript without
+            type-checking. Near-instant startup. The best choice for local dev servers (nodemon/watch
+            mode) and fast CLI scripts. Pairs with <code>tsc --noEmit</code> in CI for a separate
+            type-check step.
+          </li>
+          <li>
+            <strong>esbuild</strong> — the production build tool. Bundles and transpiles in
+            milliseconds. Used directly when you need a compact production artifact. Configure via
+            <code>esbuild.config.js</code> or the <code>esbuild</code> JS API. Does not type-check
+            — run <code>tsc --noEmit</code> as a separate CI step.
+          </li>
+        </ul>
+
+        <div class="callout">
+          <p>
+            <strong>Recommended pipeline:</strong> tsx for local dev → tsc --noEmit for CI type
+            check → esbuild for production build. This gives instant feedback during development,
+            catches type errors before merge, and produces a fast production artifact.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Framework Patterns</span>
+        <h2>Express, Fastify, and tRPC Integration</h2>
+
+        <h3>Express</h3>
+        <p>
+          Express's <code>Request</code> and <code>Response</code> types are generic but default to
+          <code>any</code> for body, params, and query. Use generics to make them precise:
+          <code>Request&lt;Params, ResBody, ReqBody, ReqQuery&gt;</code>. Combine with the
+          <code>validateBody</code> middleware pattern above for end-to-end type safety from route
+          definition to handler.
+        </p>
+
+        <h3>Fastify</h3>
+        <p>
+          Fastify has better built-in TypeScript support. Routes accept a generic type argument:
+          <code>fastify.post&lt;{ Body: CreateOrderDto }&gt;('/orders', handler)</code>. Fastify also
+          integrates with JSON Schema (via <code>@fastify/type-provider-typebox</code> or
+          <code>zod-to-json-schema</code>) to generate both runtime validation and TypeScript types
+          from a single schema definition — the recommended pattern for new Fastify projects.
+        </p>
+
+        <h3>tRPC</h3>
+        <p>
+          tRPC eliminates the HTTP layer entirely for full-stack TypeScript apps. Define procedures
+          on the server, and the client gets the exact types automatically — no code generation,
+          no OpenAPI spec, no drift. Use Zod inputs for runtime validation. tRPC integrates with
+          Next.js, Express, and Fastify adapters. The trade-off: client and server must share a
+          TypeScript monorepo (or package); not suitable for a public API consumed by non-TS clients.
+        </p>
+
+        <h3>NestJS decorators</h3>
+        <p>
+          NestJS uses TypeScript decorators for dependency injection, route definition, and
+          validation. Enable <code>experimentalDecorators: true</code> and
+          <code>emitDecoratorMetadata: true</code> in tsconfig for NestJS. Use the
+          <code>class-validator</code> + <code>class-transformer</code> stack for DTO validation,
+          or swap in Zod via <code>nestjs-zod</code> for schema-first validation without decorator
+          proliferation.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical Checklist</span>
+        <h2>TypeScript Backend Readiness — What to Nail</h2>
+        <ul class="check-list">
+          <li>Enable <code>strict: true</code> in tsconfig from day one. In legacy codebases, enable <code>strictNullChecks</code> first — it catches the most bugs.</li>
+          <li>Never use <code>any</code> at request/response boundaries. Use Zod, Valibot, or TypeBox to parse and narrow external data.</li>
+          <li>Use <code>Omit&lt;T, 'passwordHash' | 'secret'&gt;</code> to derive safe API response types from database models.</li>
+          <li>Use branded types for IDs (<code>UserId</code>, <code>OrderId</code>) to prevent silent ID mix-ups across service boundaries.</li>
+          <li>Use discriminated unions for result types instead of throwing — it makes error handling explicit and exhaustive.</li>
+          <li>Augment Express/Fastify request types via declaration merging instead of casting to <code>any</code> in middleware.</li>
+          <li>Use tsx for local dev, <code>tsc --noEmit</code> in CI, and esbuild for production builds.</li>
+          <li>Set <code>module: "NodeNext"</code> and <code>moduleResolution: "NodeNext"</code> for correct ESM/CJS interop.</li>
+          <li>Cache Zod schemas at module level, not inside request handlers — schema construction is expensive.</li>
+          <li>Run <code>tsc --strict --noEmit</code> as a mandatory CI gate — not just linting.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          TypeScript's value on the backend is proportional to how rigorously you model system
+          boundaries. Enable <code>strict</code> mode, parse all external data with a runtime
+          validator (Zod is the current standard), use branded types for domain IDs, and prefer
+          discriminated unions over throwing for expected error paths. The toolchain answer for 2026
+          is tsx for dev speed and esbuild for build speed, with <code>tsc --noEmit</code> as the
+          type-correctness gate in CI. Done right, TypeScript eliminates an entire class of
+          production bugs — the ones that only show up when a real request carries an unexpected
+          shape — without slowing down the development loop.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

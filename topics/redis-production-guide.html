@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Redis — The Complete Production Guide | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server rack lights in a data centre"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Engineering · 20 min</span>
+          </div>
+        </figure>
+
+        <h1>Redis — The Complete Production Guide</h1>
+        <p class="summary">
+          Everything you need to run Redis confidently in production: the full data-structure toolkit
+          (String to Stream), persistence trade-offs (RDB vs AOF), cluster vs Sentinel HA, eviction
+          policies, pipelining and transactions, and the six canonical use-cases — caching, session
+          store, rate limiter, leaderboard, pub/sub, and job queue — each with a working JavaScript
+          implementation.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: Redis Docs · Antirez Blog · ByteByteGo</span>
+          <span class="meta-item">Domain: Backend / Infrastructure</span>
+          <span class="meta-item">Published: 2026</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Redis is deceptively simple to start — <code>SET key value</code>, <code>GET key</code>, done.
+          But the gap between "it works on my laptop" and "it handles 500k ops/sec in production with
+          zero data loss" is enormous. This guide covers the data structures, durability options,
+          high-availability topologies, memory management, and six concrete use-case patterns you will
+          encounter on any serious backend.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> Redis is a data structure server, not just a cache. Picking
+            the right data type for each problem is the single biggest lever for both correctness and
+            performance — a naive String-encoded JSON blob where a Hash or Sorted Set belongs can
+            cost 10–100× more memory and latency.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The midnight alert</span>
+        <p>
+          At 2 AM an on-call engineer receives a PagerDuty alert: Redis memory at 98%, eviction
+          policy is <code>allkeys-lru</code>, and the leaderboard service is returning stale scores.
+          The root cause turns out to be three separate mistakes made months apart: a developer
+          stored session data as JSON strings instead of Hashes (3× the memory), a cron job wrote
+          full sorted-set dumps instead of incrementing scores, and nobody had set
+          <code>maxmemory-policy</code> deliberately — it defaulted to <code>noeviction</code> until
+          someone changed it to <code>allkeys-lru</code> without understanding that it would silently
+          evict leaderboard keys under pressure.
+        </p>
+        <p>
+          Understanding Redis data structures, eviction semantics, and persistence modes before you
+          hit production is far cheaper than learning them during an incident.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Data Structures</span>
+        <h2>The Seven Data Types and When to Use Each</h2>
+
+        <h3>String</h3>
+        <p>
+          The most versatile type. Stores any binary-safe value up to 512 MB. Used for simple
+          key-value caching, counters (<code>INCR</code>, <code>INCRBY</code>), distributed locks
+          (<code>SET … NX PX</code>), and feature flags. Internally Redis auto-encodes short integers
+          as integers (O(1) <code>INCR</code> without string parsing) and short strings as
+          <code>embstr</code> (single allocation, cache-friendly).
+        </p>
+
+        <h3>Hash</h3>
+        <p>
+          A map of field → value pairs. Ideal for objects (user profiles, product records) because
+          you can <code>HGET</code> a single field without deserialising the entire object. Redis
+          uses a compact <code>ziplist</code> encoding when a Hash has fewer than 128 fields and all
+          values are under 64 bytes — this can be 5–10× more memory-efficient than storing the same
+          data as a JSON string.
+        </p>
+
+        <h3>List</h3>
+        <p>
+          A doubly-linked list of strings. <code>LPUSH</code>/<code>RPUSH</code> and
+          <code>LPOP</code>/<code>RPOP</code> are O(1). <code>LRANGE</code> is O(N) for the
+          returned slice. Lists are the natural fit for job queues, activity feeds, and recent-events
+          windows. <code>BLPOP</code>/<code>BRPOP</code> provide blocking pop for consumer workers
+          without polling.
+        </p>
+
+        <h3>Set</h3>
+        <p>
+          An unordered collection of unique strings. O(1) for add/remove/membership. Set operations
+          (<code>SUNION</code>, <code>SINTER</code>, <code>SDIFF</code>) are powerful for tag
+          intersection, mutual-friend calculations, and deduplication pipelines.
+        </p>
+
+        <h3>Sorted Set (ZSet)</h3>
+        <p>
+          Like a Set, but every member has a floating-point score. Members are stored in sorted order
+          by score. <code>ZADD</code> is O(log N). <code>ZRANGE</code>/<code>ZREVRANGE</code> let
+          you page through top-N leaderboards in O(log N + M). <code>ZRANGEBYSCORE</code> is
+          perfect for time-window queries. This is the canonical structure for leaderboards, rate
+          limiters, and delayed job queues.
+        </p>
+
+        <h3>Stream</h3>
+        <p>
+          Append-only log of entries (Redis 5+). Each entry has an auto-generated or custom
+          <code>ID</code> and a set of field-value pairs. Streams support consumer groups — multiple
+          independent consumers each processing different entries, with acknowledgement and
+          redelivery of unacked messages. Think of it as a lightweight, in-process Kafka.
+        </p>
+
+        <h3>HyperLogLog / Bloom Filter / Geospatial (Redis Stack)</h3>
+        <p>
+          The extended Redis Stack types: <strong>HyperLogLog</strong> gives approximate cardinality
+          counts (unique page views) with O(1) memory; <strong>Bloom Filter</strong> answers
+          "have I seen this?" with configurable false-positive rate; <strong>GEOADD</strong> /
+          <code>GEODIST</code> / <code>GEORADIUS</code> handle geospatial indexing built on Sorted
+          Sets. These require the RedisBloom / RediSearch modules or Redis Stack.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Persistence</span>
+        <h2>RDB vs AOF — Choosing Your Durability Guarantee</h2>
+
+        <h3>RDB (Redis Database Snapshots)</h3>
+        <p>
+          RDB creates a point-in-time binary snapshot of the dataset at configurable intervals (e.g.,
+          <code>save 900 1</code> = save if at least 1 key changed in 900 seconds). The child process
+          does the fork-and-write, so the parent keeps serving requests. RDB files are compact and
+          fast to load on restart — startup time for a 10 GB dataset is typically under 30 seconds.
+        </p>
+        <p>
+          <strong>Trade-off:</strong> You can lose up to the interval's worth of writes. If Redis
+          crashes between snapshots, those writes are gone. RDB is appropriate when you can tolerate
+          a few minutes of data loss (e.g., a pure cache with a warm-up fallback).
+        </p>
+
+        <h3>AOF (Append-Only File)</h3>
+        <p>
+          Every write command is appended to a log file. On restart Redis replays the log to rebuild
+          state. Three <code>appendfsync</code> policies control durability vs. performance:
+        </p>
+        <ul>
+          <li><strong>always</strong> — fsync after every command. Maximum durability, ~10× slower writes.</li>
+          <li><strong>everysec</strong> — fsync once per second. At most 1 second of data loss. Recommended for most production deployments.</li>
+          <li><strong>no</strong> — let the OS decide. Fastest, but data loss on crash is up to the OS flush interval (typically 30 s).</li>
+        </ul>
+        <p>
+          AOF files grow over time. Redis periodically rewrites them via <code>BGREWRITEAOF</code>
+          (or automatically when the file exceeds a size threshold), compacting the log to the
+          minimal set of commands needed to recreate current state.
+        </p>
+
+        <h3>RDB + AOF hybrid (recommended)</h3>
+        <p>
+          Redis 4+ supports <code>aof-use-rdb-preamble yes</code> — the AOF file starts with an RDB
+          snapshot and then appends subsequent writes. Fast restart (RDB loading speed) plus
+          near-zero data loss (AOF granularity). This is the recommended production default for
+          data-sensitive workloads.
+        </p>
+
+        <div class="callout">
+          <p>
+            <strong>Rule of thumb:</strong> For a pure cache layer, disable persistence entirely
+            (<code>save ""</code> and <code>appendonly no</code>) — it eliminates fork overhead and
+            disk I/O. For anything that must survive a restart (sessions, rate-limiter state,
+            leaderboards), use RDB + AOF hybrid with <code>everysec</code>.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High Availability</span>
+        <h2>Redis Sentinel vs Redis Cluster</h2>
+
+        <h3>Redis Sentinel</h3>
+        <p>
+          Sentinel is a separate process that monitors a primary + one or more replica setup. If the
+          primary goes down, Sentinels elect a new primary through a quorum vote. Clients query
+          Sentinels to discover the current primary address. No data sharding — the entire dataset
+          lives on one shard. Use Sentinel when your dataset fits on one node and you need automatic
+          failover with minimal complexity.
+        </p>
+        <ul>
+          <li>Minimum: 3 Sentinel processes for a stable quorum.</li>
+          <li>Failover time: typically 10–30 seconds.</li>
+          <li>Client requirement: client must support Sentinel discovery (ioredis and node-redis both do).</li>
+        </ul>
+
+        <h3>Redis Cluster</h3>
+        <p>
+          Cluster shards data across up to 1000 nodes using 16384 hash slots. Each primary node
+          owns a range of hash slots; replicas provide HA for their primary. Clients route commands
+          based on the slot of the key — cluster-aware clients cache the slot map and redirect on
+          <code>MOVED</code>/<code>ASK</code> responses.
+        </p>
+        <ul>
+          <li>Required when dataset exceeds a single node's RAM.</li>
+          <li>Multi-key commands (<code>MGET</code>, <code>SUNION</code>) only work when all keys hash to the same slot — use hash tags (<code>{user:123}:session</code>) to force co-location.</li>
+          <li>Minimum recommended: 3 primaries × 1 replica each = 6 nodes.</li>
+        </ul>
+
+        <div class="callout">
+          <p>
+            <strong>Decision rule:</strong> Dataset &lt; node RAM → Sentinel. Dataset requires
+            horizontal sharding → Cluster. Don't add Cluster complexity you don't need; Sentinel
+            handles most production use-cases cleanly.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Memory Management</span>
+        <h2>Eviction Policies, TTLs, and Avoiding Hot Keys</h2>
+
+        <h3>maxmemory and eviction policies</h3>
+        <p>
+          Set <code>maxmemory</code> to leave headroom for replication buffers and AOF rewrites
+          (typically 70–80% of physical RAM). When the limit is reached, Redis applies the configured
+          <code>maxmemory-policy</code>:
+        </p>
+        <ul>
+          <li><strong>noeviction</strong> — return errors on new writes. Safe for primary data stores where silent loss is unacceptable.</li>
+          <li><strong>allkeys-lru</strong> — evict any key using LRU. Good for pure caches where any key can be regenerated.</li>
+          <li><strong>volatile-lru</strong> — evict only keys with a TTL set. Good when you want to protect keys without TTLs.</li>
+          <li><strong>allkeys-lfu</strong> — evict least-frequently used keys (Redis 4+). Better than LRU for skewed access patterns.</li>
+          <li><strong>volatile-ttl</strong> — evict the key with the shortest remaining TTL first.</li>
+        </ul>
+
+        <h3>TTL best practices</h3>
+        <p>
+          Always set TTLs on cache keys. Use <code>EXPIRE</code> or the <code>EX</code>/<code>PX</code>
+          options on write. Avoid setting all keys to the same TTL — spread them with jitter
+          (<code>ttl + Math.random() * jitterMs</code>) to prevent cache stampedes where all keys
+          expire simultaneously.
+        </p>
+
+        <h3>Hot keys and big keys</h3>
+        <p>
+          A <strong>hot key</strong> is a single key receiving a disproportionate share of traffic.
+          Since a single Redis node is single-threaded for command execution, one hot key can saturate
+          CPU. Solutions: local in-process caching for the hot key; read replicas + randomised replica
+          routing; or sharding the key across N keys with a client-side aggregation step.
+        </p>
+        <p>
+          A <strong>big key</strong> is a value that takes &gt;10 ms to serialise/deserialise or
+          occupies &gt;1 MB. Big keys block the event loop during serialisation. Detect them with
+          <code>redis-cli --bigkeys</code> or <code>OBJECT ENCODING key</code>. Mitigation: split
+          into multiple smaller keys, use HSCAN/SSCAN/ZSCAN for iterative access.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Six Canonical Use-Cases with ioredis</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import Redis from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+
+// ── 1. Cache-aside pattern ──────────────────────────────────────────────────
+async function getCachedUser(userId) {
+  const key = `user:${userId}`;
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const user = await db.findUser(userId); // hypothetical DB call
+  // Cache for 5 min with jitter to prevent stampede
+  const ttl = 300 + Math.floor(Math.random() * 60);
+  await redis.set(key, JSON.stringify(user), 'EX', ttl);
+  return user;
+}
+
+// ── 2. Distributed lock (SET NX PX) ────────────────────────────────────────
+async function withLock(resource, ttlMs, fn) {
+  const lockKey = `lock:${resource}`;
+  const token = crypto.randomUUID();
+  const acquired = await redis.set(lockKey, token, 'PX', ttlMs, 'NX');
+  if (!acquired) throw new Error(`Could not acquire lock on ${resource}`);
+
+  try {
+    return await fn();
+  } finally {
+    // Lua script for atomic check-and-delete
+    const script = `
+      if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+      else return 0 end`;
+    await redis.eval(script, 1, lockKey, token);
+  }
+}
+
+// ── 3. Fixed-window rate limiter ────────────────────────────────────────────
+async function rateLimit(userId, limitPerMinute) {
+  const window = Math.floor(Date.now() / 60_000); // 1-minute window
+  const key = `rl:${userId}:${window}`;
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, 60); // set TTL on first write
+  return { allowed: count &lt;= limitPerMinute, count, limit: limitPerMinute };
+}
+
+// ── 4. Leaderboard (Sorted Set) ─────────────────────────────────────────────
+async function addScore(gameId, userId, score) {
+  await redis.zadd(`lb:${gameId}`, score, userId);
+}
+async function getTopN(gameId, n = 10) {
+  // ZREVRANGE returns members highest score first
+  const members = await redis.zrevrange(`lb:${gameId}`, 0, n - 1, 'WITHSCORES');
+  const result = [];
+  for (let i = 0; i &lt; members.length; i += 2) {
+    result.push({ userId: members[i], score: Number(members[i + 1]) });
+  }
+  return result;
+}
+
+// ── 5. Session store (Hash) ─────────────────────────────────────────────────
+async function saveSession(sessionId, fields, ttlSeconds = 3600) {
+  const key = `sess:${sessionId}`;
+  await redis.hset(key, fields); // { userId: '42', role: 'admin', ... }
+  await redis.expire(key, ttlSeconds);
+}
+async function getSessionField(sessionId, field) {
+  return redis.hget(`sess:${sessionId}`, field);
+}
+
+// ── 6. Job queue (List + BLPOP) ─────────────────────────────────────────────
+async function enqueue(queueName, job) {
+  await redis.rpush(`q:${queueName}`, JSON.stringify(job));
+}
+async function workerLoop(queueName) {
+  while (true) {
+    // BLPOP blocks up to 5 s; returns [key, value] or null on timeout
+    const result = await redis.blpop(`q:${queueName}`, 5);
+    if (!result) continue;
+    const job = JSON.parse(result[1]);
+    await processJob(job).catch(console.error);
+  }
+}
+
+async function processJob(job) { console.log('Processing', job); }
+async function db_findUser(id) { return { id, name: 'Alice' }; }
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Transactions &amp; Scripting</span>
+        <h2>MULTI/EXEC, Lua Scripts, and Pipelining</h2>
+
+        <h3>Pipelining</h3>
+        <p>
+          Pipelining batches multiple commands into a single network round-trip. The client sends N
+          commands without waiting for replies, then reads all N replies at once. This doesn't
+          change atomicity (commands can still interleave with other clients), but it dramatically
+          reduces round-trip overhead for bulk operations. In ioredis, use <code>redis.pipeline()</code>
+          or send an array of commands.
+        </p>
+
+        <h3>MULTI / EXEC (transactions)</h3>
+        <p>
+          Commands between <code>MULTI</code> and <code>EXEC</code> are queued and executed
+          atomically as a block — no other client's commands interleave. However, Redis transactions
+          do <em>not</em> roll back on runtime errors (only on syntax errors queued before
+          <code>EXEC</code>). Use <code>WATCH</code> before <code>MULTI</code> to implement
+          optimistic locking: if the watched key changes before <code>EXEC</code>, the transaction
+          aborts and returns <code>nil</code>.
+        </p>
+
+        <h3>Lua scripting (<code>EVAL</code>)</h3>
+        <p>
+          Lua scripts execute atomically on the Redis server — no commands from other clients run
+          while a script is executing. This is stronger than MULTI/EXEC and avoids the
+          check-then-act race condition. Use Lua for complex atomic operations like the lock-release
+          pattern above, or for conditional updates that would otherwise require a WATCH loop.
+          Cache scripts with <code>SCRIPT LOAD</code> + <code>EVALSHA</code> to avoid re-sending
+          the script body on every call.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Atomic operations hierarchy:</strong> Single command (always atomic) &gt;
+            Lua script (atomic, no rollback needed) &gt; MULTI/EXEC (atomic block, no rollback)
+            &gt; Pipeline (not atomic, but fast). Match the tool to the consistency requirement.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pub / Sub &amp; Streams</span>
+        <h2>Pub/Sub, Keyspace Notifications, and Streams</h2>
+
+        <h3>Pub/Sub</h3>
+        <p>
+          <code>PUBLISH channel message</code> broadcasts to all current subscribers. Subscriptions
+          are ephemeral — if a subscriber is disconnected, messages are lost. Redis pub/sub is
+          appropriate for real-time fan-out (chat, live updates) where occasional message loss is
+          acceptable and persistence is not required.
+        </p>
+
+        <h3>Keyspace notifications</h3>
+        <p>
+          Enable with <code>notify-keyspace-events KEA</code> in <code>redis.conf</code> (or
+          <code>CONFIG SET</code> at runtime). Subscribers receive notifications when keys expire,
+          are deleted, or are written. Useful for cache invalidation triggers, TTL-based workflows,
+          and audit logging — but generates significant internal pub/sub traffic at high key churn.
+        </p>
+
+        <h3>Streams for reliable messaging</h3>
+        <p>
+          Unlike pub/sub, Streams persist messages and support consumer groups. A consumer group
+          tracks which entries each consumer has acknowledged. Unacknowledged entries can be
+          reclaimed with <code>XAUTOCLAIM</code> after a timeout — providing at-least-once delivery
+          semantics. Use Streams when you need message persistence and ordered, at-least-once
+          processing; use pub/sub for fire-and-forget fan-out.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical Checklist</span>
+        <h2>Redis Production Readiness — What to Nail</h2>
+        <ul class="check-list">
+          <li>Set <code>maxmemory</code> to 70–80% of RAM and choose <code>maxmemory-policy</code> deliberately — never rely on the default (<code>noeviction</code>) in a cache.</li>
+          <li>Use RDB + AOF hybrid with <code>appendfsync everysec</code> for any data that must survive a restart.</li>
+          <li>Always set TTLs on cache keys. Add random jitter to avoid simultaneous expiry stampedes.</li>
+          <li>Use Hash instead of JSON-serialised strings for objects with many fields — leverage ziplist compression for small hashes.</li>
+          <li>Use Sorted Sets for leaderboards and time-window rate limiters, not Lists — O(log N) range queries are worth it.</li>
+          <li>Prefer Lua scripts over MULTI/EXEC for complex atomic operations to avoid check-then-act races.</li>
+          <li>Deploy at least 3 Sentinel processes for quorum; use Redis Cluster only when you need horizontal sharding.</li>
+          <li>Monitor <code>redis-cli info memory</code> fields: <code>mem_fragmentation_ratio</code> &gt; 1.5 indicates fragmentation; restart or active defrag may be needed.</li>
+          <li>Run <code>redis-cli --hotkeys</code> in production periodically to detect hot-key concentration before it causes latency spikes.</li>
+          <li>For Node.js, use ioredis over node-redis for cluster-aware client routing and built-in reconnection logic.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Redis mastery is 80% choosing the right data structure for the problem. Strings for
+          counters and locks, Hashes for objects, Lists for queues, Sorted Sets for ordered
+          collections and leaderboards, Streams for reliable messaging — each type unlocks a compact
+          and efficient implementation that a generic "store it as JSON" approach can never match.
+          Layer in the right persistence mode and HA topology for your durability requirements,
+          set <code>maxmemory</code> and eviction policy deliberately, and use Lua scripts for
+          atomic compound operations. Done right, Redis handles hundreds of thousands of operations
+          per second on a single node with sub-millisecond latency and a memory footprint that
+          would surprise you.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

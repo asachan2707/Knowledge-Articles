@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stop Installing Random MCP Servers. Start With These 10. | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server rack with glowing fiber optic cables"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">MCP · AI · Tools · Engineering · 18 min</span>
+          </div>
+        </figure>
+
+        <h1>Stop Installing Random MCP Servers. Start With These 10.</h1>
+        <p class="summary">
+          Model Context Protocol (MCP) lets AI agents connect to external tools — but most community
+          servers are abandoned, insecure, or redundant with simpler alternatives. This guide covers
+          the 10 MCP servers that actually earn their place in a production workflow, what each one
+          does, how to configure it, and when to build your own.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: MCP / AI Tools / Engineering</span>
+          <span class="meta-item">Published: 2026-07-16</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The promise of MCP is compelling: give your AI agent a filesystem, a GitHub connection, a
+          database cursor, and a web browser, and watch it become dramatically more useful. The reality:
+          most engineers add servers faster than they evaluate them, and the config file becomes a
+          liability before the first useful workflow is built.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The discipline:</strong> An MCP server is not a feature — it is an operational
+            dependency with a blast radius. Treat every server you add like a new production service:
+            evaluate its security posture, maintenance status, and whether it actually improves your
+            workflow before it touches your agent config.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The MCP sprawl problem</span>
+        <p>
+          The engineer had been following MCP discussions for weeks. Every thread surfaced new servers:
+          filesystem, GitHub, Slack, Notion, browser, database, calendar, email, web search, code
+          execution, memory, diagram tools, project management, math, weather. Each one seemed
+          genuinely useful in isolation. So they added them all.
+        </p>
+        <p>
+          The Claude Desktop config file hit 400 lines. Three of the servers required API tokens stored
+          as plaintext in the JSON config — no environment variable support, just your key sitting in a
+          file on disk. Two were abandoned repos last touched 18 months ago; their package dependencies
+          had known CVEs. The Notion server had conflicting tool names with the Slack server, which
+          confused the model.
+        </p>
+        <p>
+          The agent started hallucinating tool calls. It would try to call <code>create_page</code>
+          (a Notion tool) when the user asked about GitHub issues. The tool registry had become
+          too large for the model to reliably select the right tool. Context windows filled with
+          tool descriptions before the actual task even started.
+        </p>
+        <p>
+          The engineer stripped it back to five servers. The hallucinations stopped. The workflows
+          got faster. That experience is the basis for this guide.
+        </p>
+        <p>
+          The MCP ecosystem is growing at a pace that outstrips the maintenance capacity of the community.
+          Most servers on GitHub are weekend projects. A small subset are production-quality, actively
+          maintained, and safe to run. This guide is that subset.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">What MCP Actually Is</span>
+        <h2>Model Context Protocol — the 5-minute version</h2>
+        <p>
+          Model Context Protocol (MCP) is an open standard announced by Anthropic in November 2024.
+          It defines a JSON-RPC 2.0 protocol that lets an AI model call external tools through a
+          standardized interface. An MCP server is a process that exposes three types of capabilities:
+        </p>
+        <ul>
+          <li><strong>Tools</strong> — callable functions (read a file, run a query, post a message)</li>
+          <li><strong>Resources</strong> — readable content the model can include in context (a file, a URL, a database row)</li>
+          <li><strong>Prompts</strong> — reusable prompt templates the server provides</li>
+        </ul>
+        <p>
+          At the transport level, an MCP server is just a process that communicates over <strong>stdio</strong>
+          (the client spawns the server as a subprocess and reads/writes JSON-RPC messages on stdin/stdout)
+          or <strong>HTTP/SSE</strong> (the server runs as an HTTP service). The AI model (Claude, GPT-4,
+          or any other MCP-compatible client) calls the server when it decides a tool call is appropriate.
+        </p>
+        <p>
+          Why this matters: the standardized interface means a single server integration works across all
+          MCP-compatible clients. A GitHub MCP server built for Claude Desktop also works with Cursor,
+          Continue.dev, or any other MCP client. This is the key architectural advantage over earlier
+          bespoke plugin systems.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The mental model:</strong> An MCP server is to an AI agent what an API client library
+            is to a web application. It abstracts a service (GitHub, PostgreSQL, Slack) behind a typed,
+            discoverable interface. The difference: the consumer is a language model, not a developer.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Evaluation Criteria</span>
+        <h2>Five questions to ask before installing any MCP server</h2>
+        <p>
+          The community ecosystem has hundreds of MCP servers. Most are not production-ready. Before
+          adding any server to your config, answer these five questions:
+        </p>
+        <ol>
+          <li>
+            <strong>Is it maintained?</strong> Check the GitHub commit history. Any server without commits
+            in the last three months is likely abandoned. Abandoned servers have unpatched dependencies and
+            unresolved bugs. The official Anthropic and partner-maintained servers are the safest baseline.
+          </li>
+          <li>
+            <strong>How does it handle credentials?</strong> The correct answer is environment variables
+            in the MCP config, not inline plaintext. If a server's README shows your API key directly in
+            the JSON config object, that key will be readable by any process on your machine and will appear
+            in your shell history if you echo the config.
+          </li>
+          <li>
+            <strong>What is the blast radius if it misbehaves?</strong> A filesystem server with access to
+            <code>~/</code> can read your SSH keys, your <code>.env</code> files, and your browser profile.
+            A code execution server without sandboxing can delete files. Rate the blast radius before
+            granting access.
+          </li>
+          <li>
+            <strong>Could you do the same thing with a simpler tool?</strong> If the server wraps a public
+            REST API you could call with curl, the MCP server is not adding value — it is adding a
+            dependency. MCP servers earn their place when the tool interface genuinely makes the AI's job
+            easier, not just when the capability exists.
+          </li>
+          <li>
+            <strong>Does it actually improve your workflow?</strong> Run for a week without it first.
+            If you are reaching for the tool daily, it belongs in your config. If you are installing it
+            "because it might be useful," defer until you have a concrete use case.
+          </li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 1</span>
+        <h2>Filesystem — The Foundation</h2>
+        <p>
+          The official Anthropic MCP filesystem server is the most universally useful server in the
+          ecosystem. It exposes read, write, list, and search operations over a configured set of
+          directory paths. For any coding workflow, this eliminates the most tedious part of working
+          with Claude: manually pasting file contents into the conversation.
+        </p>
+        <p>
+          <strong>Security: configure with the minimum necessary path.</strong> Do not point it at
+          <code>~/</code> — point it at your project directory. You can configure multiple allowed
+          directories. A path you do not grant is a path the agent cannot accidentally touch.
+        </p>
+        <p>
+          <strong>Use cases:</strong> letting Claude read and navigate your codebase, writing generated
+          code directly to disk, searching for files by pattern, reading config files for context.
+        </p>
+        <span class="code-label">JSON Config</span>
+        <pre><code class="language-json">{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/yourname/projects/my-project"
+      ]
+    }
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 2</span>
+        <h2>GitHub — Code Review and Issue Management</h2>
+        <p>
+          The official GitHub MCP server (maintained by GitHub/Microsoft) exposes the GitHub API through
+          a typed tool interface. Key capabilities: list and read repos, read and create files, manage
+          pull requests (list, read, create, merge), manage issues, and search code across repositories.
+        </p>
+        <p>
+          <strong>Authentication:</strong> use a GitHub Personal Access Token stored in an environment
+          variable. Use a fine-grained PAT scoped to only the repositories and permissions you actually
+          need. For most read-only use cases (code review assistant, issue triage), a PAT with
+          <code>Contents: read</code> and <code>Pull requests: read</code> is sufficient — you do not
+          need write permissions.
+        </p>
+        <p>
+          <strong>Use cases:</strong> a code review assistant that reads open PRs and generates structured
+          feedback; an issue triage bot that categorizes new issues by label; automated PR description
+          generation based on the diff.
+        </p>
+        <span class="code-label">JSON Config</span>
+        <pre><code class="language-json">{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 3</span>
+        <h2>PostgreSQL / SQLite — Read-Only Database Access</h2>
+        <p>
+          A database MCP server lets Claude run SQL queries and inspect schema without you manually
+          running queries and pasting results. The official SQLite server (Anthropic) and PostgreSQL
+          community servers expose query execution and schema introspection tools.
+        </p>
+        <p>
+          <strong>The critical security requirement: read-only access only.</strong> Configure your
+          database connection string with a read-only database user. Never give a language model a
+          connection with write access to a production database — the risk of an inadvertent
+          <code>DELETE</code> or <code>UPDATE</code> is not theoretical.
+        </p>
+        <p>
+          The schema inspection tools are particularly useful for code generation: Claude can read
+          your actual table structures and generate correct queries the first time, rather than you
+          manually describing the schema in the prompt.
+        </p>
+        <p>
+          <strong>Use cases:</strong> natural language analytics ("show me the top 10 users by spend
+          last week"), debugging production data issues, generating migration scripts from schema
+          inspection, writing accurate ORM models.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 4</span>
+        <h2>Brave Search / Tavily — Web Search</h2>
+        <p>
+          Claude's training data has a knowledge cutoff. For current documentation, API changes,
+          recent incidents, or real-time prices, a web search MCP server is essential. Two options
+          stand out:
+        </p>
+        <ul>
+          <li>
+            <strong>Brave Search API</strong> — privacy-respecting, does not track queries, returns
+            full search results with URLs and snippets. ~$3 per 1,000 queries. Good general-purpose
+            search.
+          </li>
+          <li>
+            <strong>Tavily</strong> — built specifically for LLM use. Returns clean extracted text
+            rather than HTML, which dramatically reduces the token cost of processing results. Has
+            a generous free tier (1,000 queries/month). The better choice for most AI workflows
+            because the response format is already optimized for model consumption.
+          </li>
+        </ul>
+        <p>
+          <strong>Use cases:</strong> researching current library documentation, checking whether a
+          CVE has a patch available, looking up current pricing for cloud services, finding relevant
+          GitHub issues for error messages.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 5</span>
+        <h2>Memory (Knowledge Graph) — Persistent Context</h2>
+        <p>
+          The official Anthropic memory server implements a persistent knowledge graph that survives
+          across conversation sessions. It stores three types of data: <strong>entities</strong>
+          (people, projects, technologies), <strong>relations</strong> (Project X uses PostgreSQL),
+          and <strong>observations</strong> (Project X deployed to AWS us-east-1 on 2026-05-01).
+        </p>
+        <p>
+          The difference from in-context memory is persistence: information stored in the knowledge
+          graph is available in every future conversation without you having to re-explain it. The
+          storage mechanism is a local JSON file on disk.
+        </p>
+        <p>
+          <strong>Use cases:</strong> project-specific context that Claude should always know
+          ("this project uses Node.js 20, pnpm, and deploys to Railway"), personal preferences
+          ("always use TypeScript strict mode"), team knowledge ("the payments team owns
+          <code>/services/billing</code>").
+        </p>
+        <p>
+          The knowledge graph model is more structured than simple notes and supports queries like
+          "what do I know about Project X?" that aggregate across all stored observations and
+          relations for that entity.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 6</span>
+        <h2>Puppeteer / Playwright — Browser Automation</h2>
+        <p>
+          A browser automation MCP server lets Claude navigate web pages, click elements, fill forms,
+          extract content, and take screenshots. This is essential for scraping sites that require
+          JavaScript rendering (most modern SPAs) and for automated UI testing workflows.
+        </p>
+        <p>
+          <strong>Security: this server has the highest blast radius of any on this list.</strong>
+          A compromised prompt or a prompt injection attack from a malicious web page could instruct
+          the browser to navigate to a phishing site, download a file, or submit a form with
+          unintended data. Best practices:
+        </p>
+        <ul>
+          <li>Run the browser in a Docker container or VM, not as your user on the host</li>
+          <li>Enable this server only when you are actively doing browser-automation work</li>
+          <li>Do not leave it in your always-on config — add it for specific sessions</li>
+          <li>Consider network restrictions in the container to limit outbound access</li>
+        </ul>
+        <p>
+          <strong>Use cases:</strong> extracting data from sites without APIs, automated visual
+          regression testing, form-based workflows that cannot be API-driven.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 7</span>
+        <h2>Slack — Channel Reading and Posting</h2>
+        <p>
+          The official Slack MCP server allows Claude to read messages from channels, post messages,
+          search conversation history, and list channel members. This enables workflows where Claude
+          needs conversational context from your team's communication.
+        </p>
+        <p>
+          <strong>Authentication:</strong> create a Slack app with a Bot Token. Request only the
+          OAuth scopes you need: <code>channels:read</code>, <code>channels:history</code>,
+          and <code>chat:write</code> are sufficient for most use cases. Do not request
+          <code>admin</code> scopes.
+        </p>
+        <p>
+          <strong>Use cases:</strong> a PR review bot that posts structured feedback to a
+          <code>#code-review</code> channel; summarizing a thread before a meeting; monitoring a
+          support channel and drafting responses; daily standup summarizer.
+        </p>
+        <p>
+          Store the Bot Token in an environment variable, not inline in the config.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 8</span>
+        <h2>Google Drive / Docs — Document Access</h2>
+        <p>
+          A Google Drive MCP server lets Claude read and search documents in your Drive without
+          you manually downloading and pasting them. For knowledge-worker workflows where context
+          lives in Google Docs, this is a significant productivity multiplier.
+        </p>
+        <p>
+          <strong>Authentication:</strong> Google OAuth with a refresh token stored securely.
+          Request the minimum scope: <code>https://www.googleapis.com/auth/drive.readonly</code>
+          is sufficient for reading documents. Never request write scopes unless you have a specific
+          write workflow and understand the blast radius.
+        </p>
+        <p>
+          <strong>Use cases:</strong> summarizing quarterly review documents, searching for
+          relevant design docs before starting a project, extracting structured data from a
+          spreadsheet for analysis, cross-referencing multiple docs to find inconsistencies.
+        </p>
+        <p>
+          Note: the Drive API has per-minute quotas. For workflows that read many documents,
+          add rate-limiting logic or use batch read requests.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 9</span>
+        <h2>Code Execution (e2b / Sandbox) — Sandboxed Runtime</h2>
+        <p>
+          Sandboxed code execution lets Claude run Python, JavaScript, or shell scripts and see
+          the output — enabling data analysis, mathematical computation, diagram generation, and
+          test execution. The critical requirement in every case: the execution environment must
+          be isolated from your host system.
+        </p>
+        <p>
+          <strong>Options:</strong>
+        </p>
+        <ul>
+          <li>
+            <strong>e2b.dev</strong> — cloud-hosted sandboxed environments; Claude runs code in an
+            isolated VM that is destroyed after the session; the best option for security because
+            there is no local execution risk
+          </li>
+          <li>
+            <strong>Modal</strong> — serverless Python execution with strong isolation; good for
+            ML and data science workflows
+          </li>
+          <li>
+            <strong>Docker-based local execution</strong> — acceptable if you configure the
+            container with no host volume mounts and no network access to your internal services
+          </li>
+        </ul>
+        <p>
+          <strong>Never</strong> configure a local code execution MCP that runs directly as your
+          user account. Claude is an LLM and will occasionally generate commands that have
+          unintended side effects. Sandboxing is not optional here — it is the feature.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server 10</span>
+        <h2>Sequential Thinking / Reasoning — Structured Problem Solving</h2>
+        <p>
+          The sequential thinking MCP server is unusual in this list because it does not connect
+          to an external system — it exposes a meta-tool that prompts Claude to break down
+          complex problems into explicit reasoning steps before taking action.
+        </p>
+        <p>
+          The tool presents a structured interface: "state the problem, identify sub-problems,
+          reason through each, synthesize a plan." By exposing this as a callable tool, it
+          makes Claude's planning visible and correctable before execution begins.
+        </p>
+        <p>
+          <strong>Why it earns a place in the top 10:</strong> for multi-step tasks (refactoring
+          a module, planning a migration, debugging a complex system issue), prompting Claude to
+          use this tool before acting produces measurably better results than jumping straight
+          to action. The reasoning chain is also useful as documentation — you can read the
+          steps Claude planned and verify them before it executes.
+        </p>
+        <p>
+          <strong>Use cases:</strong> planning complex refactors, debugging distributed system
+          issues, designing API schemas, any task where "think before you act" produces better
+          outcomes.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Building Your Own</span>
+        <h2>When to Build a Custom MCP Server</h2>
+        <p>
+          The top 10 servers above cover most workflows. Build your own when you have a data
+          source or action that none of them address: an internal API, a proprietary database,
+          a domain-specific tool, or a custom authentication flow.
+        </p>
+        <p>
+          <strong>Build your own when:</strong>
+        </p>
+        <ul>
+          <li>You have an internal API or database that is not publicly accessible</li>
+          <li>You need custom business logic in the tool interface (e.g., route by customer tier)</li>
+          <li>You want to expose a domain-specific action (run this deployment, update this config)</li>
+          <li>You need to combine multiple internal systems into a single tool</li>
+        </ul>
+        <p>
+          <strong>Do not build your own when:</strong>
+        </p>
+        <ul>
+          <li>You are wrapping a public API that already has a maintained MCP server</li>
+          <li>The use case can be covered by the filesystem or code execution servers</li>
+          <li>You would spend more time maintaining the server than it saves</li>
+        </ul>
+        <p>
+          Scaffolding a new server takes about 30 seconds with the official create tool.
+          A minimal server that exposes two tools is roughly 50 lines of code.
+        </p>
+        <span class="code-label">Shell</span>
+        <pre><code class="language-bash">npx @modelcontextprotocol/create-server my-internal-api-server</code></pre>
+        <p>
+          The generated server implements <code>list_tools</code> (returns tool schemas) and
+          <code>call_tool</code> (executes a named tool with provided arguments). Add your
+          business logic in <code>call_tool</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Minimal Custom MCP Server — 50 Lines</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * A minimal MCP server that exposes two tools:
+ *   - get_project_config: returns config for a named project
+ *   - list_all_projects: returns all project names
+ *
+ * Reads from a local JSON database (projects.json).
+ * Run: node server.js
+ */
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { readFileSync } from "fs";
+
+const DB_PATH = "./projects.json"; // { "project-x": { stack: "Node.js", db: "PostgreSQL" } }
+
+function loadDb() {
+  return JSON.parse(readFileSync(DB_PATH, "utf-8"));
+}
+
+// ── Tool definitions ──────────────────────────────────────────────────────────
+const TOOLS = [
+  {
+    name: "get_project_config",
+    description: "Get configuration details for a specific project",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_name: { type: "string", description: "The project identifier" },
+      },
+      required: ["project_name"],
+    },
+  },
+  {
+    name: "list_all_projects",
+    description: "List all known project names",
+    inputSchema: { type: "object", properties: {} },
+  },
+];
+
+// ── Server setup ──────────────────────────────────────────────────────────────
+const server = new Server(
+  { name: "internal-projects-server", version: "1.0.0" },
+  { capabilities: { tools: {} } }
+);
+
+server.setRequestHandler("tools/list", async () => ({ tools: TOOLS }));
+
+server.setRequestHandler("tools/call", async (request) => {
+  const { name, arguments: args } = request.params;
+  const db = loadDb();
+
+  if (name === "get_project_config") {
+    const config = db[args.project_name];
+    if (!config) return { content: [{ type: "text", text: `Project '${args.project_name}' not found.` }] };
+    return { content: [{ type: "text", text: JSON.stringify(config, null, 2) }] };
+  }
+
+  if (name === "list_all_projects") {
+    return { content: [{ type: "text", text: Object.keys(db).join("\n") }] };
+  }
+
+  throw new Error(`Unknown tool: ${name}`);
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+const transport = new StdioServerTransport();
+await server.connect(transport);
+// Server is now listening on stdio — add to claude_desktop_config.json:
+// { "command": "node", "args": ["/path/to/server.js"] }
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JSON Example</span>
+        <h2>A Secure claude_desktop_config.json — Top 5 Servers</h2>
+        <span class="code-label">JSON Example</span>
+        <pre><code class="language-json">{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/yourname/projects"
+      ]
+    },
+
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+
+    "sqlite": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sqlite",
+        "--db-path", "/Users/yourname/projects/myapp.db",
+        "--read-only"
+      ]
+    },
+
+    "tavily-search": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-tavily"],
+      "env": {
+        "TAVILY_API_KEY": "${TAVILY_API_KEY}"
+      }
+    },
+
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": "/Users/yourname/.claude/memory.json"
+      }
+    }
+  }
+}
+
+/*
+ * Security notes:
+ *   - All API keys are in environment variables, not inline strings
+ *   - Filesystem path is scoped to ~/projects only, not ~/
+ *   - SQLite is explicitly read-only
+ *   - Memory file is stored in .claude/ (not a project directory)
+ *   - No browser automation server in the always-on config
+ *   - No code execution server in the always-on config
+ *
+ * Add browser or code execution servers as session-specific overrides
+ * only when you are actively doing that kind of work.
+ */</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Before Installing Any MCP Server — 5 Security Questions</h2>
+        <ul class="check-list">
+          <li>Is the server maintained? Check: commits in the last 3 months, open CVEs in dependencies, a responsive maintainer.</li>
+          <li>Does it store credentials securely? Look for environment variable support — reject any server that requires plaintext keys in the JSON config.</li>
+          <li>What is the blast radius? Can it delete files, send messages, run arbitrary code, or access credentials? Configure the minimum necessary permissions.</li>
+          <li>Does it have a concrete use case in your workflow today — not "might be useful someday"?</li>
+          <li>Have you evaluated whether a simpler alternative (curl, a script, a CLI tool) would accomplish the same thing with less operational overhead?</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Should I use LiteLLM instead of individual MCP servers?</h3>
+        <p>
+          LiteLLM is an LLM routing and abstraction layer, not an MCP server. They solve different
+          problems. LiteLLM normalizes LLM provider APIs (OpenAI, Anthropic, etc.) for your
+          application code. MCP servers give the LLM access to external tools at runtime. You might
+          use both in a production system — LiteLLM for provider abstraction, MCP servers for
+          tool access.
+        </p>
+
+        <h3>How many MCP servers is too many?</h3>
+        <p>
+          The practical limit is less about count and more about total tool count. Every MCP server
+          adds its tools to the model's context window at every turn. If you have 10 servers with
+          10 tools each, the model is seeing 100 tool definitions in every conversation. This
+          increases token cost and, more importantly, increases the chance that the model selects
+          the wrong tool. Stay under 30 total active tools. If you need more, consider session-specific
+          configs that load only the tools relevant to the current task.
+        </p>
+
+        <h3>Can I use MCP servers with Claude API, not just Claude Desktop?</h3>
+        <p>
+          Yes. The Claude API supports MCP via the <code>mcp_servers</code> parameter in the
+          Messages API. You specify server URLs (HTTP/SSE transport) and the API connects to them
+          at request time. The stdio transport (subprocess) is primarily a local/desktop pattern;
+          HTTP/SSE is the pattern for hosted services.
+        </p>
+
+        <h3>What about the security of community MCP servers on npm?</h3>
+        <p>
+          Treat community npm packages the same way you treat any open-source dependency: audit
+          before installing (npm audit, Snyk), check the package's download count and GitHub
+          activity, and review the package code before granting it sensitive permissions. A server
+          with filesystem write access that was published by an unknown author two weeks ago is
+          a supply chain risk.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaways</h2>
+        <p>
+          MCP's value is in the curation, not the collection. Ten well-chosen, properly secured
+          servers will outperform fifty hastily added ones every time — because the model can
+          reliably find and use the right tool, because your config is auditable, and because
+          you understand the blast radius of every server you run. Start with filesystem and
+          GitHub. Add memory for persistence, Tavily for current information, and a database
+          server for analytics. Evaluate everything else against the five-question security
+          framework before it touches your config. And if none of the community servers fit
+          your internal tooling, 50 lines of JavaScript is all you need to build your own.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Further exploration</h2>
+        <ul>
+          <li><a href="./salesforce-hosted-mcp-apex-agents.html">Salesforce Hosted MCP + Apex Agents</a></li>
+          <li><a href="./api-design-architecture-complete-guide.html">API Design Architecture — Complete Guide</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Build Hosted MCP Tools in Apex for Agents | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Interconnected nodes representing a cloud platform with agent tooling"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Agents · MCP · Salesforce · 12 min</span>
+          </div>
+        </figure>
+
+        <h1>Build Hosted MCP Tools in Apex for Agents</h1>
+        <p class="summary">
+          Salesforce's Headless 360 platform lets you write MCP (Model Context Protocol) tool handlers
+          directly in Apex — exposing Salesforce data and business logic to any MCP-compatible AI agent
+          without building a middleware server. This covers the architecture, the Apex patterns, and how
+          headless APIs wire it all together.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: YouTube — Salesforce Headless 360 Decoded</span>
+          <span class="meta-item">Domain: Salesforce / Agents / MCP</span>
+          <span class="meta-item">Published: 2024</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Most MCP server implementations are Node.js or Python processes that you run outside your
+          platform. Salesforce's approach embeds MCP tool definitions inside Apex classes — the same
+          language used for triggers, flows, and business logic — and hosts them within the Salesforce
+          runtime. Agents talk to Salesforce directly over MCP without you maintaining a separate server.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> Apex classes annotated with MCP metadata become tool endpoints.
+            The Salesforce MCP runtime handles the protocol framing, authentication, and schema exposure.
+            You write business logic; the platform handles the agent interface.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The CRM agent that knew too little</span>
+        <p>
+          A sales team deploys an AI agent to answer questions like "Which accounts are at risk this quarter?"
+          The agent knows how to reason but has no direct access to Salesforce opportunity data. The
+          traditional fix is a Node.js middleware server that queries the Salesforce REST API, transforms
+          the JSON, and re-exposes it as an MCP tool — three systems to deploy, secure, monitor, and keep in
+          sync with schema changes.
+        </p>
+        <p>
+          With hosted MCP in Apex, the same answer lives in a 30-line Apex class sitting inside the org.
+          No middleware. The Salesforce runtime registers the tool, validates inputs against the schema, calls
+          the class, and returns the result to the agent — all within the existing Salesforce security model.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>How hosted MCP tools work in Salesforce</h2>
+        <p>
+          The Headless 360 MCP architecture has four layers:
+        </p>
+        <ol>
+          <li>
+            <strong>MCP Server endpoint:</strong> Salesforce exposes a single MCP server URL per org (or
+            per Experience Cloud site). Agents connect to this endpoint using the standard MCP protocol
+            (JSON-RPC over HTTP/SSE or WebSocket).
+          </li>
+          <li>
+            <strong>Tool registry:</strong> A metadata layer (custom metadata or Connected App config) lists
+            which Apex classes are registered as MCP tools and their JSON Schema definitions for inputs and
+            outputs.
+          </li>
+          <li>
+            <strong>Apex tool handler:</strong> Each registered Apex class implements an interface
+            (e.g. <code>MCP.ToolHandler</code>) with a single <code>execute(ToolInput input)</code> method.
+            Inside this method, you write normal Apex — SOQL queries, DML, callouts, governor-limit-aware
+            logic.
+          </li>
+          <li>
+            <strong>Auth + permission model:</strong> The tool runs under a named credential or a specific
+            Salesforce user context. Object-level and field-level security (OLS/FLS) is enforced
+            automatically — the agent can only see data the configured user is permitted to see.
+          </li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Apex patterns</span>
+        <h2>Writing an MCP tool handler in Apex</h2>
+        <p>
+          A minimal tool that returns at-risk opportunities looks like this:
+        </p>
+        <pre><code>global class AtRiskOpportunitiesTool implements MCP.ToolHandler {
+
+    global MCP.ToolOutput execute(MCP.ToolInput input) {
+        Decimal thresholdPct = (Decimal) input.getParam('probability_threshold');
+        Integer maxResults   = (Integer) input.getParam('max_results');
+
+        List&lt;Opportunity&gt; opps = [
+            SELECT Id, Name, Amount, Probability, CloseDate, Owner.Name
+            FROM   Opportunity
+            WHERE  StageName != 'Closed Won'
+              AND  Probability &lt; :thresholdPct
+            ORDER BY Amount DESC NULLS LAST
+            LIMIT  :maxResults
+        ];
+
+        List&lt;Map&lt;String, Object&gt;&gt; rows = new List&lt;Map&lt;String, Object&gt;&gt;();
+        for (Opportunity o : opps) {
+            rows.add(new Map&lt;String, Object&gt;{
+                'id'          =&gt; o.Id,
+                'name'        =&gt; o.Name,
+                'amount'      =&gt; o.Amount,
+                'probability' =&gt; o.Probability,
+                'close_date'  =&gt; String.valueOf(o.CloseDate),
+                'owner'       =&gt; o.Owner.Name
+            });
+        }
+
+        return MCP.ToolOutput.ok(rows);
+    }
+}
+</code></pre>
+        <p>
+          The tool's JSON Schema (input parameters) is declared in a companion metadata record or annotation,
+          not in the class itself — keeping schema changes deployable without touching Apex code.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Headless APIs</span>
+        <h2>How headless Salesforce APIs fit in</h2>
+        <p>
+          "Headless 360" refers to Salesforce's architecture for running its platform capabilities
+          (Commerce Cloud, Experience Cloud, Marketing Cloud) without the Salesforce UI — exposing everything
+          as API-first primitives. MCP tools are one surface of this pattern.
+        </p>
+        <p>Key headless APIs that MCP tools commonly wrap:</p>
+        <ul>
+          <li>
+            <strong>Connect REST API:</strong> Product catalog, cart, checkout, and order management for
+            Commerce scenarios. An MCP tool that answers "What is the current inventory for SKU X?" calls
+            Connect REST internally.
+          </li>
+          <li>
+            <strong>Experience Cloud Headless Auth:</strong> Token issuance and identity management for guest
+            and authenticated sessions — lets MCP tools run in a customer-facing agent context without a
+            Salesforce login screen.
+          </li>
+          <li>
+            <strong>Data Cloud Query API:</strong> Unified customer profile data across all Salesforce clouds.
+            MCP tools can surface segment membership, engagement scores, and unified identity without joining
+            across separate objects.
+          </li>
+          <li>
+            <strong>Agentforce Actions:</strong> Pre-built Salesforce agent actions (create case, update
+            opportunity, send email) that MCP tools can call via Apex, composing higher-level agent
+            capabilities from platform primitives.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Security model</span>
+        <h2>Authentication and permission enforcement</h2>
+        <p>
+          Hosted MCP tools do not bypass Salesforce's permission model — they run within it:
+        </p>
+        <ul>
+          <li>
+            <strong>Connected App OAuth:</strong> The MCP client (agent) authenticates using a Connected App
+            with the <code>api</code> scope. The resulting access token scopes all tool calls to one user's
+            data visibility.
+          </li>
+          <li>
+            <strong>Named Credentials for callouts:</strong> When a tool needs to call an external system,
+            Named Credentials provide credential storage without hard-coding secrets in Apex.
+          </li>
+          <li>
+            <strong>Sharing rules apply:</strong> SOQL inside a tool handler runs in the user's sharing
+            context by default (<code>with sharing</code> keyword). Escalation to system-level access requires
+            an explicit <code>without sharing</code> class — a deliberate opt-in, not the default.
+          </li>
+          <li>
+            <strong>Tool-level rate limiting:</strong> Each MCP tool call counts against Salesforce API limits.
+            Expensive tools (e.g. Data Cloud queries) can be rate-limited via Platform Event or custom
+            throttling logic in the handler.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>MCP client connecting to a Salesforce hosted MCP server</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+const SF_MCP_URL   = process.env.SF_MCP_URL;   // e.g. https://myorg.my.salesforce.com/services/mcp/v1
+const ACCESS_TOKEN = process.env.SF_ACCESS_TOKEN; // OAuth token from Connected App flow
+
+async function main() {
+  const transport = new StreamableHTTPClientTransport(new URL(SF_MCP_URL), {
+    requestInit: {
+      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+    },
+  });
+
+  const client = new Client({ name: 'sf-agent-client', version: '1.0.0' });
+  await client.connect(transport);
+
+  // Discover available tools — returns the list registered in the Salesforce org
+  const { tools } = await client.listTools();
+  console.log('Available tools:', tools.map((t) => t.name));
+
+  // Call the Apex-backed tool
+  const result = await client.callTool({
+    name: 'at_risk_opportunities',
+    arguments: {
+      probability_threshold: 30,
+      max_results: 10,
+    },
+  });
+
+  const opportunities = result.content[0]?.text
+    ? JSON.parse(result.content[0].text)
+    : [];
+
+  console.log(`Found ${opportunities.length} at-risk opportunities:`);
+  for (const opp of opportunities) {
+    console.log(`  ${opp.name} — $${opp.amount?.toLocaleString()} (${opp.probability}%)`);
+  }
+
+  await client.close();
+}
+
+main().catch(console.error);
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Building Salesforce MCP tools — what to get right</h2>
+        <ul class="check-list">
+          <li>Keep each Apex tool handler focused on one query or action — tools compose better when they are narrow.</li>
+          <li>Define JSON Schema input/output in metadata records, not annotations, so schema updates deploy independently.</li>
+          <li>Use <code>with sharing</code> on all tool handler classes unless there is a specific, documented reason to bypass sharing rules.</li>
+          <li>Test governor limit headroom: each MCP tool call is a single Apex execution context with standard limits (100 SOQL rows per loop, 50,000 SOQL rows total per transaction).</li>
+          <li>Store external credentials in Named Credentials — never in Apex constants or Custom Settings readable by all users.</li>
+          <li>Log tool calls with Platform Events or Big Object inserts for audit trails without bloating the transaction.</li>
+          <li>For high-volume agents, consider queuing heavy operations via Queueable Apex and returning a job ID — poll for results in a follow-up tool call.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Can any MCP client connect — not just Salesforce Agentforce?</h3>
+        <p>
+          Yes. The Salesforce MCP server implements the open Model Context Protocol spec. Claude Desktop,
+          Claude Code, and any other MCP-compatible client can connect using the org's MCP URL and a valid
+          OAuth access token. This is what makes the pattern powerful for multi-agent architectures.
+        </p>
+
+        <h3>How do I handle long-running operations that exceed Apex limits?</h3>
+        <p>
+          Use asynchronous Apex: the tool handler enqueues a <code>Queueable</code> or starts a
+          <code>Batchable</code> job and returns a job ID immediately. A second MCP tool
+          (<code>get_job_result</code>) lets the agent poll for completion. This keeps each individual
+          tool call within governor limits while supporting arbitrarily expensive operations.
+        </p>
+
+        <h3>What is the difference between MCP tools and Salesforce Agentforce Actions?</h3>
+        <p>
+          Agentforce Actions are Salesforce's native agent-action mechanism — tightly coupled to the
+          Agentforce runtime and configured through Flow or Apex. MCP tools are protocol-level and
+          runtime-agnostic: any agent that speaks MCP can use them, including agents running outside
+          Salesforce entirely. You can bridge the two: an MCP tool handler can internally call an
+          Agentforce Action via Apex.
+        </p>
+
+        <h3>Is there a size limit on tool output?</h3>
+        <p>
+          MCP responses are JSON strings transported over HTTP. Salesforce has a 6 MB limit on synchronous
+          Apex response payloads. For large result sets, paginate: accept a <code>cursor</code> parameter,
+          return a page of results plus a next cursor, and let the agent make multiple calls.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Hosting MCP tools in Apex collapses the typical three-tier agent-to-CRM architecture (agent →
+          middleware server → Salesforce API) into two tiers (agent → Salesforce MCP endpoint). You get the
+          full Salesforce security model, governor-limit-aware execution, and zero additional infrastructure
+          to deploy. The constraint is the Apex execution model: synchronous calls must complete within
+          governor limits, and heavy operations need async patterns. Within those bounds, Apex-hosted MCP
+          tools are the fastest path to giving any MCP-compatible agent real, permission-scoped access to
+          Salesforce data and business logic.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

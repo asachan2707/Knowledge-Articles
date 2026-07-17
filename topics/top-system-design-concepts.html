@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Top System Design Concepts You Must Understand Before Building Real Systems | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Engineers collaborating around computers and whiteboards"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Architecture · Engineering · 35 min</span>
+          </div>
+        </figure>
+
+        <h1>Top System Design Concepts You Must Understand Before Building Real Systems</h1>
+        <p class="summary">
+          The foundational concepts that separate engineers who design systems intuitively from those who guess —
+          scalability, availability, consistency, partitioning, caching, messaging, observability, and the
+          trade-offs that govern every architecture decision. No system exists outside these constraints;
+          every design choice is a bet on which trade-offs matter less for your use case.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: codefarm0.medium.com — Top System Design Concepts</span>
+          <span class="meta-item">Domain: System Design / Architecture</span>
+          <span class="meta-item">Published: 2026-07-16</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          System design is not a collection of facts to memorize. It is a vocabulary of trade-offs. Every
+          concept in this guide — CAP theorem, consistent hashing, eventual consistency, rate limiting —
+          exists because someone built a real system and discovered an unwanted constraint. Understanding
+          these concepts means understanding <em>why</em> the constraint exists, not just that it does.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>How to use this guide:</strong> Each concept is presented with its core definition,
+            the trade-offs it embodies, concrete real-world examples, and numbers where they exist. This
+            is reference material — bookmark it and return when you are making a specific architecture decision.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The 100k user collapse</span>
+        <p>
+          A team of four engineers builds a social platform. It grows from zero to 10,000 users over six
+          months. The stack is a single Node.js server and a PostgreSQL database on one EC2 instance.
+          Performance is fine — p99 latency is 80ms.
+        </p>
+        <p>
+          Then a tech blogger mentions the product. In four hours, active users climb from 10k to 100k.
+          The database CPU hits 100%. Queries that completed in 5ms now take 3 seconds. The API starts
+          timing out. Users see error pages. The system is down.
+        </p>
+        <p>
+          A post-mortem reveals three root causes. First, the team chose PostgreSQL without understanding
+          its behavior under concurrent write load — they did not know that full-table scans from missing
+          indexes cause lock escalation. Second, they chose an active-passive failover setup without testing
+          it — the failover took 4 minutes, not 30 seconds as assumed. Third, they had no rate limiting,
+          so retry storms from frustrated clients tripled the request rate during the outage.
+        </p>
+        <p>
+          All three failures are consequences of designing a system without internalizing the foundational
+          concepts. This guide covers them.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 1</span>
+        <h2>Scalability: Vertical, Horizontal, and When Each Breaks</h2>
+        <p>
+          Scalability is the ability of a system to handle increased load without proportional degradation
+          in performance or availability.
+        </p>
+        <p>
+          <strong>Vertical scaling (scale-up):</strong> Add more CPU, RAM, or disk to a single machine.
+          Simple — no code changes needed. Effective up to a point. AWS largest instance (u-24tb1.112xlarge)
+          has 448 vCPUs and 24 TB RAM. Breaks at the hardware ceiling, and has a single point of failure.
+          Works best for stateful systems where horizontal scaling is complex (e.g., single-leader databases).
+        </p>
+        <p>
+          <strong>Horizontal scaling (scale-out):</strong> Add more machines. No hard ceiling. Requires
+          services to be stateless (or to externalize state to a shared store like Redis). Introduces
+          complexity: load balancing, distributed coordination, network latency between nodes.
+        </p>
+        <p><strong>Load balancer types:</strong></p>
+        <ul>
+          <li>
+            <strong>L4 (transport layer):</strong> Routes based on IP address and TCP/UDP port. Fast,
+            minimal overhead. Does not inspect packet contents. Used for raw TCP load balancing
+            (databases, streaming). AWS NLB is L4.
+          </li>
+          <li>
+            <strong>L7 (application layer):</strong> Inspects HTTP headers, cookies, URLs. Can route
+            based on path (/api/* to service A, /static/* to service B), can do SSL termination,
+            can sticky-route based on session cookie. AWS ALB is L7.
+          </li>
+        </ul>
+        <p><strong>Routing algorithms:</strong></p>
+        <ul>
+          <li><strong>Round-robin:</strong> Requests distributed evenly in sequence. Simple. Ignores server load.</li>
+          <li><strong>Least-connections:</strong> Routes to the server with fewest active connections. Better for variable-length requests.</li>
+          <li><strong>IP hash:</strong> Routes the same client IP to the same server. Provides sticky sessions without cookies. Breaks if a server goes down.</li>
+          <li><strong>Weighted round-robin:</strong> Assigns weights to servers (e.g., a 16-core server gets 2x the traffic of an 8-core server).</li>
+        </ul>
+        <p>
+          <strong>Auto-scaling triggers:</strong> Modern auto-scaling responds to metrics rather than manual
+          intervention. Common triggers: CPU utilization above 70% for 2 minutes, SQS queue depth above 1,000
+          messages, custom application metrics (requests per second, active connections). Always set both
+          scale-out and scale-in policies; scale-in is often forgotten and leads to over-provisioning.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Availability vs. Reliability: SLAs, Nines, and Failover</h2>
+        <p>
+          <strong>Availability</strong> is the fraction of time a system is operational. Measured in "nines":
+        </p>
+        <ul>
+          <li>99% ("two nines"): 87.6 hours downtime per year</li>
+          <li>99.9% ("three nines"): 8.7 hours downtime per year</li>
+          <li>99.99% ("four nines"): 52.6 minutes downtime per year</li>
+          <li>99.999% ("five nines"): 5.3 minutes downtime per year</li>
+        </ul>
+        <p>
+          <strong>Reliability</strong> is the probability that a system performs its intended function
+          without failure for a given period. A system can be highly available but unreliable if it is
+          up but producing wrong results.
+        </p>
+        <p>
+          <strong>SLI / SLO / SLA:</strong> These three terms are often confused. An <em>SLI</em> (Service
+          Level Indicator) is a measurable metric — "request success rate." An <em>SLO</em> (Service Level
+          Objective) is a target for that metric — "99.9% of requests succeed." An <em>SLA</em> (Service
+          Level Agreement) is a contractual commitment with consequences — "we pay credits if SLO is missed."
+        </p>
+        <p>
+          <strong>MTTR and MTBF:</strong> Mean Time To Recovery (MTTR) is the average time to restore service
+          after a failure. Mean Time Between Failures (MTBF) is the average time between failures. Availability
+          = MTBF / (MTBF + MTTR). Improving availability requires either longer MTBF (fewer failures) or
+          shorter MTTR (faster recovery). Netflix focuses intensely on MTTR because failures are assumed inevitable.
+        </p>
+        <p><strong>Failover strategies:</strong></p>
+        <ul>
+          <li>
+            <strong>Active-passive:</strong> One primary instance handles all traffic. A standby waits.
+            On failure, the standby promotes. Simple but has a promotion delay (typically 30s-5min for DNS
+            propagation or health-check detection). The 4-minute failover in our story-card incident was this.
+          </li>
+          <li>
+            <strong>Active-active:</strong> Multiple instances handle traffic simultaneously. On failure,
+            the load balancer simply stops routing to the failed instance. No promotion delay. Requires
+            shared state or eventual consistency between instances.
+          </li>
+          <li>
+            <strong>Geo-redundancy:</strong> Deploy across geographic regions. Protects against regional
+            cloud provider failures, natural disasters, or peering events. DNS geo-routing (Route 53) or
+            anycast directs users to their nearest healthy region.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>CAP Theorem: You Can Only Pick Two</h2>
+        <p>
+          The CAP theorem (Brewer, 2000) states that a distributed data store can provide at most two of
+          three guarantees simultaneously:
+        </p>
+        <ul>
+          <li>
+            <strong>Consistency (C):</strong> Every read returns the most recent write or an error.
+            All nodes see the same data at the same time.
+          </li>
+          <li>
+            <strong>Availability (A):</strong> Every request receives a non-error response — though it
+            may not reflect the most recent write.
+          </li>
+          <li>
+            <strong>Partition Tolerance (P):</strong> The system continues operating even when network
+            partitions occur (some nodes cannot communicate with others).
+          </li>
+        </ul>
+        <p>
+          In practice, <em>network partitions are inevitable</em> in any distributed system — hardware
+          fails, networks congest, cables get cut. So P is not optional. The real trade-off is between
+          C and A during a partition:
+        </p>
+        <ul>
+          <li>
+            <strong>CP systems (choose consistency):</strong> During a partition, reject requests rather
+            than serve stale data. Examples: HBase, ZooKeeper, etcd, Google Spanner. Use when you cannot
+            afford to serve wrong data (financial systems, configuration management).
+          </li>
+          <li>
+            <strong>AP systems (choose availability):</strong> During a partition, serve potentially stale
+            data rather than return errors. Examples: Cassandra, DynamoDB, CouchDB, Riak. Use when
+            temporary stale reads are acceptable and availability is paramount (social feeds, shopping carts).
+          </li>
+          <li>
+            <strong>CA (no partition tolerance):</strong> Only possible for single-node systems with no
+            replication. A standalone PostgreSQL instance on one server is CA — it is consistent and
+            available, but it cannot survive partitions because there is no distributed component.
+          </li>
+        </ul>
+        <div class="callout">
+          <p>
+            <strong>PACELC extension (Abadi, 2012):</strong> CAP only describes behavior during partitions.
+            PACELC adds: even when there is no partition, there is a trade-off between latency (L) and
+            consistency (C). Systems like DynamoDB and Cassandra are PA/EL — they favor availability during
+            partitions and low latency during normal operation, at the cost of consistency.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>Consistency Models: From Linearizable to Eventual</h2>
+        <p>
+          Consistency models define what guarantees a system makes about the order and visibility of writes.
+          From strongest to weakest:
+        </p>
+        <ul>
+          <li>
+            <strong>Linearizability (strong consistency):</strong> Operations appear to execute instantaneously
+            at some point between invocation and completion. Every read reflects all previous writes globally.
+            Highest performance cost. Used by etcd, Google Spanner, single-node databases.
+          </li>
+          <li>
+            <strong>Sequential consistency:</strong> All operations appear in the same order to all observers,
+            but the order need not reflect real-time. Operations can be reordered as long as the reordering
+            is consistent globally.
+          </li>
+          <li>
+            <strong>Causal consistency:</strong> Causally related operations appear in causal order.
+            Concurrent (causally unrelated) operations may appear in different orders to different nodes.
+            Used by MongoDB's causal sessions, AWS Aurora Global Database.
+          </li>
+          <li>
+            <strong>Eventual consistency:</strong> Given no new writes, all replicas will eventually converge
+            to the same value. No guarantee on when. Used by DynamoDB (default read mode), Cassandra,
+            DNS propagation.
+          </li>
+        </ul>
+        <p>
+          <strong>Specific guarantees to know:</strong> <em>Read-your-writes</em> means a client that wrote
+          a value will always read that value back on subsequent reads. <em>Monotonic reads</em> means a client
+          will never read an older version after reading a newer version (no going back in time).
+        </p>
+        <p>
+          <strong>Distributed transaction approaches:</strong> Two-Phase Commit (2PC) provides distributed
+          atomicity but has a blocking failure mode — if the coordinator crashes between phases, participants
+          hold locks indefinitely. The <em>Saga pattern</em> is the modern alternative: break the distributed
+          transaction into a sequence of local transactions with compensating transactions for rollback.
+          Sagas are available and failure-tolerant but require careful design of compensations.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 5</span>
+        <h2>Caching: Strategies, Eviction, and Multi-Layer Hierarchies</h2>
+        <p>
+          Caching stores copies of data closer to the consumer to reduce latency and reduce load on
+          origin systems. The challenge is keeping cached data fresh without reading from origin too often.
+        </p>
+        <p><strong>Cache population strategies:</strong></p>
+        <ul>
+          <li>
+            <strong>Cache-aside (lazy loading):</strong> Application checks cache first; on miss, reads
+            from DB and populates cache. Simple. Data only cached when requested. Risk: thundering herd
+            on cold start or after TTL expiry.
+          </li>
+          <li>
+            <strong>Read-through:</strong> Cache sits in front of DB. On miss, cache itself fetches from
+            DB. Application always talks to cache. Simpler application code; cache handles population.
+          </li>
+          <li>
+            <strong>Write-through:</strong> Every write goes to cache and DB synchronously. No stale reads.
+            Write latency is higher. Cache always consistent with DB.
+          </li>
+          <li>
+            <strong>Write-behind (write-back):</strong> Write to cache immediately; flush to DB asynchronously.
+            Lower write latency. Risk of data loss if cache fails before flush.
+          </li>
+          <li>
+            <strong>Refresh-ahead:</strong> Proactively refresh cache entries before they expire, based on
+            predicted access patterns. Used by Netflix OCA fill algorithm and CDN pre-warming.
+          </li>
+        </ul>
+        <p><strong>Eviction policies:</strong></p>
+        <ul>
+          <li><strong>LRU (Least Recently Used):</strong> Evict the item not accessed for the longest time. Most common. Works well for temporal locality.</li>
+          <li><strong>LFU (Least Frequently Used):</strong> Evict the item accessed fewest times. Better for frequency-based access patterns. Higher overhead.</li>
+          <li><strong>ARC (Adaptive Replacement Cache):</strong> Adapts between LRU and LFU based on recent hit patterns. Used in ZFS. Near-optimal in practice.</li>
+          <li><strong>FIFO:</strong> Evict in insertion order. Simple. Poor cache hit rates for most workloads.</li>
+        </ul>
+        <p>
+          <strong>Multi-layer cache hierarchy:</strong>
+        </p>
+        <ul>
+          <li>L1 (in-process): A HashMap in the application process. Zero network latency. Limited size. Requires manual invalidation. Good for configuration data and rarely-changing reference data.</li>
+          <li>L2 (Redis/Memcached): Shared cache across all service instances. ~0.1-1ms latency. Eviction policies. Pub/sub for invalidation. The workhorse of most production caching layers.</li>
+          <li>L3 (CDN edge cache): Geographically distributed. Caches static assets and public API responses at edge PoPs worldwide. ~1-50ms depending on distance. Cache invalidation via CDN API (typically takes seconds to minutes).</li>
+        </ul>
+        <div class="callout">
+          <p>
+            <strong>Cache stampede prevention:</strong> When a popular key expires, all concurrent requests
+            simultaneously miss the cache and hammer the DB. Solutions: mutex lock (only one request populates,
+            others wait), probabilistic early expiry (XFetch algorithm — refresh with probability that increases
+            as TTL approaches zero), background refresh (refresh before expiry), TTL jitter (add random offset
+            to TTL to desynchronize expiries).
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 6</span>
+        <h2>Database Choices: SQL, NoSQL, and When to Use Each</h2>
+        <p>
+          The most impactful architecture decision for most systems is database selection. No database is
+          universally best — each makes different trade-offs.
+        </p>
+        <p><strong>SQL (Relational) databases — PostgreSQL, MySQL, CockroachDB:</strong></p>
+        <ul>
+          <li>ACID transactions (atomicity, consistency, isolation, durability)</li>
+          <li>Strong schema enforcement — catches data integrity bugs at the DB layer</li>
+          <li>Powerful query language with JOINs across normalized data</li>
+          <li>Vertical scaling is primary path; horizontal sharding is complex</li>
+          <li>Best for: financial transactions, user accounts, inventory, anything where consistency is paramount</li>
+        </ul>
+        <p><strong>NoSQL databases — choose by data model:</strong></p>
+        <ul>
+          <li>
+            <strong>Key-Value (Redis, DynamoDB, Riak):</strong> Simplest model — get/set by key. Extremely
+            fast. No query language beyond key lookup. Best for: session data, caching, leaderboards
+            (Redis Sorted Sets), rate limiting counters.
+          </li>
+          <li>
+            <strong>Document (MongoDB, Firestore, CouchDB):</strong> Store and query JSON-like documents.
+            Flexible schema. Rich queries within a document. Poor for cross-document joins. Best for:
+            content management, user profiles, product catalogs with variable attributes.
+          </li>
+          <li>
+            <strong>Wide-column (Cassandra, HBase, ScyllaDB):</strong> Store rows with many columns, optimized
+            for write throughput and time-series queries. No JOINs. Query by primary key and clustering columns.
+            Best for: IoT sensor data, messaging history, analytics event logs, high-write workloads.
+          </li>
+          <li>
+            <strong>Graph (Neo4j, Amazon Neptune, TigerGraph):</strong> Store entities as nodes and
+            relationships as edges. Optimized for multi-hop traversals. Best for: social networks (friends-of-friends),
+            knowledge graphs, fraud detection (transaction network analysis).
+          </li>
+        </ul>
+        <p>
+          <strong>Polyglot persistence:</strong> In most large systems, no single database serves all needs.
+          Use PostgreSQL for financial records, Redis for session caching, Cassandra for event streams,
+          Elasticsearch for full-text search, Neo4j for relationship traversal. The complexity is data
+          synchronization across stores.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 7</span>
+        <h2>Sharding and Partitioning: Distributing Data Across Nodes</h2>
+        <p>
+          When a single database node cannot store or serve all your data, you partition it across multiple
+          nodes. This is called <em>sharding</em> for horizontal partitioning.
+        </p>
+        <p><strong>Sharding strategies:</strong></p>
+        <ul>
+          <li>
+            <strong>Range sharding:</strong> Shard key ranges map to specific nodes (user IDs 1-1M on shard 1,
+            1M-2M on shard 2). Simple. Risk: hot shards if data access is skewed (e.g., most users have IDs
+            in the high range because they registered recently).
+          </li>
+          <li>
+            <strong>Hash sharding:</strong> Hash the shard key and mod by number of shards. Distributes data
+            evenly. Problem: adding or removing shards requires rehashing most keys (expensive rebalancing).
+          </li>
+          <li>
+            <strong>Consistent hashing:</strong> Map both keys and nodes to positions on a ring. A key routes
+            to the first node clockwise from its position. Adding a node only moves a fraction of keys (1/N
+            where N is node count). Used by Cassandra, DynamoDB, Riak. Virtual nodes (vnodes) further
+            smooth distribution — each physical node owns multiple positions on the ring.
+          </li>
+          <li>
+            <strong>Directory / lookup sharding:</strong> A separate lookup table maps shard keys to nodes.
+            Maximum flexibility. The lookup table itself must be highly available and low-latency.
+          </li>
+        </ul>
+        <p>
+          <strong>Problems to plan for:</strong> Hot shards occur when a disproportionate amount of traffic
+          routes to one shard (a celebrity user, a popular event). Mitigations: sub-sharding hot keys,
+          caching at the application layer, splitting the hot shard. Cross-shard queries are expensive —
+          operations that require joining data from multiple shards require scatter-gather (query all shards,
+          aggregate results). This is why sharding schemas are so hard to change after the fact.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 8</span>
+        <h2>Replication: Single-Leader, Multi-Leader, and Leaderless</h2>
+        <p>
+          Replication maintains copies of data on multiple nodes for fault tolerance and read scalability.
+        </p>
+        <ul>
+          <li>
+            <strong>Single-leader (primary-replica):</strong> One node accepts writes; replicas receive a
+            replication stream. Simple. Single point of contention for writes. Replicas can serve reads,
+            scaling read throughput. Used by PostgreSQL, MySQL, Redis Sentinel.
+          </li>
+          <li>
+            <strong>Multi-leader:</strong> Multiple nodes accept writes simultaneously. Higher write
+            availability. Write conflicts must be resolved (last-write-wins, merge, or application-defined).
+            Used by CouchDB, some configurations of MySQL (circular replication). Also the model for
+            multi-region active-active setups where each region has a local leader.
+          </li>
+          <li>
+            <strong>Leaderless (Dynamo-style):</strong> Any node can accept reads or writes. No single
+            leader. Cassandra, Riak, Amazon DynamoDB. Reads and writes use quorums: if N=3 replicas,
+            a write requires W=2 acknowledgments and a read requires R=2 responses. When W+R > N, you
+            get "read-your-writes" (the quorums overlap). Conflict detection uses vector clocks or
+            last-write-wins (LWW) based on timestamp.
+          </li>
+        </ul>
+        <p>
+          <strong>Replication lag:</strong> Asynchronous replication means a replica may be seconds (or
+          minutes during high write load) behind the leader. Reading from a replica during lag returns stale
+          data. Solutions: read from leader for consistency-critical paths, use synchronous replication for
+          critical replicas at the cost of higher write latency.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 9</span>
+        <h2>Message Queues and Event Streaming: Async at Scale</h2>
+        <p>
+          Async messaging decouples producers from consumers: the producer does not wait for the consumer
+          to process the message before continuing.
+        </p>
+        <p><strong>Two fundamental patterns:</strong></p>
+        <ul>
+          <li>
+            <strong>Message queue (point-to-point):</strong> A message is sent to a queue and consumed by
+            exactly one consumer. Once consumed, the message is removed. SQS, RabbitMQ. Best for task
+            distribution — you want exactly one worker to process each job.
+          </li>
+          <li>
+            <strong>Pub/Sub / Event streaming:</strong> A message is published to a topic and delivered
+            to all subscribed consumers. Each subscriber maintains its own position in the stream.
+            Kafka, Google Pub/Sub, AWS Kinesis. Best for event broadcasting — you want multiple
+            downstream systems to independently react to the same event.
+          </li>
+        </ul>
+        <p><strong>Delivery guarantees:</strong></p>
+        <ul>
+          <li><strong>At-most-once:</strong> Message may be lost but never delivered twice. Fastest. Used when occasional data loss is acceptable (metrics, logs).</li>
+          <li><strong>At-least-once:</strong> Message will be delivered, but may be delivered more than once on retry. Requires idempotent consumers. Used by most production messaging systems.</li>
+          <li><strong>Exactly-once:</strong> Message delivered exactly once despite failures. Very expensive — requires distributed transactions or idempotent producers + transactional consumers. Kafka provides exactly-once with transactions since v0.11.</li>
+        </ul>
+        <p>
+          <strong>Key Kafka concepts:</strong> Topics are divided into partitions. Each partition is an
+          ordered append-only log. Consumers in a consumer group each own a subset of partitions — parallel
+          consumption with ordering within a partition. Log compaction retains the latest value for each
+          key, enabling efficient state reconstruction. Dead-letter queues capture messages that failed
+          processing after all retries.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 10</span>
+        <h2>Indexes: B-Tree, Covering, Full-Text, and Vector</h2>
+        <p>
+          An index is a data structure that speeds up read queries at the cost of write overhead and
+          storage. Every write must update all indexes on the table — this is called <em>write amplification</em>.
+        </p>
+        <ul>
+          <li>
+            <strong>B-tree index:</strong> The default index type in most SQL databases. Balanced tree
+            structure — O(log N) lookup, range queries supported. Works for equality and inequality
+            predicates. Not optimal for high-cardinality append-only data.
+          </li>
+          <li>
+            <strong>Hash index:</strong> O(1) equality lookup. Does not support range queries. Good for
+            exact-match lookups on high-cardinality columns (e.g., user ID lookup).
+          </li>
+          <li>
+            <strong>Composite index:</strong> Index on multiple columns (a, b, c). A query on (a) or
+            (a, b) can use the index. A query on (b) alone cannot. Column order matters — put the
+            most selective column first.
+          </li>
+          <li>
+            <strong>Covering index:</strong> An index that contains all columns needed by a query —
+            so the database can answer the query entirely from the index without touching the main table
+            (an "index-only scan"). Dramatically reduces I/O for read-heavy queries.
+          </li>
+          <li>
+            <strong>Full-text index (inverted index):</strong> Maps words to the documents containing
+            them. Powers Elasticsearch, PostgreSQL's pg_tsvector. Supports fuzzy search, relevance
+            ranking, stemming. Not suitable in relational databases for large-scale full-text workloads —
+            use Elasticsearch or OpenSearch.
+          </li>
+          <li>
+            <strong>Vector index (HNSW):</strong> Hierarchical Navigable Small World graphs for
+            Approximate Nearest Neighbor (ANN) search. Powers semantic search and recommendation systems.
+            Used by pgvector, Pinecone, Weaviate. Searches in high-dimensional embedding space
+            (e.g., 1536-dimensional OpenAI embeddings).
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 11</span>
+        <h2>Rate Limiting and Throttling: Protecting Your Services</h2>
+        <p>
+          Rate limiting controls how many requests a client can make in a time window, protecting backend
+          services from overload and abuse.
+        </p>
+        <p><strong>Rate limiting algorithms:</strong></p>
+        <ul>
+          <li>
+            <strong>Token bucket:</strong> A bucket holds tokens up to capacity. Each request consumes one
+            token. Tokens refill at a fixed rate. Allows bursting up to bucket size. Most common production
+            algorithm. Redis-based token bucket with Lua atomic scripts is standard.
+          </li>
+          <li>
+            <strong>Leaky bucket:</strong> Requests enter a queue (bucket); they are processed at a constant
+            rate (leak). Smooths out bursts. Queue adds latency. Used when you want to smooth request rate
+            rather than allow bursts.
+          </li>
+          <li>
+            <strong>Fixed window:</strong> Count requests in a fixed time window (e.g., 100 requests per
+            minute). Simple. Boundary problem: a client can make 100 requests at 11:59 and 100 at 12:00 —
+            200 requests in 2 seconds.
+          </li>
+          <li>
+            <strong>Sliding window log:</strong> Store a timestamp for each request. Count requests within
+            the last N seconds. Accurate but high memory usage.
+          </li>
+          <li>
+            <strong>Sliding window counter:</strong> Blend of fixed window and sliding window. Two window
+            counts + interpolation. Accurate within ~1% error, low memory. The recommended production approach.
+          </li>
+        </ul>
+        <p>
+          Rate limit responses should include standard headers: <code>X-RateLimit-Limit</code>,
+          <code>X-RateLimit-Remaining</code>, <code>X-RateLimit-Reset</code> (Unix timestamp when window resets).
+          Return HTTP 429 Too Many Requests with a <code>Retry-After</code> header.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 12</span>
+        <h2>Observability: Logs, Metrics, and Distributed Traces</h2>
+        <p>
+          Observability is the ability to understand the internal state of a system from its external outputs.
+          A system is observable if you can answer "what is wrong and why" without deploying new code.
+        </p>
+        <p><strong>The three pillars:</strong></p>
+        <ul>
+          <li>
+            <strong>Logs:</strong> Timestamped records of discrete events. Structured JSON logs (not printf
+            strings) enable filtering and aggregation. Always include correlation IDs that link a log entry
+            to the original request. Log levels: DEBUG (development), INFO (routine operations), WARN
+            (unexpected but recoverable), ERROR (failure requiring attention). Ship to Elasticsearch or
+            CloudWatch Logs.
+          </li>
+          <li>
+            <strong>Metrics:</strong> Numeric measurements aggregated over time. Four metric types:
+            <em>Counters</em> (only increase — requests served, errors), <em>Gauges</em> (current value —
+            queue depth, memory usage), <em>Histograms</em> (distribution of values — request duration
+            bucketed), <em>Summaries</em> (pre-computed quantiles). Always track p50/p95/p99 latency —
+            average latency hides tail latency problems. Ship to Prometheus or Datadog.
+          </li>
+          <li>
+            <strong>Distributed traces:</strong> Track a single request as it flows across multiple
+            microservices. Each service adds a span to the trace. The trace ID propagates in HTTP headers
+            (W3C Trace Context: <code>traceparent</code>). OpenTelemetry is the open standard for
+            instrumentation — instrument once, export to any backend (Jaeger, Zipkin, AWS X-Ray, Datadog).
+          </li>
+        </ul>
+        <div class="callout">
+          <p>
+            <strong>SLO-based alerting vs. symptom-based alerting:</strong> Alert on symptoms (high error
+            rate, high latency) rather than causes (high CPU, high memory). CPU at 95% is not an incident
+            if p99 latency is still meeting SLO. Error rate at 5% is always an incident, regardless of
+            infrastructure metrics. This distinction eliminates alert fatigue from noisy infrastructure metrics.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Distributed Rate Limiter Using Redis Sliding Window</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * Distributed sliding window rate limiter using Redis.
+ * Uses the sliding window counter algorithm (blend of fixed windows with interpolation).
+ * Accurate within ~1% error while requiring only O(1) Redis memory per key.
+ */
+import { createClient } from 'redis';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+/**
+ * Check and increment a rate limit counter.
+ * @param {string} identifier - Unique key per client (IP, user ID, API key)
+ * @param {number} limit       - Maximum requests allowed in the window
+ * @param {number} windowMs    - Window size in milliseconds (e.g., 60_000 for 1 minute)
+ * @returns {{ allowed: boolean, remaining: number, resetAt: number }}
+ */
+async function checkRateLimit(identifier, limit = 100, windowMs = 60_000) {
+  const now       = Date.now();
+  const windowSec = windowMs / 1000;
+
+  // Keys for current and previous windows
+  const currentWindowStart  = Math.floor(now / windowMs) * windowMs;
+  const previousWindowStart = currentWindowStart - windowMs;
+  const currentKey  = `rl:${identifier}:${currentWindowStart}`;
+  const previousKey = `rl:${identifier}:${previousWindowStart}`;
+
+  // Atomic increment of current window + fetch previous window count
+  const pipeline = redis.multi();
+  pipeline.incr(currentKey);
+  pipeline.expire(currentKey, Math.ceil(windowSec * 2)); // Keep for 2 windows
+  pipeline.get(previousKey);
+  const [currentCount, , prevCountStr] = await pipeline.exec();
+
+  const prevCount = parseInt(prevCountStr ?? '0', 10);
+
+  // Sliding window calculation: weight previous window by remaining fraction
+  const fractionElapsed = (now - currentWindowStart) / windowMs;
+  const weightedPrev    = prevCount * (1 - fractionElapsed);
+  const slidingCount    = weightedPrev + currentCount;
+
+  const allowed   = slidingCount <= limit;
+  const remaining = Math.max(0, Math.floor(limit - slidingCount));
+  const resetAt   = currentWindowStart + windowMs;
+
+  return { allowed, remaining, resetAt, slidingCount: Math.round(slidingCount) };
+}
+
+/** Express middleware factory */
+function rateLimitMiddleware({ limit = 100, windowMs = 60_000, keyFn = req => req.ip } = {}) {
+  return async (req, res, next) => {
+    const identifier = keyFn(req);
+    const result     = await checkRateLimit(identifier, limit, windowMs);
+
+    res.set({
+      'X-RateLimit-Limit':     limit,
+      'X-RateLimit-Remaining': result.remaining,
+      'X-RateLimit-Reset':     Math.ceil(result.resetAt / 1000), // Unix timestamp
+    });
+
+    if (!result.allowed) {
+      return res.status(429).json({
+        error: 'Too Many Requests',
+        retryAfter: Math.ceil((result.resetAt - Date.now()) / 1000),
+      });
+    }
+
+    next();
+  };
+}
+
+// Usage example
+const app = express();
+app.use('/api/', rateLimitMiddleware({ limit: 100, windowMs: 60_000 }));
+app.use('/api/search', rateLimitMiddleware({ limit: 10, windowMs: 60_000 })); // stricter for search
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Consistent Hashing Ring with Virtual Nodes</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * Consistent hashing ring with virtual nodes (vnodes).
+ * Each physical node owns multiple positions on the ring to improve distribution.
+ * Used by Cassandra, DynamoDB, Riak for sharding data across nodes.
+ */
+import crypto from 'crypto';
+
+function hashKey(key) {
+  return parseInt(crypto.createHash('md5').update(key).digest('hex').slice(0, 8), 16);
+}
+
+class ConsistentHashRing {
+  constructor(vnodeCount = 150) {
+    this.vnodeCount = vnodeCount; // virtual nodes per physical node
+    this.ring       = new Map();  // hash position -> physical node
+    this.sortedKeys = [];         // sorted positions for binary search
+  }
+
+  /** Add a physical node to the ring */
+  addNode(nodeName) {
+    for (let i = 0; i < this.vnodeCount; i++) {
+      const virtualKey = `${nodeName}#vnode${i}`;
+      const position   = hashKey(virtualKey);
+      this.ring.set(position, nodeName);
+    }
+    this.sortedKeys = [...this.ring.keys()].sort((a, b) => a - b);
+    console.log(`Added node ${nodeName} (${this.vnodeCount} vnodes). Ring size: ${this.ring.size}`);
+  }
+
+  /** Remove a physical node from the ring */
+  removeNode(nodeName) {
+    for (let i = 0; i < this.vnodeCount; i++) {
+      const virtualKey = `${nodeName}#vnode${i}`;
+      const position   = hashKey(virtualKey);
+      this.ring.delete(position);
+    }
+    this.sortedKeys = [...this.ring.keys()].sort((a, b) => a - b);
+    console.log(`Removed node ${nodeName}. Ring size: ${this.ring.size}`);
+  }
+
+  /** Get the node responsible for a given key */
+  getNode(key) {
+    if (this.ring.size === 0) throw new Error('Ring is empty');
+    const keyHash = hashKey(key);
+
+    // Binary search for the first ring position >= keyHash
+    let lo = 0, hi = this.sortedKeys.length - 1;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (this.sortedKeys[mid] < keyHash) lo = mid + 1;
+      else hi = mid;
+    }
+
+    // Wrap around to first node if keyHash > all positions
+    const position = this.sortedKeys[lo] >= keyHash
+      ? this.sortedKeys[lo]
+      : this.sortedKeys[0];
+
+    return this.ring.get(position);
+  }
+
+  /** Get distribution stats — how many keys each node owns (sample-based) */
+  getDistribution(sampleSize = 10_000) {
+    const counts = {};
+    for (let i = 0; i < sampleSize; i++) {
+      const key  = `sample-key-${i}`;
+      const node = this.getNode(key);
+      counts[node] = (counts[node] || 0) + 1;
+    }
+    return counts;
+  }
+}
+
+// Demo: 3-node cluster
+const ring = new ConsistentHashRing(150);
+ring.addNode('node-1');
+ring.addNode('node-2');
+ring.addNode('node-3');
+
+console.log('Key routing:');
+['user:1234', 'order:5678', 'session:abc', 'product:999'].forEach(key => {
+  console.log(`  ${key} -> ${ring.getNode(key)}`);
+});
+
+console.log('\nDistribution (10k sample keys):');
+const dist = ring.getDistribution();
+Object.entries(dist).forEach(([node, count]) =>
+  console.log(`  ${node}: ${count} keys (${((count / 10000) * 100).toFixed(1)}%)`)
+);
+
+// Add a 4th node — only ~25% of keys should remap
+ring.addNode('node-4');
+console.log('\nDistribution after adding node-4:');
+const dist2 = ring.getDistribution();
+Object.entries(dist2).forEach(([node, count]) =>
+  console.log(`  ${node}: ${count} keys (${((count / 10000) * 100).toFixed(1)}%)`)
+);
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>System Design Decision Checklist</h2>
+        <ul class="check-list">
+          <li>Define your SLO before choosing a database — consistency requirements determine CP vs AP trade-off.</li>
+          <li>Measure current bottleneck before optimizing — profile queries with EXPLAIN ANALYZE before adding caching layers.</li>
+          <li>Start with a SQL database unless you have a specific reason for NoSQL — PostgreSQL handles 10k req/s on a single server with proper indexing.</li>
+          <li>Use consistent hashing when planning to shard — range sharding with hash sharding creates rebalancing problems when nodes change.</li>
+          <li>Always implement rate limiting at the API gateway layer — application-layer rate limiting is a second line of defense, not the primary.</li>
+          <li>Add a message queue only when you have identified a real need: decoupling teams, absorbing spikes, or tasks exceeding the user's patience time (~2s).</li>
+          <li>Implement all three observability pillars (logs, metrics, traces) from day one — retrofitting distributed tracing is painful.</li>
+          <li>Design for at-least-once message delivery and make consumers idempotent — exactly-once is too expensive for most systems.</li>
+          <li>Test your failover procedure before you need it — active-passive failover that has never been exercised is not a failover plan.</li>
+          <li>Document your CAP trade-offs explicitly — future engineers should not have to reverse-engineer why you chose Cassandra over PostgreSQL.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Is eventual consistency safe for financial systems?</h3>
+        <p>
+          Generally no. Financial ledgers require strong consistency — you cannot allow two ATMs to read a
+          balance, both see $100, and both allow a $90 withdrawal (resulting in -$80). Banks use linearizable
+          databases (or strict serializable transactions in SQL) for balance operations. However, some read
+          paths (e.g., showing a user their transaction history) can tolerate eventual consistency.
+        </p>
+
+        <h3>When should I add Redis to my stack?</h3>
+        <p>
+          Redis earns its place when you have: (a) session data that does not fit in-process due to multiple
+          service instances, (b) a cache hit rate > 80% for a frequently-accessed dataset, (c) a specific
+          Redis data structure need (Sorted Sets for leaderboards, Pub/Sub for real-time events, Streams for
+          lightweight message queuing). Do not add Redis simply because "it will make things faster" — measure
+          first.
+        </p>
+
+        <h3>What is the practical difference between p50, p95, and p99 latency?</h3>
+        <p>
+          p50 is median — 50% of requests complete in this time or less. p95 means 95% of requests complete
+          in this time. p99 means 99% do. If p50 is 20ms and p99 is 2000ms, you have a tail latency problem
+          affecting 1% of users — at 1,000 req/s, that is 10 users per second experiencing 2-second responses.
+          p99 is the latency your worst-affected users experience; optimize for it in customer-facing systems.
+        </p>
+
+        <h3>How do I decide between Kafka and SQS?</h3>
+        <p>
+          Use Kafka when: multiple independent consumers need to independently read the same events (fan-out
+          with different processing logic), you need replay (re-read historical events), you need message
+          ordering within a partition, or you need high throughput (millions of events per second). Use SQS
+          when: you want managed infrastructure with minimal ops overhead, you have a simple task-queue pattern
+          with one consumer per message, or you do not need replay or fan-out.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaways</h2>
+        <p>
+          System design mastery is not about knowing every technology — it is about internalizing the
+          <strong>trade-off vocabulary</strong>. CAP theorem tells you that consistency and availability
+          trade off during partitions — forcing an explicit choice. Consistent hashing tells you that
+          you can add nodes to a ring without rehashing the whole dataset. Sliding window rate limiting
+          tells you that fixed windows have boundary exploitation vulnerabilities. Once you understand
+          <em>why</em> each pattern exists, you can reason about novel systems without having seen them
+          before. That is what distinguishes the engineer who designs systems intuitively from the one
+          who guesses.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Further exploration</h2>
+        <ul>
+          <li><a href="./28-system-design-failure-prevention.html">28 System Design Failure Prevention Concepts</a></li>
+          <li><a href="./scaling-to-1-million-users.html">Scaling to 1 Million Users — Architecture Evolution</a></li>
+          <li><a href="./cache-stampede-hot-key.html">Cache Stampede and Hot Key Problems</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

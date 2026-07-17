@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kubernetes for Application Developers — From Pods to Production | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1667372393119-3d4c48d07fc9?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Container cargo ship from above"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">DevOps · Cloud · 22 min</span>
+          </div>
+        </figure>
+
+        <h1>Kubernetes for Application Developers — From Pods to Production</h1>
+        <p class="summary">
+          Kubernetes from an app developer's perspective: pods, deployments, services, ingress,
+          and config patterns you use every sprint — not the cluster-admin internals. Covers resource
+          limits, health probes, HPA, rolling updates, RBAC, Helm, and how to translate a
+          docker-compose file into production-ready Kubernetes manifests, with full kubectl examples
+          throughout.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: Kubernetes Docs · Kelsey Hightower · Brendan Burns</span>
+          <span class="meta-item">Domain: DevOps / Cloud</span>
+          <span class="meta-item">Published: 2026</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Kubernetes is often taught from the cluster-operator perspective — networking plugins, etcd
+          quorum, node taints. But most developers interact with Kubernetes at a much higher layer:
+          writing manifests, debugging failing pods, wiring up services, and configuring autoscaling.
+          This guide covers the Kubernetes primitives a backend or full-stack developer actually uses
+          every sprint, with enough depth to understand <em>why</em> things work the way they do.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> Kubernetes is a desired-state reconciliation engine. You
+            declare what you want (a Deployment with 3 replicas, a Service pointing to them) and
+            Kubernetes continuously works to make reality match the declaration. Understanding this
+            model explains almost every behaviour that otherwise looks magical or frustrating.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The 3 AM OOMKilled pod</span>
+        <p>
+          A developer deploys a Node.js service. It works perfectly during load testing. On the
+          first real traffic spike in production, pods start crashing with status
+          <code>OOMKilled</code>. The developer had never set <code>resources.limits.memory</code>.
+          Without limits, Kubernetes has no signal to schedule the pod on a node with available
+          memory — it just places it anywhere, and the pod expands until the node's kernel kills it.
+        </p>
+        <p>
+          Setting <code>resources.requests</code> (what Kubernetes uses for scheduling) and
+          <code>resources.limits</code> (the hard ceiling) is one of those things that feels
+          optional in development and becomes mandatory the first time you hit production. This guide
+          covers it — and the dozen other non-obvious settings that make the difference between
+          a fragile deployment and a resilient one.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Core Primitives</span>
+        <h2>Pods, Deployments, and StatefulSets</h2>
+
+        <h3>Pod</h3>
+        <p>
+          The smallest deployable unit in Kubernetes. A Pod contains one or more containers that
+          share a network namespace (same IP, same <code>localhost</code>) and can share volumes.
+          You almost never create Pods directly — you create Deployments or StatefulSets that manage
+          Pods for you. Direct Pod creation is used for one-off debug sessions
+          (<code>kubectl run -it --rm debug --image=busybox -- sh</code>) and nothing else.
+        </p>
+
+        <h3>Deployment</h3>
+        <p>
+          A Deployment manages a ReplicaSet which manages Pods. It handles rolling updates,
+          rollbacks, and scaling. The Deployment's <code>spec.template</code> is the Pod spec that
+          all replicas are created from. When you change the image or environment variables in the
+          template, Kubernetes rolls out new Pods and terminates old ones according to the
+          <code>strategy</code> settings.
+        </p>
+        <p>
+          Key Deployment settings to understand:
+        </p>
+        <ul>
+          <li><strong><code>replicas</code></strong> — desired number of Pod copies. Set to at least 2 in production for zero-downtime deploys.</li>
+          <li><strong><code>strategy.type: RollingUpdate</code></strong> — the default; replaces old pods gradually. <code>maxUnavailable: 0</code> + <code>maxSurge: 1</code> ensures zero downtime.</li>
+          <li><strong><code>strategy.type: Recreate</code></strong> — kills all old pods before starting new ones. Use for stateful apps that can't run two versions simultaneously.</li>
+          <li><strong><code>revisionHistoryLimit</code></strong> — how many old ReplicaSets to keep for rollback. Default is 10; reduce to 3 to save etcd storage.</li>
+        </ul>
+
+        <h3>StatefulSet</h3>
+        <p>
+          Like a Deployment but for stateful apps (databases, queues). Pods get stable, ordered
+          names (<code>mysql-0</code>, <code>mysql-1</code>), stable DNS hostnames, and stable
+          PersistentVolumeClaims. Pods are created and deleted in order (0 first, 0 last). Use
+          StatefulSets for anything that needs stable network identity or persistent storage tied
+          to a specific pod.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Networking</span>
+        <h2>Services, Ingress, and DNS</h2>
+
+        <h3>Service types</h3>
+        <p>
+          A Service is a stable network endpoint in front of a set of Pods. Pods have ephemeral IPs
+          that change on restart; Services provide a stable virtual IP (ClusterIP) and DNS name.
+        </p>
+        <ul>
+          <li>
+            <strong>ClusterIP</strong> (default) — internal-only IP, reachable only within the
+            cluster. Use for pod-to-pod communication. DNS name:
+            <code>service-name.namespace.svc.cluster.local</code>. In the same namespace, just
+            <code>service-name</code> resolves.
+          </li>
+          <li>
+            <strong>NodePort</strong> — exposes the service on a port on every node's IP. Useful
+            for quick access from outside the cluster during development. Not recommended for
+            production (uses a high port number, bypasses load balancer).
+          </li>
+          <li>
+            <strong>LoadBalancer</strong> — provisions an external load balancer in the cloud
+            (AWS ELB, GCP CLB). Each LoadBalancer service creates one external IP. Expensive at
+            scale — prefer a single Ingress controller with multiple path rules instead.
+          </li>
+          <li>
+            <strong>ExternalName</strong> — maps a service name to an external DNS name. Useful for
+            referencing external databases or APIs from within the cluster without hardcoding
+            external hostnames in your app config.
+          </li>
+        </ul>
+
+        <h3>Ingress</h3>
+        <p>
+          Ingress is an API object that defines HTTP/HTTPS routing rules. An Ingress controller
+          (nginx-ingress, Traefik, AWS ALB Ingress Controller) watches Ingress objects and
+          configures an external load balancer accordingly. One load balancer, many services — the
+          correct pattern for production.
+        </p>
+        <p>
+          Ingress supports host-based routing (<code>api.example.com</code> → service A,
+          <code>app.example.com</code> → service B) and path-based routing
+          (<code>/api/v1/*</code> → backend service, <code>/*</code> → frontend service).
+          TLS termination is configured on the Ingress with a <code>secretName</code> pointing to
+          a TLS certificate stored as a Kubernetes Secret.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Configuration</span>
+        <h2>ConfigMaps, Secrets, and Environment Variables</h2>
+
+        <h3>ConfigMap</h3>
+        <p>
+          Stores non-sensitive configuration as key-value pairs. Mount as environment variables
+          or as files in a volume. Keep ConfigMaps small and specific — one per service, not a
+          global config blob. When a ConfigMap changes, Pods must be restarted to pick up the new
+          values (unless using a volume mount, which auto-updates but can cause config drift mid-run).
+        </p>
+
+        <h3>Secret</h3>
+        <p>
+          Stores sensitive data (passwords, API keys, TLS certs). Values are base64-encoded in
+          etcd (not encrypted by default — enable Encryption at Rest in your cluster config for
+          true security). Mount as environment variables or volume files. In production, use an
+          external secrets operator (External Secrets Operator with AWS Secrets Manager/Vault) to
+          sync secrets from a dedicated secrets store rather than storing raw values in the cluster.
+        </p>
+
+        <h3>Environment variables vs volume mounts</h3>
+        <p>
+          Environment variables are convenient but have a downside: the container process sees
+          them at startup only — a ConfigMap update requires a Pod restart. Volume mounts are
+          updated automatically by kubelet (typically within 60 seconds) but the process must
+          re-read the file. For most 12-factor apps that read config at startup, environment
+          variables are simpler. For configurations that need hot-reloading (feature flags, TLS
+          cert rotation), use volume mounts.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Reliability</span>
+        <h2>Health Probes, Resource Limits, and HPA</h2>
+
+        <h3>Liveness, Readiness, and Startup probes</h3>
+        <p>
+          Kubernetes uses three probe types to manage Pod lifecycle:
+        </p>
+        <ul>
+          <li>
+            <strong>Liveness probe</strong> — "is the container still alive?" If it fails, Kubernetes
+            kills and restarts the container. Use for detecting deadlocks or hung processes. Keep
+            the liveness check very simple — an HTTP 200 from a <code>/healthz</code> endpoint that
+            returns immediately. Never make the liveness probe depend on a database connection — a
+            DB outage should not restart your app pods.
+          </li>
+          <li>
+            <strong>Readiness probe</strong> — "is the container ready to receive traffic?" If it
+            fails, the Pod is removed from the Service's endpoint list (traffic stops flowing to it)
+            but the container is not restarted. Use this to prevent traffic during startup warmup and
+            to gracefully handle temporary dependency failures. The readiness probe <em>can</em>
+            check external dependencies.
+          </li>
+          <li>
+            <strong>Startup probe</strong> — "is the container still initialising?" Replaces
+            liveness during slow startup. If the startup probe hasn't succeeded within
+            <code>failureThreshold × periodSeconds</code>, the container is killed. Use this for
+            apps with long initialisation times (JVM warmup, large model loading) so the liveness
+            probe isn't killing them before they're ready.
+          </li>
+        </ul>
+
+        <h3>Resource requests and limits</h3>
+        <p>
+          <code>resources.requests</code> is what Kubernetes uses for scheduling — the scheduler
+          only places a Pod on a node that has at least that much free capacity.
+          <code>resources.limits</code> is the hard ceiling — the container is throttled (CPU) or
+          killed (memory) if it exceeds this value.
+        </p>
+        <p>
+          Best practice: set requests to the typical workload level and limits to the maximum you
+          can tolerate. For CPU, a request of <code>100m</code> (0.1 core) with a limit of
+          <code>500m</code> is common for a lightweight Node.js service. For memory, requests and
+          limits are often set equal to prevent eviction under memory pressure.
+        </p>
+
+        <h3>Horizontal Pod Autoscaler (HPA)</h3>
+        <p>
+          HPA watches a metric (CPU utilisation, memory, or custom metrics via Prometheus Adapter)
+          and scales the Deployment's replica count up or down to maintain a target value.
+          Example: <code>targetCPUUtilizationPercentage: 70</code> scales out when average CPU
+          across all pods exceeds 70% of the CPU request. HPA requires <code>resources.requests</code>
+          to be set — it calculates utilisation as <code>current usage / request</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Complete Deployment Manifest and kubectl Cheat Sheet</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Generate Kubernetes manifest programmatically (useful for templating)
+// In practice you'd write YAML directly; this shows the structure as JS objects
+
+const deployment = {
+  apiVersion: 'apps/v1',
+  kind: 'Deployment',
+  metadata: { name: 'api-server', namespace: 'production' },
+  spec: {
+    replicas: 3,
+    revisionHistoryLimit: 3,
+    selector: { matchLabels: { app: 'api-server' } },
+    strategy: {
+      type: 'RollingUpdate',
+      rollingUpdate: { maxUnavailable: 0, maxSurge: 1 },
+    },
+    template: {
+      metadata: { labels: { app: 'api-server' } },
+      spec: {
+        containers: [{
+          name: 'api',
+          image: 'myregistry/api-server:v1.2.3',  // always pin to a tag, never :latest
+          ports: [{ containerPort: 3000 }],
+          env: [
+            { name: 'NODE_ENV', value: 'production' },
+            { name: 'DB_URL', valueFrom: { secretKeyRef: { name: 'api-secrets', key: 'db-url' } } },
+          ],
+          resources: {
+            requests: { cpu: '100m', memory: '128Mi' },
+            limits:   { cpu: '500m', memory: '512Mi' },
+          },
+          livenessProbe: {
+            httpGet: { path: '/healthz', port: 3000 },
+            initialDelaySeconds: 10,
+            periodSeconds: 10,
+            failureThreshold: 3,
+          },
+          readinessProbe: {
+            httpGet: { path: '/ready', port: 3000 },
+            initialDelaySeconds: 5,
+            periodSeconds: 5,
+            failureThreshold: 3,
+          },
+        }],
+      },
+    },
+  },
+};
+
+// kubectl cheat sheet (shell commands)
+const kubectlCheatSheet = `
+# Apply a manifest
+kubectl apply -f deployment.yaml
+
+# Check rollout status
+kubectl rollout status deployment/api-server -n production
+
+# Roll back to previous version
+kubectl rollout undo deployment/api-server -n production
+
+# Scale manually (override HPA temporarily)
+kubectl scale deployment/api-server --replicas=5 -n production
+
+# Get pod logs (last 100 lines, follow)
+kubectl logs -l app=api-server -n production --tail=100 -f
+
+# Exec into a running pod
+kubectl exec -it deploy/api-server -n production -- sh
+
+# Describe a pod (events, resource usage)
+kubectl describe pod &lt;pod-name&gt; -n production
+
+# Get events sorted by time
+kubectl get events --sort-by=.metadata.creationTimestamp -n production
+
+# Port-forward to a pod for local debugging
+kubectl port-forward deploy/api-server 3000:3000 -n production
+
+# Check HPA status
+kubectl get hpa -n production
+
+# View current resource usage
+kubectl top pods -n production
+kubectl top nodes
+`;
+
+console.log('Deployment manifest:', JSON.stringify(deployment, null, 2));
+console.log(kubectlCheatSheet);
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Advanced Topics</span>
+        <h2>RBAC, PersistentVolumes, and Namespaces</h2>
+
+        <h3>Namespaces</h3>
+        <p>
+          Namespaces are virtual clusters within a cluster. Use them to separate environments
+          (<code>staging</code>, <code>production</code>) or teams. Resources in different namespaces
+          can communicate via their full DNS names
+          (<code>service-name.namespace.svc.cluster.local</code>). NetworkPolicies can enforce
+          namespace isolation. Do not use the <code>default</code> namespace for production
+          workloads — create named namespaces.
+        </p>
+
+        <h3>RBAC basics</h3>
+        <p>
+          Role-Based Access Control governs who can do what in the cluster. A <strong>Role</strong>
+          (namespace-scoped) or <strong>ClusterRole</strong> (cluster-wide) defines a set of
+          permissions (verbs like <code>get</code>, <code>list</code>, <code>create</code> on
+          resources like <code>pods</code>, <code>secrets</code>). A <strong>RoleBinding</strong>
+          grants a Role to a ServiceAccount, user, or group.
+        </p>
+        <p>
+          As an application developer, your main RBAC concern is the Pod's
+          <strong>ServiceAccount</strong>. By default pods use the <code>default</code> ServiceAccount
+          in their namespace. If your pod needs to call the Kubernetes API (e.g., to discover other
+          services or manage CRDs), create a dedicated ServiceAccount with the minimum required
+          permissions — don't use <code>cluster-admin</code>.
+        </p>
+
+        <h3>PersistentVolumes and PersistentVolumeClaims</h3>
+        <p>
+          A <strong>PersistentVolume (PV)</strong> is a piece of storage provisioned in the cluster
+          (cloud disk, NFS mount). A <strong>PersistentVolumeClaim (PVC)</strong> is a request for
+          storage by a Pod — it specifies size, access mode (<code>ReadWriteOnce</code> for a single
+          pod, <code>ReadWriteMany</code> for shared), and StorageClass. In cloud environments,
+          PVCs are typically satisfied dynamically by a StorageClass that provisions cloud disks
+          on demand.
+        </p>
+        <p>
+          Most application developers only interact with PVCs (not PVs directly). For StatefulSets,
+          use <code>volumeClaimTemplates</code> — each pod replica gets its own PVC automatically.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Helm &amp; Local Dev</span>
+        <h2>Helm Charts, Minikube, and docker-compose to Kubernetes</h2>
+
+        <h3>Helm charts</h3>
+        <p>
+          Helm is the package manager for Kubernetes. A chart is a collection of YAML templates
+          with configurable values. <code>helm install my-release ./chart --values prod.yaml</code>
+          renders the templates with the given values and applies them. Charts can be versioned,
+          shared, and parameterised — a chart for a microservice typically exposes values for image
+          tag, replica count, resource limits, and ingress hostname, keeping the base manifests
+          DRY across environments.
+        </p>
+        <p>
+          Use Helm for anything you need to deploy to multiple environments with different
+          configurations. Use <code>helm diff</code> (plugin) to preview changes before applying.
+          For simple single-environment setups, plain <code>kubectl apply -f</code> with
+          Kustomize overlays is a lighter alternative.
+        </p>
+
+        <h3>Local development with minikube and kind</h3>
+        <p>
+          <strong>minikube</strong> runs a single-node Kubernetes cluster in a VM or container on
+          your machine. Includes addons for ingress, metrics-server, and dashboard.
+          <code>minikube image load myimage:tag</code> pushes a local Docker image into the cluster
+          without a registry.
+        </p>
+        <p>
+          <strong>kind (Kubernetes IN Docker)</strong> creates multi-node clusters as Docker
+          containers — faster to start than minikube and easier to script for CI. Load images with
+          <code>kind load docker-image myimage:tag</code>.
+        </p>
+
+        <h3>Translating docker-compose to Kubernetes</h3>
+        <p>
+          The mental model:
+        </p>
+        <ul>
+          <li><strong>service</strong> in compose → <strong>Deployment</strong> + <strong>Service</strong> in Kubernetes.</li>
+          <li><strong>environment</strong> variables → <strong>ConfigMap</strong> (non-sensitive) or <strong>Secret</strong> (sensitive) mounted as env vars.</li>
+          <li><strong>volumes</strong> → <strong>PersistentVolumeClaim</strong> (or emptyDir for ephemeral scratch space).</li>
+          <li><strong>ports</strong> → <strong>containerPort</strong> in the Pod spec; exposed via a Service or Ingress.</li>
+          <li><strong>depends_on</strong> → readiness probes + retry logic in the app. Kubernetes doesn't have a built-in ordering primitive — design your app to retry on startup.</li>
+          <li><strong>networks</strong> → Kubernetes networking is flat within a cluster. Use NetworkPolicies to restrict communication between namespaces or pods.</li>
+        </ul>
+        <p>
+          Use <code>kompose convert</code> to auto-generate Kubernetes manifests from a
+          <code>docker-compose.yml</code> as a starting point, then review and refine the output —
+          the generated manifests rarely set resource limits, health probes, or proper secret
+          management out of the box.
+        </p>
+
+        <div class="callout">
+          <p>
+            <strong>The most common migration mistake:</strong> Copying docker-compose health checks
+            (<code>test: ["CMD", "curl", "-f", "http://localhost:3000/health"]</code>) directly into
+            Kubernetes liveness probes without understanding the restart semantics. A failing
+            liveness probe kills the pod — ensure your liveness check is truly "is the process
+            alive?" and not "is the database reachable?".
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical Checklist</span>
+        <h2>Kubernetes Application Readiness — What to Nail</h2>
+        <ul class="check-list">
+          <li>Always set <code>resources.requests</code> and <code>resources.limits</code> — without them, the scheduler is flying blind and your pods will be OOMKilled.</li>
+          <li>Never use <code>:latest</code> tag in production manifests — pin to a specific image digest or version tag for reproducible deployments.</li>
+          <li>Separate liveness and readiness probes: liveness = "is the process alive", readiness = "is it ready to serve traffic". Never check external dependencies in a liveness probe.</li>
+          <li>Set <code>strategy.rollingUpdate.maxUnavailable: 0</code> for zero-downtime deploys. Ensure at least 2 replicas.</li>
+          <li>Use namespaces to separate production from staging. Never put production workloads in <code>default</code>.</li>
+          <li>Store secrets in a dedicated secrets manager (Vault, AWS Secrets Manager) and sync to Kubernetes Secrets using External Secrets Operator — don't store raw secret values in YAML committed to git.</li>
+          <li>Add a <code>PodDisruptionBudget</code> to prevent all replicas of a critical service from being evicted simultaneously during node maintenance.</li>
+          <li>Configure HPA with custom metrics (RPS, queue depth) rather than just CPU — CPU is a lagging indicator for many workload types.</li>
+          <li>Use <code>kubectl rollout undo</code> to roll back — don't re-apply an old manifest, which bypasses revision tracking.</li>
+          <li>Run <code>kubectl top pods</code> and <code>kubectl top nodes</code> weekly to check resource utilisation and right-size your requests/limits.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Kubernetes is not a deployment destination — it's a control plane that continuously
+          reconciles your desired state with reality. As an application developer, the highest-leverage
+          Kubernetes skills are: writing correct resource limits and health probes (they prevent the
+          majority of production incidents), understanding Services and Ingress routing (they determine
+          how your users reach your code), and using Deployments with rolling update strategies
+          (they enable zero-downtime deploys). Helm handles the repetition across environments.
+          Everything else — RBAC, PVs, network policies — you'll learn as you need it. Start with
+          the primitives, write manifests by hand before reaching for Helm, and always use
+          <code>kubectl describe pod</code> as your first debugging tool.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

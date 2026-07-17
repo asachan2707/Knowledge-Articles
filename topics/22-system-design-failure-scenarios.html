@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>22 Scenario-Based System Design Questions That Reveal How Real Systems Break | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Developer staring at multiple monitors with error logs"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Engineering · 40 min</span>
+          </div>
+        </figure>
+
+        <h1>22 Scenario-Based System Design Questions That Reveal How Real Systems Break</h1>
+        <p class="summary">
+          Twenty-two scenario-based questions built from real distributed system failure patterns — each with the
+          symptom, root cause, and production-proven fix. Covers payment failures, Kafka duplicates, double-booking
+          race conditions, Redis cascades, slow microservice isolation, and more.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: codefarm0.medium.com — 22 Scenario-Based System Design Questions</span>
+          <span class="meta-item">Domain: Distributed Systems / Engineering</span>
+        </div>
+      </header>
+
+      <section class="story-card">
+        <span class="section-label">Story · The 3 AM Alert</span>
+        <p>
+          3 AM. A senior engineer at a fintech startup receives a PagerDuty alert: "Payment success rate dropped
+          to 60%." They log in to find hundreds of orders in a corrupted state: <code>payment_collected = true</code>,
+          <code>order_status = FAILED</code>. Money has left customers' bank accounts. No orders were created.
+        </p>
+        <p>
+          The bug: the Payment Service called the payment gateway successfully, then attempted to write the order to
+          MySQL — which was experiencing replication lag. The write failed silently. The payment was already committed.
+          No rollback was possible across service boundaries. The engineer spent four hours writing a reconciliation
+          script. 847 customers affected. This failure was entirely preventable with a transactional outbox pattern.
+        </p>
+        <p>
+          This guide documents 22 such failures — their symptoms, root causes, and fixes — so you can recognise them
+          in a system design interview and prevent them before the 3 AM alert ever arrives.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">How to Use This Guide</span>
+        <h2>Structure and Reference Table</h2>
+        <p>
+          Each scenario is a system design interview question in disguise. The interviewer describes the symptom;
+          you must identify the root cause, the immediate mitigation, and the long-term prevention. For each
+          scenario, a minimal code or config snippet illustrates the fix.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The most expensive bugs in distributed systems share one trait:</strong> they succeed locally
+            but fail systemically. They pass unit tests. They look correct in staging. They only break in production
+            under load or at the boundary between components.
+          </p>
+        </div>
+        <table>
+          <thead>
+            <tr><th>#</th><th>Scenario</th><th>Root Cause</th><th>Fix Pattern</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td>Payment deducted, order not created</td><td>Distributed transaction failure</td><td>Transactional Outbox + Saga</td></tr>
+            <tr><td>2</td><td>Kafka consumer processes same message twice</td><td>At-least-once + crash mid-commit</td><td>Idempotent consumer + dedup store</td></tr>
+            <tr><td>3</td><td>Movie tickets double-booked</td><td>Race condition on inventory</td><td>SELECT FOR UPDATE / Redis SETNX</td></tr>
+            <tr><td>4</td><td>Redis OOM brings down entire platform</td><td>No circuit breaker, no fallback</td><td>Circuit breaker + Redis Sentinel/Cluster</td></tr>
+            <tr><td>5</td><td>Slow microservice degrades entire system</td><td>No timeout / no bulkhead</td><td>Bulkhead + thread pool isolation</td></tr>
+            <tr><td>6</td><td>Cache stampede on hot key expiry</td><td>Thundering herd</td><td>XFetch / mutex / background refresh</td></tr>
+            <tr><td>7</td><td>DB connection pool exhausted under load</td><td>No pool tuning, cascading waits</td><td>PgBouncer + pool sizing + circuit breaker</td></tr>
+            <tr><td>8</td><td>Rate limiter allows 2× traffic at window boundary</td><td>Fixed window counter flaw</td><td>Sliding window or token bucket</td></tr>
+            <tr><td>9</td><td>Retry storm causes cascading failure</td><td>No jitter on retry backoff</td><td>Jitter + exponential backoff + circuit breaker</td></tr>
+            <tr><td>10</td><td>Search index out of sync with database</td><td>Dual-write inconsistency</td><td>CDC with Debezium + Kafka</td></tr>
+            <tr><td>11</td><td>Uploaded file corrupted after S3 transfer</td><td>No integrity check</td><td>MD5/SHA-256 checksum verify</td></tr>
+            <tr><td>12</td><td>Auto-scaling triggers too late</td><td>Slow metrics lag</td><td>Predictive scaling + queue-depth metric</td></tr>
+            <tr><td>13</td><td>Leader election storm</td><td>No lease TTL, split-brain</td><td>Raft consensus + fencing tokens</td></tr>
+            <tr><td>14</td><td>Session data lost on rolling deploy</td><td>In-memory session on node</td><td>Externalize to Redis</td></tr>
+            <tr><td>15</td><td>Webhook delivery failing silently</td><td>No retry, no receipt</td><td>Exponential retry + dead-letter queue</td></tr>
+            <tr><td>16</td><td>Hot partition in Kafka</td><td>All events for one user to one partition</td><td>Composite partition key</td></tr>
+            <tr><td>17</td><td>DB query suddenly 100× slower</td><td>Missing index after data growth</td><td>EXPLAIN ANALYZE + composite index</td></tr>
+            <tr><td>18</td><td>Fan-out overwhelms follower queues</td><td>Celebrity problem</td><td>Hybrid push-pull lazy fan-out</td></tr>
+            <tr><td>19</td><td>Distributed cron runs N times</td><td>No leader election for jobs</td><td>Redis SETNX lock + idempotent job</td></tr>
+            <tr><td>20</td><td>Memory leak causes OOM every 6 hours</td><td>Event listener not removed</td><td>WeakMap + explicit cleanup + heap profiling</td></tr>
+            <tr><td>21</td><td>GDPR deletion misses derived data</td><td>No deletion event fan-out</td><td>Deletion event via Kafka + audit log</td></tr>
+            <tr><td>22</td><td>Cold start spikes every 30 minutes</td><td>Lambda recycled</td><td>Provisioned concurrency + keep-warm</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scenarios 1–4</span>
+        <h2>Distributed Transactions, Deduplication, Race Conditions, and Cache Failures</h2>
+
+        <h3>Scenario 1: Payment Deducted But Order Not Created</h3>
+        <p><strong>Symptom:</strong> Customers are charged but orders don't appear in their accounts.</p>
+        <p><strong>Root cause:</strong> The Payment Service successfully calls the payment gateway (Stripe), then tries to write the order to MySQL. That write fails (timeout, OOM, replication lag). The payment was already committed externally. No rollback is possible.</p>
+        <p><strong>Fix — Transactional Outbox:</strong> Write the order AND an outbox event atomically to the same database in a single transaction. A relay process reads the outbox and publishes to Kafka. If relay fails, it retries from its last checkpoint. Downstream services consume from Kafka and create the order. If order creation ultimately fails after all retries, a Saga compensation action issues a refund.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Transactional outbox: order + event in one DB transaction
+async function createOrderWithOutbox(client, paymentRef, cart) {
+  await client.query('BEGIN');
+  const { rows } = await client.query(
+    'INSERT INTO orders (payment_ref, status, items) VALUES ($1, $2, $3) RETURNING id',
+    [paymentRef, 'PENDING', JSON.stringify(cart.items)]
+  );
+  await client.query(
+    'INSERT INTO outbox_events (aggregate_id, event_type, payload) VALUES ($1, $2, $3)',
+    [rows[0].id, 'order.created', JSON.stringify({ orderId: rows[0].id, paymentRef })]
+  );
+  await client.query('COMMIT');
+  return rows[0].id;
+}
+// Relay process polls outbox and publishes to Kafka — separate concern
+</code></pre>
+
+        <h3>Scenario 2: Kafka Consumer Processes the Same Message Twice</h3>
+        <p><strong>Symptom:</strong> Emails sent twice, inventory decremented twice, payments duplicated.</p>
+        <p><strong>Root cause:</strong> Kafka delivers at-least-once. Consumer processes a message, the downstream call succeeds, then the consumer crashes before committing the offset. On restart, the consumer re-reads and re-processes the same message.</p>
+        <p><strong>Fix — Idempotent Consumer:</strong> Store a dedup key (partition:offset or message UUID) in Redis with TTL before processing. On each message: check Redis — if key exists, skip and commit offset. If not, process, then SET the key.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Idempotent Kafka consumer using Redis dedup store
+async function processMessage(redis, message) {
+  const dedupKey = `dedup:${message.partition}:${message.offset}`;
+  const alreadyProcessed = await redis.set(dedupKey, '1', 'EX', 86400, 'NX');
+  if (!alreadyProcessed) {
+    console.log('Duplicate message — skipping:', dedupKey);
+    return; // commit offset without reprocessing
+  }
+  // Safe to process — we own this message
+  await processOrderEvent(JSON.parse(message.value));
+}
+</code></pre>
+
+        <h3>Scenario 3: Movie Tickets Double-Booked</h3>
+        <p><strong>Symptom:</strong> Two users both receive booking confirmations for the same seat.</p>
+        <p><strong>Root cause:</strong> Read-modify-write race condition (TOCTOU). Both users read <code>available = 1</code> simultaneously, both see the seat as available, both proceed, both confirm. Seat is sold twice.</p>
+        <p><strong>Fix Option A — SELECT FOR UPDATE:</strong> DB-level exclusive row lock. The second reader blocks until the first commits or rolls back.</p>
+        <p><strong>Fix Option B — Redis SETNX reservation lock:</strong> <code>SET reservation:{seatId} {userId} EX 600 NX</code>. Only one requester gets the lock. Second requester receives nil and sees "seat being reserved."</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Redis SETNX seat reservation with 10-minute TTL
+async function reserveSeat(redis, seatId, userId) {
+  const key = `reservation:seat:${seatId}`;
+  const acquired = await redis.set(key, userId, 'EX', 600, 'NX');
+  if (!acquired) {
+    return { success: false, reason: 'seat_already_reserved' };
+  }
+  // Proceed to DB confirmation within TTL window
+  return { success: true, reservationKey: key };
+}
+// On payment confirmation: update DB, delete key
+// On timeout or payment failure: key auto-expires, seat becomes available
+</code></pre>
+
+        <h3>Scenario 4: Redis Goes Down and Takes Down the Entire Platform</h3>
+        <p><strong>Symptom:</strong> 100% of requests return 500. Redis was a single instance with no replica.</p>
+        <p><strong>Root cause:</strong> No circuit breaker on Redis calls. All application threads hung on TCP connect timeout (30 seconds). Thread pools exhausted. The database was fine — but the application was completely dead.</p>
+        <p><strong>Fix:</strong> Circuit breaker around all Redis calls. If Redis returns errors or timeouts for N consecutive requests, OPEN the circuit — fall through to DB. Half-open probe every 30 seconds to check recovery. Deploy Redis Sentinel for automatic failover to a replica in under 30 seconds.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Simple circuit breaker for Redis with DB fallback
+class CircuitBreaker {
+  constructor({ threshold = 5, resetMs = 30_000 } = {}) {
+    this.state = 'CLOSED'; this.failures = 0;
+    this.threshold = threshold; this.resetMs = resetMs;
+  }
+  async call(redisFn, dbFallbackFn) {
+    if (this.state === 'OPEN') return dbFallbackFn();
+    try {
+      const result = await redisFn();
+      this.failures = 0;
+      return result;
+    } catch {
+      if (++this.failures >= this.threshold) {
+        this.state = 'OPEN';
+        setTimeout(() => { this.state = 'CLOSED'; this.failures = 0; }, this.resetMs);
+      }
+      return dbFallbackFn();
+    }
+  }
+}
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scenarios 5–8</span>
+        <h2>Bulkheads, Cache Stampedes, Connection Pools, and Rate Limiters</h2>
+
+        <h3>Scenario 5: One Slow Microservice Degrades the Entire System</h3>
+        <p><strong>Symptom:</strong> The non-critical recommendations service started timing out at 2 seconds. Within minutes, the entire product page API returned 503.</p>
+        <p><strong>Root cause:</strong> No timeout and no bulkhead isolation. The product page API called five services in parallel. When recommendations hung, all 5 goroutines/threads waited 2 seconds. With 1,000 req/sec, the thread pool filled in 2 seconds. All requests failed.</p>
+        <p><strong>Fix — Bulkhead Pattern:</strong> Allocate a separate, bounded thread pool per downstream service. Recommendations gets 20 threads max. When its pool fills, fail-fast with a default response ("No recommendations available"). Set aggressive timeouts: recommendations 200ms, inventory 50ms.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Bulkhead: per-service concurrency limit with timeout
+async function callWithBulkhead(fn, { maxConcurrent = 20, timeoutMs = 200 }) {
+  // In practice, use a semaphore (p-limit) + AbortController
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fn({ signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') return null; // return fallback
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Usage: non-critical service returns null on timeout — page still loads
+const recommendations = await callWithBulkhead(
+  () => fetchRecommendations(userId),
+  { maxConcurrent: 20, timeoutMs: 200 }
+) ?? [];
+</code></pre>
+
+        <h3>Scenario 6: Cache Stampede on Hot Key Expiry</h3>
+        <p><strong>Symptom:</strong> Every midnight, DB query rate spikes 50× for 2 minutes. DB CPU hits 95%.</p>
+        <p><strong>Root cause:</strong> The "top products" cache key had TTL=86400, set exactly at midnight. All 50,000 product page requests simultaneously miss cache and hit the database — the thundering herd.</p>
+        <p><strong>Fix — XFetch Algorithm:</strong> Instead of a hard TTL, probabilistically refresh early. The formula: <code>now - (delta * beta * Math.log(Math.random())) &gt;= expiry</code>. As expiry approaches, the probability of deciding to refresh increases. With beta=1, on average exactly one early refresh occurs. No locks, fully distributed.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// XFetch: probabilistic early refresh — no stampede
+async function xfetchGet(redis, key, fetchFn, ttlSeconds) {
+  const raw = await redis.hgetall(key);
+  if (raw && raw.value) {
+    const expiry = parseFloat(raw.expiry);
+    const delta = parseFloat(raw.delta);
+    const beta = 1.0;
+    // Probabilistic check: refresh early if condition met
+    if (Date.now() / 1000 - delta * beta * Math.log(Math.random()) < expiry) {
+      return JSON.parse(raw.value); // Return cached value
+    }
+    // Condition met: async background refresh, still return current value
+    fetchFn().then(v => cacheWithDelta(redis, key, v, ttlSeconds)).catch(() => {});
+    return JSON.parse(raw.value);
+  }
+  // Cache miss: fetch and store
+  const t0 = Date.now();
+  const value = await fetchFn();
+  const delta = (Date.now() - t0) / 1000;
+  await cacheWithDelta(redis, key, value, ttlSeconds, delta);
+  return value;
+}
+async function cacheWithDelta(redis, key, value, ttl, delta = 0.1) {
+  const expiry = Date.now() / 1000 + ttl;
+  await redis.hset(key, { value: JSON.stringify(value), expiry, delta });
+  await redis.expireat(key, Math.ceil(expiry));
+}
+</code></pre>
+
+        <h3>Scenario 7: Database Connection Pool Exhausted Under Load</h3>
+        <p><strong>Symptom:</strong> <code>Error: too many connections</code>. PostgreSQL max_connections=200. Application has 100 instances × 10 pool connections = 1,000 potential connections.</p>
+        <p><strong>Root cause:</strong> Each app instance maintains its own connection pool. At 100 instances, the maximum potential connections exceed PostgreSQL's limit. During a deploy where all instances start simultaneously, a connection storm occurs.</p>
+        <p><strong>Fix — PgBouncer:</strong> Deploy PgBouncer in transaction-pooling mode. 10,000 application connections are multiplexed to 200 real PostgreSQL connections. Pool sizing formula: <code>connections = (cpu_cores × 2) + effective_spindle_count</code>. For a 4-core server: 9 connections is the optimal PostgreSQL setting.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// pgbouncer.ini — transaction pooling mode
+// [databases]
+// mydb = host=postgres port=5432 dbname=mydb
+// [pgbouncer]
+// pool_mode = transaction
+// max_client_conn = 10000
+// default_pool_size = 25  // per DB user — total ~200 DB connections
+// server_idle_timeout = 600
+
+// Application connects to PgBouncer (port 6432), not PostgreSQL directly:
+import { Pool } from 'pg';
+const pool = new Pool({
+  host: 'pgbouncer',  // PgBouncer host
+  port: 6432,
+  database: 'mydb',
+  max: 10,  // per app instance; PgBouncer multiplexes to DB
+});
+</code></pre>
+
+        <h3>Scenario 8: Rate Limiter Allows 2× Traffic at Window Boundary</h3>
+        <p><strong>Symptom:</strong> The rate limiter allows 200 requests/minute per user. At the minute boundary, 200 requests arrive in the last second of minute 1 and 200 more in the first second of minute 2 — 400 requests in 2 seconds slip through.</p>
+        <p><strong>Root cause:</strong> Fixed window counter. The counter resets at the exact minute boundary. Users who send requests at the boundary of two windows can double their effective rate.</p>
+        <p><strong>Fix — Sliding Window Counter:</strong> Track both the previous window count and the current window count. Estimate the current rate as: <code>prev_count × (1 - elapsed_fraction) + curr_count</code>. O(1) memory, less than 0.1% error compared to the exact sliding window log.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Sliding window counter rate limiter using Redis
+async function isAllowed(redis, userId, limit = 200, windowSecs = 60) {
+  const now = Math.floor(Date.now() / 1000);
+  const currWindow = Math.floor(now / windowSecs) * windowSecs;
+  const prevWindow = currWindow - windowSecs;
+  const elapsed = (now - currWindow) / windowSecs; // fraction of current window elapsed
+
+  const [prevCount, currCount] = await redis.mget(
+    `rl:${userId}:${prevWindow}`,
+    `rl:${userId}:${currWindow}`
+  );
+  // Weighted estimate: contribution of prev window decreases as current window fills
+  const estimate = (parseInt(prevCount) || 0) * (1 - elapsed) + (parseInt(currCount) || 0);
+  if (estimate >= limit) return false;
+
+  await redis.multi()
+    .incr(`rl:${userId}:${currWindow}`)
+    .expire(`rl:${userId}:${currWindow}`, windowSecs * 2)
+    .exec();
+  return true;
+}
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scenarios 9–12</span>
+        <h2>Retry Storms, Sync Gaps, File Integrity, and Auto-Scaling Lag</h2>
+
+        <h3>Scenario 9: Cascading Failure from Retry Storms</h3>
+        <p><strong>Symptom:</strong> The payment service is slow under high load. Client services retry. More retries add more load. Service degrades further. Complete failure in 60 seconds.</p>
+        <p><strong>Root cause:</strong> All clients retry with the same fixed delay (retry after 1 second). When the service partially recovers, all waiting clients retry simultaneously — a synchronised thundering herd of retries.</p>
+        <p><strong>Fix — Exponential Backoff with Full Jitter:</strong> <code>delay = random(0, min(maxDelay, baseDelay × 2^attempt))</code>. The jitter desynchronises retries across all clients. Add a circuit breaker: if error rate exceeds 50%, stop retrying and fast-fail.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Exponential backoff with full jitter
+async function retryWithJitter(fn, maxRetries = 5, baseDelayMs = 100) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const cap = Math.min(30_000, baseDelayMs * Math.pow(2, attempt));
+      const delay = Math.random() * cap; // full jitter: uniform [0, cap]
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+</code></pre>
+
+        <h3>Scenario 10: Search Index Out of Sync with Database</h3>
+        <p><strong>Symptom:</strong> Users find a product via search, navigate to it, but it shows as deleted. The search index has stale data.</p>
+        <p><strong>Root cause:</strong> Dual-write pattern. Application writes to PostgreSQL first, then calls the Elasticsearch API. If the Elasticsearch write fails (timeout, ES node down), the data is in the DB but not indexed. Inconsistency grows silently over time.</p>
+        <p><strong>Fix — Change Data Capture (CDC) with Debezium:</strong> Debezium tails the PostgreSQL WAL (write-ahead log). Every committed transaction generates a Kafka event. An Elasticsearch consumer reads from Kafka and updates the index. The database is always the source of truth. The index is always eventually consistent with the DB.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Debezium connector config (deploy to Kafka Connect cluster)
+const debeziumConfig = {
+  "name": "postgres-products-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.dbname": "shop",
+    "table.include.list": "public.products",
+    "topic.prefix": "shop",
+    "plugin.name": "pgoutput"
+  }
+};
+// Consumer subscribes to 'shop.public.products' Kafka topic
+// and upserts into Elasticsearch on every INSERT/UPDATE/DELETE event
+</code></pre>
+
+        <h3>Scenario 11: User Uploaded File Corrupted After S3 Transfer</h3>
+        <p><strong>Symptom:</strong> Large file uploads (videos, PDFs) occasionally arrive corrupted. The upload reports success.</p>
+        <p><strong>Root cause:</strong> S3 multipart upload splits files into N parts uploaded in parallel. If a part is silently corrupted during transit (TCP checksum collision, network bit-flip at the IP layer), S3 stores the corrupted part. The <code>CompleteMultipartUpload</code> call succeeds but the file is corrupt.</p>
+        <p><strong>Fix:</strong> Compute SHA-256 of the file before uploading. Pass <code>Content-MD5</code> header with each part (S3 validates each part on receipt). After <code>CompleteMultipartUpload</code>, verify the final checksum matches the pre-upload hash.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import { createHash } from 'crypto';
+import { readFile } from 'fs/promises';
+
+async function uploadWithIntegrityCheck(s3, bucket, key, filePath) {
+  const data = await readFile(filePath);
+  const expectedHash = createHash('sha256').update(data).digest('hex');
+
+  // Upload (simplified — production uses multipart for large files)
+  await s3.putObject({
+    Bucket: bucket, Key: key, Body: data,
+    ChecksumSHA256: Buffer.from(expectedHash, 'hex').toString('base64'),
+  });
+
+  // Verify: head-object and compare checksum
+  const head = await s3.headObject({ Bucket: bucket, Key: key });
+  if (head.ChecksumSHA256 !== Buffer.from(expectedHash, 'hex').toString('base64')) {
+    await s3.deleteObject({ Bucket: bucket, Key: key });
+    throw new Error('Upload integrity check failed — file corrupted during transfer');
+  }
+  return { key, sha256: expectedHash };
+}
+</code></pre>
+
+        <h3>Scenario 12: Auto-Scaling Triggers Too Late During Traffic Spike</h3>
+        <p><strong>Symptom:</strong> Flash sale starts at noon. Traffic spikes 10× in 30 seconds. Auto-scaling triggers at 12:05. Five minutes of degraded service.</p>
+        <p><strong>Root cause:</strong> Auto-scaling based on CPU. CloudWatch aggregates CPU with a 1-minute lag. At 100% CPU, the scale-out decision is made. New EC2 instances take 3–5 minutes to boot and register with the load balancer. Total delay: 6–8 minutes.</p>
+        <p><strong>Fix:</strong> Use SQS queue depth as a custom CloudWatch metric — queue depth grows in sub-seconds when traffic spikes, far faster than CPU. For known events: schedule scale-out 30 minutes before the event using AWS Scheduled Scaling or EC2 Auto Scaling scheduled actions.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// AWS CLI: schedule scale-out 30 minutes before flash sale
+// aws autoscaling put-scheduled-update-group-action \
+//   --auto-scaling-group-name my-asg \
+//   --scheduled-action-name pre-flash-sale \
+//   --start-time "2026-07-16T11:30:00Z" \
+//   --desired-capacity 50 \
+//   --min-size 50
+
+// Custom CloudWatch metric: SQS queue depth (reacts in seconds vs. CPU minutes)
+import { CloudWatchClient, PutMetricAlarmCommand } from '@aws-sdk/client-cloudwatch';
+const cw = new CloudWatchClient({});
+await cw.send(new PutMetricAlarmCommand({
+  AlarmName: 'HighQueueDepth',
+  MetricName: 'ApproximateNumberOfMessagesVisible',
+  Namespace: 'AWS/SQS',
+  Threshold: 1000, ComparisonOperator: 'GreaterThanThreshold',
+  EvaluationPeriods: 1, Period: 60, Statistic: 'Maximum',
+  AlarmActions: ['arn:aws:autoscaling:...my-scaling-policy'],
+}));
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scenarios 13–16</span>
+        <h2>Leader Election, Session Loss, Webhook Failures, and Kafka Hotspots</h2>
+
+        <h3>Scenario 13: Leader Election Storm in Distributed System</h3>
+        <p><strong>Symptom:</strong> Distributed job scheduler starts running the same job N times simultaneously.</p>
+        <p><strong>Root cause:</strong> Split-brain. The leader lease in ZooKeeper expired during a 2-second network partition. All N instances saw "no leader" and simultaneously elected themselves. The lease TTL was too short (1 second).</p>
+        <p><strong>Fix:</strong> Use Raft consensus (etcd, Consul) instead of ZooKeeper ephemeral nodes. Raft guarantees at-most-one leader. Add a fencing token: each leader receives a monotonically increasing token. The storage backend rejects writes with a token lower than the last seen — preventing a deposed leader from causing side effects after it believes it has been re-elected.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Redis-based leader election with fencing token
+async function acquireLeadership(redis, instanceId, ttlSeconds = 30) {
+  // Atomic: SET only if not exists; returns current fencing token
+  const acquired = await redis.set('leader:lock', instanceId, 'EX', ttlSeconds, 'NX');
+  if (!acquired) return null;
+
+  // Increment monotonic fencing token — storage backends check this
+  const token = await redis.incr('leader:token');
+  return token; // pass token with every write operation
+}
+
+async function doLeaderWork(redis, instanceId, token) {
+  // Verify we still hold the lock before each critical operation
+  const currentLeader = await redis.get('leader:lock');
+  if (currentLeader !== instanceId) throw new Error('Lost leadership');
+  // Include token in downstream writes for fencing
+  await performJob({ fencingToken: token });
+}
+</code></pre>
+
+        <h3>Scenario 14: Session Data Lost After Rolling Deployment</h3>
+        <p><strong>Symptom:</strong> 10–20% of users are logged out on every deployment.</p>
+        <p><strong>Root cause:</strong> Session data stored in-memory on the application server (e.g., express-session with MemoryStore). Rolling deployment terminates old instances. Users whose session was on a terminated instance lose their session.</p>
+        <p><strong>Fix:</strong> Externalise session storage to Redis. Use connect-redis with express-session. Sessions survive server restarts and are accessible from any instance. Set Redis key TTL = session timeout.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import session from 'express-session';
+import RedisStore from 'connect-redis';
+import Redis from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL);
+
+app.use(session({
+  store: new RedisStore({ client: redis, prefix: 'sess:' }),
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+  },
+}));
+// Sessions now survive rolling deploys — any instance can serve any session
+</code></pre>
+
+        <h3>Scenario 15: Webhook Delivery Failing Silently</h3>
+        <p><strong>Symptom:</strong> Third-party integrations stop receiving webhooks. No errors in application logs. Customer reports the issue 4 hours later.</p>
+        <p><strong>Root cause:</strong> Webhook delivery was a fire-and-forget HTTP call inside the payment callback handler. If the customer's endpoint returned 500 or timed out, the error was swallowed. No retry, no alerting, no dead-letter queue.</p>
+        <p><strong>Fix:</strong> Webhook delivery service with exponential retry. On failure, enqueue to a Redis-backed retry queue with delays: 1s, 2s, 4s, 8s, 30s, 5min, 30min, 2h, 12h, 24h. After 10 failures, move to dead-letter queue. Add HMAC signature to each webhook payload for authenticity verification.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import { createHmac } from 'crypto';
+
+async function deliverWebhook(bull, endpoint, payload, secret) {
+  const signature = createHmac('sha256', secret)
+    .update(JSON.stringify(payload))
+    .digest('hex');
+
+  // Add to Bull queue with exponential backoff
+  await bull.add(
+    { endpoint, payload, signature },
+    {
+      attempts: 10,
+      backoff: { type: 'exponential', delay: 1000 },
+      removeOnComplete: true,
+      removeOnFail: false, // keep in dead-letter queue for inspection
+    }
+  );
+}
+
+// Worker: deliver and verify response
+async function webhookWorker(job) {
+  const { endpoint, payload, signature } = job.data;
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Signature-256': signature },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!resp.ok) throw new Error(`Endpoint returned ${resp.status}`);
+}
+</code></pre>
+
+        <h3>Scenario 16: Hot Partition in Kafka</h3>
+        <p><strong>Symptom:</strong> Kafka consumer lag grows only on partition 0. That consumer is at 100% CPU. Partitions 1–15 are idle.</p>
+        <p><strong>Root cause:</strong> Partition key is <code>userId</code>. A celebrity user generates 10M events per day — 100× the average. All their events go to the same partition (hash(userId) % N). One partition, one consumer thread.</p>
+        <p><strong>Fix:</strong> Composite partition key: <code>`${userId}#${randomSuffix}`</code> where randomSuffix is random(0, 8). The celebrity's events spread across 8 partitions. Note: ordering within a user is lost — use a sequence number in the event payload if ordering matters.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Composite Kafka partition key to spread hot users
+function getPartitionKey(userId, isHighVolume) {
+  if (!isHighVolume) return String(userId);
+  // Spread high-volume users across 8 virtual shards
+  const shard = Math.floor(Math.random() * 8);
+  return `${userId}#${shard}`;
+}
+
+await producer.send({
+  topic: 'user-events',
+  messages: [{
+    key: getPartitionKey(userId, followerCount > 10_000),
+    value: JSON.stringify({ userId, eventType, timestamp, seqNum: event.seqNum }),
+  }],
+});
+// Consumer reconstructs per-user order using seqNum if needed
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scenarios 17–22</span>
+        <h2>Slow Queries, Celebrity Fan-out, Distributed Crons, Memory Leaks, GDPR, Cold Starts</h2>
+
+        <h3>Scenario 17: Database Query Suddenly 100× Slower</h3>
+        <p><strong>Symptom:</strong> A specific API endpoint was p99 &lt;50ms for 6 months. One day it becomes p99 = 8,000ms. No deployment occurred.</p>
+        <p><strong>Root cause:</strong> The query had <code>WHERE status = 'PENDING' AND created_at &gt; ?</code>. At low row counts, PostgreSQL used an index scan on <code>created_at</code>. As the table grew past 10M rows, the query planner switched to a sequential scan — because the index cost estimate crossed a threshold. 10M row sequential scan = 8 seconds.</p>
+        <p><strong>Fix:</strong> Run <code>EXPLAIN ANALYZE</code> to see the query plan change. Create a composite index on the filtered columns: <code>CREATE INDEX CONCURRENTLY idx_orders_status_created ON orders(status, created_at)</code>. The <code>CONCURRENTLY</code> option avoids a table lock. Add <code>pg_stat_statements</code> monitoring to detect plan changes before they reach production.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// PostgreSQL: create composite index without table lock
+// Run this during low-traffic period — takes minutes on large tables
+// CREATE INDEX CONCURRENTLY idx_orders_status_created
+//   ON orders(status, created_at DESC)
+//   WHERE status IN ('PENDING', 'PROCESSING'); -- partial index saves space
+
+// pg_stat_statements: find slowest queries
+// SELECT query, mean_exec_time, calls
+// FROM pg_stat_statements
+// ORDER BY mean_exec_time DESC LIMIT 10;
+
+// Node.js: always log slow queries
+const { rows } = await pool.query({
+  text: 'SELECT * FROM orders WHERE status=$1 AND created_at > $2',
+  values: ['PENDING', since],
+});
+// Set statement_timeout per connection for safety:
+// SET statement_timeout = '5000ms';
+</code></pre>
+
+        <h3>Scenario 18: Fan-Out Write Overwhelms Follower Queues</h3>
+        <p><strong>Symptom:</strong> When a celebrity with 80M followers posts, the fan-out job takes 12 minutes. Other users' timelines are delayed.</p>
+        <p><strong>Root cause:</strong> Fan-out on write for all users. 80M Redis LPUSH operations, each O(1) but 80M sequential = minutes of Redis write saturation.</p>
+        <p><strong>Fix — Hybrid Push-Pull:</strong> Fan-out on write for users with fewer than 10,000 followers. For celebrities: skip fan-out. On timeline read, fetch the 5 most recent posts from each celebrity the user follows (read-time pull) and merge with the user's Redis timeline in application code. The merge of 20 celebrity feeds × 5 posts = 100 items sorted in memory is negligible.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Hybrid fan-out: push for normal users, pull for celebrities
+const CELEBRITY_THRESHOLD = 10_000;
+
+async function onNewPost(redis, db, authorId, postId, timestamp) {
+  const { rows } = await db.query('SELECT follower_count FROM users WHERE id=$1', [authorId]);
+  const followerCount = rows[0].follower_count;
+
+  if (followerCount <= CELEBRITY_THRESHOLD) {
+    // Fan-out on write: push post ID to each follower's timeline ZSET
+    const followers = await db.query('SELECT id FROM followers WHERE followee_id=$1', [authorId]);
+    const pipeline = redis.pipeline();
+    for (const { id } of followers.rows) {
+      pipeline.zadd(`timeline:${id}`, timestamp, String(postId));
+      pipeline.zremrangebyrank(`timeline:${id}`, 0, -501); // keep top-500
+    }
+    await pipeline.exec();
+  } else {
+    // Celebrity: mark for read-time pull — no fan-out
+    await redis.sadd('celebrities', String(authorId));
+  }
+}
+</code></pre>
+
+        <h3>Scenario 19: Distributed Cron Job Runs N Times</h3>
+        <p><strong>Symptom:</strong> A daily digest email is deployed across 5 instances. Users receive 5 digest emails.</p>
+        <p><strong>Root cause:</strong> Each instance runs its own cron scheduler. No coordination. All 5 execute simultaneously.</p>
+        <p><strong>Fix:</strong> Redis SETNX leader lock before each cron execution. Only the instance that acquires the lock runs the job. TTL = job period to ensure the lock expires before the next run. The job itself must be idempotent — if two instances race at TTL boundary, the second run is a no-op.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Distributed cron: only one instance runs per period
+async function runWithDistributedLock(redis, jobName, periodSecs, jobFn) {
+  const lockKey = `cron:${jobName}`;
+  const instanceId = process.env.INSTANCE_ID ?? Math.random().toString(36).slice(2);
+
+  const acquired = await redis.set(lockKey, instanceId, 'EX', periodSecs, 'NX');
+  if (!acquired) {
+    console.log(`[${jobName}] Lock held by another instance — skipping`);
+    return;
+  }
+  try {
+    console.log(`[${jobName}] Running (lock acquired)`);
+    await jobFn(); // must be idempotent
+  } finally {
+    // Only release if we still own the lock (prevents releasing another instance's lock)
+    const current = await redis.get(lockKey);
+    if (current === instanceId) await redis.del(lockKey);
+  }
+}
+
+// Usage:
+setInterval(() => runWithDistributedLock(redis, 'daily-digest', 86400, sendDigestEmails), 60_000);
+</code></pre>
+
+        <h3>Scenario 20: Memory Leak Causes OOM Kill Every 6 Hours</h3>
+        <p><strong>Symptom:</strong> Node.js process memory grows from 200 MB to 2 GB over 6 hours, then OOM-kills. Growth resumes on restart.</p>
+        <p><strong>Root cause:</strong> An event listener was added inside a request handler: <code>emitter.on('data', handler)</code>. Listeners accumulated because they were never removed. Each held a closure referencing request-scoped variables. Memory grows with every request.</p>
+        <p><strong>Fix:</strong> Use <code>emitter.once('data', handler)</code> (auto-removes after one call) or call <code>emitter.removeListener()</code> in a cleanup block. Use WeakMap for object-keyed caches — WeakMap entries are garbage-collected when the key object is collected. Add heap snapshot monitoring.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Bug: listener added per request, never removed
+// emitter.on('data', (chunk) => { ... requestContext ... }); // WRONG
+
+// Fix 1: use once() — auto-removes after first emission
+emitter.once('data', (chunk) => { processChunk(chunk, requestContext); });
+
+// Fix 2: explicit cleanup with removeListener
+function requestHandler(req, res) {
+  const handler = (chunk) => processChunk(chunk, req);
+  emitter.on('data', handler);
+  res.on('finish', () => emitter.removeListener('data', handler)); // cleanup
+}
+
+// Fix 3: WeakMap for request-scoped caches (GC cleans up when req is collected)
+const cache = new WeakMap(); // keys are request objects — auto-GC'd
+function getCachedData(req) {
+  if (!cache.has(req)) cache.set(req, computeExpensiveData(req));
+  return cache.get(req);
+}
+
+// Monitor: alert when RSS exceeds 1.5GB
+setInterval(() => {
+  const { rss } = process.memoryUsage();
+  if (rss > 1.5e9) console.error(`Memory warning: RSS ${(rss/1e9).toFixed(2)}GB`);
+}, 30_000);
+</code></pre>
+
+        <h3>Scenario 21: GDPR Deletion Request Misses Derived Data</h3>
+        <p><strong>Symptom:</strong> A GDPR deletion request is processed. Account deleted. 3 months later, a data audit finds the user's data still in the analytics warehouse, recommendation model training set, and email suppression list.</p>
+        <p><strong>Root cause:</strong> Deletion logic only removed from the primary user table and auth store. It did not fan out to 10+ downstream systems that stored derived copies of user data.</p>
+        <p><strong>Fix:</strong> Publish a <code>user.deleted</code> event to a Kafka topic. Every downstream service that stores user data subscribes and implements a deletion handler. Maintain an audit log of confirmed deletions. GDPR Article 17 SLA: all systems must confirm deletion within 30 days.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// GDPR deletion event published on account deletion
+async function deleteUser(db, kafka, userId) {
+  // 1. Anonymise/delete primary record
+  await db.query('UPDATE users SET email=$1, name=$2, deleted_at=NOW() WHERE id=$3',
+    [`deleted-${userId}@anon.invalid`, 'Deleted User', userId]);
+
+  // 2. Publish deletion event — downstream services subscribe and purge
+  await kafka.producer().send({
+    topic: 'user-lifecycle',
+    messages: [{
+      key: String(userId),
+      value: JSON.stringify({ event: 'user.deleted', userId, requestedAt: new Date().toISOString() }),
+    }],
+  });
+
+  // 3. Log deletion request for audit trail
+  await db.query('INSERT INTO gdpr_audit (user_id, event, ts) VALUES ($1, $2, NOW())',
+    [userId, 'deletion_requested']);
+}
+
+// Each downstream service: subscribe to 'user-lifecycle' and handle deletion
+// analytics-service: DELETE FROM events WHERE user_id = ?
+// recommendation-service: DELETE FROM user_features WHERE user_id = ?
+// email-service: add to suppression list, DELETE FROM preferences WHERE user_id = ?
+</code></pre>
+
+        <h3>Scenario 22: Cold Start Latency Spikes Every 30 Minutes</h3>
+        <p><strong>Symptom:</strong> Lambda function p99 latency is &lt;100ms normally. Every 30 minutes there is a spike to 8 seconds, correlating with low-traffic periods.</p>
+        <p><strong>Root cause:</strong> Lambda cold start. After ~15 minutes of inactivity, AWS recycles the execution environment. On the next invocation: runtime initialises, dependencies load, database connection pool initialises. Node.js + PostgreSQL connection: cold start = 5–8 seconds.</p>
+        <p><strong>Fix A — Provisioned Concurrency:</strong> Lambda keeps N instances pre-initialised at all times. Cold starts are eliminated for provisioned instances. Cost: you pay for idle instances.</p>
+        <p><strong>Fix B — Keep-warm ping (free):</strong> A CloudWatch Events rule triggers the Lambda every 5 minutes with a <code>{"warm": true}</code> event. The handler returns immediately on warm pings. Prevents recycling.</p>
+        <p><strong>Fix C — Move initialisation outside handler:</strong> DB connection pool and SDK clients initialised at module level are reused across invocations in the same container.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import { Pool } from 'pg';
+
+// CORRECT: pool created at module level — shared across invocations in same container
+const pool = new Pool({ connectionString: process.env.DB_URL, max: 2 });
+
+export const handler = async (event) => {
+  // Keep-warm handler: return immediately on ping events
+  if (event.warm) return { statusCode: 200, body: 'warm' };
+
+  // Actual logic — pool connection already warm from module init
+  const { rows } = await pool.query('SELECT 1');
+  return { statusCode: 200, body: JSON.stringify(rows) };
+};
+
+// CloudWatch Events rule (cron): runs every 5 minutes to keep warm
+// { "source": "aws.events", "warm": true }
+// Or use Lambda's built-in Provisioned Concurrency for strict SLAs:
+// aws lambda put-provisioned-concurrency-config \
+//   --function-name my-func --qualifier prod --provisioned-concurrent-executions 5
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Pattern Analysis</span>
+        <h2>Cross-Cutting Lessons from All 22 Scenarios</h2>
+        <p>
+          Grouping the 22 scenarios by root cause category reveals the most leveraged fixes:
+        </p>
+        <ul>
+          <li><strong>Distributed transaction / atomicity (1, 3, 13):</strong> Use Saga + transactional outbox for cross-service atomicity. Avoid XA transactions in microservices — they create distributed locking that degrades availability.</li>
+          <li><strong>Exactly-once semantics (2, 19):</strong> Idempotency key + dedup store. Treat all messaging as at-least-once from day one. The idempotency check cost (one Redis lookup) is negligible compared to the cost of a duplicate payment or double email.</li>
+          <li><strong>Resource exhaustion (4, 5, 7, 16):</strong> Circuit breakers, bulkheads, connection pooling, and composite partition keys prevent single-component overload from cascading. Missing any one of these converts a partial failure into a total outage.</li>
+          <li><strong>Timing and synchronisation (6, 8, 9, 12):</strong> Jitter, sliding windows, and predictive scaling break synchronised spikes. Synchronised behaviour in distributed systems is almost always a bug.</li>
+          <li><strong>Data consistency (10, 21):</strong> CDC (Debezium) and event-driven deletion propagation keep derived stores consistent with the source of truth. Dual-writes are a consistency debt that grows silently until it fails loudly.</li>
+          <li><strong>Operational hygiene (11, 14, 15, 17, 20, 22):</strong> Checksums, externalised sessions, retry queues, index monitoring, memory profiling, and keep-warm pings. These are not glamorous — but they prevent the category of failures that are discovered by customers, not by engineers.</li>
+        </ul>
+        <div class="callout">
+          <p>
+            <strong>The consistent thread across all 22 scenarios:</strong> none of these failures would have been
+            caught by unit tests. Most would be caught by integration tests. All can be prevented by applying
+            one of a handful of well-understood patterns. Distributed system failures are rarely caused by bugs
+            in the happy path — they are caused by the absence of handling for the unhappy path.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical Checklist</span>
+        <h2>What to Verify in Every Distributed System</h2>
+        <ul class="check-list">
+          <li>Use transactional outbox for any write that must trigger a cross-service event.</li>
+          <li>Make all event consumers idempotent — assume every message will be delivered at least twice.</li>
+          <li>Put circuit breakers on every external dependency: Redis, database, downstream services.</li>
+          <li>Isolate thread/connection pools per downstream service (bulkhead pattern).</li>
+          <li>Use sliding window or token bucket rate limiting — never fixed window.</li>
+          <li>Add full jitter to all retry logic — synchronised retries amplify the failure they are meant to fix.</li>
+          <li>Use CDC (Debezium) to synchronise derived stores — dual-writes will diverge silently.</li>
+          <li>Compute and verify file checksums for all large file transfers — S3 multipart is not immune to corruption.</li>
+          <li>Externalise all session state — in-memory sessions are destroyed on rolling deployments.</li>
+          <li>Monitor DB query execution plans — they change silently as data volume grows.</li>
+          <li>Publish deletion events to Kafka and fan out to all downstream services for GDPR compliance.</li>
+          <li>Move DB connection pool and SDK client initialisation outside Lambda handlers.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common Questions</h2>
+
+        <h3>In the Saga pattern, what happens if the compensation transaction also fails?</h3>
+        <p>
+          Compensating transactions must themselves be idempotent and retried with exponential backoff.
+          A compensation that fails after N retries goes to a dead-letter queue requiring manual intervention.
+          This is why Saga compensations must be designed to be eventually successful — for example, a refund
+          will keep retrying until the payment gateway becomes available again, because a failed compensation
+          for a payment Saga means a customer was charged without receiving their order.
+        </p>
+
+        <h3>Should I always use idempotency keys for every API call?</h3>
+        <p>
+          For any call with side effects (write, payment, notification, state change): yes. For pure reads: no.
+          The cost of an idempotency check (one Redis SETNX lookup, sub-millisecond) is negligible compared to
+          the cost of a duplicate side effect — a double charge, a double notification, or an inventory
+          double-decrement.
+        </p>
+
+        <h3>How do I choose between SELECT FOR UPDATE and Redis SETNX for concurrency control?</h3>
+        <p>
+          SELECT FOR UPDATE is correct when the final write must go to the same SQL database — it uses
+          database-native row locking with full transactional guarantees. Redis SETNX is faster and works
+          across service boundaries, but requires careful TTL management and does not integrate with SQL
+          transactions. Use SELECT FOR UPDATE for single-database seat or inventory reservation; use
+          Redis SETNX for cross-service reservation flows where you need to hold a lock while calling
+          an external service.
+        </p>
+
+        <h3>How long should idempotency keys and dedup keys be stored?</h3>
+        <p>
+          At minimum: the maximum retry window plus a safety buffer. For payment idempotency keys: 24–48
+          hours (Stripe's standard is 24 hours). For Kafka consumer dedup keys: 2× the maximum consumer
+          group lag (if max lag is 1 hour, store dedup keys for 2 hours). For API idempotency keys from
+          external clients: 24 hours is the industry standard.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Explore Further</h2>
+        <ul>
+          <li><a href="./28-system-design-failure-prevention.html">28 System Design Failure Modes</a> — expanded catalogue of distributed system failure patterns and prevention strategies</li>
+          <li><a href="./microservices-architecture-patterns.html">Microservices Architecture Patterns</a> — Saga, CQRS, and transactional outbox in depth</li>
+          <li><a href="./cache-stampede-hot-key.html">Cache Stampede and Hot Key Expiry</a> — deep dive on Scenario 6: thundering herd and the XFetch algorithm</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The 22 scenarios in this guide are not hypotheticals — they are failure patterns extracted from production
+          incidents at real companies. What they share: none would have been caught by unit tests, most could be
+          detected by integration tests, and all can be prevented by applying one of a handful of well-understood
+          patterns. The most valuable insight is this: distributed system failures are rarely caused by bugs in
+          the happy path. They are caused by the absence of handling for the unhappy path — the missing circuit
+          breaker, the missing idempotency check, the missing composite partition key, the missing outbox event.
+          Building robust distributed systems means coding the failure paths with the same rigour as the success
+          paths. The 3 AM alert arrives when you don't.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

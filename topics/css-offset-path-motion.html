@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CSS offset-path Motion Animation | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract flowing curves of light suggesting motion paths"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Frontend · CSS · 8 min</span>
+          </div>
+        </figure>
+
+        <h1>CSS offset-path — Motion Along Any Path</h1>
+        <p class="summary">
+          <code>offset-path</code> is a CSS property that moves elements along an arbitrary geometric path —
+          an SVG curve, a circle, a polygon — using pure CSS. It replaces entire JavaScript animation rigs
+          with a handful of declarative properties and runs on the compositor thread.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: YouTube — CSS Deep Dive</span>
+          <span class="meta-item">Domain: CSS / Frontend Animation</span>
+          <span class="meta-item">Published: 2024</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Before <code>offset-path</code>, animating an element along a curved path meant calculating
+          coordinates in JavaScript on every frame — a main-thread operation that janked on mobile and required
+          libraries like GSAP or anime.js. The CSS Motion Path module changes that: define the path once,
+          animate <code>offset-distance</code> from 0% to 100%, and the browser handles the rest entirely
+          off-main-thread.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> <code>offset-path</code> defines <em>where</em> to move;
+            <code>offset-distance</code> defines <em>how far along</em>. Animate the distance and you get
+            path-following motion in pure CSS.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The carousel dot problem</span>
+        <p>
+          A designer hands you a spec: a loading indicator where three dots orbit in an ellipse, each spaced
+          evenly, each rotating to stay tangent to the curve. In JavaScript, that's trigonometry per frame,
+          three requestAnimationFrame loops, and careful cleanup to prevent memory leaks. With
+          <code>offset-path</code> it's three elements, one SVG ellipse path, and
+          <code>animation-delay</code> stagger. The GPU compositor handles the interpolation — silky smooth
+          even on a budget Android phone.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The properties</span>
+        <h2>The CSS Motion Path property set</h2>
+        <p>Five properties form the full API:</p>
+        <ul>
+          <li>
+            <strong><code>offset-path</code></strong> — defines the path. Accepts:
+            <ul>
+              <li><code>path('M 0 0 C 100 0 200 100 200 200')</code> — SVG path data string</li>
+              <li><code>circle(50px at 50% 50%)</code> — CSS basic shape</li>
+              <li><code>ray(45deg closest-side)</code> — a ray from the element's container</li>
+              <li><code>url(#svgPathId)</code> — reference to an inline SVG <code>&lt;path&gt;</code> element</li>
+            </ul>
+          </li>
+          <li>
+            <strong><code>offset-distance</code></strong> — how far along the path (0% = start, 100% = end).
+            This is the animatable value.
+          </li>
+          <li>
+            <strong><code>offset-rotate</code></strong> — how the element rotates as it moves.
+            <code>auto</code> keeps it tangent to the path; <code>auto 90deg</code> adds a fixed offset;
+            <code>0deg</code> keeps it upright regardless of path direction.
+          </li>
+          <li>
+            <strong><code>offset-anchor</code></strong> — which point of the element sits on the path (default
+            is the transform-origin, usually center).
+          </li>
+          <li>
+            <strong><code>offset-position</code></strong> — defines where the path starts in the coordinate
+            space when no explicit start is encoded in the path data.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 2</span>
+        <h2>Path types in depth</h2>
+        <h3>SVG path string</h3>
+        <p>
+          The most flexible option. Any SVG path command works — lines (<code>L</code>), cubic beziers
+          (<code>C</code>), arcs (<code>A</code>), and more. You can sketch the path in Figma, export the
+          <code>d</code> attribute, and drop it straight into <code>path('...')</code>. No inline SVG element
+          required.
+        </p>
+        <h3>CSS basic shapes</h3>
+        <p>
+          <code>circle()</code>, <code>ellipse()</code>, <code>polygon()</code>, and <code>inset()</code> work
+          as paths. An element orbiting on a <code>circle(80px)</code> path needs zero SVG — the path is
+          computed from the CSS alone.
+        </p>
+        <h3>SVG element reference</h3>
+        <p>
+          <code>url(#myPath)</code> references an inline <code>&lt;path&gt;</code> inside an
+          <code>&lt;svg&gt;</code> in the document. This is ideal when the path is already part of the visual
+          design (e.g. a decorative curve the element should follow).
+        </p>
+        <h3>ray()</h3>
+        <p>
+          The <code>ray()</code> function defines a straight line at a given angle from the element's
+          containing block. Useful for starburst effects or elements shooting out from a central point.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 3</span>
+        <h2>Performance model</h2>
+        <p>
+          <code>offset-distance</code> is a composited property — the browser can animate it entirely on the
+          GPU compositor thread without touching the main thread. This means:
+        </p>
+        <ul>
+          <li>No layout or paint recalculations during the animation.</li>
+          <li>No JavaScript execution per frame.</li>
+          <li>The animation continues smoothly even when the main thread is busy (parsing scripts, running
+              event handlers, etc.).</li>
+        </ul>
+        <p>
+          The one caveat: if the element's size or shape changes during the animation (triggering layout),
+          the compositor advantage is lost. Keep animated elements' dimensions fixed.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Concept 4</span>
+        <h2>Browser support and fallbacks</h2>
+        <p>
+          As of 2024, <code>offset-path</code> has baseline support across all major engines (Chrome 79+,
+          Firefox 72+, Safari 15.4+). The <code>path()</code> value is the most widely supported form;
+          <code>ray()</code> and <code>url()</code> have slightly newer baselines.
+        </p>
+        <p>
+          For older browsers, wrap the animation in a <code>@supports</code> query and provide a simpler
+          <code>translate</code> fallback:
+        </p>
+        <pre><code>.dot {
+  /* fallback: simple translate bounce */
+  animation: bounce 1s ease-in-out infinite;
+}
+
+@supports (offset-path: path('M 0 0')) {
+  .dot {
+    animation: none;
+    offset-path: path('M 0 0 A 80 80 0 1 1 0 -0.01');
+    animation: orbit 2s linear infinite;
+  }
+}
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Generating and animating a motion path programmatically</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code>/**
+ * Dynamically assign an offset-path to elements and stagger them
+ * along an SVG bezier curve — no animation library required.
+ */
+
+const SVG_PATH = 'M 0 200 C 50 0, 150 400, 200 200 S 350 0, 400 200';
+
+/**
+ * Animate a NodeList of elements along a shared SVG path, staggered.
+ * @param {NodeListOf<HTMLElement>} elements
+ * @param {object} opts
+ */
+function animateAlongPath(elements, { duration = 2000, staggerMs = 200 } = {}) {
+  elements.forEach((el, i) => {
+    // Apply motion path properties
+    el.style.offsetPath = `path('${SVG_PATH}')`;
+    el.style.offsetRotate = 'auto';
+
+    // Use the Web Animations API to drive offset-distance
+    el.animate(
+      [{ offsetDistance: '0%' }, { offsetDistance: '100%' }],
+      {
+        duration,
+        delay: i * staggerMs,
+        iterations: Infinity,
+        easing: 'linear',
+        fill: 'none',
+      }
+    );
+  });
+}
+
+// Usage
+const dots = document.querySelectorAll('.orbit-dot');
+animateAlongPath(dots, { duration: 3000, staggerMs: 400 });
+
+/**
+ * Reverse direction for every other element — useful for bidirectional orbits.
+ */
+function animateBidirectional(elements) {
+  elements.forEach((el, i) => {
+    const direction = i % 2 === 0 ? 'normal' : 'reverse';
+    el.style.offsetPath = `circle(80px at 50% 50%)`;
+    el.style.offsetRotate = 'auto';
+    el.animate(
+      [{ offsetDistance: '0%' }, { offsetDistance: '100%' }],
+      { duration: 2500, iterations: Infinity, direction, easing: 'linear' }
+    );
+  });
+}
+
+/**
+ * Smoothly update the path at runtime (e.g. in response to a resize or interaction).
+ * Cancels old animations and re-applies with the new path geometry.
+ */
+function updatePath(elements, newPathD) {
+  elements.forEach((el) => {
+    el.getAnimations().forEach((anim) => anim.cancel());
+    el.style.offsetPath = `path('${newPathD}')`;
+    el.animate(
+      [{ offsetDistance: '0%' }, { offsetDistance: '100%' }],
+      { duration: 2000, iterations: Infinity, easing: 'ease-in-out' }
+    );
+  });
+}
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Using offset-path well</h2>
+        <ul class="check-list">
+          <li>Prefer <code>path()</code> with SVG path data for complex curves; use <code>circle()</code> / <code>ellipse()</code> for simple orbits.</li>
+          <li>Set <code>offset-rotate: auto</code> for elements that should face the direction of travel (arrows, cars, indicators).</li>
+          <li>Animate <code>offset-distance</code> not <code>offset-path</code> — the former is composited; the latter triggers layout.</li>
+          <li>Use <code>@supports (offset-path: path('M 0 0'))</code> to gate the fancy animation and provide a CSS fallback.</li>
+          <li>Keep animated elements at a fixed size — any layout-triggering change drops the compositor-thread advantage.</li>
+          <li>Use <code>animation-delay</code> staggering to space multiple elements along the same path without duplicating keyframe definitions.</li>
+          <li>Export paths from Figma or SVG editors; the <code>d</code> attribute value drops directly into <code>path('...')</code>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Can I use a path drawn in an external SVG file?</h3>
+        <p>
+          No — <code>url(#id)</code> only resolves inline SVG elements in the same document. For external
+          paths, fetch the SVG, extract the <code>d</code> attribute, and pass it as a <code>path()</code>
+          string value.
+        </p>
+
+        <h3>How do I make the element loop seamlessly?</h3>
+        <p>
+          Close the SVG path — end it at the same coordinate it started. A closed path with
+          <code>iterations: Infinity</code> loops without a visible jump. For open paths,
+          <code>direction: alternate</code> reverses playback on each iteration.
+        </p>
+
+        <h3>Can I combine offset-path with CSS transforms?</h3>
+        <p>
+          Yes. <code>offset-path</code> and <code>transform</code> compose: the element is positioned on the
+          path first, then the transform is applied on top. This lets you add scale or rotation effects
+          independently of the path motion.
+        </p>
+
+        <h3>Is this different from SVG <code>animateMotion</code>?</h3>
+        <p>
+          <code>animateMotion</code> is an SVG-only mechanism for moving SVG child elements along a path. CSS
+          <code>offset-path</code> works on any HTML element — divs, images, custom elements — and integrates
+          with the Web Animations API and CSS transitions, giving it far more flexibility.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          <code>offset-path</code> collapses what used to be a JavaScript animation problem into a few CSS
+          declarations. The key mental shift is thinking of an element's position not as <em>x,y coordinates</em>
+          but as a <em>distance along a named path</em>. Once you internalize that model — path defines the
+          geometry, <code>offset-distance</code> is the animated scalar — you can build orbital loaders,
+          path-following icons, decorative scroll effects, and SVG-synchronized UI elements with zero runtime
+          JavaScript and full compositor-thread performance.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

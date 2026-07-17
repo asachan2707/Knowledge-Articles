@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Every System Design Question Asked in Real Interviews at 10+ Companies | Learning Hub</title>
+  <link rel="stylesheet" href="../styles.css" />
+  <script src="../read-state.js" defer></script>
+  <script src="../highlight.js" defer></script>
+  <script src="../chat-widget.js" defer></script>
+</head>
+<body>
+  <nav class="top-nav">
+    <a href="../index.html" class="nav-logo">Learning Hub</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../graph.html">Graph</a>
+    </div>
+  </nav>
+
+  <article class="topic-article">
+
+    <!-- Hero -->
+    <header class="topic-hero">
+      <img
+        src="https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=1600&h=700&fit=crop&auto=format&q=80"
+        alt="Person at whiteboard drawing system diagrams"
+        class="hero-image"
+      />
+      <div class="hero-overlay">
+        <p class="kicker">System Design &middot; Interview &middot; Career &middot; 35 min</p>
+        <h1>Every System Design Question Asked in Real Interviews at 10+ Companies</h1>
+        <p class="hero-summary">
+          A compiled reference of real system design questions asked at Google, Meta, Amazon, Apple,
+          Netflix, Microsoft, Uber, Twitter/X, Airbnb, Stripe, and LinkedIn — with complete answers,
+          key components, scale constraints, and the 3-5 things interviewers actually evaluate at each company.
+        </p>
+        <p class="hero-source">
+          Source: <a href="https://interviewnoodle.com" target="_blank" rel="noopener">interviewnoodle.com</a>
+          &mdash; Real Interviews at 10+ Companies
+        </p>
+      </div>
+    </header>
+
+    <!-- Section 1: Story -->
+    <section class="story-card">
+      <span class="section-label">Story &middot; The Interview Room</span>
+      <h2>Two Candidates Walk In</h2>
+      <p>
+        The room is small. A whiteboard on the wall, a single marker on the tray, and an interviewer
+        who has seen hundreds of candidates. Candidate A walks in, picks up the marker, and immediately
+        draws boxes. A box labeled "Client." An arrow to a box labeled "Server." An arrow to a box
+        labeled "Database." The interviewer nods politely.
+      </p>
+      <p>
+        "Okay," says the interviewer. "A celebrity with 100 million followers posts a tweet. What
+        happens?"
+      </p>
+      <p>
+        Candidate A stares at the boxes. "The client sends a request... to the server... which writes
+        to the database... and then... all the followers read it?" The interviewer writes a note.
+        Candidate A did not pass.
+      </p>
+      <p>
+        Candidate B walks in next. Before picking up the marker, Candidate B asks: "How many active
+        users do we have? What is our write QPS at peak? How many followers does a typical user have
+        versus a celebrity?" The interviewer relaxes. This is different.
+      </p>
+      <p>
+        When the celebrity tweet question comes, Candidate B does not skip a beat: "This is the classic
+        fan-out problem. For regular users with, say, fewer than 10,000 followers, we fan out on write —
+        we push post IDs into each follower's Redis timeline sorted set immediately. But for a celebrity
+        with 100 million followers, synchronous fan-out would block for minutes. So we use a hybrid
+        push-pull model: celebrity posts are stored separately and pulled at read time, merged with the
+        pre-computed timeline from Redis. The trade-off is slightly higher read latency for celebrity
+        content versus unbounded write amplification if we fan out to 100 million Redis keys in-line."
+      </p>
+      <p>
+        Candidate B passed. Not because the answer was correct — there is rarely one correct answer in
+        system design — but because Candidate B knew the trade-offs, named the problem (fan-out),
+        proposed a concrete mechanism (hybrid push-pull, Redis sorted sets), and explained the
+        trade-off clearly (write amplification vs. read latency). That is what system design interviews
+        evaluate. Not components. Trade-offs.
+      </p>
+    </section>
+
+    <!-- Section 2: Evaluation Dimensions -->
+    <section class="content-card">
+      <span class="section-label">Framework</span>
+      <h2>How System Design Interviews Are Evaluated</h2>
+      <p>
+        Every major tech company uses a rubric. The labels differ but the dimensions are remarkably
+        consistent across Google, Meta, Amazon, and Microsoft. Understanding the rubric does not let
+        you game the interview — it tells you where to invest your explanation time.
+      </p>
+
+      <h3>The Four Dimensions</h3>
+      <p>
+        <strong>(1) Problem Scoping — 20%.</strong> Did you ask the right clarifying questions before
+        drawing? Did you distinguish functional requirements (what the system does) from non-functional
+        requirements (how well it does it — latency, throughput, availability, consistency, geo-distribution)?
+        A candidate who jumps straight to the whiteboard without scoping loses most of this dimension
+        automatically.
+      </p>
+      <p>
+        <strong>(2) Component Design — 35%.</strong> This is the largest single dimension. Can you
+        identify the right components for the problem? Can you explain the API contracts between them?
+        Can you propose a data model? Interviewers want to see that you can translate a vague problem
+        statement into concrete services with well-defined responsibilities.
+      </p>
+      <p>
+        <strong>(3) Scale Thinking — 25%.</strong> Can you reason about what breaks first as load
+        grows? Can you identify the hot path? Can you propose horizontal scaling, sharding, or caching
+        in the right places? This dimension rewards candidates who can do back-of-envelope math
+        confidently: "At 1 million DAU with 10 posts per day average, that is about 115 writes per
+        second, which a single Postgres instance handles easily — but at 100 million DAU, we need to
+        think about sharding the write path."
+      </p>
+      <p>
+        <strong>(4) Trade-off Articulation — 20%.</strong> This is what separates senior from
+        mid-level assessments. Did you acknowledge that every choice has a cost? Did you name the
+        alternatives you considered and explain why you chose what you chose?
+      </p>
+
+      <div class="callout">
+        <p>
+          Interviewers grade process, not correctness. Two candidates can design the same system with
+          opposite technology choices and both pass — if both articulate why they made those choices
+          and what they gave up.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 3: Google -->
+    <section class="content-card">
+      <span class="section-label">Google</span>
+      <h2>Design Google Docs: Real-Time Collaborative Editing</h2>
+      <p>
+        This question appears in Google engineering interviews at L4 through L6 and is one of the most
+        technically demanding on this list. The core difficulty is not building a document editor — it
+        is handling concurrent edits from multiple users without corrupting the document state.
+      </p>
+
+      <h3>Key Components</h3>
+      <p>
+        <strong>WebSocket Server.</strong> Every active client maintains a persistent WebSocket
+        connection. The server fans out edit operations to all clients currently viewing the same
+        document. HTTP polling is a non-starter at Google Docs scale — you need sub-200ms latency for
+        edits to feel real-time.
+      </p>
+      <p>
+        <strong>Operational Transformation (OT) Engine.</strong> This is the heart of the system. When
+        two users type simultaneously at different cursor positions, their operations need to be
+        transformed against each other so both views converge to the same final document. The OT engine
+        runs both on the server (authoritative) and client (optimistic updates).
+      </p>
+      <p>
+        <strong>Document State Server.</strong> The canonical document state is stored in Google's
+        Bigtable or Spanner depending on the consistency requirements. Spanner is preferred for
+        documents that require strong consistency across geographic regions — but Bigtable is used for
+        high-throughput append-only operation logs.
+      </p>
+      <p>
+        <strong>Presence Service.</strong> A lightweight service that tracks which users are in which
+        documents, their cursor positions, and selection ranges. This is read-heavy and can use a
+        separate Redis cluster with TTL-based expiry for cursor positions.
+      </p>
+      <p>
+        <strong>History and Version Store.</strong> All operations are stored in an append-only log.
+        This enables document history, undo/redo, and version restoration. Compaction runs
+        periodically to snapshot the document state.
+      </p>
+
+      <h3>OT vs. CRDT: The Key Trade-off</h3>
+      <p>
+        Operational Transformation is the classic approach — Google Docs uses it. CRDTs (Conflict-free
+        Replicated Data Types) are the newer approach used by systems like Figma and Notion. OT
+        requires a central server to order operations; CRDTs are peer-to-peer and always converge.
+        The trade-off: OT has lower overhead for two-party editing but complexity grows with number of
+        concurrent users; CRDTs are more complex upfront but scale to decentralized scenarios.
+      </p>
+
+      <div class="callout">
+        <p>
+          Most common mistake on this question: drawing a database and an API server without explaining
+          conflict resolution at all. Interviewers flag "no conflict resolution explanation" as the
+          single most common gap on the Google Docs question.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 4: Meta -->
+    <section class="content-card">
+      <span class="section-label">Meta / Facebook</span>
+      <h2>Design News Feed: Fan-Out at Scale</h2>
+      <p>
+        The News Feed question is the canonical fan-out system design problem. It appears at Meta,
+        Twitter, LinkedIn, and Snapchat interviews in various forms. The version asked at Meta is
+        specifically focused on the feed generation pipeline and the celebrity problem.
+      </p>
+
+      <h3>Key Components</h3>
+      <p>
+        <strong>Feed Write Service.</strong> When a user creates a post, the Feed Write Service
+        receives the event. For users with fewer than 10,000 followers, it fans out immediately —
+        it writes the post ID into each follower's Redis timeline sorted set (scored by timestamp).
+        This is fan-out on write, also called push-based feed.
+      </p>
+      <p>
+        <strong>Feed Read Service.</strong> When a user opens their feed, the Feed Read Service
+        fetches the sorted set of post IDs from Redis (ZREVRANGE), hydrates the actual post objects
+        from a separate post store, and merges in celebrity posts fetched on-demand. It then passes
+        the post list through the EdgeRank ranking service before returning.
+      </p>
+      <p>
+        <strong>Redis Timeline Cache.</strong> Each user has a sorted set in Redis keyed by user ID.
+        The set contains post IDs scored by epoch timestamp. Redis sorted sets support
+        ZREVRANGEBYSCORE and ZREVRANGE efficiently. The set is capped at the last 1000 posts to
+        control memory. This is the hot path — it must return in under 10ms.
+      </p>
+      <p>
+        <strong>EdgeRank ML Ranking Service.</strong> The raw chronological list from Redis is passed
+        through EdgeRank (Meta's feed ranking model) which scores each post by affinity (how close
+        are you to this person?), weight (is this a video, photo, link?), and time decay. The output
+        is a re-ranked feed.
+      </p>
+      <p>
+        <strong>Media CDN.</strong> Post thumbnails, images, and videos are served from CDN edge
+        nodes co-located with ISPs. The Feed Read Service returns post metadata with CDN URLs — it
+        never serves media bytes directly.
+      </p>
+
+      <h3>The Celebrity Problem: Hybrid Push-Pull</h3>
+      <p>
+        If a user has 100 million followers and you fan out on write, you are writing 100 million
+        Redis keys in-line with the post creation request. Even at 100,000 writes/second, that takes
+        over 16 minutes — completely unacceptable. The solution is a threshold: above approximately
+        10,000 followers, skip the fan-out. Instead, maintain a separate "celebrity post" store and
+        merge celebrity posts into the timeline at read time. The read is slightly heavier — you fetch
+        the Redis timeline and do a set union with the celebrity posts — but it bounds write latency.
+      </p>
+
+      <div class="callout">
+        <p>
+          The most common mistake on the News Feed question is not asking about follower count
+          distribution before proposing an architecture. If you assume all users are equal, you propose
+          pure fan-out on write, and your system collapses when Cristiano Ronaldo posts a photo.
+          Always ask: "What is the distribution of follower counts? What is the p99 follower count?"
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 5: Amazon -->
+    <section class="content-card">
+      <span class="section-label">Amazon</span>
+      <h2>Design Product Page / Order System: Inventory Exactly-Once</h2>
+      <p>
+        Amazon's system design questions focus heavily on reliability, exactly-once semantics, and
+        distributed transactions — reflecting the actual engineering challenges Amazon solves at
+        retail scale. The most common variant asks you to design the product page and order placement
+        flow with correct inventory management.
+      </p>
+
+      <h3>Key Components</h3>
+      <p>
+        <strong>Product Catalog (DynamoDB).</strong> Product metadata (title, description, price,
+        images) is read-heavy and can tolerate eventual consistency. DynamoDB with DAX (in-memory
+        cache) handles millions of reads per second with single-digit millisecond latency. Data is
+        partitioned by product ID.
+      </p>
+      <p>
+        <strong>Inventory Service (Conditional Writes).</strong> Inventory is the hardest part. Each
+        product-warehouse combination has a stock count. To reserve inventory, the Inventory Service
+        uses DynamoDB conditional writes: "decrement count where count greater than 0." If the
+        condition fails, the item is out of stock. This is optimistic concurrency — no locks, no
+        two-phase commit.
+      </p>
+      <p>
+        <strong>Order Service (SQS FIFO).</strong> Once inventory is reserved, the Order Service
+        writes the order record and publishes to an SQS FIFO queue. FIFO queues guarantee exactly-once
+        delivery within a message group (order ID), preventing duplicate order processing. The order
+        also has an idempotency key derived from the client request ID.
+      </p>
+      <p>
+        <strong>Payment Service (Stripe + Idempotency).</strong> The Payment Service calls Stripe's
+        API with an idempotency key equal to the order ID. If the network times out and we retry,
+        Stripe returns the original charge result rather than charging twice. The Payment Service
+        updates the order state to PAID and publishes to the fulfillment queue.
+      </p>
+      <p>
+        <strong>Fulfillment Worker.</strong> Consumes from the fulfillment SQS queue. Routes the
+        order to the nearest warehouse with sufficient stock. Handles backorder logic if stock ran
+        out between reservation and fulfillment.
+      </p>
+
+      <h3>The Last-Unit Race Condition</h3>
+      <p>
+        The most important failure mode to discuss is the last-unit race condition: two users
+        simultaneously place orders for the last item in stock. With optimistic concurrency on
+        DynamoDB, only one conditional write succeeds. The other receives a ConditionalCheckFailedException
+        and must be returned a "sorry, out of stock" response. You must explain this explicitly —
+        interviewers at Amazon listen for it.
+      </p>
+    </section>
+
+    <!-- Section 6: Apple -->
+    <section class="content-card">
+      <span class="section-label">Apple</span>
+      <h2>Design APNS: Persistent Connections at Scale</h2>
+      <p>
+        The Apple Push Notification Service design question is unique to Apple interviews. It tests
+        knowledge of persistent connection management, certificate-based authentication, and
+        store-and-forward messaging for offline devices. Apple runs APNS at the scale of billions
+        of registered device tokens.
+      </p>
+
+      <h3>Key Components</h3>
+      <p>
+        <strong>Device Token Store (Cassandra).</strong> Every Apple device generates a unique device
+        token when it registers for push notifications. These tokens are stored in a Cassandra cluster
+        partitioned by app bundle ID and device token. Cassandra is well-suited here: write-heavy
+        workload (tokens refresh periodically), geographically distributed, and tolerant of eventual
+        consistency since a delayed token update merely delays a notification briefly.
+      </p>
+      <p>
+        <strong>Persistent TCP Connection Manager.</strong> iOS devices maintain a persistent TCP
+        connection to APNS servers. The Connection Manager is a specialized service that handles
+        millions of concurrent long-lived connections using event-driven I/O (similar to nginx's
+        event loop model). Each connection is authenticated with the device's TLS certificate during
+        handshake.
+      </p>
+      <p>
+        <strong>Notification Fanout Service (Consistent Hashing).</strong> When an app server sends
+        a push notification, the Fanout Service routes it to the Connection Manager node that holds
+        the target device's persistent connection. Consistent hashing ensures that if a Connection
+        Manager node goes down, only the connections on that node need to reconnect — the other nodes
+        are unaffected.
+      </p>
+      <p>
+        <strong>Delivery Receipt Store.</strong> APNS provides delivery feedback to app developers.
+        The Delivery Receipt Store records whether each notification was delivered, when, and whether
+        the device token became invalid (device was wiped or app uninstalled).
+      </p>
+      <p>
+        <strong>Certificate Auth.</strong> App servers authenticate to APNS using either a
+        certificate-based (P12) or token-based (JWT with ES256) auth method. The auth layer validates
+        credentials before accepting any notification for delivery.
+      </p>
+
+      <h3>Offline Device Store-and-Forward</h3>
+      <p>
+        When a device is offline (airplane mode, dead battery, out of coverage), notifications cannot
+        be delivered immediately. APNS stores the most recent notification per app per device in the
+        offline queue — when the device reconnects, the stored notification is delivered. If multiple
+        notifications arrived while offline, only the most recent is delivered (APNS does not buffer
+        all missed notifications). Most common mistake: not explaining this store-and-forward behavior
+        for offline devices, or incorrectly assuming APNS buffers all missed messages.
+      </p>
+    </section>
+
+    <!-- Section 7: Netflix -->
+    <section class="content-card">
+      <span class="section-label">Netflix</span>
+      <h2>Design Video Streaming: CDN Pre-Positioning and ABR</h2>
+      <p>
+        Netflix's system design question focuses on video delivery infrastructure. The core insight
+        Netflix engineers want to see is that you understand why a naive CDN deployment fails and
+        what Netflix's Open Connect architecture solves. The question also tests understanding of
+        adaptive bitrate streaming.
+      </p>
+
+      <h3>Key Components</h3>
+      <p>
+        <strong>Open Connect CDN (ISP Co-location).</strong> Netflix does not use a third-party CDN
+        for its main traffic. It operates its own CDN by placing Open Connect Appliances (OCAs) directly
+        inside ISP networks. This means video bytes travel only the last mile from ISP to subscriber —
+        they never traverse long-haul internet links. Netflix pre-positions (proactively caches) popular
+        titles at each OCA based on viewing patterns in that region. This is distinct from reactive
+        caching: Netflix pushes content before anyone requests it, during off-peak hours.
+      </p>
+      <p>
+        <strong>Encoding Pipeline (20+ Quality Levels).</strong> Every video on Netflix is encoded
+        into over 20 quality levels — different combinations of resolution (240p through 4K) and
+        codec (H.264, H.265/HEVC, AV1). AV1 offers 30-40% better compression than H.264 at the same
+        perceptual quality, which reduces CDN bandwidth costs significantly. The encoding pipeline
+        runs on AWS EC2 with GPU acceleration.
+      </p>
+      <p>
+        <strong>ABR Algorithm (MPEG-DASH, Bandwidth Measurement Every 2s).</strong> The client player
+        implements Adaptive Bitrate (ABR) streaming using MPEG-DASH. The player downloads the video
+        in small 2-4 second segments. After each segment download, it measures the achieved
+        throughput. If throughput is high, it requests the next segment at a higher quality level.
+        If throughput drops, it steps down. This measurement happens every 2 seconds, allowing smooth
+        adaptation to network conditions.
+      </p>
+      <p>
+        <strong>Manifest Service.</strong> When a client starts playback, it requests a manifest from
+        the Manifest Service. The manifest is an XML/JSON document listing all available quality levels
+        and the URLs for each video segment at each quality. The client uses this to construct download
+        requests to the nearest OCA.
+      </p>
+      <p>
+        <strong>Playback API (Anycast Routing).</strong> The Playback API handles session start,
+        license validation (DRM), and OCA selection. It uses Anycast routing to direct the client
+        to the nearest API server globally with sub-100ms latency. The API returns the best OCA
+        IP address based on the client's ISP and current OCA load.
+      </p>
+
+      <h3>The Critical Mistake to Avoid</h3>
+      <p>
+        The most common failure on the Netflix question is proposing "just use a CDN" without
+        explaining adaptive bitrate streaming. A CDN without ABR means the client downloads at a
+        fixed quality level — if the connection degrades, playback stops and buffers. ABR is what
+        makes Netflix resilient to variable network conditions. Interviewers listen for this
+        distinction explicitly.
+      </p>
+    </section>
+
+    <!-- Section 8: Other Companies -->
+    <section class="content-card">
+      <span class="section-label">Microsoft &middot; Uber &middot; Twitter/X &middot; Airbnb &middot; Stripe &middot; LinkedIn</span>
+      <h2>Six More Companies: Key Design Decisions</h2>
+
+      <h3>Microsoft: Design Teams (Presence and File Sync)</h3>
+      <p>
+        <strong>Presence Service.</strong> Teams presence (Available, Busy, Away, Do Not Disturb) is
+        maintained via WebSocket heartbeats. Each client sends a heartbeat every 30 seconds. The
+        presence server sets a Redis key with TTL=45 seconds on each heartbeat. If the TTL expires
+        without a new heartbeat, the user is marked offline. This TTL approach avoids the need for
+        explicit disconnect events, which are unreliable on mobile networks.
+      </p>
+      <p>
+        <strong>File Sync (CRDT).</strong> Teams uses CRDTs for co-authoring in Word and PowerPoint
+        files synced via OneDrive. Unlike OT, CRDTs do not require a central server to order
+        operations — they converge automatically when replicas merge. This enables offline editing
+        and sync when connectivity is restored.
+      </p>
+      <p>
+        <strong>Message Store (Cosmos DB).</strong> Chat messages are stored in Azure Cosmos DB with
+        a partition key of channel ID and a sort key of timestamp. Cosmos DB's multi-region write
+        capability enables low-latency writes for Teams' global enterprise customer base.
+      </p>
+
+      <h3>Uber: Ride Matching and Surge Pricing</h3>
+      <p>
+        <strong>Geospatial Indexing.</strong> Uber uses Redis Geo commands (GEOADD, GEORADIUS) to
+        store driver locations. Geohash level 6 cells (approximately 1.2km x 0.6km) are used for
+        aggregating supply and demand. When a rider requests a trip, the system searches the geohash
+        cell of the pickup location and adjacent cells for available drivers.
+      </p>
+      <p>
+        <strong>Driver Matching (Geohash Level 8).</strong> For actual driver assignment, the system
+        uses geohash level 8 cells (approximately 38m x 19m) for precise proximity ranking. ETA
+        is calculated using a pre-computed routing graph — not real-time shortest path — to achieve
+        sub-100ms response times.
+      </p>
+      <p>
+        <strong>Surge Pricing.</strong> Surge multiplier is calculated as demand/supply ratio per
+        geohash level 6 cell. If the ratio exceeds a threshold (e.g., 1.5x), the cell enters surge.
+        The surge engine runs as a streaming job consuming location update events from Kafka.
+      </p>
+      <p>
+        <strong>Trip State Machine.</strong> Each trip is modeled as an explicit state machine:
+        REQUESTED -> DRIVER_ASSIGNED -> DRIVER_ARRIVED -> IN_PROGRESS -> COMPLETED (or CANCELLED
+        at any state). State transitions are persisted to a relational database (MySQL at Uber) with
+        strict idempotency — retrying a state transition has no effect if already in that state.
+      </p>
+
+      <h3>Twitter/X: Hybrid Timeline and Search</h3>
+      <p>
+        <strong>Hybrid Timeline.</strong> Twitter uses the same hybrid push-pull model described for
+        Meta: for users with fewer than approximately 10,000 followers, tweets are fanned out on
+        write to Redis timeline sorted sets. For accounts above that threshold (celebrities, public
+        figures), tweets are not fanned out — they are pulled and merged into followers' timelines
+        at read time.
+      </p>
+      <p>
+        <strong>Search (Elasticsearch via Kafka).</strong> Tweets are indexed in Elasticsearch for
+        full-text search. Indexing happens asynchronously: a Kafka consumer reads from the tweet
+        creation topic and writes to Elasticsearch. This decouples search indexing from the write
+        hot path. Elasticsearch handles both keyword search and trending topic aggregation via
+        term frequency queries.
+      </p>
+
+      <h3>Airbnb: Search and Double-Booking Prevention</h3>
+      <p>
+        <strong>Search (Elasticsearch).</strong> Airbnb's search combines geographic proximity and
+        text matching. Elasticsearch handles both: geographic queries use geo_distance filters on
+        latitude/longitude, and text matching handles title, amenity, and neighborhood search. The
+        availability filter is implemented as a dense bitfield: one bit per day for the next 365
+        days indicates whether a listing is available on that date.
+      </p>
+      <p>
+        <strong>Double-Booking Prevention.</strong> Two guests should never be able to book the same
+        listing for overlapping dates. Airbnb uses a two-layer lock: Redis SETNX at the application
+        layer (fast, distributed lock for the booking flow) and SELECT FOR UPDATE at the database
+        layer (Postgres row lock on the availability record). The database lock is the authoritative
+        lock; Redis SETNX reduces database load by preventing most duplicate requests from reaching
+        the DB.
+      </p>
+      <p>
+        <strong>Dynamic Pricing.</strong> Listing prices vary by date based on demand, seasonality,
+        and local events. A pricing service reads demand signals (search views, booking velocity)
+        and publishes price recommendations to hosts. Dynamic pricing data is cached per listing per
+        date in Redis with a 1-hour TTL.
+      </p>
+
+      <h3>Stripe: Payment Processing and Idempotency</h3>
+      <p>
+        <strong>Idempotency Key.</strong> Every Stripe API call that creates a charge requires an
+        Idempotency-Key header — a client-generated UUID. Stripe stores the request and response for
+        24 hours. If the same idempotency key is received again (network timeout, client retry),
+        Stripe returns the original response without processing a new charge. This is the foundation
+        of Stripe's reliability guarantee.
+      </p>
+      <p>
+        <strong>Two-Phase Auth and Capture.</strong> Card payments use two phases: authorization
+        (reserve funds on the card, no money moves) and capture (actually move the money). This
+        separation allows merchants to authorize at order time and capture at shipment, reducing
+        risk. The authorization hold expires after 7 days if not captured.
+      </p>
+      <p>
+        <strong>Webhook Retry (Exponential Backoff).</strong> Stripe sends webhook events to
+        merchant servers. If the merchant server returns a non-2xx status, Stripe retries up to
+        10 times with exponential backoff (1s, 2s, 4s... up to several hours). Merchants must make
+        their webhook handlers idempotent — the same event may arrive multiple times.
+      </p>
+      <p>
+        <strong>PCI-DSS Tokenization.</strong> Raw card numbers never touch merchant servers.
+        Stripe's JavaScript element captures the card number in an iframe hosted by Stripe's PCI-DSS
+        compliant servers and returns a single-use token to the merchant. The merchant exchanges this
+        token for a charge via the Stripe API. This keeps merchants out of PCI scope.
+      </p>
+
+      <h3>LinkedIn: Graph Queries and People You May Know</h3>
+      <p>
+        <strong>Graph Database (Neptune).</strong> LinkedIn's social graph — who is connected to whom —
+        is stored in Amazon Neptune (a managed graph database). Graph queries like "find all 2nd-degree
+        connections of user X" are expressed as Gremlin traversals. Neptune handles the graph
+        traversal natively, which would require expensive multi-table JOINs in a relational database.
+      </p>
+      <p>
+        <strong>People You May Know (Collaborative Filtering).</strong> PYMK recommendations use
+        collaborative filtering: "users who have connection X in common with you also have connection Y —
+        you may know Y." The model runs as a batch Spark job overnight. Precomputed recommendations
+        are stored in Voldemort (LinkedIn's custom key-value store) for O(1) read access.
+      </p>
+      <p>
+        <strong>Feed (Kafka Streams).</strong> LinkedIn's professional feed uses Kafka Streams for
+        real-time aggregation of activity events (new job, post, article, reaction). A Kafka Streams
+        topology joins activity events with social graph edges to determine which followers should
+        see a given update. This replaces the batch feed generation that LinkedIn used in its earlier
+        architecture.
+      </p>
+    </section>
+
+    <!-- Section 9: Cross-Cutting Patterns -->
+    <section class="content-card">
+      <span class="section-label">Patterns</span>
+      <h2>Cross-Cutting Patterns That Appear in Every FAANG Interview</h2>
+      <p>
+        Across all 11 companies, six patterns appear in nearly every system design interview. These
+        are not company-specific; they are solutions to universal distributed systems problems.
+        Knowing them fluently — being able to name them, describe the problem they solve, and give
+        a real example — is a prerequisite for FAANG system design interviews.
+      </p>
+
+      <p>
+        <strong>1. Consistent Hashing.</strong> Problem it solves: when you add or remove nodes from
+        a distributed cache or service cluster, naive modulo-based hashing requires remapping all
+        keys. Consistent hashing minimizes the number of keys that need to move when a node is
+        added or removed — only keys on the adjacent arc of the ring are remapped. One-line example:
+        Redis Cluster uses consistent hashing to distribute keys across shards so that adding a shard
+        rebalances only a fraction of keys.
+      </p>
+
+      <p>
+        <strong>2. Pub-Sub (Kafka).</strong> Problem it solves: decoupling producers from consumers.
+        When a post is created, the write service should not synchronously call the notification
+        service, the search indexer, the analytics pipeline, and the feed fan-out service. Instead,
+        it publishes one event to Kafka and each consumer processes it independently. One-line
+        example: Kafka is used by Twitter, Uber, LinkedIn, and Airbnb to decouple write events from
+        downstream processing.
+      </p>
+
+      <p>
+        <strong>3. CQRS (Command Query Responsibility Segregation).</strong> Problem it solves:
+        read and write workloads have fundamentally different requirements. Writes need consistency
+        and durability; reads need low latency and high throughput. CQRS separates the write model
+        (normalized, consistent) from the read model (denormalized, cached). One-line example:
+        Twitter writes tweets to a MySQL primary but serves timelines from Redis sorted sets — a
+        CQRS separation.
+      </p>
+
+      <p>
+        <strong>4. Circuit Breaker.</strong> Problem it solves: when a downstream service is slow or
+        failing, all upstream callers pile up waiting for responses, exhausting thread pools and
+        cascading the failure. A circuit breaker monitors error rates and, when a threshold is
+        exceeded, short-circuits calls to the failing service — returning an error immediately rather
+        than waiting for a timeout. One-line example: Netflix's Hystrix library introduced circuit
+        breakers to protect microservices from cascading failures.
+      </p>
+
+      <p>
+        <strong>5. Idempotency Keys.</strong> Problem it solves: networks fail. Clients retry. Without
+        idempotency keys, a payment may be charged twice, an email sent twice, or an order placed twice.
+        An idempotency key is a client-generated unique ID included with every mutating request. The
+        server stores the response keyed by this ID — if the request arrives again, the stored response
+        is returned without re-executing. One-line example: Stripe requires an Idempotency-Key header
+        on all charge creation requests.
+      </p>
+
+      <p>
+        <strong>6. Caching Layers.</strong> Problem it solves: databases are slow under high read
+        load. Caching layers (Redis, Memcached, CDN, local in-process cache) serve reads from fast
+        memory rather than disk. Key decisions: cache-aside vs. write-through, TTL strategy, cache
+        invalidation (hardest problem in computer science). One-line example: Meta's news feed reads
+        from Redis sorted sets first; only on a cache miss does it query the post database.
+      </p>
+
+      <div class="callout">
+        <p>
+          If you cannot discuss these 6 patterns fluently — naming the problem they solve, a
+          concrete example of each, and at least one trade-off — you are not ready for a FAANG
+          system design interview. These are table stakes, not differentiators.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 10: 45-Minute Structure -->
+    <section class="content-card">
+      <span class="section-label">Strategy</span>
+      <h2>How to Structure Your 45-Minute Answer</h2>
+      <p>
+        One of the most consistent failure modes in system design interviews is time mismanagement.
+        Candidates spend 35 minutes on the happy path diagram and never discuss scaling, failure
+        modes, or trade-offs. The following time allocation is based on post-interview feedback from
+        candidates at Google, Meta, and Amazon.
+      </p>
+
+      <h3>0-5 Minutes: Requirements and Clarification</h3>
+      <p>
+        Before touching the whiteboard, ask. Interviewers grade this heavily. Distinguish between
+        functional requirements (what the system does) and non-functional requirements (how well it
+        does it). For functional requirements, identify 3-5 core features — do not try to design
+        everything. For non-functional requirements, always ask: What is the expected scale in
+        terms of DAU and peak QPS? What is the acceptable read latency SLO (99th percentile)?
+        What consistency model is required — strong, eventual, or causal? Is the system globally
+        distributed or single-region? What is the expected data retention period?
+      </p>
+
+      <h3>5-10 Minutes: Capacity Estimation</h3>
+      <p>
+        Back-of-envelope math demonstrates scale thinking. Calculate peak QPS for reads and writes.
+        Estimate storage requirements over 5 years. Estimate bandwidth requirements for media-heavy
+        systems. Compute the read/write ratio — this often drives the architecture choice. Common
+        anchors: 1 million DAU with 10 actions per day equals approximately 115 QPS average, with
+        3-5x peak = 350-575 peak QPS. At 100 bytes per action, 1 million DAU generates roughly 1GB
+        of storage per day.
+      </p>
+
+      <h3>10-30 Minutes: Core Design</h3>
+      <p>
+        This is the largest block and covers the most ground. Start with the API design — define the
+        3-5 key endpoints with request and response schemas. Then draw the data flow from user action
+        through to storage. Next, propose a database schema: 2-3 core tables with primary keys,
+        foreign keys, and the 1-2 indexes that matter for your access patterns. Finally, add caching:
+        identify which reads are hot and place Redis or CDN in front of them. Do not skip caching —
+        interviewers notice.
+      </p>
+
+      <h3>30-40 Minutes: Scale and Bottlenecks</h3>
+      <p>
+        Identify the hot path — the sequence of operations executed on every single request. Ask
+        yourself: what breaks first as load doubles? This is usually the database write path or a
+        synchronous fan-out. Propose horizontal scaling for stateless services (add instances behind
+        a load balancer). Propose sharding for stateful services (database, cache). Name the shard
+        key and explain why you chose it. Discuss read replicas for read-heavy workloads.
+      </p>
+
+      <h3>40-45 Minutes: Trade-offs and Wrap-Up</h3>
+      <p>
+        In the last five minutes, explicitly name the trade-offs you made. "I chose eventual
+        consistency for the timeline because strong consistency would require a distributed lock
+        on every write, which would hurt write throughput significantly." "I chose fan-out on write
+        for regular users because it makes reads cheap, but the cost is higher write amplification
+        for users with many followers." Also briefly mention what you would monitor: error rate,
+        p99 latency, cache hit rate, dead letter queue depth.
+      </p>
+    </section>
+
+    <!-- Section 11: Common Mistakes -->
+    <section class="content-card">
+      <span class="section-label">Pitfalls</span>
+      <h2>Most Common Mistakes in System Design Interviews</h2>
+      <p>
+        These six mistakes appear repeatedly in post-interview debriefs. Each one is fixable with
+        deliberate practice.
+      </p>
+
+      <p>
+        <strong>1. Jumping to Solution Without Requirements.</strong> This is the single most common
+        failure. The candidate hears "design Twitter" and immediately draws a client-server-database
+        diagram. But design Twitter for 100 users is completely different from design Twitter for 500
+        million users. Always ask at least three clarifying questions before drawing a single box.
+        This takes discipline — the impulse to demonstrate knowledge by drawing is strong. Resist it.
+      </p>
+
+      <p>
+        <strong>2. Ignoring Non-Functional Requirements.</strong> Many candidates focus entirely on
+        functional correctness ("the user can post a tweet and followers can see it") and never
+        address latency, availability, consistency, or geographic distribution. Interviewers expect
+        you to articulate: what is the latency SLO for feed reads? Is the system multi-region? Can
+        users tolerate seeing slightly stale data? These choices drive architecture decisions more
+        than the functional requirements do.
+      </p>
+
+      <p>
+        <strong>3. No Trade-off Discussion.</strong> Stating "I will use Cassandra for the user
+        table" without explaining why — and what you sacrifice by not using Postgres or DynamoDB —
+        is a red flag. Every design decision is a trade-off. You are not being evaluated on whether
+        you chose Cassandra or Postgres; you are being evaluated on whether you understand what
+        each choice gives up.
+      </p>
+
+      <p>
+        <strong>4. Over-Engineering for Stated Scale.</strong> If the interviewer states "design a
+        system for 10,000 active users," proposing a multi-region active-active Cassandra cluster
+        with Kafka-based event sourcing and a custom CDN demonstrates poor judgment. Match the
+        complexity of your architecture to the stated scale. Over-engineering wastes the interview's
+        limited time on unnecessary complexity.
+      </p>
+
+      <p>
+        <strong>5. Not Knowing Failure Modes.</strong> What happens when your Redis cluster goes
+        down? What happens when the payment service returns a timeout? What happens when a Kafka
+        consumer falls behind? Interviewers probe failure modes deliberately. If your answer to every
+        failure is "it fails gracefully," you are not demonstrating distributed systems depth. Know
+        your failure modes: timeouts, retries, circuit breakers, dead letter queues, and fallback
+        paths.
+      </p>
+
+      <p>
+        <strong>6. Never Asking for Feedback.</strong> At the end of your design, ask: "Does this
+        address the key concerns you had in mind? Is there a part you'd like me to go deeper on?"
+        This demonstrates collaborative problem-solving rather than solo performance. Interviewers
+        routinely reward this behavior — it is closer to how real engineering works.
+      </p>
+
+      <div class="callout">
+        <p>
+          Mistake number 1 — jumping to solution without requirements — accounts for more failed
+          system design interviews than any other single factor. Practice starting every system
+          design session with a five-minute requirements conversation, even when practicing alone.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 12: Code Example -->
+    <section class="content-card">
+      <span class="section-label">Implementation</span>
+      <h2>JavaScript: Fan-Out News Feed Write Path</h2>
+      <p>
+        The following code illustrates the hybrid push-pull fan-out pattern discussed in the Meta
+        News Feed section. It is simplified for clarity — production systems would add error handling,
+        circuit breakers, and distributed tracing — but it demonstrates the core logic interviewers
+        want to see.
+      </p>
+
+      <span class="code-label">JavaScript Example</span>
+<pre><code class="language-javascript">const redis = require('ioredis');
+const { Kafka } = require('kafkajs');
+
+const redisClient = new redis({ host: 'localhost', port: 6379 });
+const kafka = new Kafka({ brokers: ['localhost:9092'] });
+const producer = kafka.producer();
+
+// Threshold above which a user is treated as a "celebrity"
+// and we skip the fan-out on write.
+const CELEBRITY_FOLLOWER_THRESHOLD = 10_000;
+
+// Maximum number of post IDs to retain per user timeline in Redis.
+const TIMELINE_MAX_LENGTH = 1000;
+
+/**
+ * Called when a user publishes a new post.
+ * @param {string} userId - The ID of the user creating the post.
+ * @param {string} content - The text content of the post.
+ * @param {object} db - Database connection for posts and followers.
+ */
+async function publishPost(userId, content, db) {
+  // 1. Persist the post to the primary database.
+  const postId = await db.posts.insert({
+    authorId: userId,
+    content,
+    createdAt: Date.now(),
+  });
+
+  // 2. Check the author's follower count to decide fan-out strategy.
+  const followerCount = await db.followers.countByUserId(userId);
+
+  if (followerCount &lt; CELEBRITY_FOLLOWER_THRESHOLD) {
+    // Fan-out on write: push this post ID into each follower's
+    // Redis timeline sorted set, scored by current epoch timestamp.
+    // This is efficient for normal users but would cause write amplification
+    // for accounts with millions of followers.
+    const followers = await db.followers.getFollowerIds(userId);
+    const score = Date.now();
+
+    const pipeline = redisClient.pipeline();
+    for (const followerId of followers) {
+      const timelineKey = `timeline:${followerId}`;
+      // ZADD: add postId with score = timestamp so ZREVRANGE
+      // returns posts in reverse chronological order.
+      pipeline.zadd(timelineKey, score, postId);
+      // Trim the timeline to avoid unbounded Redis memory growth.
+      pipeline.zremrangebyrank(timelineKey, 0, -(TIMELINE_MAX_LENGTH + 1));
+    }
+    await pipeline.exec();
+  } else {
+    // Celebrity / high-follower-count path: skip the fan-out.
+    // Instead, publish an event to Kafka. A downstream consumer will
+    // store this post in the "celebrity posts" collection.
+    // At read time, followers will pull celebrity posts and merge them
+    // into their Redis timeline on-the-fly.
+    await producer.send({
+      topic: 'celebrity-post-created',
+      messages: [{ key: userId, value: JSON.stringify({ postId, userId, createdAt: Date.now() }) }],
+    });
+  }
+
+  // 3. Always publish a general post-created event for analytics,
+  //    notifications, and search indexing — regardless of follower count.
+  await producer.send({
+    topic: 'post-created',
+    messages: [{ key: postId, value: JSON.stringify({ postId, userId, content }) }],
+  });
+
+  return postId;
+}
+
+/**
+ * Reads the timeline for a given user.
+ * Returns a merged, sorted list of post IDs from:
+ *   (a) the pre-computed Redis timeline (normal users the viewer follows), and
+ *   (b) recent posts from celebrities the viewer follows (pulled at read time).
+ *
+ * @param {string} userId - The ID of the user requesting their timeline.
+ * @param {object} db - Database connection.
+ * @param {number} limit - Number of posts to return.
+ */
+async function getTimeline(userId, db, limit = 20) {
+  const timelineKey = `timeline:${userId}`;
+
+  // Fetch recent post IDs from Redis sorted set in reverse chron order.
+  // ZREVRANGE returns members with the highest score (most recent) first.
+  const cachedPostIds = await redisClient.zrevrange(timelineKey, 0, limit - 1);
+
+  let postIds = cachedPostIds;
+
+  // If Redis has fewer posts than requested, fall back to the database
+  // for older posts (handles cold start and TTL expiry cases).
+  if (cachedPostIds.length &lt; limit) {
+    const dbPostIds = await db.posts.getTimelinePostIds(userId, {
+      limit: limit - cachedPostIds.length,
+      before: cachedPostIds[cachedPostIds.length - 1] || null,
+    });
+    postIds = [...cachedPostIds, ...dbPostIds];
+  }
+
+  // Pull recent posts from celebrities this user follows (hybrid pull).
+  const celebrityPostIds = await db.posts.getCelebrityPostIds(userId, { limit });
+
+  // Merge and sort all post IDs by score/timestamp, then take the top N.
+  const merged = mergeAndSort([...postIds, ...celebrityPostIds], limit);
+  return merged;
+}
+
+/**
+ * Merges two arrays of post IDs (already sorted descending by timestamp)
+ * and returns the top `limit` unique entries.
+ */
+function mergeAndSort(postIds, limit) {
+  const unique = [...new Set(postIds)];
+  // Post IDs are assumed to encode creation time (e.g., Snowflake IDs).
+  // Sort descending so newest posts appear first.
+  return unique.sort((a, b) => Number(BigInt(b) - BigInt(a))).slice(0, limit);
+}
+</code></pre>
+    </section>
+
+    <!-- Section 13: Checklist -->
+    <section class="content-card">
+      <span class="section-label">Checklist</span>
+      <h2>Pre-Interview System Design Checklist</h2>
+      <p>
+        Run through this checklist before every mock interview. If you cannot confidently answer
+        any item, that is a gap to practice before the real interview.
+      </p>
+      <ul class="check-list">
+        <li>Always ask for scale — daily active users and peak QPS — before drawing a single box on the whiteboard</li>
+        <li>State non-functional requirements explicitly: latency SLO (p99), availability target (99.9% vs 99.99%), consistency model, and geographic distribution</li>
+        <li>Name your trade-offs explicitly — for every technology choice, state what you are giving up and why that is acceptable given the requirements</li>
+        <li>Address the celebrity / hot-key problem for any social platform: propose hybrid push-pull with a follower count threshold</li>
+        <li>Explain your database choice with at least two reasons (e.g., "DynamoDB because we need single-digit millisecond reads at any scale and the access pattern is always by primary key — we do not need complex joins")</li>
+        <li>Put analytics pipelines, notification dispatch, and search indexing on an async path (Kafka) — they should never block the user-facing write</li>
+        <li>Mention circuit breakers for every external dependency your system calls: payment processors, email providers, third-party APIs</li>
+        <li>Know the 6 cross-cutting patterns (consistent hashing, pub-sub/Kafka, CQRS, circuit breaker, idempotency keys, caching layers) well enough to give a one-line example and one trade-off for each</li>
+      </ul>
+    </section>
+
+    <!-- Section 14: FAQ -->
+    <section class="content-card">
+      <span class="section-label">FAQ</span>
+      <h2>Frequently Asked Questions</h2>
+
+      <h3>Do I need to know Kafka internals — partitions, replication factor, ISR?</h3>
+      <p>
+        No. Interviewers do not quiz you on Kafka's internal replication protocol. What they want to
+        see is that you understand the problem Kafka solves (durable, ordered, replayable event
+        stream; decoupling producers from consumers), the key properties (at-least-once delivery by
+        default, exactly-once with idempotent producers and transactional API, log compaction for
+        state topics), and when NOT to use Kafka (when you need sub-10ms latency and cannot tolerate
+        broker overhead, or when your message volume is too low to justify the operational cost —
+        use a simple SQS or even a database-based job queue instead).
+      </p>
+
+      <h3>How much database schema detail should I provide?</h3>
+      <p>
+        Aim for 2-3 core tables with primary key, the most important foreign key relationships, and
+        the 1-2 indexes that serve your main access patterns. For example, a tweet table: tweet_id
+        (PK), author_id (FK, indexed), content, created_at (indexed for time-range queries).
+        You do not need to enumerate every column. Interviewers want to see that you understand
+        normalization trade-offs and that you can identify which columns need indexes and why.
+      </p>
+
+      <h3>What should I say if I do not know the answer to a follow-up question?</h3>
+      <p>
+        Say: "I'm not certain of the exact implementation detail here, but here's how I would think
+        about it." Then walk through your reasoning process. Interviewers at senior levels care far
+        more about your problem-solving process than about your ability to recall specific implementation
+        details. A candidate who says "I don't know" and stops is penalized far more than a candidate
+        who says "I'm not sure but let me reason through it" and arrives at a plausible answer.
+      </p>
+
+      <h3>Should I memorize the answers in this article?</h3>
+      <p>
+        No. Memorizing answers without understanding the underlying patterns is counterproductive.
+        Interviewers probe lateral thinking — they change one parameter (5x more users, add
+        a geo-distribution requirement, change the consistency requirement) and see how your
+        answer adapts. If you memorized the answer, the variant breaks you. If you understood the
+        pattern, the variant is just another instance of the same problem. Study the patterns:
+        fan-out, consistent hashing, idempotency, CAP trade-offs, caching strategies. The specific
+        questions change; the patterns repeat.
+      </p>
+    </section>
+
+    <!-- Section 15: Related Reading -->
+    <section class="content-card">
+      <span class="section-label">Related Reading</span>
+      <h2>Continue Learning</h2>
+      <ul>
+        <li>
+          <a href="./interview/index.html">System Design Interview Question Bank</a> —
+          Categorized by company and domain with difficulty ratings
+        </li>
+        <li>
+          <a href="./system-design-for-beginners.html">System Design for Beginners</a> —
+          Start here if this article felt dense; covers fundamentals before advanced topics
+        </li>
+        <li>
+          <a href="./uber-architecture-driver-tracking.html">Uber Architecture: Driver Tracking</a> —
+          A deep dive into the geospatial indexing and real-time location update pipeline discussed briefly above
+        </li>
+      </ul>
+    </section>
+
+    <!-- Section 16: Takeaways -->
+    <section class="content-card takeaways">
+      <span class="section-label">Takeaways</span>
+      <h2>What to Take Away</h2>
+      <p>
+        The 11 companies covered in this article — Google, Meta, Amazon, Apple, Netflix, Microsoft,
+        Uber, Twitter/X, Airbnb, Stripe, and LinkedIn — collectively ask 15 to 20 system design
+        problems in rotation. The specific questions change slightly year to year. The patterns
+        underneath them almost never do.
+      </p>
+      <p>
+        The fan-out problem (Meta News Feed, Twitter timeline, LinkedIn feed) is the same problem
+        across three companies. The idempotency problem (Amazon orders, Stripe payments) is the
+        same problem in two different domains. The persistent connection problem (Apple APNS,
+        Microsoft Teams presence) is the same problem with different constraints. Once you
+        internalize the pattern, you can adapt it to any instance.
+      </p>
+      <p>
+        The evaluative framework is also consistent: Problem Scoping, Component Design, Scale
+        Thinking, Trade-off Articulation. The largest single dimension is Component Design at 35%,
+        but Trade-off Articulation is what distinguishes a passing answer from a standout answer.
+        Two candidates can draw identical diagrams; the one who can clearly articulate why Redis
+        sorted sets and not a relational database for the timeline, and what that choice costs,
+        will score higher.
+      </p>
+      <p>
+        The six cross-cutting patterns (consistent hashing, Kafka pub-sub, CQRS, circuit breakers,
+        idempotency keys, caching layers) are not optional knowledge. They appear in some form in
+        nearly every FAANG system design interview. Make them reflexive — you should be able to
+        apply them without searching your memory.
+      </p>
+      <p>
+        Finally: the 45-minute structure is a discipline. Requirements and scoping in the first
+        five minutes. Capacity estimation in the next five. Core design in the middle twenty.
+        Scaling and bottlenecks in the following ten. Trade-offs in the last five. Every minute
+        spent drawing a beautiful diagram at the expense of discussing trade-offs is a minute that
+        costs you points on the dimension interviewers weight most.
+      </p>
+      <p>
+        Study patterns. Practice trade-off articulation. Ask before you draw. These three habits,
+        applied consistently, will take you further in system design interviews than memorizing
+        any specific answer.
+      </p>
+    </section>
+
+  </article>
+</body>
+</html>

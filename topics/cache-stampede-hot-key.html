@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>System Design Interview: How to Stop Cache Stampedes When a Hot Key Expires | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80" alt="Server rack with blinking lights under heavy load" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Backend · 18 min</span>
+          </div>
+        </figure>
+        <h1>System Design Interview: How to Stop Cache Stampedes When a Hot Key Expires</h1>
+        <p class="summary">Cache stampedes happen when a high-traffic key expires and thousands of requests simultaneously hit the database — potentially crashing it. This guide covers the exact failure mechanics, three battle-tested prevention strategies (mutex locking, background refresh, and the XFetch probabilistic early-expiry algorithm), and how to choose between them for a system design interview.</p>
+        <div class="article-meta">
+          <span class="meta-item">Source: VLDB 2015 · Vattani et al. · System Design Interview Prep</span>
+          <span class="meta-item">Domain: Backend Engineering / Caching</span>
+        </div>
+      </header>
+
+      <!-- ─── STORY ─────────────────────────────────────────────────────────── -->
+      <section class="story-card">
+        <span class="section-label">Story · The Flash-Sale Database Crash</span>
+        <h2>Flipkart Big Billion Days: How One Expiring Cache Key Took Down a Flash Sale</h2>
+        <p>
+          It is 11:58 PM. The Flipkart Big Billion Days sale is scheduled to open at midnight. The most anticipated listing — "iPhone 16 Pro — Limited Stock, Midnight Price Reveal" — has been warming the Redis cache all evening. Engineering ran a load test at 10 PM: everything passed. The Redis hit rate is 99.7%. MySQL is idle. The on-call team cracks open a laptop and watches the dashboard.
+        </p>
+        <p>
+          At 11:59:45 PM, the cache key for the iPhone 16 Pro product page reaches its configured TTL. The key was set to expire at exactly midnight to ensure the page would be refreshed with the new discounted price at the precise moment the sale opens. This seemed clever at the time it was written.
+        </p>
+        <p>
+          At 00:00:00.000, the Redis key expires. The marketing campaign fires across push notifications, SMS, and email. Fifty thousand concurrent users, who have been holding their phones with the product page still loading, all hit refresh at the same second. Every single one of those requests reaches the application server. Every single application server checks Redis. Redis returns a cache miss for every one of them. This is the moment the stampede begins.
+        </p>
+        <p>
+          Each of those 50,000 requests now falls through to the application's database fetch path. Every request independently constructs the same MySQL <code>SELECT</code> query: fetch product details, fetch inventory, fetch pricing for the iPhone 16 Pro. The MySQL connection pool has 500 connections. Within 50 milliseconds, all 500 connections are occupied. The remaining 49,500 requests begin queuing. The queue grows faster than connections are returned.
+        </p>
+        <p>
+          MySQL CPU spikes from 3% to 100% in under two seconds. Every one of those 500 connections is running the same query against the same product rows, holding row-level read locks, and competing for the buffer pool. Because MySQL is now saturated, the queries that were taking 40ms now take 4,000ms. The application servers begin logging connection timeout errors. Node.js request handlers hit their own 5-second timeout limit and begin returning 500s to users. Users see a spinner, then an error page. They tap refresh again. The retry storm layers on top of the initial stampede.
+        </p>
+        <p>
+          By 00:00:30, MySQL has crashed. The InnoDB crash recovery kicks in. The flash sale is completely unreachable. It takes 8 minutes to restore service — 8 minutes during which the limited stock is not selling, users are furious, and the social media backlash is already starting. The engineering post-mortem later estimates the revenue loss in the millions of rupees per minute of downtime.
+        </p>
+        <p>
+          The root cause was not a lack of caching. The cache was working perfectly. The root cause was a single architectural decision: setting the TTL to a round, predictable time aligned with a known traffic spike. Everything that followed — the stampede, the connection exhaustion, the cascading timeouts, the crash — was the inevitable consequence of that one decision.
+        </p>
+        <p>
+          This guide is about making sure you never make that decision again — and about what to do instead.
+        </p>
+      </section>
+
+      <!-- ─── WHAT IS A CACHE STAMPEDE ─────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Fundamentals</span>
+        <h2>What Is a Cache Stampede and Why It's Dangerous</h2>
+        <p>
+          A cache stampede — also called a <strong>thundering herd</strong> or <strong>dog-pile effect</strong> — occurs when a large number of concurrent requests all experience a cache miss at the same moment and all independently attempt to regenerate the cached value by querying the underlying data store. The problem is not any single request. Each individual request is doing exactly the right thing: checking the cache, finding nothing, falling through to the database. The problem is that thousands of requests do this simultaneously.
+        </p>
+        <p>
+          Consider the cost formula. If each database query takes 200ms of wall clock time and consumes 1 CPU-second of database server compute, then under steady traffic at 100 requests per second, you might have at most 20 concurrent queries running at any time (100 req/s × 0.2s = 20 concurrent). That is manageable. But a stampede of 50,000 simultaneous requests means 50,000 CPU-seconds of work arrive at the database in the same instant. The database must serve 50,000 CPU-seconds of work with, say, 8 CPU cores. It would take over 6,250 seconds — nearly two hours — to clear that backlog, if the database did not crash first.
+        </p>
+        <p>
+          This is why a stampede is categorically more dangerous than steady high traffic. A site serving 50,000 requests per second sustains that load continuously: work arrives and drains at roughly the same rate. A stampede delivers 50,000 requests of work in a single instant. Queuing theory tells us that a system operating at exactly its capacity limit will have infinite queue length; a stampede drives utilisation far past 100% instantly.
+        </p>
+        <p>
+          The failure cascade is mechanical and fast:
+        </p>
+        <ol>
+          <li><strong>Cache miss storm</strong> — TTL expires, all in-flight requests simultaneously miss.</li>
+          <li><strong>DB connection pool exhaustion</strong> — available connections fill in milliseconds.</li>
+          <li><strong>Query queue buildup</strong> — subsequent requests queue waiting for connections. Latency spikes from 40ms to seconds.</li>
+          <li><strong>App-tier timeouts</strong> — application servers hit their own timeout limits and start returning 5xx errors.</li>
+          <li><strong>Retry storms</strong> — clients retry on 5xx, doubling or tripling the load already hitting a saturated system.</li>
+          <li><strong>Complete outage</strong> — database OOMs or process-crashes; or app servers exhaust their thread pools; the entire tier goes dark.</li>
+        </ol>
+        <div class="callout">
+          <p><strong>The paradox of popular content:</strong> the more popular a cache key, the more dangerous its expiry. A key that is read by 10,000 concurrent users causes a 10,000x amplification when it expires. Your most important content carries your highest risk. The homepage is not safer than the product page — it is more dangerous.</p>
+        </div>
+        <p>
+          Cache stampedes are also surprisingly easy to trigger accidentally. Any of these common practices can cause one: setting TTLs to round numbers aligned with peak traffic (00:00, 09:00, on the hour); flushing the entire cache after a deployment; setting the same TTL for all keys in a category so they all expire in the same second; or simply underestimating how popular a particular piece of content will become.
+        </p>
+      </section>
+
+      <!-- ─── STRATEGY 1: MUTEX ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Strategy 1</span>
+        <h2>Mutex / Distributed Lock</h2>
+        <p>
+          The mutex strategy is the most intuitive approach: when a cache miss occurs, only one request is allowed to fetch from the database and repopulate the cache. All other requests must wait — or, if a stale value exists, be served the stale value while the refresh happens.
+        </p>
+        <p>
+          The implementation uses Redis's <code>SET key value EX ttl NX</code> command (<code>NX</code> means "only set if not exists"). This is an atomic operation: only one caller can succeed. The first request to experience the cache miss calls <code>SET lock:product:123 1 EX 10 NX</code>. If it gets back <code>OK</code>, it is the lock holder. It fetches from the database, writes the result to Redis, then deletes the lock key. All other requests that called the same SETNX command got back <code>nil</code> instead of <code>OK</code> — they know someone else holds the lock.
+        </p>
+        <p>
+          There are two variants for what the non-lock-holders do while waiting:
+        </p>
+        <p>
+          <strong>Variant A — Wait and poll:</strong> Non-lock-holders sleep for a short interval (10–50ms), then check the cache again. When the lock holder has written the value, the next poll finds the cache populated and returns it. This introduces latency for all waiting requests equal to the DB fetch time plus polling overhead, but ensures every response is fresh.
+        </p>
+        <p>
+          <strong>Variant B — Serve stale:</strong> If the cache stores a stale (expired-but-still-present) copy of the value, non-lock-holders serve it immediately. This requires a two-TTL design: the "logical TTL" (when the value should be refreshed) and the "physical TTL" (when Redis actually deletes the key — set much longer, e.g. logical + 60 seconds). When a request sees logical TTL has passed, it attempts the lock. If it gets the lock, it refreshes. If not, it returns the stale value from the physical TTL window.
+        </p>
+        <p>
+          The drawbacks of the mutex approach are real and worth understanding for an interview:
+        </p>
+        <ul>
+          <li><strong>Lock TTL must exceed DB query time</strong> — if the lock expires before the database fetch completes (e.g., a slow query), the lock is released and a second stampede begins. You must set the lock TTL conservatively high, but then a crashed lock-holder blocks all traffic for the full lock duration.</li>
+          <li><strong>Single point of contention</strong> — 50,000 requests all competing for one Redis key creates a serialisation bottleneck. On extremely high-traffic keys, this itself becomes a performance problem.</li>
+          <li><strong>Herd at lock release</strong> — if using Variant A (wait and poll), all waiting threads wake up and re-check simultaneously when the lock is released. The stampede is not eliminated, just deferred by one DB round-trip.</li>
+          <li><strong>Lock holder crash</strong> — if the process holding the lock crashes before populating the cache, the lock expires after its TTL and then one new request attempts the lock. During that entire window, traffic is either blocked or serving stale data.</li>
+        </ul>
+        <p>
+          The mutex strategy is best suited to moderate-traffic scenarios where a simple, correct implementation is more valuable than theoretically optimal performance, and where stale data is not acceptable (so Variant B is off the table).
+        </p>
+      </section>
+
+      <!-- ─── STRATEGY 2: BACKGROUND REFRESH ──────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Strategy 2</span>
+        <h2>Background / Proactive Refresh</h2>
+        <p>
+          Background refresh inverts the problem entirely: instead of waiting for a cache miss and then reacting, the system proactively refreshes hot keys before they expire. From a user's perspective, the cache never misses — because the value is always there.
+        </p>
+        <p>
+          There are two implementation variants:
+        </p>
+        <p>
+          <strong>Variant A — Fixed-schedule warmer:</strong> A cron job or scheduled worker runs on a fixed interval (e.g., every 5 minutes) and refreshes a known list of hot keys. For the Flipkart scenario, this warmer would have refreshed the iPhone 16 Pro cache entry at 11:55 PM, 11:50 PM, and so on — ensuring the key never expired naturally during the traffic spike. The new discounted price would be pushed at exactly midnight by the warmer, not by a TTL expiry.
+        </p>
+        <p>
+          <strong>Variant B — TTL-minus-buffer async trigger:</strong> This variant does not require knowing hot keys in advance. The cache entry stores two values: the cached content, and a <code>refreshAt</code> timestamp set to <code>expiry - buffer</code> (e.g., 30 seconds before natural expiry). When any request reads the cache and finds that <code>refreshAt</code> is in the past, it fires an asynchronous background task to refresh the value — but immediately returns the current (still valid) cached value to the user. The first request to see the refresh trigger kicks off the background job; subsequent requests during the refresh continue to serve the current value. By the time natural expiry would have occurred, the background job has already written a fresh value with a new TTL.
+        </p>
+        <p>
+          The key data structure for Variant B looks like this: store a JSON object in Redis rather than a plain string — <code>{"value": "...", "refreshAt": 1720000000, "expiry": 1720000030}</code>. The physical Redis TTL is set to <code>expiry + safetyBuffer</code> so the key is never evicted before the refresh has a chance to complete.
+        </p>
+        <p>
+          Background refresh has significant advantages: zero wait time for users, zero database stampede, and the refresh is completely invisible to end users. It is the most operationally clean solution when it applies.
+        </p>
+        <div class="callout">
+          <p><strong>Background refresh is perfect for predictable hot keys</strong> — homepage content, product catalog, app configuration, top-10 leaderboards — but it is blind to surprise viral content. A tweet that sends 200,000 users to an obscure product page in 60 seconds cannot be pre-warmed. For unknown hot keys, you need a probabilistic strategy like XFetch.</p>
+        </div>
+        <p>
+          The other drawback of background refresh is wasted compute: if a key is refreshed every 5 minutes but rarely read in the last 4.5 minutes of its TTL, those refresh cycles were pure overhead. For a cache with hundreds of thousands of keys, pre-warming all of them is infeasible. Selective warming requires either heuristics (refresh only the top-N most-read keys) or a dynamic hot-key detection system that adds operational complexity.
+        </p>
+      </section>
+
+      <!-- ─── STRATEGY 3: XFETCH ───────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Strategy 3</span>
+        <h2>XFetch — The Optimal Probabilistic Early-Expiry Algorithm</h2>
+        <p>
+          XFetch was published at VLDB 2015 by Vattani, Chiariotti, and Tolomei in "An Optimal Algorithm for Invalidation-based Cache Coherence." It is arguably the most elegant solution to the cache stampede problem because it requires no coordination, no locks, no background workers, and no knowledge of which keys are hot. Every application instance independently decides, on each cache read, whether to proactively refresh the cached value — using a single probabilistic formula.
+        </p>
+        <p>
+          The algorithm replaces the standard "if TTL expired, fetch from DB" logic with:
+        </p>
+        <div class="callout">
+          <p><strong>XFetch formula:</strong><br />
+          <code>currentTime - (delta × beta × Math.log(Math.random())) &gt;= expiry</code><br /><br />
+          If this condition is true, refresh the cache proactively. Otherwise, return the cached value as normal.</p>
+        </div>
+        <p>
+          Each variable has a precise meaning:
+        </p>
+        <ul>
+          <li><strong><code>currentTime</code></strong> — the current UNIX timestamp in seconds.</li>
+          <li><strong><code>expiry</code></strong> — the UNIX timestamp at which the cached value expires (i.e., when it was set: <code>setTime + ttl</code>). Stored alongside the cached value.</li>
+          <li><strong><code>delta</code></strong> — how long it took to compute or fetch the cached value from the database, in seconds. This is measured at write time and stored alongside the value (e.g., if the DB query took 0.2 seconds, <code>delta = 0.2</code>). Keys that are expensive to recompute get proportionally more aggressive early refreshes.</li>
+          <li><strong><code>beta</code></strong> — a tuning parameter, default <code>1.0</code>. Higher values (e.g., 2 or 3) make the algorithm refresh earlier and more aggressively. Lower values (e.g., 0.5) make it more conservative. The paper proves that <code>beta = 1</code> is optimal: it produces exactly one early refresh on average before natural expiry.</li>
+          <li><strong><code>Math.log(Math.random())</code></strong> — the natural logarithm of a uniform random number in (0, 1]. Because <code>Math.random()</code> returns values in [0, 1) and the log of a number in (0, 1) is always negative, this term is always negative. Multiplying by the negative sign implicit in subtraction (<code>currentTime - (positive × negative)</code> = <code>currentTime + something positive</code>) means the left-hand side is always greater than <code>currentTime</code>.</li>
+        </ul>
+        <p>
+          The intuition is straightforward: as the current time approaches the expiry time, the gap between <code>expiry</code> and <code>currentTime</code> shrinks. The random offset term on the left side has a fixed distribution. As the gap shrinks, the probability that the random offset exceeds the remaining gap increases. When there is still an hour left on the TTL, the probability is essentially zero — no request will trigger an early refresh. When there are 30 seconds left, the probability is appreciable. When there are 5 seconds left, almost every request will trigger a refresh.
+        </p>
+        <p>
+          The algorithm is also naturally self-throttling in a distributed system. Once one server refreshes the cache and writes a new value with a new expiry, all other servers immediately see a fresh key with a distant expiry — the XFetch formula returns false for all of them, and no further early refreshes occur until the next window.
+        </p>
+        <p>
+          To implement XFetch, you need to store three values alongside the cached content: <code>value</code> (the actual data), <code>delta</code> (the measured fetch time in seconds), and <code>expiry</code> (the UNIX timestamp of expiration). A Redis hash works well for this, or a JSON-encoded string value. The physical TTL on the Redis key should be set to exactly <code>ttl</code> seconds — XFetch handles the early-refresh window purely through the probabilistic check, not by extending the physical TTL.
+        </p>
+        <p>
+          When the XFetch condition is true, the correct behaviour is to trigger an <strong>asynchronous background refresh</strong> — not a synchronous one. The current request returns the still-valid cached value immediately. The background task fetches from the DB, measures the new delta, and writes the refreshed value back. This preserves the zero-latency user experience that makes XFetch superior to the mutex approach.
+        </p>
+      </section>
+
+      <!-- ─── STRATEGY 4: TTL JITTER ───────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Strategy 4</span>
+        <h2>TTL Jitter — The Simplest Defence</h2>
+        <p>
+          TTL jitter is the simplest and most universally applicable defence. Instead of setting every cache key to a fixed TTL like 3600 seconds, you add a small random offset:
+        </p>
+        <pre><code class="language-javascript">// Without jitter — all keys set at the same time expire at the same time
+const ttl = 3600;
+
+// With jitter — keys set at the same time expire in a 30-second window
+const ttl = 3600 + Math.floor(Math.random() * 30);</code></pre>
+        <p>
+          The effect is to desynchronise expiry times across keys. If you flush and repopulate 10,000 cache keys during a deploy, without jitter all 10,000 expire simultaneously one hour later. With jitter spread over 30 seconds, only roughly 333 expire per second — a manageable rate that the database can absorb.
+        </p>
+        <p>
+          The important limitation to understand for system design interviews is that TTL jitter only helps when many different keys are at risk of expiring simultaneously. It does not help with a single hot key. If your iPhone 16 Pro product page has a TTL of <code>3600 + random(30)</code>, it still expires at some point, and at that moment all 50,000 concurrent users still miss simultaneously. Jitter spreads the expiry across a 30-second window, but a key still has exactly one expiry moment.
+        </p>
+        <p>
+          TTL jitter is best used as a baseline hygiene measure for:
+        </p>
+        <ul>
+          <li>CDN invalidations after deploys — use staggered TTLs so not every edge node revalidates at once</li>
+          <li>Cache warming after a full flush — populate keys with jittered TTLs to prevent a future mass-expiry</li>
+          <li>Category caches (e.g., all product listings with the same 1-hour TTL) — add jitter so they do not all expire in the same second</li>
+        </ul>
+        <p>
+          Never set TTLs to round numbers, especially ones that align with known traffic patterns. <code>TTL = 3600</code> set at midnight means expiry at 1 AM — another peak hour. <code>TTL = 3647</code> is significantly safer.
+        </p>
+      </section>
+
+      <!-- ─── LAYERED DEFENCE ──────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Production Architecture</span>
+        <h2>Layered Defence — The Production Combination</h2>
+        <p>
+          No single strategy is sufficient for a production system at scale. Each strategy addresses a different failure mode, and each has gaps that the others cover. The right answer for a system design interview — and for production — is to layer them.
+        </p>
+        <p>
+          <strong>Layer 1 — TTL Jitter on all keys.</strong> This is pure hygiene with zero operational overhead. Add it to every cache write unconditionally. It prevents mass-expiry events caused by simultaneous cache population (deploys, cache flushes, batch jobs). Cost: two lines of code. Benefit: eliminates an entire class of stampede.
+        </p>
+        <p>
+          <strong>Layer 2 — Background refresh for known hot keys.</strong> Maintain a list of high-priority keys whose absence would cause catastrophic load: homepage, top product listings, app configuration, feature flags. A scheduled worker refreshes these on a fixed cadence shorter than their TTL. For the Flipkart scenario, the iPhone 16 Pro listing would be on this list, and the midnight price reveal would be pushed by the warmer rather than by a TTL expiry. Cost: a small warmer service and a hot-key registry. Benefit: zero miss rate for your most important content.
+        </p>
+        <p>
+          <strong>Layer 3 — XFetch on all cache reads.</strong> For everything not covered by the background warmer — all the unknown viral content, the tail of the long-tail catalog, user-specific caches — wrap every cache read in the XFetch formula. This is a drop-in replacement for the standard cache-aside pattern. Cost: storing delta and expiry alongside cached values; a few nanoseconds of computation per cache read. Benefit: coordination-free probabilistic protection for every key in the cache.
+        </p>
+        <p>
+          <strong>Layer 4 — Circuit breaker on the DB read path.</strong> Even with the above layers, your database will occasionally see elevated load during unusual events. A circuit breaker sits in front of the database call and opens when the error rate or latency exceeds a threshold (e.g., &gt;5% error rate in 10 seconds, or p99 latency &gt; 2 seconds). When open, the circuit returns a fast failure (503 or stale data) rather than adding more load to an already-struggling database. This prevents retry storms from turning a degradation into a complete outage. Libraries like Hystrix, Resilience4j, and Cockatiel implement this pattern.
+        </p>
+        <p>
+          <strong>Layer 5 — Redis High Availability.</strong> All of the above strategies assume Redis is available. If Redis goes down, every request misses the cache simultaneously — the worst possible stampede. Redis Sentinel provides automatic failover to a replica in approximately 30 seconds. Redis Cluster provides instant failover with no single point of failure (each shard is replicated). For critical applications, Redis Cluster is the right default.
+        </p>
+        <p>
+          The request flow in the layered system looks like this: a request arrives and reads from Redis. The application checks the XFetch condition. If XFetch triggers, an async background task refreshes the value while the current request returns the cached value. Separately, the background warmer maintains freshness for known hot keys on a schedule. TTL jitter ensures no mass-expiry event occurs after bulk cache operations. If Redis is unavailable, the circuit breaker limits the load reaching the database.
+        </p>
+        <div class="callout">
+          <p><strong>Defence in depth for caching:</strong> Jitter prevents mass expiry. Background refresh protects known hot keys. XFetch protects unknown hot keys. Circuit breaker prevents cascading failure. Redis HA prevents total cache unavailability. Each layer compensates for the blind spots of the others.</p>
+        </div>
+      </section>
+
+      <!-- ─── INTERVIEW FRAMING ─────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Interview Framing</span>
+        <h2>"What If Redis Goes Down?" — The Follow-Up Question</h2>
+        <p>
+          In nearly every system design interview that involves caching, the follow-up question is: "What happens if Redis goes down entirely?" This is a different problem from key expiry. It is total cache unavailability. Your answer to this question signals whether you think in production failure modes or only in happy-path architectures.
+        </p>
+        <p>
+          Here is the answer framework:
+        </p>
+        <p>
+          <strong>Circuit breaker — detect and limit.</strong> When Redis connection timeout rate exceeds a threshold (e.g., 10% of requests in a 5-second window), open the circuit. Stop sending requests to Redis at all. This does two things: it stops accumulating timed-out Redis connections in your application thread pool, and it forces a decision about what to do instead. The circuit breaker should have a half-open state: periodically send one probe request to Redis; if it succeeds, close the circuit and resume normal operation.
+        </p>
+        <p>
+          <strong>DB fallback with rate limiting.</strong> When the circuit is open and traffic falls through to the database, the database will see more traffic than it was dimensioned for. This must be controlled. Use a token bucket rate limiter to cap how many DB queries per second reach the database (based on known capacity), returning 503 to requests that exceed the limit. This is graceful degradation: some users get errors, but the database remains alive for the users who do get through.
+        </p>
+        <p>
+          <strong>Secondary in-memory LRU cache.</strong> Application servers can maintain a small in-process LRU cache (e.g., 500 MB of heap, last 10,000 keys by recency). This is not a replacement for Redis — it is much smaller, not shared across instances, and goes stale. But it means that during a Redis outage, the most recently accessed keys are still served from memory. The cache hit rate drops significantly, but it does not drop to zero.
+        </p>
+        <p>
+          <strong>Redis Sentinel vs Redis Cluster — knowing the difference matters.</strong> Redis Sentinel is the older HA mechanism: one primary, one or more replicas, and a set of sentinel processes that monitor and execute failover. Failover takes approximately 30 seconds (detect failure → elect new primary → update clients). During those 30 seconds, writes may be lost and reads are unavailable unless clients fall back to replicas. Redis Cluster is the modern approach: data is partitioned across multiple primary-replica pairs. If one primary goes down, its replica is automatically promoted — typically within a few seconds, and other shards remain fully available throughout. For stampede prevention, the key distinction is that Cluster avoids a single point of failure entirely; Sentinel just shortens the recovery window.
+        </p>
+        <p>
+          What NOT to say in an interview: "we would just restart Redis." This shows no understanding of distributed failure, replication lag, or the blast radius of a cache going dark. What TO say: "We have a circuit breaker that opens when Redis connection timeout rate exceeds a threshold, routing traffic to the database with rate limiting to protect it. Simultaneously, Redis Sentinel automatically promotes a replica. Once Redis is healthy and the circuit half-opens, we verify Redis connectivity before gradually closing the circuit and resuming normal caching."
+        </p>
+      </section>
+
+      <!-- ─── CODE EXAMPLE ─────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>XFetch + Redis Mutex Implementation</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// cache-stampede-prevention.js
+// Requires: ioredis  (npm install ioredis)
+
+import Redis from 'ioredis';
+
+const redis = new Redis({ host: 'localhost', port: 6379 });
+
+// ── XFetch: coordination-free probabilistic early expiry ──────────────────
+
+/**
+ * Read-through cache using the XFetch algorithm (VLDB 2015).
+ * Triggers an async background refresh as the TTL approaches.
+ *
+ * @param {string}   key       Redis key
+ * @param {Function} fetchFn   Async function that fetches fresh data from the DB
+ * @param {object}   opts
+ * @param {number}   opts.ttl  TTL in seconds (with jitter applied automatically)
+ * @param {number}   opts.beta XFetch tuning param (default 1.0; higher = earlier refresh)
+ */
+export async function xfetchGet(key, fetchFn, { ttl = 300, beta = 1.0 } = {}) {
+  const raw = await redis.get(key);
+
+  if (raw) {
+    const cached = JSON.parse(raw);
+    const { value, delta, expiry } = cached;
+    const now = Date.now() / 1000; // UNIX seconds
+
+    // XFetch condition: should we refresh early?
+    const shouldRefresh =
+      now - delta * beta * Math.log(Math.random()) >= expiry;
+
+    if (shouldRefresh) {
+      // Fire-and-forget: refresh in background, return current value immediately
+      refreshInBackground(key, fetchFn, ttl).catch(console.error);
+    }
+
+    return value;
+  }
+
+  // True cache miss — fetch synchronously and populate
+  return await refreshInBackground(key, fetchFn, ttl);
+}
+
+async function refreshInBackground(key, fetchFn, ttl) {
+  const start = Date.now();
+  const value = await fetchFn();
+  const delta = (Date.now() - start) / 1000; // seconds
+
+  // Add jitter: ±10% of TTL
+  const jitter = Math.floor(Math.random() * ttl * 0.1);
+  const actualTtl = ttl + jitter;
+  const expiry = Date.now() / 1000 + actualTtl;
+
+  const payload = JSON.stringify({ value, delta, expiry });
+  await redis.set(key, payload, 'EX', actualTtl);
+  return value;
+}
+
+// ── Mutex: distributed lock for cases where stale data is not acceptable ──
+
+/**
+ * Read-through cache using a Redis SETNX distributed lock.
+ * Non-lock-holders serve stale data if available, or wait.
+ *
+ * @param {string}   key     Redis key
+ * @param {Function} fetchFn Async function that fetches fresh data
+ * @param {number}   ttl     TTL in seconds
+ */
+export async function mutexGet(key, fetchFn, ttl = 300) {
+  const value = await redis.get(key);
+  if (value) return JSON.parse(value);
+
+  const lockKey = `lock:${key}`;
+  // Acquire lock — NX ensures only one caller succeeds
+  // EX 30 — lock auto-expires in 30s if holder crashes
+  const acquired = await redis.set(lockKey, '1', 'EX', 30, 'NX');
+
+  if (acquired === 'OK') {
+    try {
+      const fresh = await fetchFn();
+      const jitter = Math.floor(Math.random() * 30);
+      await redis.set(key, JSON.stringify(fresh), 'EX', ttl + jitter);
+      return fresh;
+    } finally {
+      await redis.del(lockKey); // Always release lock
+    }
+  } else {
+    // Did not get lock — poll until cache is populated (max 3s)
+    for (let i = 0; i &lt; 30; i++) {
+      await new Promise(r =&gt; setTimeout(r, 100));
+      const retry = await redis.get(key);
+      if (retry) return JSON.parse(retry);
+    }
+    // Fallback: fetch directly (avoid deadlock if lock holder crashed)
+    return fetchFn();
+  }
+}
+
+// ── Circuit Breaker stub ──────────────────────────────────────────────────
+
+let circuitOpen = false;
+let failureCount = 0;
+const FAILURE_THRESHOLD = 5;
+
+export async function withCircuitBreaker(fn) {
+  if (circuitOpen) throw new Error('Circuit open — DB unavailable');
+  try {
+    const result = await fn();
+    failureCount = 0; // Reset on success
+    return result;
+  } catch (err) {
+    failureCount++;
+    if (failureCount &gt;= FAILURE_THRESHOLD) {
+      circuitOpen = true;
+      // Auto-reset after 30 seconds (half-open probe)
+      setTimeout(() =&gt; { circuitOpen = false; failureCount = 0; }, 30_000);
+    }
+    throw err;
+  }
+}</code></pre>
+      </section>
+
+      <!-- ─── CHECKLIST ─────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Practical Checklist</h2>
+        <ul class="check-list">
+          <li>Never set TTLs to round numbers — always add jitter (at minimum ±10% of the base TTL)</li>
+          <li>Store the computation delta alongside every cached value so XFetch has accurate timing data</li>
+          <li>Use XFetch for all cache reads in read-through caches — it is a zero-cost drop-in replacement for the standard miss-fetch-store loop</li>
+          <li>Use background refresh for known hot keys: homepage, top-N product listings, app configuration, feature flags</li>
+          <li>Put a circuit breaker on every database read path — never let unlimited traffic reach the DB when the cache is cold</li>
+          <li>Set Redis <code>maxmemory-policy</code> to <code>allkeys-lru</code> to prevent out-of-memory crashes; volatile-lru only evicts keys with TTLs set</li>
+          <li>Monitor cache hit rate in real time — a sudden drop from 99% to 60% is a stampede in progress, even before the DB alarm fires</li>
+          <li>Alert on DB query rate spikes and connection pool utilisation as leading indicators of impending overload</li>
+        </ul>
+      </section>
+
+      <!-- ─── FAQ ───────────────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Frequently Asked Questions</h2>
+
+        <h3>Is XFetch safe to use with distributed caches across multiple app servers?</h3>
+        <p>
+          Yes — the algorithm is specifically designed for distributed environments. Each server independently runs the probabilistic check without any coordination. Because the probability of triggering an early refresh increases as the expiry approaches, the expected total number of early refreshes across all servers before natural expiry is exactly one (when beta = 1). Once any server successfully writes a refreshed value, all other servers see a fresh key with a distant expiry, and the XFetch condition immediately becomes false for all of them. The algorithm is self-correcting.
+        </p>
+
+        <h3>What beta value should I use in XFetch?</h3>
+        <p>
+          The VLDB 2015 paper proves that <code>beta = 1</code> is the optimal default — it produces exactly one early refresh before expiry in expectation. Increase beta (e.g., 2–3) for very expensive database queries where you want to begin refreshing much earlier, accepting the cost of slightly more refreshes in exchange for more buffer time. Decrease beta (e.g., 0.5) for cheap, fast queries where a slight stampede is acceptable and you want to avoid unnecessary DB calls. In practice, start with <code>beta = 1</code> and tune based on your observed delta values.
+        </p>
+
+        <h3>Does TTL jitter help with a single hot key?</h3>
+        <p>
+          No. Jitter only helps when many different keys are at risk of expiring simultaneously — for example, after a cache flush or a bulk population event. For a single hot key with hundreds of thousands of concurrent readers, jitter has no effect: the key still has one expiry moment, and all readers miss simultaneously when that moment arrives. For single hot keys, you need XFetch or mutex locking.
+        </p>
+
+        <h3>How do I handle cache stampedes in a CDN?</h3>
+        <p>
+          Most major CDNs have native support for stale-while-revalidate, which is conceptually equivalent to background refresh. Set your <code>Cache-Control</code> header to <code>max-age=3600, stale-while-revalidate=60</code>. This tells the CDN edge node to serve the cached (potentially stale) content immediately while triggering a background revalidation request to the origin. Cloudflare, Fastly, and AWS CloudFront all support this directive. For aggressive cache stampede prevention at the CDN layer, also look at request coalescing (or "request collapsing") — a feature where the CDN sends only one origin request for a cache miss, even if thousands of user requests arrive simultaneously.
+        </p>
+      </section>
+
+      <!-- ─── RELATED READING ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Explore Further</h2>
+        <ul>
+          <li><a href="./redis-production-guide.html">Redis Production Guide</a> — Redis data structures and eviction policies</li>
+          <li><a href="./28-system-design-failure-prevention.html">28 System Design Failure Modes</a> — comprehensive failure catalogue</li>
+          <li><a href="./scaling-to-1-million-users.html">Scaling to 1 Million Users</a> — caching layer in scaling strategy</li>
+        </ul>
+      </section>
+
+      <!-- ─── TAKEAWAYS ─────────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <span class="section-label">Takeaways</span>
+        <h2>Key Takeaways</h2>
+        <p>
+          Cache stampedes are not an edge case. They are a systemic risk that grows proportionally with the popularity of your content and the size of your user base. Every cache key has an expiry, and every expiry under high concurrency is a latent stampede waiting to trigger.
+        </p>
+        <p>
+          The XFetch algorithm is the most elegant solution because it is coordination-free, requires no shared state, scales perfectly across distributed deployments, and adapts automatically to the cost of each cached computation through the delta parameter. It is the best default for all cache reads. The paper proving its optimality is freely available; the implementation is under 20 lines of code.
+        </p>
+        <p>
+          For production systems, no single strategy is sufficient. Layer all four defences: TTL jitter eliminates mass-expiry events caused by bulk cache operations. Background refresh keeps known hot keys warm without any miss. XFetch protects the long tail of unknown hot keys using probability. A circuit breaker on the database prevents a degradation from becoming a complete outage.
+        </p>
+        <p>
+          In a system design interview, demonstrating knowledge of XFetch by name — including the formula, the beta parameter, and the coordination-free distributed property — will immediately differentiate you from candidates who only know mutex locking. But the real signal of seniority is knowing that stampede prevention is not a single technique you bolt on; it is a layered posture you design into the system from the start.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

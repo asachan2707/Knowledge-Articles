@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>System Design Interview: Real-Time Leaderboard for Millions of Users | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .code-label {
+        display: inline-block;
+        font-family: Arial, sans-serif;
+        font-size: .72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .07em;
+        color: #0f766e;
+        background: #f0fdf4;
+        border: 1px solid #bbf7d0;
+        border-radius: 4px;
+        padding: .15rem .45rem;
+        margin-bottom: .5rem;
+      }
+      .ops-table {
+        width: 100%;
+        max-width: var(--reading-width);
+        margin: 0 0 1rem;
+        border-collapse: collapse;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        box-shadow: var(--shadow);
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: .93rem;
+      }
+      .ops-table th,
+      .ops-table td {
+        padding: .65rem .85rem;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        vertical-align: top;
+      }
+      .ops-table th {
+        background: #f8fafc;
+        font-size: .8rem;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .ops-table tr:last-child td { border-bottom: 0; }
+      .ops-table code {
+        font-size: .88rem;
+        background: #eef2ff;
+      }
+      .req-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: .9rem;
+        margin: .9rem 0;
+      }
+      @media (max-width: 580px) {
+        .req-grid { grid-template-columns: 1fr; }
+      }
+      .req-box {
+        padding: .85rem 1rem;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+      .req-box h4 {
+        margin: 0 0 .5rem;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: .85rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--muted);
+      }
+      .req-box ul {
+        margin: 0;
+        padding-left: 1.1rem;
+      }
+      .req-box li {
+        font-size: .95rem;
+        color: var(--text);
+      }
+      .req-box li + li { margin-top: .3rem; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1511882150382-421056c89033?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Gaming competition with glowing screens"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Backend · 20 min</span>
+          </div>
+        </figure>
+        <h1>System Design Interview: Real-Time Leaderboard for Millions of Users</h1>
+        <p class="summary">
+          Designing a leaderboard for 50M players and 2M concurrent users isn't a SQL problem — it's a
+          data structure problem. This guide walks through why relational sorting breaks, how Redis Sorted
+          Sets solve ranking in O(log N), how to handle write amplification at 100k updates/second, and
+          how to scope global vs regional vs friend leaderboards.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: System Design Interview Prep · Redis Documentation</span>
+          <span class="meta-item">Domain: Backend Engineering / Gaming Infrastructure</span>
+        </div>
+      </header>
+
+      <!-- 1. Story Card -->
+      <section class="story-card">
+        <span class="section-label">Story · The Tournament That Broke the Database</span>
+        <h2>Free Fire India Tournament, 2026</h2>
+        <p>
+          Fifty million registered players. The top 100 will win cash prizes. The tournament starts at
+          12:00 PM and 2 million players are competing concurrently, each completing a match roughly every
+          8 minutes and submitting their updated score. Do the arithmetic: 2,000,000 players divided by an
+          8-minute match cycle equals 250,000 score updates per minute — roughly 4,167 per second at
+          steady state. At match-end spikes, when thousands of games conclude in the same 10-second
+          window, the update rate breaches 100,000 per second.
+        </p>
+        <p>
+          The engineering team had shipped the naive implementation: a PostgreSQL table with columns
+          <code>(user_id BIGINT, score BIGINT, updated_at TIMESTAMPTZ)</code>, indexed by
+          <code>score DESC</code>. The write path was a single UPDATE:
+          <code>UPDATE scores SET score = score + $points WHERE user_id = $uid</code>. The read path for
+          the leaderboard page was an ORDER BY: <code>SELECT user_id, score FROM scores ORDER BY score
+          DESC LIMIT 100</code>. Both queries looked fine in staging with 10,000 rows.
+        </p>
+        <p>
+          With 50 million rows, the B-tree index on <code>score</code> is enormous. Every score update
+          requires the database to locate the old index entry, remove it, compute the new score, and
+          insert a new entry at the correct sorted position. At 4,000 writes per second, the index is
+          under constant restructuring. Pages split and merge. Write-ahead log (WAL) volume explodes.
+          The index is never in a stable state long enough for VACUUM to reclaim space efficiently.
+        </p>
+        <p>
+          The ORDER BY reads make things catastrophically worse. Even with the index, PostgreSQL must
+          traverse the index from the highest-scored entry downward, collecting row pointers, then fetch
+          the actual heap rows — a process that competes with write transactions for buffer pool space.
+          With 50M rows, the query planner estimates 50M index entries to scan. At the load of a live
+          tournament, the leaderboard SELECT starts taking 8 seconds. The index is being simultaneously
+          modified by thousands of concurrent writes. Read-write lock contention escalates. The DB CPU
+          climbs to 95%. The connection pool fills. Application servers start timing out.
+        </p>
+        <p>
+          Players see their rank update 3 minutes after their match ends. Refresh after refresh returns
+          a spinner. Forty minutes into the tournament, the leaderboard page stops loading entirely.
+          PostgreSQL's autovacuum kicks in and consumes the remaining I/O headroom. The primary database
+          becomes unresponsive. The tournament is suspended.
+        </p>
+        <p>
+          The root cause is not a missing index or a poorly tuned query. The root cause is using a
+          relational database for a problem it was never designed to solve: maintaining a continuously
+          updated global ranking over 50 million entries with sub-second read and write latency.
+        </p>
+      </section>
+
+      <!-- 2. Requirements -->
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>What We Are Building</h2>
+        <div class="req-grid">
+          <div class="req-box">
+            <h4>Functional</h4>
+            <ul>
+              <li>Update a user's score (additive, not absolute replacement)</li>
+              <li>Get the rank of a specific user in real time</li>
+              <li>Get the top-N leaderboard with scores</li>
+              <li>Time-windowed leaderboards: daily, weekly, tournament-specific</li>
+              <li>Friend leaderboard: rank among a user's social graph only</li>
+              <li>Regional leaderboard: filter by country or region</li>
+            </ul>
+          </div>
+          <div class="req-box">
+            <h4>Non-Functional</h4>
+            <ul>
+              <li>50M registered players in the system</li>
+              <li>2M concurrent users during peak tournaments</li>
+              <li>100k score updates per second at peak</li>
+              <li>Rank reads: p99 latency under 100ms</li>
+              <li>Score visible in rank within 500ms of match end</li>
+              <li>Leaderboards are eventually consistent (~1s lag acceptable)</li>
+              <li>99.9% availability (no more than ~8.7 hours downtime/year)</li>
+            </ul>
+          </div>
+        </div>
+        <div class="callout">
+          <p>
+            <strong>Interview tip:</strong> The single most important thing to establish early is the
+            consistency model. "Eventually consistent with up to 1 second of lag" unlocks a completely
+            different (and much more scalable) architecture than "strongly consistent ranking." In a real
+            gaming leaderboard, players tolerate a 1-second lag; they do not tolerate a 3-minute lag.
+          </p>
+        </div>
+      </section>
+
+      <!-- 3. Why SQL Fails -->
+      <section class="content-card">
+        <span class="section-label">Root Cause Analysis</span>
+        <h2>Why the Naive Database Approach Fails</h2>
+        <p>
+          To understand why PostgreSQL (or MySQL, or any RDBMS) cannot serve this workload, it helps to
+          examine each failure mode independently.
+        </p>
+        <p>
+          <strong>Full table sort on every read.</strong> The query <code>ORDER BY score DESC</code>
+          requires the database to produce a globally sorted result set. Even with a B-tree index on
+          <code>score</code>, this is not a simple key lookup — it is a range scan from the highest
+          value downward. For 50M rows, this means traversing 50M index entries per query. With thousands
+          of concurrent leaderboard page views, the database performs this scan thousands of times per
+          second.
+        </p>
+        <p>
+          <strong>Index thrash under writes.</strong> A B-tree index is a balanced tree whose structure
+          is determined by the values it indexes. Every time a user's score changes, the index must
+          delete the old entry (at the old score position) and insert a new entry (at the new score
+          position). With 100,000 updates per second, the index is subject to 100,000 deletions and
+          100,000 insertions per second. Index pages split continuously. The tree rebalances constantly.
+          This is not just CPU — it generates enormous I/O and WAL write volume.
+        </p>
+        <p>
+          <strong>SQL window functions offer no relief.</strong> The SQL <code>RANK()</code> window
+          function computes rank at query time over the result set. It does not cache anything between
+          calls. Every invocation is an O(N) sort pass. For a single user asking "what is my rank,"
+          the database must sort all 50M rows to find the position of that one user.
+        </p>
+        <p>
+          <strong>Read-write lock contention.</strong> Rank reads and score writes both require access to
+          the same index. Under the default MVCC model, writes do not block reads, but they do generate
+          dead tuples that VACUUM must reclaim. At 100k writes/sec, the table bloats faster than VACUUM
+          can clean it. Additionally, any query that needs a consistent snapshot of the entire sorted set
+          while writes are in flight must use a transaction isolation level that causes lock escalation
+          at scale.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core insight:</strong> A leaderboard is fundamentally a sorted set problem, not a
+            relational database problem. SQL was not designed for this access pattern. The correct tool
+            is a data structure that was designed from the ground up for O(log N) sorted insertion and
+            O(log N) rank queries: a skip list.
+          </p>
+        </div>
+      </section>
+
+      <!-- 4. Redis ZSET -->
+      <section class="content-card">
+        <span class="section-label">Core Data Structure</span>
+        <h2>Redis Sorted Set (ZSET): The Right Tool for the Job</h2>
+        <p>
+          A Redis Sorted Set (ZSET) is a collection of unique string members, each associated with a
+          floating-point score. Members are always stored in order of their score. Redis implements the
+          ZSET using two internal data structures simultaneously: a skip list (for ordered operations)
+          and a hash table (for O(1) score lookups by member). This dual representation is what gives
+          ZSETs their uniquely strong performance profile for leaderboard workloads.
+        </p>
+        <p>
+          The key operations and their time complexities are:
+        </p>
+        <table class="ops-table">
+          <thead>
+            <tr>
+              <th>Command</th>
+              <th>Complexity</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>ZINCRBY key incr member</code></td>
+              <td>O(log N)</td>
+              <td>Atomically increment score — the correct command for additive scoring</td>
+            </tr>
+            <tr>
+              <td><code>ZADD key score member</code></td>
+              <td>O(log N)</td>
+              <td>Add or update member with absolute score</td>
+            </tr>
+            <tr>
+              <td><code>ZREVRANK key member</code></td>
+              <td>O(log N)</td>
+              <td>Return 0-indexed rank of member (highest score = rank 0)</td>
+            </tr>
+            <tr>
+              <td><code>ZREVRANGE key start stop [WITHSCORES]</code></td>
+              <td>O(log N + M)</td>
+              <td>Return top M members by descending score — the leaderboard query</td>
+            </tr>
+            <tr>
+              <td><code>ZSCORE key member</code></td>
+              <td>O(1)</td>
+              <td>Return the score of a specific member (hash table lookup)</td>
+            </tr>
+            <tr>
+              <td><code>ZCARD key</code></td>
+              <td>O(1)</td>
+              <td>Return the total number of members in the set</td>
+            </tr>
+            <tr>
+              <td><code>ZMSCORE key member [member ...]</code></td>
+              <td>O(N)</td>
+              <td>Return scores for multiple members in one round-trip (Redis 6.2+)</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <strong>Memory estimate.</strong> Each ZSET entry consumes approximately 60 bytes: 8 bytes for
+          the score (IEEE 754 double), variable bytes for the member string (a user ID like
+          <code>"user:42000000"</code> is about 14 bytes), and the skip list node with forward pointers
+          (roughly 32 bytes on average). For 50 million entries:
+          50,000,000 × 60 bytes = 3,000,000,000 bytes = approximately 3 GB. A single Redis instance
+          with 8 GB of RAM can comfortably hold the entire global leaderboard with room for other keys.
+        </p>
+
+        <span class="code-label">Redis Commands — Core Leaderboard Operations</span>
+        <pre><code class="language-bash"># User 42 scored 150 points in a match — increment their cumulative score
+ZINCRBY leaderboard:global 150 "user:42"
+# Returns the new total score as a string, e.g. "3450"
+
+# Get user 42's rank (0-indexed; rank 0 = first place)
+ZREVRANK leaderboard:global "user:42"
+# Returns an integer, e.g. 1847 (means user:42 is in 1848th place)
+
+# Get user 42's exact score
+ZSCORE leaderboard:global "user:42"
+# Returns "3450"
+
+# Get the top 100 players with their scores
+ZREVRANGE leaderboard:global 0 99 WITHSCORES
+# Returns alternating list: ["user:99", "9800", "user:7", "9750", ...]
+
+# How many total players are on the leaderboard?
+ZCARD leaderboard:global
+# Returns 50000000</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>Why the skip list is fast:</strong> Redis's skip list implementation gives O(log N)
+            for all rank operations. For 50 million users, log base 2 of 50,000,000 is approximately 26.
+            That means ZINCRBY and ZREVRANK require at most 26 pointer comparisons. At modern CPU speeds
+            operating on data in RAM, 26 comparisons takes under a microsecond. Compare that with
+            PostgreSQL's 8-second ORDER BY on 50M rows under write contention.
+          </p>
+        </div>
+      </section>
+
+      <!-- 5. Write Path -->
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>Write Path: From Game Server to Leaderboard</h2>
+        <p>
+          The write path must handle 100,000 score updates per second at peak without dropping updates or
+          overwhelming the Redis instance. Direct writes from game servers to Redis would work at moderate
+          scale, but introducing Kafka as a buffer between game servers and the score processing layer
+          provides crucial benefits for burst handling and durability.
+        </p>
+        <p>
+          The flow is: <strong>Game Server</strong> publishes a score event to the Kafka topic
+          <code>score-events</code> (partitioned by <code>user_id</code> to preserve per-user ordering)
+          — the Score Processor service consumes events and issues <code>ZINCRBY</code> commands to Redis
+          — asynchronously, the Score Processor also writes the final score to PostgreSQL as the durable
+          source of truth.
+        </p>
+        <p>
+          <strong>Why Kafka in the middle.</strong> Kafka decouples the game servers from the score
+          processing layer. During the tournament match-end spike at 100k updates/sec, game servers
+          publish to Kafka without waiting for Redis to acknowledge. Kafka absorbs the burst. The Score
+          Processor consumes at whatever rate Redis can handle, with Kafka managing the backpressure.
+          Crucially, Kafka's log provides a durable, replayable record of every score event — if Redis
+          data is lost (node failure, accidental key deletion), the entire leaderboard can be rebuilt
+          by replaying Kafka from offset 0.
+        </p>
+        <p>
+          <strong>Redis pipeline batching.</strong> Even though ZINCRBY is O(log N), the network
+          round-trip cost dominates at 100k commands/sec. Redis pipelining batches multiple commands into
+          a single TCP write, eliminating per-command round-trip overhead. The Score Processor accumulates
+          incoming score events over a 5ms window and flushes them as a pipeline: 100k ops/sec divided
+          into 200 pipeline flushes per second, each containing ~500 ZINCRBY commands. Pipeline throughput
+          on Redis typically runs 10-20x higher than individual command throughput because the Redis
+          event loop processes the entire batch before returning to I/O.
+        </p>
+        <p>
+          <strong>PostgreSQL as source of truth.</strong> Redis holds the live, queryable ranking state.
+          PostgreSQL holds the authoritative, durable record. The <code>user_scores</code> table records
+          the latest total score per user per window. After the Score Processor writes to Redis, it
+          asynchronously upserts to PostgreSQL. If Redis is rebuilt from scratch (disaster recovery), the
+          Score Processor reads all rows from PostgreSQL and re-hydrates the ZSET. PostgreSQL is never
+          queried on the rank read hot path.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Partition key matters:</strong> Partitioning the Kafka topic by <code>user_id</code>
+            ensures all score events for a given user land on the same partition and are processed in
+            order by the same Score Processor consumer. This prevents a race condition where two match
+            results for the same user arrive out of order and result in an incorrect final score.
+          </p>
+        </div>
+      </section>
+
+      <!-- 6. Read Path -->
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>Read Path: Serving Rank with Zero Database Calls</h2>
+        <p>
+          The read path serves two distinct query patterns with very different shapes. Both must complete
+          in under 100ms at p99 and must never touch the PostgreSQL database on the hot path.
+        </p>
+        <p>
+          <strong>Pattern A: Top-N Leaderboard.</strong> A player opens the global leaderboard page and
+          wants to see the current top 100. The API handler issues a single Redis command:
+          <code>ZREVRANGE leaderboard:global 0 99 WITHSCORES</code>. Redis returns 100 (member, score)
+          pairs from its skip list in O(log N + 100) time — effectively O(log 50M) + 100 pointer
+          traversals, completing in under 1ms. The API server then enriches the response by fetching
+          display names and avatars from a Redis Hash (pre-populated by the user profile service) using
+          <code>HGETALL user:profile:{id}</code> for each of the 100 entries, or batched with a single
+          pipeline. The final JSON is returned to the client in well under 100ms total.
+        </p>
+        <p>
+          For the public top-100 leaderboard (the same view that appears on the tournament homepage), the
+          API response is cached at the CDN edge with a 5-second TTL. With 2M concurrent users
+          potentially refreshing the leaderboard page every few seconds, CDN caching reduces the Redis
+          request rate for this query from potentially millions per minute to approximately 12 per minute
+          (one cache fill per 5 seconds per CDN edge node). The 5-second staleness is well within the
+          acceptable 1-second eventual consistency window for the non-top-100 positions.
+        </p>
+        <p>
+          <strong>Pattern B: My Rank.</strong> A player wants to know their own current rank. The API
+          issues two Redis commands in a pipeline:
+          <code>ZREVRANK leaderboard:global "user:42"</code> and
+          <code>ZSCORE leaderboard:global "user:42"</code>. Both complete in O(log N) and O(1)
+          respectively, in a single network round-trip. The response includes rank (1-indexed for
+          display), score, and the total player count from <code>ZCARD leaderboard:global</code>
+          (which is O(1)). Zero database reads. Total Redis time under 1ms.
+        </p>
+        <p>
+          <strong>Rate limiting on rank reads.</strong> Leaderboard data is valuable for automated
+          scraping (competitors harvesting all 50M ranks). Apply a per-user rate limit on rank reads —
+          for example, 60 requests per minute per authenticated user. This prevents scraping without
+          impacting legitimate gameplay.
+        </p>
+      </section>
+
+      <!-- 7. Tie-Breaking -->
+      <section class="content-card">
+        <span class="section-label">Edge Case</span>
+        <h2>Tie-Breaking: When Two Players Have Identical Scores</h2>
+        <p>
+          In a tournament with 50 million players accumulating discrete integer scores (kills, points,
+          objectives), large numbers of ties are mathematically guaranteed. If 100,000 players all finish
+          a round at exactly 5,000 points, which one of them holds rank 10,001? The answer matters when
+          prize money is on the line.
+        </p>
+        <p>
+          <strong>Naive approach: arbitrary ordering.</strong> Redis, by default, breaks score ties
+          lexicographically by member string. For user IDs like <code>"user:42"</code> and
+          <code>"user:43"</code>, this produces a consistent (deterministic) but arbitrary (meaningless)
+          ordering. This is acceptable for casual leaderboards but not for prize-bearing tournaments.
+        </p>
+        <p>
+          <strong>Tournament-fair approach: earlier achiever ranks higher.</strong> The player who
+          reached a score first should hold the higher rank. To encode this in the Redis score, use
+          fractional encoding. Redis ZSET scores are IEEE 754 double-precision floats, which provide 15-16
+          significant decimal digits. If scores are integers in the range 0 to 999,999, we have many
+          spare digits for a time-based tie-breaker.
+        </p>
+        <p>
+          The encoding: <code>redisScore = integerScore * 1_000_000 + (1_000_000 - timestampOffset)</code>
+          where <code>timestampOffset</code> is derived from the Unix timestamp of when the player
+          reached that score, modulo 1,000,000. Because Redis sorts by ascending score but we want
+          descending rank, we subtract the timestamp from a constant: an earlier timestamp produces a
+          larger offset, which produces a larger effective score, which produces a higher rank for equal
+          integer scores.
+        </p>
+        <p>
+          <strong>Using ZADD with flags to prevent score rollback.</strong> During a tournament, scores
+          should only ever increase. If a network glitch causes a stale score event to be replayed, a
+          naive ZINCRBY could still over-apply points. The safer pattern for absolute score updates:
+          <code>ZADD leaderboard:global GT encodedScore "user:42"</code>. The <code>GT</code> flag
+          (Redis 6.2+) only updates the score if the new value is greater than the existing value.
+          Combined with idempotency keys in the Kafka event (to deduplicate exact duplicate events), this
+          makes the write path safe against replays and out-of-order delivery.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Double precision range check:</strong> IEEE 754 doubles have 53 bits of integer
+            mantissa, representing integers exactly up to 2^53 = 9,007,199,254,740,992. A score of
+            999,999 multiplied by 1,000,000 equals 999,999,000,000 — well within the safe integer range
+            for exact representation. The tie-breaking encoding is numerically safe for all realistic
+            game scores.
+          </p>
+        </div>
+      </section>
+
+      <!-- 8. Windowed Leaderboards -->
+      <section class="content-card">
+        <span class="section-label">Feature Design</span>
+        <h2>Windowed Leaderboards: Daily, Weekly, and Tournament</h2>
+        <p>
+          Players engage more deeply with leaderboards that reset periodically. A player ranked 47,000th
+          globally has no chance of winning the all-time leaderboard, but they might be competitive on
+          today's daily board. Windowed leaderboards require separate ZSET keys per time window.
+        </p>
+        <p>
+          The key naming convention:
+        </p>
+        <ul>
+          <li><code>leaderboard:global</code> — all-time cumulative scores</li>
+          <li><code>leaderboard:daily:2026-07-16</code> — scores earned on July 16 only</li>
+          <li><code>leaderboard:weekly:2026-W29</code> — scores earned in ISO week 29</li>
+          <li><code>leaderboard:tournament:finals-2026</code> — scores for a specific tournament</li>
+          <li><code>leaderboard:region:india</code> — global scores filtered to India players</li>
+        </ul>
+        <p>
+          When the Score Processor consumes a score event, it issues ZINCRBY commands to all relevant
+          window ZSETs simultaneously within a single Redis pipeline. A score event from a player in
+          India playing in the July 16 daily window of the Finals tournament would update four ZSETs
+          in one pipeline flush.
+        </p>
+        <p>
+          <strong>Automatic expiry.</strong> Daily leaderboard keys are set to expire at midnight using
+          <code>EXPIREAT leaderboard:daily:2026-07-16 &lt;next-midnight-unix-timestamp&gt;</code>. Redis
+          deletes the key automatically. Weekly keys expire at end-of-week. This requires no scheduled
+          cleanup jobs — Redis handles garbage collection automatically.
+        </p>
+        <p>
+          <strong>Memory estimate for multiple windows.</strong> Four active window ZSETs (global, daily,
+          weekly, tournament) at 50M players each: 4 × 50,000,000 × 60 bytes = 12 GB. This fits in a
+          single Redis instance with 16 GB of RAM, or across two replicas in a Redis Cluster setup.
+        </p>
+        <p>
+          <strong>Tournament close-out.</strong> When a tournament window ends, the top-N results are
+          promoted to a permanent, read-only snapshot in PostgreSQL:
+          <code>SELECT * FROM leaderboard_snapshots WHERE tournament_id = 'finals-2026' LIMIT 1000</code>.
+          The ZSET is then deleted. Future prize dispute resolution uses the PostgreSQL snapshot, not
+          Redis. Redis is for live ranking; PostgreSQL is for historical records.
+        </p>
+      </section>
+
+      <!-- 9. Friend Leaderboard -->
+      <section class="content-card">
+        <span class="section-label">Feature Design</span>
+        <h2>Friend Leaderboard: Ranking Among Your Social Graph</h2>
+        <p>
+          The friend leaderboard answers: "Among my 500 friends, where do I rank right now?" It is
+          fundamentally a subset-ranking problem: given a global ZSET of 50M members and a set of
+          specific member IDs, return those members sorted by score with their ranks within that subset.
+        </p>
+        <p>
+          <strong>The ZINTERSTORE approach (avoid for this use case).</strong> Redis provides
+          <code>ZINTERSTORE dest numkeys key [key ...] [WEIGHTS weight ...] [AGGREGATE SUM|MIN|MAX]</code>
+          to produce a new ZSET containing only members present in all input keys. Creating a temporary
+          ZSET of friends requires first maintaining the friend list as a ZSET itself (awkward —
+          friends have no natural score), then intersecting it with the global leaderboard. Each
+          ZINTERSTORE writes a new key to Redis and must be explicitly deleted after use. For 2M
+          concurrent users each with 500 friends, the volume of temporary keys becomes unmanageable.
+        </p>
+        <p>
+          <strong>The ZMSCORE approach (recommended).</strong> Redis 6.2 introduced
+          <code>ZMSCORE key member [member ...]</code>, which returns the scores of multiple members in
+          a single O(N) command where N is the number of requested members. For user 42 with 500 friends,
+          the API issues one command: <code>ZMSCORE leaderboard:global friend1 friend2 ... friend500</code>.
+          Redis returns 500 scores (or nil for friends not yet on the board) in a single round-trip.
+          The API layer sorts the 500-element array in memory (microseconds) and returns the friend
+          leaderboard with computed ranks within the subset.
+        </p>
+        <p>
+          <strong>Social graph storage.</strong> Each user's friend list is stored in a Redis Set:
+          <code>SMEMBERS friends:42</code> returns the set of all friend user IDs. Redis Sets support
+          O(1) member lookup and O(N) enumeration. Friend lists are small (typically under 1000
+          members) and change infrequently, so they can be cached aggressively.
+        </p>
+        <p>
+          <strong>Caching the friend leaderboard.</strong> Computing the friend leaderboard requires
+          fetching the friend list and querying 500 scores — an inexpensive operation but one that
+          happens millions of times per second at tournament scale. Cache the computed friend
+          leaderboard result per user: <code>SET leaderboard:friends:42 "[serialized JSON]" EX 30</code>.
+          A 30-second TTL means the friend leaderboard is at most 30 seconds stale — acceptable for
+          social features.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Why not a per-user ZSET?</strong> Maintaining a separate ZSET per user for their
+            friend leaderboard would require updating 500 ZSETs on every score event (once per friend
+            of the scoring user). A player with 500 friends scoring 100k times per second would generate
+            50M additional ZINCRBY calls per second — a 50x write amplification. The ZMSCORE approach
+            pushes the fan-out cost to read time, where it can be cached, rather than write time.
+          </p>
+        </div>
+      </section>
+
+      <!-- 10. Sharding -->
+      <section class="content-card">
+        <span class="section-label">Scaling</span>
+        <h2>Sharding for Massive Write Throughput</h2>
+        <p>
+          Redis is single-threaded for command processing. A single Redis instance can execute roughly
+          100,000 simple GET/SET commands per second; for ZINCRBY on a 50M-member ZSET, where the
+          skip list traversal is heavier, practical throughput may be closer to 50,000 to 70,000
+          operations per second. At a sustained 100k score updates per second with a 50M-member ZSET,
+          a single Redis instance may become the bottleneck.
+        </p>
+        <p>
+          <strong>Sharding Strategy A: Shard by region or game mode.</strong> Partition the global
+          leaderboard by a natural boundary: <code>leaderboard:global:india</code>,
+          <code>leaderboard:global:asia-pacific</code>, <code>leaderboard:global:europe</code>. Each
+          shard is a separate Redis instance serving a geographically co-located set of players.
+          Regional leaderboards are trivially available at each shard. A "true global" leaderboard
+          requires a fan-out read across all shards (merge and sort), but this can be done at low
+          frequency (every 30 seconds) and cached.
+        </p>
+        <p>
+          <strong>Sharding Strategy B: Hash sharding for write distribution.</strong> Route writes
+          based on <code>userId % N</code> to N Redis instances, each holding a ZSET named
+          <code>leaderboard:shard:{0..N-1}</code>. Write throughput scales linearly with the number
+          of shards. The cost: global rank requires merging N sorted lists and computing a combined
+          rank — a non-trivial operation that must be done offline or approximated.
+        </p>
+        <p>
+          <strong>Approximate ranking for hyper-scale.</strong> For players outside the top 10,000,
+          an exact rank of 2,847,332 versus 2,847,401 carries no meaningful information. Use rank
+          buckets: top 100 (exact), top 1,000 (exact), top 10,000 (exact), top 1% (~500,000), top
+          10% (~5,000,000), top 25%, top 50%, bottom 50%. These thresholds can be computed by
+          sampling the ZSET at known percentile positions using <code>ZREVRANGE</code> — a lightweight
+          operation that runs in O(log N + 1) per threshold.
+        </p>
+        <p>
+          <strong>HyperLogLog for unique active player counts.</strong> The tournament dashboard needs
+          to display "X players active today" without a full ZCARD on every daily ZSET. Use Redis
+          HyperLogLog: <code>PFADD active_players:today user:42</code> on each score event.
+          <code>PFCOUNT active_players:today</code> returns an approximate count with less than 1%
+          error in O(1) time. HyperLogLog uses only 12 KB of memory regardless of cardinality, versus
+          3 GB for the full ZSET.
+        </p>
+        <p>
+          <strong>Reservoir sampling for percentile estimates.</strong> To answer "what score puts a
+          player in the top 10%?" without scanning the entire ZSET, maintain a random sample of 10,000
+          scores in a separate data structure (a sorted list updated via random eviction). The sample
+          provides an accurate estimate of any percentile boundary in O(log 10,000) = O(1) time for
+          practical purposes.
+        </p>
+      </section>
+
+      <!-- 11. JavaScript Code -->
+      <section class="content-card">
+        <span class="section-label">Implementation</span>
+        <h2>JavaScript: Full Leaderboard Service</h2>
+        <p>
+          The following service implements all core leaderboard operations using the
+          <a href="https://github.com/luin/ioredis" target="_blank" rel="noopener">ioredis</a> client.
+          It includes pipeline batching for write throughput, ZMSCORE-based friend leaderboards, and
+          windowed leaderboard support.
+        </p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">import Redis from 'ioredis';
+
+const redis = new Redis({
+  host: process.env.REDIS_HOST || 'localhost',
+  port: 6379,
+  // Enable auto-pipelining: ioredis automatically batches commands
+  // that arrive within the same event loop tick into a single pipeline.
+  enableAutoPipelining: true,
+});
+
+// ─── Key helpers ─────────────────────────────────────────────────────────────
+
+function globalKey() {
+  return 'leaderboard:global';
+}
+
+function windowKey(window) {
+  // window: 'global' | 'daily:2026-07-16' | 'weekly:2026-W29' | 'tournament:finals-2026'
+  if (window === 'global') return 'leaderboard:global';
+  return `leaderboard:${window}`;
+}
+
+function friendsKey(userId) {
+  return `friends:${userId}`;
+}
+
+function friendLeaderboardCacheKey(userId) {
+  return `leaderboard:friends:${userId}`;
+}
+
+// ─── Write path ──────────────────────────────────────────────────────────────
+
+/**
+ * Increment a user's score on one or more leaderboard windows.
+ * Called by the Score Processor after consuming a Kafka score event.
+ *
+ * @param {string} userId  - e.g. "user:42"
+ * @param {number} points  - points to add (always positive)
+ * @param {string[]} windows - leaderboard windows to update
+ */
+async function updateScore(userId, points, windows = ['global']) {
+  // Use a manually created pipeline to batch all ZINCRBY calls for this
+  // score event into a single TCP write regardless of autoPipelining.
+  const pipeline = redis.pipeline();
+
+  for (const window of windows) {
+    pipeline.zincrby(windowKey(window), points, userId);
+  }
+
+  // Invalidate the cached friend leaderboard for this user's friends.
+  // In production, this fan-out would be done asynchronously via a separate
+  // Kafka event to avoid adding latency to the score write path.
+  pipeline.del(friendLeaderboardCacheKey(userId));
+
+  await pipeline.exec();
+}
+
+// ─── Read path: my rank ───────────────────────────────────────────────────────
+
+/**
+ * Get the rank and score of a specific user.
+ * Returns { rank: number (1-indexed), score: number, totalPlayers: number }
+ *
+ * @param {string} userId
+ * @param {string} window
+ */
+async function getRank(userId, window = 'global') {
+  const key = windowKey(window);
+  const pipeline = redis.pipeline();
+
+  pipeline.zrevrank(key, userId);   // 0-indexed rank (null if not present)
+  pipeline.zscore(key, userId);     // score as string (null if not present)
+  pipeline.zcard(key);              // total members
+
+  const [[, rankIdx], [, scoreStr], [, total]] = await pipeline.exec();
+
+  if (rankIdx === null) {
+    return { rank: null, score: 0, totalPlayers: total };
+  }
+
+  return {
+    rank: rankIdx + 1,          // convert to 1-indexed for display
+    score: parseFloat(scoreStr),
+    totalPlayers: total,
+  };
+}
+
+// ─── Read path: top-N leaderboard ─────────────────────────────────────────────
+
+/**
+ * Get the top N players with their scores.
+ * Returns [{ userId, score, rank }]
+ *
+ * @param {number} n       - how many entries to return (e.g. 100)
+ * @param {string} window  - which leaderboard window
+ */
+async function getTopN(n, window = 'global') {
+  const key = windowKey(window);
+
+  // ZREVRANGE returns alternating [member, score, member, score, ...]
+  const raw = await redis.zrevrange(key, 0, n - 1, 'WITHSCORES');
+
+  const results = [];
+  for (let i = 0; i &lt; raw.length; i += 2) {
+    results.push({
+      userId: raw[i],
+      score: parseFloat(raw[i + 1]),
+      rank: i / 2 + 1,  // 1-indexed
+    });
+  }
+
+  return results;
+}
+
+// ─── Read path: friend leaderboard ────────────────────────────────────────────
+
+/**
+ * Get the leaderboard ranking among a user's friends.
+ * Uses ZMSCORE (Redis 6.2+) to fetch all friend scores in one round-trip,
+ * then sorts in the application layer.
+ *
+ * @param {string} userId
+ * @param {string[]} friendIds  - array of friend user IDs
+ * @param {string} window
+ */
+async function getFriendLeaderboard(userId, friendIds, window = 'global') {
+  const cacheKey = friendLeaderboardCacheKey(userId);
+
+  // Check the 30-second cache first.
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  if (!friendIds || friendIds.length === 0) return [];
+
+  const key = windowKey(window);
+
+  // Include the requesting user themselves in the leaderboard.
+  const allIds = [userId, ...friendIds];
+
+  // ZMSCORE returns an array of scores (strings or null) in the same order
+  // as the requested member list. One round-trip for up to 500 members.
+  const scores = await redis.zmscore(key, ...allIds);
+
+  const entries = allIds
+    .map((id, idx) => ({
+      userId: id,
+      score: scores[idx] !== null ? parseFloat(scores[idx]) : 0,
+      isMe: id === userId,
+    }))
+    .filter((e) => e.score &gt; 0)                  // exclude players not yet on board
+    .sort((a, b) => b.score - a.score)             // sort descending by score
+    .map((entry, idx) => ({ ...entry, rank: idx + 1 }));
+
+  // Cache the result for 30 seconds to reduce repeated computation.
+  await redis.set(cacheKey, JSON.stringify(entries), 'EX', 30);
+
+  return entries;
+}
+
+// ─── Windowed leaderboard convenience wrapper ─────────────────────────────────
+
+/**
+ * Get the top N entries for any named window.
+ * Example: getWindowedLeaderboard('daily:2026-07-16', 50)
+ *
+ * @param {string} window
+ * @param {number} n
+ */
+async function getWindowedLeaderboard(window, n = 100) {
+  return getTopN(n, window);
+}
+
+export {
+  updateScore,
+  getRank,
+  getTopN,
+  getFriendLeaderboard,
+  getWindowedLeaderboard,
+};</code></pre>
+      </section>
+
+      <!-- 12. Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Implementation Checklist</h2>
+        <ul class="check-list">
+          <li>Never use <code>ORDER BY score DESC</code> on a 50M+ row relational table for real-time ranking</li>
+          <li>Use <code>ZINCRBY</code> for atomic, additive score updates — not <code>ZADD</code> which overwrites the absolute score</li>
+          <li>Use <code>ZADD ... GT</code> flag when setting absolute scores to ensure scores only increase and cannot roll back</li>
+          <li>Create a separate ZSET key per time window; set <code>EXPIREAT</code> to midnight or end-of-week for automatic key cleanup</li>
+          <li>Batch score updates via Redis pipeline (or enable <code>enableAutoPipelining</code> in ioredis) to handle burst traffic efficiently</li>
+          <li>Cache the public top-100 leaderboard at the CDN edge with a 5-second TTL to reduce Redis read pressure at scale</li>
+          <li>Use <code>ZMSCORE</code> (Redis 6.2+) for friend leaderboard to fetch all friend scores in one round-trip</li>
+          <li>Back Redis with PostgreSQL as the source of truth for disaster recovery; rebuild from Kafka replay if Redis data is lost</li>
+          <li>Alert when ZSET memory exceeds 70% of available Redis RAM; plan for additional shards or a larger instance</li>
+          <li>Use <code>ZADD NX</code> for first-time score creation (only add if not exists), then <code>ZINCRBY</code> for all subsequent updates</li>
+        </ul>
+      </section>
+
+      <!-- 13. FAQ -->
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Frequently Asked Questions</h2>
+        <ul class="faq-list">
+          <li class="faq-item">
+            <p class="faq-question">What happens if Redis crashes and we lose all leaderboard data?</p>
+            <p class="faq-answer">
+              Redis replication (AOF persistence) writes every write command to disk on each node.
+              Replica promotion happens in under 30 seconds via Redis Sentinel or Redis Cluster automatic
+              failover. In the absolute worst case — simultaneous loss of all Redis nodes before a replica
+              can be promoted — the leaderboard can be rebuilt by replaying the score event log from
+              Kafka. The Score Processor replays events from offset 0, issuing ZINCRBY commands as it
+              goes. For 50M players with an average of 20 score events each, this is 1 billion Kafka
+              events. At 100,000 events/sec processing rate, full rebuild takes roughly 3 hours. During
+              the rebuild, serve approximate rankings from PostgreSQL's <code>user_scores</code> table
+              using a pre-computed snapshot.
+            </p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">Can a Redis ZSET actually handle 50 million members in a single key?</p>
+            <p class="faq-answer">
+              Yes. Redis has no practical member count limit on ZSETs. The skip list implementation scales
+              to hundreds of millions of members. At 50M members, ZADD and ZREVRANK still run in O(log N)
+              — approximately 26 steps. The only real constraint is memory: at roughly 60 bytes per entry,
+              50M members consume about 3 GB of RAM. Redis documentation explicitly supports large ZSETs;
+              production deployments at major gaming companies use ZSETs with tens of millions of members
+              as standard practice.
+            </p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">How do you prevent leaderboard manipulation via fake scores?</p>
+            <p class="faq-answer">
+              The architecture is server-authoritative: score events originate from the game server, not
+              the client. The game client sends match results to the game server, which validates them
+              against the server-side game state before publishing a score event to Kafka. Score events
+              are signed with an HMAC using a server secret and validated by the Score Processor before
+              any Redis write. The client never calls the leaderboard write API directly. Anomaly
+              detection runs as a Kafka Streams job alongside the Score Processor, flagging users whose
+              score velocity exceeds a configurable statistical threshold (e.g., more than 5 standard
+              deviations above the mean for their game mode). Flagged accounts are reviewed and
+              potentially suspended before their scores are persisted.
+            </p>
+          </li>
+          <li class="faq-item">
+            <p class="faq-question">How is rank defined when many users have the same score?</p>
+            <p class="faq-answer">
+              Tie-breaking is encoded into the Redis score using fractional score encoding: the stored
+              Redis score equals the integer game score multiplied by a large constant plus a time-based
+              offset that makes earlier achievers rank higher. Because every effective score value is
+              unique (the timestamp component distinguishes between any two users who reached the same
+              integer score), ZREVRANK always returns a strict total ordering with no ties. The integer
+              game score is recovered by dividing the Redis score by the same large constant and taking
+              the floor.
+            </p>
+          </li>
+        </ul>
+      </section>
+
+      <!-- 14. Takeaways -->
+      <section class="content-card takeaways">
+        <span class="section-label">Takeaways</span>
+        <h2>Key Takeaways</h2>
+        <p>
+          A real-time leaderboard at scale is an exercise in choosing the right data structure for the
+          access pattern. SQL was designed for flexible ad-hoc queries over relational data; it was not
+          designed for continuously updated global rankings over 50 million rows. Attempting to force
+          a leaderboard workload onto a relational database results in the failure described in the
+          opening story: index thrash, read-write contention, and eventual unavailability under peak
+          load.
+        </p>
+        <p>
+          Redis Sorted Set provides O(log N) rank operations for 50 million users in microseconds.
+          The skip list implementation means that ZINCRBY, ZREVRANK, and ZREVRANGE all perform the
+          same number of steps regardless of whether the set has 10 members or 100 million. This
+          constant-time characteristic is what makes Redis the correct tool.
+        </p>
+        <p>
+          The four critical architectural decisions are: Kafka as a score event buffer to absorb the
+          100k/sec burst without losing events; Redis ZSET as the live ranking engine; PostgreSQL as
+          the durable source of truth for recovery and audit; and separate ZSET keys per time window
+          for daily, weekly, and tournament leaderboards with automatic expiry. Adding friend
+          leaderboards via ZMSCORE pushes fan-out cost to read time where caching absorbs it.
+        </p>
+        <p>
+          For extreme scale beyond a single Redis instance, approximate rank via percentile buckets
+          and HyperLogLog active player counts makes the system economical without sacrificing the
+          user experience that matters: exact ranks at the top and competitive buckets everywhere else.
+        </p>
+      </section>
+
+      <!-- Related Reading -->
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Explore Further</h2>
+        <ul>
+          <li><a href="./redis-production-guide.html">Redis Production Guide</a> — Redis sorted sets, pipelining, and persistence</li>
+          <li><a href="./cache-stampede-hot-key.html">Cache Stampede and Hot Key Expiry</a> — protecting leaderboard read cache</li>
+          <li><a href="./scaling-to-1-million-users.html">Scaling to 1 Million Users</a> — horizontal scaling patterns</li>
+        </ul>
+      </section>
+
+    </main>
+  </body>
+</html>

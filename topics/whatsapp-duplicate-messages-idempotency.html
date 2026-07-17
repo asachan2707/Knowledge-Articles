@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Duplicate Messages in WhatsApp: At-Least-Once Delivery and Idempotency Deep Dive | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611746872915-64382b5c76da?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Smartphone showing messaging app conversation"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Backend · Engineering · Interview · 22 min</span>
+          </div>
+        </figure>
+
+        <h1>Duplicate Messages in WhatsApp: At-Least-Once Delivery and Idempotency Deep Dive</h1>
+        <p class="summary">
+          WhatsApp delivers 100B+ messages per day to 3B users using at-least-once delivery — which means
+          duplicates are a design guarantee, not a bug. This deep dive covers how the delivery receipt system
+          (1 tick / 2 ticks / blue ticks) maps to exactly which guarantees, how client-side and server-side
+          idempotency work together to prevent visible duplicates, and how to apply these patterns in any
+          messaging system interview.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Messaging / Distributed Systems / Interview Prep</span>
+          <span class="meta-item">Published: 2026-07-16</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every time a WhatsApp message is delivered on a flaky mobile connection, the system makes a
+          deliberate choice: if we are unsure whether the message arrived, we deliver it again. This is
+          at-least-once delivery. It creates duplicates as a first-order effect. Preventing those duplicates
+          from being <em>visible</em> to users is the engineering challenge this guide explores.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The core insight:</strong> Duplicates and delivery guarantees are not opposites.
+            At-least-once delivery is chosen <em>because</em> it is simpler and more reliable than
+            exactly-once at scale. The cost of duplicates is then paid once at the consumer side with
+            idempotency logic — not distributed across every delivery path.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · "I love you" appeared twice</span>
+        <p>
+          A user types "I love you" on poor mobile data — the kind of connection where the bars alternate
+          between one and two. She taps send. The message leaves her phone and reaches WhatsApp's servers.
+          The server stores it and begins forwarding it to her partner's device. But before the server's
+          ACK reaches her phone, her connection drops for 200 milliseconds.
+        </p>
+        <p>
+          Her WhatsApp client never got the delivery confirmation. It has a timer: if no ACK arrives in
+          N seconds, retry. So it sends "I love you" again. Now the server has two copies. If the recipient's
+          client is not careful, the message appears twice in the conversation.
+        </p>
+        <p>
+          This scenario is not a bug. It is the expected behavior of an at-least-once delivery system. The
+          question is: why does this not happen visibly in WhatsApp 99.99% of the time, given that it
+          handles 100B+ messages per day? The answer is a layered deduplication system — on both the client
+          and the server — that makes at-least-once delivery appear like exactly-once to the user.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Delivery Guarantees</span>
+        <h2>The Three Delivery Guarantees and Why WhatsApp Chose At-Least-Once</h2>
+        <p>
+          There are three fundamental delivery guarantees in distributed messaging:
+        </p>
+        <ul>
+          <li>
+            <strong>At-most-once:</strong> A message is delivered zero or one times. If the network drops
+            after delivery but before the ACK, the message is lost rather than retried. No duplicates, but
+            potential data loss. Used for non-critical, fire-and-forget scenarios (metrics, telemetry, UDP
+            video frames).
+          </li>
+          <li>
+            <strong>At-least-once:</strong> A message is delivered one or more times. If delivery is
+            uncertain, retry. No data loss, but potential duplicates. The receiving side must handle
+            duplicates (idempotency). Used by WhatsApp, most message queues (SQS, Kafka default config),
+            email delivery.
+          </li>
+          <li>
+            <strong>Exactly-once:</strong> A message is delivered exactly once despite any failures.
+            No data loss, no duplicates. Extremely expensive to implement — requires distributed coordination
+            (2-phase commit or idempotent producers + transactional consumers). Kafka's exactly-once
+            semantics add ~20% latency overhead and require careful producer/consumer configuration.
+          </li>
+        </ul>
+        <p>
+          <strong>Why WhatsApp chose at-least-once:</strong> WhatsApp processes approximately 100 billion
+          messages per day — roughly 1.16 million messages per second at average, with peaks much higher.
+          Exactly-once at that scale requires every message delivery to coordinate with a distributed
+          transaction log. At 100B messages/day, even a 20% overhead on exactly-once is catastrophic for
+          infrastructure cost. At-least-once is cheap — retry until ACK, then stop. The deduplication
+          cost is paid once on the receiving side, not on every leg of the delivery path.
+        </p>
+        <p>
+          Additionally, "losing a message" in a chat application is far worse user experience than briefly
+          showing a duplicate. At-least-once errs toward delivery, which is the right bias for messaging.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Architecture</span>
+        <h2>WhatsApp Architecture: Erlang, XMPP, and Store-and-Forward</h2>
+        <p>
+          WhatsApp was built on three foundational technology choices that still define its architecture:
+        </p>
+        <ul>
+          <li>
+            <strong>Erlang:</strong> WhatsApp's backend is written almost entirely in Erlang. Erlang was
+            designed for telecom systems requiring extreme concurrency and fault tolerance. Its lightweight
+            processes (not OS threads) can handle millions of concurrent connections on a single server.
+            WhatsApp reported handling 2 million connections per server in early engineering posts. Erlang's
+            "let it crash" philosophy means processes restart automatically on failure rather than requiring
+            explicit error handling.
+          </li>
+          <li>
+            <strong>XMPP (Extensible Messaging and Presence Protocol):</strong> WhatsApp uses a modified
+            version of XMPP called FunXMPP (referenced in internal documents as early as 2019). XMPP is
+            an open XML-based messaging protocol with built-in concepts for presence (online/offline/typing),
+            message acknowledgment, and roster management. WhatsApp extended it with binary encoding for
+            efficiency and additional features.
+          </li>
+          <li>
+            <strong>Ejabberd:</strong> WhatsApp runs a heavily modified version of Ejabberd, the open-source
+            XMPP server written in Erlang. Over the years, WhatsApp has rewritten significant portions of
+            Ejabberd, but the architecture remains recognizable.
+          </li>
+        </ul>
+        <p>
+          <strong>Store-and-forward model:</strong> When a sender's device is online and the recipient's
+          device is also online, the message routes from sender to server to recipient in near real-time.
+          When the recipient is offline, the server stores the message. When the recipient reconnects, the
+          server forwards all stored messages. Stored messages are retained for up to 30 days — if a
+          recipient does not come online within 30 days, the message is dropped.
+        </p>
+        <p>
+          <strong>Persistent connection:</strong> Every WhatsApp client maintains a persistent TCP/WebSocket
+          connection to WhatsApp servers at all times the app is running. This enables near-instant message
+          delivery (no polling), presence detection, and efficient ACK delivery. Mnesia (Erlang's built-in
+          distributed database) handles in-flight message state. Cassandra handles persistent message history.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Scale context:</strong> WhatsApp serves 3 billion monthly active users (2025) with a
+            relatively small engineering team — the Erlang stack enables exceptional concurrency efficiency.
+            By comparison, a Java or Node.js server would require vastly more hardware for the same connection
+            count due to thread-per-connection model limitations.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Delivery Receipts</span>
+        <h2>The Tick System: How 1 Tick / 2 Ticks / Blue Ticks Map to ACK States</h2>
+        <p>
+          WhatsApp's delivery receipt system is a three-state machine that communicates exactly where in
+          the delivery pipeline a message currently sits:
+        </p>
+        <ul>
+          <li>
+            <strong>1 grey tick (Sent):</strong> The message has reached WhatsApp's server. The sender's
+            client received a server-side ACK. This does NOT mean the recipient has received it — only
+            that WhatsApp's servers are now responsible for delivery.
+          </li>
+          <li>
+            <strong>2 grey ticks (Delivered):</strong> The message has reached the recipient's device.
+            The recipient's client sent a delivery receipt back to the server, which forwarded it to
+            the sender. The recipient has not necessarily read it.
+          </li>
+          <li>
+            <strong>2 blue ticks (Read):</strong> The recipient opened the conversation and the message
+            was displayed on screen. The recipient's client sent a read receipt. This is the strongest
+            confirmation — not just that the message arrived, but that it was seen.
+          </li>
+        </ul>
+        <p>
+          Each state transition is a separate ACK message flowing back through the system. These ACK
+          messages are themselves subject to at-least-once delivery — if a read receipt ACK is lost,
+          the client retries it. The sender's tick state is updated idempotently when the ACK arrives.
+        </p>
+        <p>
+          <strong>Read receipts can be disabled:</strong> Users can turn off blue ticks for privacy, in
+          which case the sender never receives a read receipt. The 2 grey ticks still appear (delivery
+          is unaffected), but the sender cannot see when the recipient reads the message.
+        </p>
+        <p>
+          <strong>Encryption context:</strong> All message content, including read receipts, is end-to-end
+          encrypted using the Signal Protocol (rolled out April 5, 2016). WhatsApp servers relay but
+          cannot read message content. The server only sees: message ID, sender, recipient, timestamp,
+          and size. Not content.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>How Duplicates Arise: Four Concrete Scenarios</h2>
+        <p>
+          Understanding where duplicates come from is essential to designing the deduplication strategy.
+          There are four primary sources:
+        </p>
+        <p>
+          <strong>Scenario A — Network timeout after server receipt:</strong> Sender's client transmits
+          a message. Server receives and stores it. Before the server can send the ACK back, the sender's
+          connection drops for 500ms. The client's retry timer fires. The client sends the same message
+          again. Server now has two copies of the message with no deduplication. If the server does not
+          check for duplicates, both get forwarded to the recipient.
+        </p>
+        <p>
+          <strong>Scenario B — ACK lost between server and recipient:</strong> Server forwards message
+          to recipient's device. Recipient's client receives and stores the message. Before the recipient's
+          ACK reaches the server, the connection drops. Server's retry timer fires. Server forwards the
+          message again. Recipient's client receives a second copy.
+        </p>
+        <p>
+          <strong>Scenario C — App crash between receive and ACK:</strong> Recipient's device receives
+          a message from the server. The app crashes before it can send the delivery ACK. On restart,
+          the client reconnects. The server sees no delivery ACK for that message and forwards it again.
+          Recipient gets it a second time.
+        </p>
+        <p>
+          <strong>Scenario D — Multi-device delivery:</strong> A user has WhatsApp linked to both their
+          phone and laptop. A message arrives. The phone is online, receives the message, and the server
+          sends a delivery receipt to the original sender. The laptop was offline at that moment. When
+          the laptop reconnects, the server delivers all unread messages — including that message again.
+          The user now has the message on both devices (expected), but the sending client may log the
+          delivery receipt twice if not deduped.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The pattern:</strong> Every duplicate originates from the same root cause — an ACK
+            was lost or delayed after a successful delivery, causing the sender to retry a delivery that
+            already succeeded. The fix is always the same: record the delivery result keyed by a unique
+            message ID, and check before processing a retry.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Client-Side Deduplication</span>
+        <h2>Client-Side Deduplication: Message IDs and the Seen-ID Cache</h2>
+        <p>
+          WhatsApp's primary deduplication mechanism is the message ID. Every message sent from a client
+          is assigned a globally unique identifier at the moment the user taps send — before it ever
+          leaves the device. This ID is a random 128-bit value (essentially a UUID). It is generated by
+          the <em>sender's client</em>, not the server.
+        </p>
+        <p>
+          <strong>Why client-generated IDs?</strong> If the server generated the ID, the client would
+          need to receive the server-assigned ID before retrying a failed send — but a failed send might
+          mean the server never got the first message. The client would not know which ID to use for the
+          retry. Client-generated IDs solve this cleanly: the client assigns the ID once, and retries
+          carry the same ID regardless of whether the first attempt reached the server.
+        </p>
+        <p>
+          <strong>Recipient-side dedup cache:</strong> The recipient's WhatsApp client maintains a
+          cache of recently seen message IDs. This is implemented as:
+        </p>
+        <ul>
+          <li>An in-memory LRU cache of the last N message IDs (N is typically in the hundreds to thousands)</li>
+          <li>A persistent store (SQLite on mobile) for message IDs across app restarts</li>
+        </ul>
+        <p>
+          Before displaying any incoming message, the client checks: is this message ID already in the
+          seen cache? If yes, the message is a duplicate — discard it silently. If no, add it to the
+          cache and display the message.
+        </p>
+        <p>
+          <strong>Cache sizing challenge:</strong> The cache must be large enough to cover the maximum
+          retry window. If a message was sent, the first copy was received but the ACK was lost, and
+          the retry arrives 30 seconds later, the original message ID must still be in the cache. In
+          practice, the cache size is tuned to cover minutes of messages, not just the last N count —
+          because high-traffic group chats can generate hundreds of messages per minute.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Server-Side Idempotency</span>
+        <h2>Server-Side Idempotency: The Dedup Store and 30-Day Window</h2>
+        <p>
+          The server also implements idempotency, independently of the client. This covers the case where
+          the server itself retries a delivery (Scenario B above) — the client dedup handles duplicates
+          from the sender, but the server must handle its own retries.
+        </p>
+        <p>
+          <strong>Server dedup store:</strong> When the server receives a message from a sender, it
+          records the message ID along with the delivery state (received, forwarded, delivered, failed).
+          This is stored in Mnesia (for in-flight messages) with a TTL and in Cassandra for persistence.
+          Before processing any incoming message, the server performs a lookup:
+        </p>
+        <ul>
+          <li>If the message ID is not in the store: process and store it.</li>
+          <li>If the message ID is already stored with state "delivered": return the cached ACK to the sender without re-delivering.</li>
+          <li>If the message ID is stored with state "in-flight": wait or return a "processing" response.</li>
+        </ul>
+        <p>
+          <strong>Idempotency window — 30 days:</strong> The server's dedup store must retain message IDs
+          for at least as long as it will retain undelivered messages. Since undelivered messages are stored
+          for 30 days, the dedup store must retain message IDs for at least 30 days. After that, if a sender
+          retries a 31-day-old message, the server treats it as a new message — but this is an edge case so
+          unlikely that it is not worth the storage cost of longer retention.
+        </p>
+        <p>
+          <strong>The forward-on-reconnect flow:</strong> When a recipient reconnects after being offline,
+          the server queries its store for all messages addressed to that recipient in the delivered=false
+          state. It forwards all of them in sequence. If the connection drops mid-forward, the server
+          restarts from where it left off on the next reconnect — each message is retried individually
+          with its original message ID, and the client's dedup cache handles any duplicates.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">ACK Protocol</span>
+        <h2>The ACK Protocol in Detail: Five Steps per Message</h2>
+        <p>
+          A complete message delivery involves five discrete events, each of which can fail and trigger
+          a retry:
+        </p>
+        <ol>
+          <li>
+            <strong>Client → Server (message send):</strong> Sender transmits message payload with
+            message ID. Server must acknowledge.
+          </li>
+          <li>
+            <strong>Server → Client (server ACK / 1 tick):</strong> Server confirms it received and
+            stored the message. Sender's client updates the message state to "sent" and shows 1 grey tick.
+            If this ACK is lost, the client retries step 1 with the same message ID.
+          </li>
+          <li>
+            <strong>Server → Recipient (message forward):</strong> Server forwards message to recipient's
+            device (or stores it if offline). Recipient must acknowledge delivery.
+          </li>
+          <li>
+            <strong>Recipient → Server (delivery ACK):</strong> Recipient's device confirms receipt.
+            Server updates message state to "delivered."
+          </li>
+          <li>
+            <strong>Server → Original Sender (delivery receipt / 2 grey ticks):</strong> Server notifies
+            the original sender that the message was delivered. Sender shows 2 grey ticks.
+          </li>
+        </ol>
+        <p>
+          Read receipts add a sixth event: when the recipient opens the conversation, the client sends
+          a read receipt to the server, which forwards it to the sender (2 blue ticks).
+        </p>
+        <p>
+          Any of these five steps can fail and be retried. Each retry carries the original message ID.
+          The server's idempotency logic handles duplicate step-1 retries. The client's seen-ID cache
+          handles duplicate step-3 retries. The system is robust to failures at every step because each
+          step is individually retried, and each step is individually idempotent.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Group Messages</span>
+        <h2>Group Message Complexity: Fan-Out, Sender Keys, and Read Receipts</h2>
+        <p>
+          Group messages amplify every individual-message challenge. When a user sends a message to a
+          512-member group:
+        </p>
+        <p>
+          <strong>Server-side fan-out:</strong> The server creates an individual delivery task for each
+          of the 512 recipients. Each task has its own delivery state. If the server retries delivery
+          to member 213 because her ACK was lost, members 1-212 and 214-512 should not get duplicates.
+          Each recipient's delivery state is tracked independently under the same message ID.
+        </p>
+        <p>
+          <strong>Group read receipts:</strong> The 2 grey ticks for a group message appear when the
+          message has been delivered to ALL members. The 2 blue ticks appear only when ALL members have
+          read the message. This is more conservative than individual messaging — one offline member
+          delays the tick transition for the entire group.
+        </p>
+        <p>
+          <strong>Sender Keys protocol:</strong> End-to-end encryption for groups uses a different
+          scheme than individual messaging. In individual messaging (Signal Protocol), each sender-recipient
+          pair has a unique encryption key. In groups, using unique keys per pair would require encrypting
+          each message N times for an N-member group — 512 encryptions per message in a max-size group.
+          Instead, WhatsApp uses the Sender Keys protocol: the sender generates a single symmetric key
+          for the (sender, group) pair and shares it with all group members once. Subsequent messages
+          are encrypted once with this key and decrypted by all members using their copy. When a member
+          leaves the group, the key is rotated (to provide forward secrecy — the ex-member should not
+          be able to decrypt future messages). New members receive the key history encrypted with their
+          individual keys so they can decrypt existing messages (configurable — "message history" setting).
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Multi-device and groups:</strong> Each device (phone + up to 4 linked devices) is
+            treated as a separate recipient in the sender key distribution. A message to a 10-person group
+            where each person has 2 devices requires distributing the sender key to 20 devices and
+            delivering the message to 20 delivery endpoints.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Multi-Device</span>
+        <h2>Multi-Device Deduplication: Phones, Tablets, and Sync</h2>
+        <p>
+          As of April 2023, WhatsApp supports up to 4 linked devices per account (in addition to the
+          primary phone). This introduces a new class of "duplicates" that are actually intentional:
+          every message should appear on all devices. The challenge is that each device has its own
+          delivery state and its own seen-ID cache.
+        </p>
+        <p>
+          <strong>How it works:</strong> When a message arrives for a user, the server delivers it
+          independently to each of that user's linked devices. Each device has its own delivery
+          endpoint. The server tracks delivery state per (message ID, device ID) — not just per message ID.
+          A delivery ACK from the phone does not count as delivery to the tablet.
+        </p>
+        <p>
+          <strong>Read state synchronization:</strong> When a user reads a message on their phone, the
+          blue ticks should appear on their tablet too (and the notification should be dismissed). This
+          is handled by sync messages — a special message type sent to all linked devices when any
+          device sends a read receipt. The sync message carries the original message IDs that were read.
+          Each device updates its local database accordingly.
+        </p>
+        <p>
+          <strong>Reconnect replay on linked device:</strong> If the tablet was offline for a week, on
+          reconnect it receives all messages delivered while it was offline — each with its original
+          message ID. The tablet's seen-ID cache (backed by its local SQLite database) deduplicates
+          any that were already seen during a previous online session.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Design Pattern</span>
+        <h2>The Idempotency Pattern: Applying This to Your Own System</h2>
+        <p>
+          WhatsApp's deduplication approach distills into a five-part pattern applicable to any at-least-once
+          distributed system:
+        </p>
+        <ol>
+          <li>
+            <strong>Client-generated IDs:</strong> Assign a globally unique identifier to every operation
+            before it leaves the client. Use UUID v4 or ULID (sortable). Never let the server generate
+            the ID on first receipt — the client cannot know the server's ID if the first request was lost.
+          </li>
+          <li>
+            <strong>Server-side idempotency store:</strong> The server stores a record of every processed
+            operation keyed by its client-generated ID. Before processing any incoming operation, check the
+            store. If found, return the cached result. If not found, process and store.
+          </li>
+          <li>
+            <strong>TTL-bounded idempotency window:</strong> The idempotency store does not need to retain
+            IDs forever — only as long as clients might retry. WhatsApp's window is 30 days (matching
+            message TTL). Stripe's idempotency key window is 24 hours. Choose a window matching your
+            max retry timeout plus a safety buffer.
+          </li>
+          <li>
+            <strong>Consumer dedup window:</strong> Recipients maintain a cache of recently processed
+            message IDs. Before processing an incoming message, check the cache. The window must cover
+            the max time between a first delivery and its retry.
+          </li>
+          <li>
+            <strong>Idempotent operations:</strong> Ensure the operation itself is safe to execute multiple
+            times with the same result. If processing a payment, the payment should be charged once
+            regardless of how many times the request arrives with the same idempotency key.
+          </li>
+        </ol>
+        <p>
+          <strong>Comparison to other systems:</strong> Stripe's idempotency keys follow exactly this pattern
+          — the client generates a unique key per payment request, Stripe stores results keyed by that value
+          for 24 hours, and retries with the same key return the cached result. AWS SQS MessageDeduplicationId
+          provides server-side dedup with a 5-minute window for FIFO queues. The pattern is universal —
+          only the window length and storage mechanism vary.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Idempotent Message Handler: Client ID Generation + Server Dedup Store</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * Complete idempotent message handler.
+ * Demonstrates:
+ *   - Client-side message ID generation before send
+ *   - Server-side dedup store in Redis (30-day TTL)
+ *   - Retry-safe message processing
+ *   - Consumer-side seen-ID cache
+ */
+import { createClient } from 'redis';
+import { randomUUID } from 'crypto';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+
+const DEDUP_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+
+// ─── CLIENT SIDE ────────────────────────────────────────────────────────────
+
+class MessageClient {
+  constructor(senderId) {
+    this.senderId   = senderId;
+    this.pendingAck = new Map(); // messageId -> { message, resolve, retryTimer }
+  }
+
+  /** Create a message with a client-generated ID and send it */
+  async sendMessage(recipientId, content, maxRetries = 5) {
+    const message = {
+      id:          randomUUID(),  // Client-generated — same ID on every retry
+      senderId:    this.senderId,
+      recipientId,
+      content,
+      timestamp:   Date.now(),
+    };
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`[Client] Sending message ${message.id} (attempt ${attempt + 1})`);
+        const result = await this.sendToServer(message);
+        console.log(`[Client] Message ${message.id} acknowledged: ${result.status}`);
+        return result;
+      } catch (err) {
+        if (attempt === maxRetries) throw new Error(`Failed after ${maxRetries} retries: ${err.message}`);
+        const delay = Math.min(1000 * Math.pow(2, attempt), 30_000); // exponential backoff, max 30s
+        console.warn(`[Client] No ACK for ${message.id}, retrying in ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+
+  async sendToServer(message) {
+    // Simulate network call — will throw 30% of the time to simulate ACK loss
+    await new Promise((resolve, reject) => setTimeout(() => {
+      Math.random() < 0.3 ? reject(new Error('Network timeout')) : resolve();
+    }, 100 + Math.random() * 200));
+    return messageServer.receive(message);
+  }
+}
+
+// ─── SERVER SIDE ────────────────────────────────────────────────────────────
+
+const messageServer = {
+  /** Idempotently receive and store a message */
+  async receive(message) {
+    const dedupKey = `msg:dedup:${message.id}`;
+
+    // Check dedup store — atomic get-or-set
+    const existing = await redis.get(dedupKey);
+    if (existing) {
+      console.log(`[Server] Duplicate detected for ${message.id} — returning cached result`);
+      return JSON.parse(existing); // Return the same result as the first processing
+    }
+
+    // Not seen before — process the message
+    const result = await this.processMessage(message);
+
+    // Store result with TTL — any future retry returns this result
+    await redis.setEx(dedupKey, DEDUP_TTL_SECONDS, JSON.stringify(result));
+
+    return result;
+  },
+
+  async processMessage(message) {
+    console.log(`[Server] Processing new message ${message.id}: "${message.content}"`);
+
+    // Simulate storage and fan-out
+    await this.storeMessage(message);
+    await this.forwardToRecipient(message);
+
+    return { status: 'delivered', messageId: message.id, processedAt: Date.now() };
+  },
+
+  async storeMessage(msg)    { /* Write to Cassandra */ },
+  async forwardToRecipient(msg) { await messageRecipient.receive(msg); },
+};
+
+// ─── RECIPIENT CLIENT SIDE ──────────────────────────────────────────────────
+
+const messageRecipient = {
+  seenIds: new Set(), // In production: LRU cache + persistent SQLite store
+
+  async receive(message) {
+    // Client-side dedup: have we seen this message ID before?
+    if (this.seenIds.has(message.id)) {
+      console.log(`[Recipient] Duplicate message ${message.id} discarded`);
+      return;
+    }
+
+    this.seenIds.add(message.id);
+    console.log(`[Recipient] New message ${message.id}: "${message.content}" from ${message.senderId}`);
+
+    // Display to user, update DB, send delivery ACK...
+    return { acked: true };
+  },
+};
+
+// ─── DEMO ────────────────────────────────────────────────────────────────────
+
+const client = new MessageClient('alice');
+
+console.log('=== Sending "I love you" with retry on ACK loss ===');
+await client.sendMessage('bob', 'I love you');
+
+console.log('\n=== Simulating server receiving same message twice ===');
+const msg = { id: randomUUID(), senderId: 'alice', recipientId: 'bob', content: 'Hello!', timestamp: Date.now() };
+await messageServer.receive(msg); // First delivery
+await messageServer.receive(msg); // Duplicate — should NOT re-process
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Delivery Receipt State Machine with ACK Handling and Reconnect Replay</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * Delivery receipt state machine.
+ * Models the 1-tick / 2-tick / blue-tick state transitions.
+ * Handles ACK retries and reconnect replay correctly.
+ */
+
+const MessageState = {
+  PENDING:   'PENDING',    // Created locally, not yet sent
+  SENT:      'SENT',       // Server ACK received (1 grey tick)
+  DELIVERED: 'DELIVERED',  // Recipient device ACK received (2 grey ticks)
+  READ:      'READ',       // Recipient opened conversation (2 blue ticks)
+  FAILED:    'FAILED',     // All retries exhausted
+};
+
+class DeliveryStateMachine {
+  constructor() {
+    this.messages = new Map(); // messageId -> { state, transitions[] }
+  }
+
+  createMessage(messageId, content) {
+    this.messages.set(messageId, {
+      id:          messageId,
+      content,
+      state:       MessageState.PENDING,
+      transitions: [{ state: MessageState.PENDING, timestamp: Date.now() }],
+      ackAttempts: 0,
+    });
+    return this.messages.get(messageId);
+  }
+
+  transition(messageId, newState) {
+    const msg = this.messages.get(messageId);
+    if (!msg) throw new Error(`Unknown message: ${messageId}`);
+
+    const validTransitions = {
+      [MessageState.PENDING]:   [MessageState.SENT, MessageState.FAILED],
+      [MessageState.SENT]:      [MessageState.DELIVERED, MessageState.FAILED],
+      [MessageState.DELIVERED]: [MessageState.READ],
+      [MessageState.READ]:      [],   // Terminal state
+      [MessageState.FAILED]:    [],   // Terminal state
+    };
+
+    if (!validTransitions[msg.state].includes(newState)) {
+      // Idempotent: if already in this state, ignore (handles duplicate ACKs)
+      if (msg.state === newState) {
+        console.log(`[StateMachine] Duplicate ACK for ${messageId} (already ${newState}) — ignored`);
+        return msg;
+      }
+      throw new Error(`Invalid transition: ${msg.state} -> ${newState} for message ${messageId}`);
+    }
+
+    msg.state = newState;
+    msg.transitions.push({ state: newState, timestamp: Date.now() });
+    this.onTransition(msg, newState);
+    return msg;
+  }
+
+  onTransition(msg, newState) {
+    const tick = {
+      [MessageState.SENT]:      '✓ (1 grey tick)',
+      [MessageState.DELIVERED]: '✓✓ (2 grey ticks)',
+      [MessageState.READ]:      '✓✓ (2 blue ticks)',
+      [MessageState.FAILED]:    '✗ (failed)',
+    }[newState] || '';
+    console.log(`[StateMachine] ${msg.id} -> ${newState} ${tick}`);
+  }
+
+  /** Process an incoming ACK — handles duplicates and out-of-order ACKs */
+  processAck(messageId, ackType) {
+    const stateMap = {
+      'server_receipt':   MessageState.SENT,
+      'device_delivery':  MessageState.DELIVERED,
+      'read_receipt':     MessageState.READ,
+    };
+    const targetState = stateMap[ackType];
+    if (!targetState) throw new Error(`Unknown ACK type: ${ackType}`);
+
+    try {
+      return this.transition(messageId, targetState);
+    } catch (err) {
+      // If transition fails because state is already advanced, that's fine (idempotent)
+      console.warn(`[StateMachine] ACK for ${messageId} discarded: ${err.message}`);
+      return this.messages.get(messageId);
+    }
+  }
+
+  /** Replay unacked messages on reconnect (delivers stored messages to offline client) */
+  replayUndelivered(storedMessages) {
+    console.log(`\n[Reconnect] Replaying ${storedMessages.length} stored messages`);
+    for (const { messageId, content, ackedBefore } of storedMessages) {
+      if (!this.messages.has(messageId)) {
+        // New message — create and display
+        this.createMessage(messageId, content);
+        console.log(`[Reconnect] Displaying new message ${messageId}: "${content}"`);
+        this.processAck(messageId, 'device_delivery');
+      } else {
+        // Duplicate — already in seen cache, skip
+        console.log(`[Reconnect] Skipping already-seen message ${messageId}`);
+      }
+    }
+  }
+}
+
+// Demo
+const sm = new DeliveryStateMachine();
+
+// Normal happy path
+const msgId = 'msg-001';
+sm.createMessage(msgId, 'I love you');
+sm.processAck(msgId, 'server_receipt');    // 1 grey tick
+sm.processAck(msgId, 'device_delivery');   // 2 grey ticks
+sm.processAck(msgId, 'read_receipt');      // 2 blue ticks
+
+// Duplicate ACK handling (network retried the delivery ACK)
+console.log('\n--- Duplicate ACK simulation ---');
+sm.processAck(msgId, 'device_delivery');   // Should be silently ignored
+
+// Reconnect replay
+console.log('\n--- Reconnect replay simulation ---');
+sm.replayUndelivered([
+  { messageId: 'msg-002', content: 'Hello!', ackedBefore: false },       // New message
+  { messageId: 'msg-001', content: 'I love you', ackedBefore: true },    // Already seen — skip
+]);
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Building a Messaging System — Idempotency Checklist</h2>
+        <ul class="check-list">
+          <li>Generate message IDs on the client before sending — never rely on the server to assign IDs that the client then re-uses on retry.</li>
+          <li>Store the idempotency key → result mapping on the server with a TTL equal to your max retry window.</li>
+          <li>Before processing any incoming message, check the dedup store — process and store atomically (use Redis SET NX or a DB transaction).</li>
+          <li>Maintain a recipient-side seen-ID cache large enough to cover your max retry-to-delivery time window.</li>
+          <li>Persist the seen-ID cache across app restarts — an in-memory-only cache is defeated by the Scenario C crash case.</li>
+          <li>Track delivery state per (message ID, recipient device ID) in multi-device scenarios, not just per message ID.</li>
+          <li>Make read receipts and delivery ACKs idempotent — the same ACK may arrive multiple times.</li>
+          <li>In group chats, track fan-out delivery state independently per recipient — one member's ACK loss should not cause duplicates for others.</li>
+          <li>Include exponential backoff with jitter in client retry logic — avoid creating retry storms.</li>
+          <li>Test the reconnect replay path explicitly — it is the most common source of duplicate message bugs in practice.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Can WhatsApp see my messages?</h3>
+        <p>
+          No. WhatsApp uses the Signal Protocol for end-to-end encryption on all messages, calls, and
+          media. WhatsApp servers relay encrypted ciphertext but hold no keys to decrypt it. Even WhatsApp
+          employees cannot read message content. The server only stores metadata: message ID, sender,
+          recipient, timestamp, and encrypted payload size.
+        </p>
+
+        <h3>Why does a message sometimes show 1 tick for a long time even when the recipient is online?</h3>
+        <p>
+          1 tick means the message has not reached WhatsApp's server — it is still in transit on the
+          sender's side. This happens when the sender has a poor data connection. The app is retrying the
+          send in the background. As soon as the message reaches the server, the tick appears. This is
+          distinct from the recipient being online — the issue is on the sender's end.
+        </p>
+
+        <h3>What is the maximum message size in WhatsApp?</h3>
+        <p>
+          Text messages are capped at 65,536 characters. Media files (images, video, documents) have
+          separate limits: 16 MB for images, 16 MB for documents, 16 MB for audio, and 64 MB for video.
+          Large media is uploaded to WhatsApp's servers and a download link is sent, not the file itself
+          in the message body.
+        </p>
+
+        <h3>Does exactly-once delivery exist anywhere in practice?</h3>
+        <p>
+          It exists, but it is expensive. Kafka's exactly-once semantics use idempotent producers (each
+          message gets a sequence number; the broker rejects duplicates from the same producer) combined
+          with transactional consumers (commits are atomic with message acknowledgment). Apache Flink and
+          Google Pub/Sub with ordering keys also offer exactly-once-like guarantees. The cost is reduced
+          throughput, higher latency, and architectural complexity. For most systems, at-least-once with
+          idempotent consumers is the pragmatic choice.
+        </p>
+
+        <h3>How does WhatsApp handle messages when storage is almost full on the recipient's device?</h3>
+        <p>
+          Text messages are tiny and almost never fail due to storage. Media messages fail more gracefully:
+          media is not auto-downloaded if the device is low on storage — the user sees a download button
+          instead. The message itself (text metadata) always arrives. WhatsApp's store-and-forward means
+          the message waits on the server for up to 30 days — the user has 30 days to free storage and
+          download any pending media.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaways</h2>
+        <p>
+          WhatsApp's deduplication architecture is a textbook example of the <strong>at-least-once +
+          idempotent consumer</strong> pattern at extreme scale. The core insight is that preventing
+          <em>visible</em> duplicates does not require preventing all duplicates in the delivery path —
+          it requires detecting and discarding them at the point of display. This is achieved through
+          two independent, overlapping mechanisms: <strong>client-generated message IDs</strong> (so
+          every retry carries the same identity) and <strong>server-side dedup stores with TTL-bounded
+          windows</strong> (so the server never re-processes what it already processed). The 5-step ACK
+          protocol makes the delivery state machine explicit, and each step's idempotency ensures that
+          any retry at any step is safe. Apply this exact pattern in any distributed system that sends
+          events, processes payments, or delivers notifications.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Further exploration</h2>
+        <ul>
+          <li><a href="./22-system-design-failure-scenarios.html">22 Scenario-Based System Design Questions That Reveal How Real Systems Break</a></li>
+          <li><a href="./api-gateway-pattern-microservices.html">API Gateway Pattern in Microservices</a></li>
+          <li><a href="./cache-stampede-hot-key.html">Cache Stampede and Hot Key Problems</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

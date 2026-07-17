@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Design &amp; Architecture — The Complete Guide | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="API design and system architecture diagram on a screen"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Architecture · Engineering · 45 min</span>
+          </div>
+        </figure>
+
+        <h1>API Design &amp; Architecture — The Complete Guide</h1>
+        <p class="summary">
+          Everything from the six major API architecture styles and when to choose each, to the design rules
+          that make an API a joy to use, the performance techniques that can 10× throughput, and a from-scratch
+          Node.js REST implementation — synthesised from five expert sources into one exhaustive reference.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Sources: YouTube — API Design &amp; Architecture (1hr) · Top 7 API Performance · Good vs Bad APIs · RESTful APIs in 100s · Top 6 API Styles</span>
+          <span class="meta-item">Domain: Backend Engineering</span>
+          <span class="meta-item">Published: 2024–2026</span>
+        </div>
+      </header>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <p class="lead">
+          An API is a contract. Every design decision — the style, the naming, the error format, the version
+          strategy — either makes that contract easy to honour or easy to break. Most bad APIs aren't caused by
+          wrong technology choices; they're caused by skipping the design phase and letting implementation
+          details leak through the interface.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> API design is an outside-in discipline. You start with what the consumer
+            needs, then decide what to expose and how — not the other way around. The six architecture styles
+            each optimise for a different consumer need: REST for resources, GraphQL for flexible queries, gRPC
+            for speed, WebSockets for bidirectional streams, webhooks for push events, and SOAP for strict
+            contracts.
+          </p>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="story-card">
+        <span class="section-label">Story · The Monday-morning outage</span>
+        <p>
+          A team ships a mobile app backed by a REST API designed in a weekend sprint. Endpoints are named after
+          internal database tables: <code>GET /tbl_user_data</code>. There's no versioning. Errors return
+          HTTP&nbsp;200 with <code>{ "success": false }</code> in the body. The iOS client parses the JSON body;
+          the Android client checks the status code. When the team fixes the error format, both clients break in
+          different ways simultaneously.
+        </p>
+        <p>
+          Three months later, a new product requirement forces a field rename. There's no version field,
+          no deprecation path. Every client must update in lock-step or the app crashes. The team now spends
+          more time managing API compatibility than building features.
+        </p>
+        <p>
+          Every rule in this guide exists to prevent exactly that scenario.
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 1</span>
+        <h2>The Six API Architecture Styles — and When to Use Each</h2>
+        <p>
+          There is no single best API style. Each solves a specific communication problem. Choosing the wrong
+          one means fighting the protocol at every step.
+        </p>
+
+        <h3>1. REST (Representational State Transfer)</h3>
+        <p>
+          The dominant style for public and partner APIs. REST treats everything as a
+          <strong>resource</strong> identified by a URI and acted on via standard HTTP methods. It is stateless,
+          cacheable, and layerable. The uniform interface constraint is its greatest strength — any client that
+          understands HTTP can call a REST API without prior knowledge.
+        </p>
+        <ul>
+          <li><strong>Best for:</strong> Public-facing APIs, mobile backends, CRUD services, systems where caching matters.</li>
+          <li><strong>Weakness:</strong> Over-fetching (getting more fields than needed) and under-fetching (requiring multiple round-trips for related data).</li>
+          <li><strong>Constraint checklist:</strong> Stateless, client-server, cacheable, uniform interface, layered system, optional code-on-demand.</li>
+        </ul>
+        <div class="callout">
+          <p><strong>REST anti-pattern to avoid:</strong> Putting verbs in URLs (<code>/getUser</code>, <code>/deletePost</code>). The HTTP method <em>is</em> the verb. The URL names the resource.</p>
+        </div>
+
+        <h3>2. GraphQL</h3>
+        <p>
+          Developed at Facebook to solve REST's over/under-fetching problem. The client defines the exact
+          shape of the response in a query; the server returns precisely that. A single endpoint handles all
+          operations: <code>query</code> (read), <code>mutation</code> (write), <code>subscription</code>
+          (real-time stream).
+        </p>
+        <ul>
+          <li><strong>Best for:</strong> Complex frontends with diverse data needs, mobile apps on constrained bandwidth, APIs aggregating multiple back-end services, product teams that ship UI changes frequently.</li>
+          <li><strong>Weakness:</strong> Complex caching (no URL per resource), potential N+1 query problems server-side, steeper learning curve, schema management overhead.</li>
+          <li><strong>Key concept — DataLoader:</strong> Batches and deduplicates database calls within a single request cycle to solve N+1.</li>
+        </ul>
+
+        <h3>3. gRPC (Google Remote Procedure Call)</h3>
+        <p>
+          Uses HTTP/2 and Protocol Buffers (protobuf) for binary serialisation. The API is defined in a
+          <code>.proto</code> schema file; code is generated for both client and server in any supported
+          language. Payload size is roughly 5–10× smaller than equivalent JSON; latency is significantly lower.
+        </p>
+        <ul>
+          <li><strong>Best for:</strong> Internal microservice-to-microservice communication, polyglot systems, high-throughput pipelines, streaming use cases (client streaming, server streaming, bidirectional streaming).</li>
+          <li><strong>Weakness:</strong> Not human-readable (binary), harder to debug without tooling, browser support requires a proxy layer (gRPC-Web), tight coupling to proto schema.</li>
+          <li><strong>HTTP/2 benefits:</strong> Multiplexing (many requests over one connection), header compression (HPACK), server push.</li>
+        </ul>
+
+        <h3>4. WebSockets</h3>
+        <p>
+          Upgrades an HTTP connection to a persistent, full-duplex TCP channel. After the handshake, either
+          side can send messages at any time without the request-response overhead. Ideal for any application
+          requiring real-time data flow.
+        </p>
+        <ul>
+          <li><strong>Best for:</strong> Live chat, collaborative editing, real-time dashboards, online games, trading platforms, live sports scores.</li>
+          <li><strong>Weakness:</strong> Stateful connections make horizontal scaling harder (sticky sessions or a shared pub/sub layer like Redis Streams or Kafka is needed), no built-in request-response correlation.</li>
+        </ul>
+
+        <h3>5. Webhooks (Reverse APIs)</h3>
+        <p>
+          The server pushes data to the client when an event occurs, rather than the client polling. The
+          client registers a callback URL; the server POSTs to that URL when the event fires. Stripe, GitHub,
+          and Twilio all rely heavily on webhooks.
+        </p>
+        <ul>
+          <li><strong>Best for:</strong> Event-driven integrations, payment confirmations, CI/CD triggers, IoT alerts, any flow where the client should react to server-side state changes.</li>
+          <li><strong>Weakness:</strong> Client must be publicly accessible, delivery is not guaranteed (need retry + idempotency logic), ordering is not guaranteed, debugging is harder.</li>
+          <li><strong>Reliability pattern:</strong> Sign payloads with HMAC-SHA256, validate the signature on receipt, return 200 immediately and process async to avoid timeouts.</li>
+        </ul>
+
+        <h3>6. SOAP (Simple Object Access Protocol)</h3>
+        <p>
+          An XML-based protocol with strict message structure, mandatory envelopes, and a WSDL (Web Services
+          Description Language) contract. Predates REST. Still dominant in enterprise systems (banking,
+          healthcare, government) because of its built-in standards for security (WS-Security), transactions
+          (WS-AtomicTransaction), and reliability (WS-ReliableMessaging).
+        </p>
+        <ul>
+          <li><strong>Best for:</strong> Enterprise integrations requiring formal contracts, regulated industries, systems that need built-in WS-* standards for transactions and security.</li>
+          <li><strong>Weakness:</strong> Verbose XML overhead, steep learning curve, slower development velocity, poor fit for modern web/mobile clients.</li>
+        </ul>
+
+        <h3>Quick decision matrix</h3>
+        <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:.85rem;margin-top:.75rem;">
+          <thead>
+            <tr style="background:#f0fdf4;border-bottom:2px solid #d1fae5;">
+              <th style="padding:.5rem .75rem;text-align:left;">Style</th>
+              <th style="padding:.5rem .75rem;text-align:left;">Protocol</th>
+              <th style="padding:.5rem .75rem;text-align:left;">Data format</th>
+              <th style="padding:.5rem .75rem;text-align:left;">Choose when…</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #e7e5df;"><td style="padding:.45rem .75rem;"><strong>REST</strong></td><td style="padding:.45rem .75rem;">HTTP/1.1+</td><td style="padding:.45rem .75rem;">JSON/XML</td><td style="padding:.45rem .75rem;">Resources, CRUD, public APIs</td></tr>
+            <tr style="border-bottom:1px solid #e7e5df;background:#fafaf8;"><td style="padding:.45rem .75rem;"><strong>GraphQL</strong></td><td style="padding:.45rem .75rem;">HTTP/1.1+</td><td style="padding:.45rem .75rem;">JSON</td><td style="padding:.45rem .75rem;">Flexible queries, complex frontends</td></tr>
+            <tr style="border-bottom:1px solid #e7e5df;"><td style="padding:.45rem .75rem;"><strong>gRPC</strong></td><td style="padding:.45rem .75rem;">HTTP/2</td><td style="padding:.45rem .75rem;">Protobuf (binary)</td><td style="padding:.45rem .75rem;">Microservices, high throughput, streaming</td></tr>
+            <tr style="border-bottom:1px solid #e7e5df;background:#fafaf8;"><td style="padding:.45rem .75rem;"><strong>WebSocket</strong></td><td style="padding:.45rem .75rem;">TCP (upgraded)</td><td style="padding:.45rem .75rem;">Binary/text</td><td style="padding:.45rem .75rem;">Real-time bidirectional data</td></tr>
+            <tr style="border-bottom:1px solid #e7e5df;"><td style="padding:.45rem .75rem;"><strong>Webhook</strong></td><td style="padding:.45rem .75rem;">HTTP/1.1+</td><td style="padding:.45rem .75rem;">JSON</td><td style="padding:.45rem .75rem;">Event-driven push, async notifications</td></tr>
+            <tr><td style="padding:.45rem .75rem;background:#fafaf8;"><strong>SOAP</strong></td><td style="padding:.45rem .75rem;background:#fafaf8;">HTTP/SMTP</td><td style="padding:.45rem .75rem;background:#fafaf8;">XML</td><td style="padding:.45rem .75rem;background:#fafaf8;">Enterprise, regulated, WS-* required</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 2</span>
+        <h2>REST API Design Rules — Good vs Bad APIs</h2>
+        <p>
+          The difference between a good API and a bad one is rarely the technology. It's the discipline
+          applied to naming, structure, and consistency.
+        </p>
+
+        <h3>Rule 1 — Use nouns, never verbs, in endpoints</h3>
+        <p>
+          The HTTP method already expresses the action. The URL should name the resource being acted on.
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:.85rem;margin:.6rem 0;">
+          <thead><tr style="background:#fef2f2;"><th style="padding:.4rem .7rem;text-align:left;">❌ Bad</th><th style="padding:.4rem .7rem;text-align:left;">✅ Good</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #fee2e2;"><td style="padding:.35rem .7rem;"><code>GET /getUsers</code></td><td style="padding:.35rem .7rem;"><code>GET /users</code></td></tr>
+            <tr style="border-bottom:1px solid #fee2e2;"><td style="padding:.35rem .7rem;"><code>POST /createOrder</code></td><td style="padding:.35rem .7rem;"><code>POST /orders</code></td></tr>
+            <tr style="border-bottom:1px solid #fee2e2;"><td style="padding:.35rem .7rem;"><code>DELETE /deleteProduct?id=5</code></td><td style="padding:.35rem .7rem;"><code>DELETE /products/5</code></td></tr>
+            <tr><td style="padding:.35rem .7rem;"><code>GET /fetchOrdersByUser</code></td><td style="padding:.35rem .7rem;"><code>GET /users/42/orders</code></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Rule 2 — Use plural nouns for collections</h3>
+        <p>Consistency matters more than grammar. <code>/users</code> for the collection, <code>/users/{id}</code> for a single resource.</p>
+
+        <h3>Rule 3 — Logical nesting for relationships</h3>
+        <p>
+          Nest related resources to express ownership, but cap depth at 2–3 levels. Beyond that, references
+          in the response body are cleaner than deeper URL nesting.
+        </p>
+        <ul>
+          <li><code>GET /articles/{id}/comments</code> — correct, 2 levels</li>
+          <li><code>GET /users/{id}/posts/{postId}/comments/{commentId}/likes</code> — too deep; better: <code>GET /likes?commentId=X</code></li>
+          <li>Avoid mirroring database table structure in URLs — it leaks implementation and creates security risk</li>
+        </ul>
+
+        <h3>Rule 4 — HTTP methods map to CRUD precisely</h3>
+        <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:.85rem;margin:.6rem 0;">
+          <thead><tr style="background:#f0fdf4;"><th style="padding:.4rem .7rem;text-align:left;">Method</th><th style="padding:.4rem .7rem;text-align:left;">CRUD</th><th style="padding:.4rem .7rem;text-align:left;">Idempotent?</th><th style="padding:.4rem .7rem;text-align:left;">Safe?</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #d1fae5;"><td style="padding:.35rem .7rem;"><code>GET</code></td><td style="padding:.35rem .7rem;">Read</td><td style="padding:.35rem .7rem;">Yes</td><td style="padding:.35rem .7rem;">Yes</td></tr>
+            <tr style="border-bottom:1px solid #d1fae5;background:#fafaf8;"><td style="padding:.35rem .7rem;"><code>POST</code></td><td style="padding:.35rem .7rem;">Create</td><td style="padding:.35rem .7rem;">No</td><td style="padding:.35rem .7rem;">No</td></tr>
+            <tr style="border-bottom:1px solid #d1fae5;"><td style="padding:.35rem .7rem;"><code>PUT</code></td><td style="padding:.35rem .7rem;">Full update / upsert</td><td style="padding:.35rem .7rem;">Yes</td><td style="padding:.35rem .7rem;">No</td></tr>
+            <tr style="border-bottom:1px solid #d1fae5;background:#fafaf8;"><td style="padding:.35rem .7rem;"><code>PATCH</code></td><td style="padding:.35rem .7rem;">Partial update</td><td style="padding:.35rem .7rem;">Conditionally</td><td style="padding:.35rem .7rem;">No</td></tr>
+            <tr><td style="padding:.35rem .7rem;"><code>DELETE</code></td><td style="padding:.35rem .7rem;">Remove</td><td style="padding:.35rem .7rem;">Yes</td><td style="padding:.35rem .7rem;">No</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Rule 5 — Always use standard HTTP status codes</h3>
+        <p>
+          Never return HTTP 200 with an error in the body — this breaks every HTTP-aware tool (load balancers,
+          monitoring, caches, client frameworks). Use the correct code for every outcome:
+        </p>
+        <ul>
+          <li><code>200 OK</code> — successful GET, PUT, PATCH, DELETE</li>
+          <li><code>201 Created</code> — successful POST; include <code>Location</code> header pointing to new resource</li>
+          <li><code>204 No Content</code> — successful DELETE with no body</li>
+          <li><code>400 Bad Request</code> — client sent invalid data; include validation error details</li>
+          <li><code>401 Unauthorized</code> — not authenticated (missing or invalid credentials)</li>
+          <li><code>403 Forbidden</code> — authenticated but lacks permission</li>
+          <li><code>404 Not Found</code> — resource doesn't exist</li>
+          <li><code>409 Conflict</code> — state conflict (e.g. duplicate creation, optimistic lock failure)</li>
+          <li><code>422 Unprocessable Entity</code> — syntactically valid but semantically invalid request</li>
+          <li><code>429 Too Many Requests</code> — rate limit exceeded; include <code>Retry-After</code></li>
+          <li><code>500 Internal Server Error</code> — unhandled server error; never expose stack traces</li>
+          <li><code>503 Service Unavailable</code> — dependency down or overloaded</li>
+        </ul>
+
+        <h3>Rule 6 — Return consistent, informative error bodies</h3>
+        <p>A good error response tells the client what went wrong, why, and (where possible) how to fix it. Never just return a status code with no body.</p>
+        <span class="code-label">JSON error body — recommended format</span>
+        <pre><code class="language-javascript">{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request body failed validation",
+    "details": [
+      {
+        "field": "email",
+        "issue": "must be a valid email address",
+        "received": "not-an-email"
+      }
+    ],
+    "requestId": "req_4kZ9mN2xP",
+    "docsUrl": "https://api.example.com/docs/errors#VALIDATION_ERROR"
+  }
+}</code></pre>
+
+        <h3>Rule 7 — Filtering, sorting, and pagination via query parameters</h3>
+        <ul>
+          <li>Filtering: <code>GET /products?category=shoes&amp;maxPrice=100</code></li>
+          <li>Sorting: <code>GET /products?sort=price&amp;order=asc</code> (or <code>sort=-price</code> for desc)</li>
+          <li>Offset pagination: <code>GET /products?page=2&amp;limit=20</code> — simple, but inconsistent on live data</li>
+          <li>Cursor pagination: <code>GET /products?after=cursor_abc123&amp;limit=20</code> — consistent for feeds (used by GitHub, Twitter/X)</li>
+          <li>Always include metadata in paginated responses: <code>total</code>, <code>page</code>, <code>limit</code>, <code>nextCursor</code></li>
+        </ul>
+
+        <h3>Rule 8 — Version your API from day one</h3>
+        <p>
+          The moment a public client exists, breaking changes are a migration problem. There are three common
+          versioning strategies — choose one and be consistent across the entire API:
+        </p>
+        <ul>
+          <li><strong>URL path versioning</strong> (most common): <code>/v1/users</code>, <code>/v2/users</code> — visible, cacheable, easy to route</li>
+          <li><strong>Query parameter versioning</strong>: <code>/users?version=2</code> — easier to add but pollutes query strings</li>
+          <li><strong>Header versioning</strong>: <code>Accept: application/vnd.example.v2+json</code> — clean URLs, harder to test in a browser</li>
+        </ul>
+        <p>
+          Additive changes (new optional fields, new endpoints) are <strong>non-breaking</strong>. Removing or
+          renaming fields, changing types, or changing HTTP methods are <strong>breaking</strong> and require a
+          new major version.
+        </p>
+
+        <h3>Rule 9 — Enforce HTTPS everywhere, always</h3>
+        <p>
+          There is no valid reason to serve an API over plain HTTP in 2026. TLS certificates from Let's Encrypt
+          are free. Beyond encryption, use:
+        </p>
+        <ul>
+          <li><strong>HSTS</strong> (<code>Strict-Transport-Security</code>) — forces browsers to upgrade to HTTPS</li>
+          <li><strong>API keys</strong> — for identifying callers; rotate on compromise</li>
+          <li><strong>OAuth 2.0 + JWT</strong> — for delegated user authentication; short-lived access tokens, long-lived refresh tokens</li>
+          <li><strong>Principle of least privilege</strong> — each client gets only the scopes it needs</li>
+        </ul>
+
+        <h3>Rule 10 — Idempotency for mutation endpoints</h3>
+        <p>
+          Network retries are unavoidable. A payment endpoint that isn't idempotent will double-charge users on
+          retry. Pattern: accept an <code>Idempotency-Key</code> header on all POST/PATCH/DELETE operations.
+          Store the key and response; on duplicate key, return the cached response without re-executing.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Stripe's rule:</strong> Every POST mutation accepts <code>Idempotency-Key</code>. Keys are
+            scoped to 24 hours. The same key always returns the same result, whether the original request
+            succeeded, failed, or is still processing.
+          </p>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 3</span>
+        <h2>7 Performance Techniques That Can 10× API Throughput</h2>
+        <p>
+          Performance problems in APIs are almost never caused by the web framework. They come from one of
+          seven areas — and fixing them in order of impact produces the largest gains with the least risk.
+        </p>
+
+        <h3>1. Caching — the highest-leverage optimization</h3>
+        <p>
+          Every layer of the stack can cache. Each layer reduces load on the layer below:
+        </p>
+        <ul>
+          <li><strong>HTTP response caching:</strong> Set <code>Cache-Control: public, max-age=3600</code> on read-only endpoints. CDNs and reverse proxies (Nginx, CloudFront) cache responses at the edge — zero compute cost per hit.</li>
+          <li><strong>Application-level cache (Redis):</strong> Store expensive query results with a short TTL. Cache-aside pattern: check cache → miss → query DB → write cache → return.</li>
+          <li><strong>Semantic caching (for LLM APIs):</strong> Embed the query, find semantically similar past queries using vector search, return cached response if similarity exceeds threshold.</li>
+          <li><strong>ETag / conditional GET:</strong> Server returns an ETag (hash of response); client sends <code>If-None-Match: "etag-value"</code> on next request; server returns 304 Not Modified if unchanged — no body transfer.</li>
+        </ul>
+        <div class="callout">
+          <p><strong>Avoid caching:</strong> Anything with user-specific data at a public CDN layer, or mutation responses (POST/PATCH/DELETE).</p>
+        </div>
+
+        <h3>2. Connection pooling</h3>
+        <p>
+          Opening a new TCP+TLS connection per request costs ~100–500ms. Connection pools maintain a set of
+          pre-opened connections and hand them off to requests. With a pool, connection overhead drops to near
+          zero.
+        </p>
+        <ul>
+          <li><strong>Database connection pools:</strong> PgBouncer for PostgreSQL, HikariCP for Java, pg-pool for Node.js. Set <code>max</code> to (CPU cores × 2) + storage latency headroom.</li>
+          <li><strong>HTTP keep-alive:</strong> Reuses TCP connections for multiple requests. Enabled by default in HTTP/1.1. HTTP/2 multiplexes requests on a single connection — even better.</li>
+          <li><strong>gRPC:</strong> HTTP/2 multiplexing means one connection handles hundreds of concurrent streams.</li>
+        </ul>
+
+        <h3>3. Async processing for long-running operations</h3>
+        <p>
+          Operations that take more than a few seconds (video processing, email sending, report generation,
+          ML inference) should never block the HTTP response. Pattern:
+        </p>
+        <ol>
+          <li>Client POSTs the operation request</li>
+          <li>API immediately returns <code>202 Accepted</code> with a job ID and a <code>Location</code> header pointing to a status endpoint</li>
+          <li>Background worker processes the job (BullMQ, Celery, SQS Lambda)</li>
+          <li>Client polls <code>GET /jobs/{id}</code> or receives a webhook when complete</li>
+        </ol>
+
+        <h3>4. Pagination — never return unbounded collections</h3>
+        <p>
+          <code>GET /users</code> without a <code>limit</code> will eventually return millions of rows, OOM
+          the server, and timeout the client. Always:
+        </p>
+        <ul>
+          <li>Apply a default page size (20–100 items) and a maximum (1000)</li>
+          <li>Reject requests that exceed the max: <code>400 Bad Request</code></li>
+          <li>For feeds: use cursor pagination — it's stable even as records are inserted/deleted</li>
+        </ul>
+
+        <h3>5. Payload compression</h3>
+        <p>
+          JSON is verbose. Gzip compression typically reduces payload size by 60–80% with negligible CPU cost on modern hardware.
+        </p>
+        <ul>
+          <li>Enable <code>Content-Encoding: gzip</code> on responses if the client sends <code>Accept-Encoding: gzip</code></li>
+          <li>For internal services: switch to protobuf (gRPC) — binary serialisation is 5–10× smaller than JSON before compression</li>
+          <li>For field-heavy responses: implement <a href="#sparse-fieldsets">sparse fieldsets</a> (<code>?fields=id,name,email</code>) to let clients request only what they need</li>
+        </ul>
+
+        <h3 id="sparse-fieldsets">6. Sparse fieldsets / response shaping</h3>
+        <p>
+          Allow clients to specify which fields to return. This reduces payload size, reduces database query
+          projection cost, and aligns the API toward the consumer's actual need (similar to GraphQL's
+          selection sets, but within REST):
+        </p>
+        <ul>
+          <li><code>GET /users/42?fields=id,name,email</code></li>
+          <li><code>GET /orders?fields=id,status,total&amp;expand=items</code></li>
+          <li>Stripe and GitHub both support <code>?expand[]=</code> to opt-in to nested objects</li>
+        </ul>
+
+        <h3>7. Rate limiting — protect performance by design</h3>
+        <p>
+          A single misbehaving client (or a DDoS) can saturate your API for everyone. Rate limiting is not
+          just a security control — it is a performance guarantee for all other clients.
+        </p>
+        <ul>
+          <li><strong>Token bucket:</strong> Each client gets N tokens per window. Each request consumes a token. Tokens refill at a fixed rate. Allows bursting.</li>
+          <li><strong>Sliding window counter:</strong> Counts requests in the last N seconds using a rolling window. More accurate than fixed window.</li>
+          <li><strong>Fixed window:</strong> Simple counter reset every window. Susceptible to burst at window boundary.</li>
+          <li>Respond with <code>429 Too Many Requests</code> and headers: <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, <code>X-RateLimit-Reset</code>, <code>Retry-After</code>.</li>
+          <li>Implement at the API gateway layer (Kong, AWS API Gateway, Nginx) to protect all downstream services simultaneously.</li>
+        </ul>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 4</span>
+        <h2>Building a REST API from Scratch — Node.js + Express</h2>
+        <p>
+          Theory without code is half the picture. Below is a production-shaped Express API implementing the
+          patterns from Parts 2 and 3: proper routing, validation, error handling, caching, and rate limiting.
+        </p>
+
+        <span class="code-label">JavaScript Example — Full REST API skeleton (Node.js / Express)</span>
+        <pre><code class="language-javascript">// server.js — production-shaped REST API skeleton
+// npm install express express-rate-limit helmet compression cors
+import express from 'express';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+import compression from 'compression';
+import cors from 'cors';
+
+const app = express();
+
+// ── Security &amp; compression middleware ────────────────────────────────────
+app.use(helmet());                          // sets secure HTTP headers
+app.use(compression());                     // gzip all responses
+app.use(cors({ origin: process.env.ALLOWED_ORIGINS?.split(',') }));
+app.use(express.json({ limit: '1mb' }));    // parse JSON bodies
+
+// ── Rate limiting (token bucket via fixed window) ─────────────────────────
+const limiter = rateLimit({
+  windowMs: 60 * 1000,   // 1-minute window
+  max: 100,              // 100 requests per window per IP
+  standardHeaders: true, // X-RateLimit-* headers in response
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: 'Too many requests. Please wait before retrying.',
+        retryAfter: Math.ceil(req.rateLimit.resetTime / 1000),
+      },
+    });
+  },
+});
+app.use('/api/', limiter);
+
+// ── Simple in-memory cache (replace with Redis in production) ─────────────
+const cache = new Map();
+function cacheMiddleware(ttlSeconds) {
+  return (req, res, next) => {
+    if (req.method !== 'GET') return next();
+    const key = req.originalUrl;
+    const hit = cache.get(key);
+    if (hit &amp;&amp; Date.now() - hit.ts &lt; ttlSeconds * 1000) {
+      res.set('X-Cache', 'HIT');
+      return res.json(hit.data);
+    }
+    // Override res.json to capture the response and cache it
+    const originalJson = res.json.bind(res);
+    res.json = (data) => {
+      if (res.statusCode === 200) cache.set(key, { data, ts: Date.now() });
+      res.set('X-Cache', 'MISS');
+      return originalJson(data);
+    };
+    next();
+  };
+}
+
+// ── Idempotency key middleware (for mutating endpoints) ───────────────────
+const idempotencyStore = new Map(); // use Redis in production with 24h TTL
+function idempotencyMiddleware(req, res, next) {
+  const key = req.headers['idempotency-key'];
+  if (!key) return next();
+  if (idempotencyStore.has(key)) {
+    const cached = idempotencyStore.get(key);
+    res.set('X-Idempotency-Replayed', 'true');
+    return res.status(cached.status).json(cached.body);
+  }
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    idempotencyStore.set(key, { status: res.statusCode, body });
+    return originalJson(body);
+  };
+  next();
+}
+
+// ── Resource router: /api/v1/users ────────────────────────────────────────
+const usersRouter = express.Router();
+
+// GET /api/v1/users?page=1&amp;limit=20&amp;sort=createdAt&amp;order=desc&amp;fields=id,name
+usersRouter.get('/', cacheMiddleware(60), async (req, res, next) => {
+  try {
+    const page    = Math.max(1, parseInt(req.query.page  ?? '1',  10));
+    const limit   = Math.min(100, parseInt(req.query.limit ?? '20', 10));
+    const sort    = ['createdAt','name','email'].includes(req.query.sort) ? req.query.sort : 'createdAt';
+    const order   = req.query.order === 'asc' ? 'asc' : 'desc';
+    const fields  = req.query.fields?.split(',').filter(Boolean);
+
+    // Simulate DB query
+    const users = await db.users.findMany({ page, limit, sort, order, fields });
+
+    res.json({
+      data: users,
+      pagination: {
+        page,
+        limit,
+        total: users.total,
+        hasNextPage: page * limit &lt; users.total,
+      },
+    });
+  } catch (err) {
+    next(err); // delegate to global error handler
+  }
+});
+
+// GET /api/v1/users/:id
+usersRouter.get('/:id', cacheMiddleware(300), async (req, res, next) => {
+  try {
+    const user = await db.users.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: { code: 'NOT_FOUND', message: `User ${req.params.id} not found` } });
+    res.json({ data: user });
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/users — with idempotency
+usersRouter.post('/', idempotencyMiddleware, async (req, res, next) => {
+  try {
+    const { name, email, password } = req.body;
+    // Validate — never trust client input
+    const errors = [];
+    if (!name  || typeof name  !== 'string') errors.push({ field: 'name',  issue: 'required string' });
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push({ field: 'email', issue: 'valid email required' });
+    if (!password || password.length &lt; 8) errors.push({ field: 'password', issue: 'minimum 8 characters' });
+    if (errors.length) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', details: errors } });
+
+    const user = await db.users.create({ name, email, password });
+    res
+      .status(201)
+      .set('Location', `/api/v1/users/${user.id}`)
+      .json({ data: user });
+  } catch (err) {
+    if (err.code === 'UNIQUE_VIOLATION') return res.status(409).json({ error: { code: 'CONFLICT', message: 'Email already registered' } });
+    next(err);
+  }
+});
+
+// PATCH /api/v1/users/:id — partial update
+usersRouter.patch('/:id', idempotencyMiddleware, async (req, res, next) => {
+  try {
+    const allowed = ['name', 'email', 'bio'];
+    const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
+    if (Object.keys(updates).length === 0)
+      return res.status(400).json({ error: { code: 'NO_VALID_FIELDS', message: `Updatable fields: ${allowed.join(', ')}` } });
+
+    const user = await db.users.update(req.params.id, updates);
+    if (!user) return res.status(404).json({ error: { code: 'NOT_FOUND' } });
+    res.json({ data: user });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/v1/users/:id
+usersRouter.delete('/:id', async (req, res, next) => {
+  try {
+    const deleted = await db.users.delete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: { code: 'NOT_FOUND' } });
+    res.status(204).send();
+  } catch (err) { next(err); }
+});
+
+app.use('/api/v1/users', usersRouter);
+
+// ── Async job endpoint (202 pattern) ─────────────────────────────────────
+app.post('/api/v1/reports', async (req, res) => {
+  const jobId = crypto.randomUUID();
+  // Enqueue the job — BullMQ/SQS/etc in production
+  jobQueue.add('generateReport', { ...req.body, jobId });
+  res
+    .status(202)
+    .set('Location', `/api/v1/jobs/${jobId}`)
+    .json({ jobId, status: 'queued', estimatedSeconds: 30 });
+});
+
+app.get('/api/v1/jobs/:id', async (req, res) => {
+  const job = await jobQueue.getJob(req.params.id);
+  if (!job) return res.status(404).json({ error: { code: 'NOT_FOUND' } });
+  res.json({ jobId: job.id, status: job.status, result: job.result ?? null });
+});
+
+// ── Global error handler ──────────────────────────────────────────────────
+app.use((err, req, res, _next) => {
+  const requestId = req.headers['x-request-id'] ?? crypto.randomUUID();
+  console.error({ requestId, err });        // structured log — never send stack to client
+  res.status(500).json({
+    error: {
+      code: 'INTERNAL_ERROR',
+      message: 'An unexpected error occurred. Please try again.',
+      requestId,
+    },
+  });
+});
+
+// ── Health check ──────────────────────────────────────────────────────────
+app.get('/health', (_, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+
+app.listen(3000, () => console.log('API listening on :3000'));</code></pre>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 5</span>
+        <h2>API Security Patterns</h2>
+        <p>
+          Security is not a layer you add after design. Every endpoint decision has a security implication.
+        </p>
+
+        <h3>Authentication vs Authorization</h3>
+        <ul>
+          <li><strong>Authentication</strong> — Who are you? (API key, OAuth token, JWT)</li>
+          <li><strong>Authorization</strong> — What can you do? (scopes, roles, resource ownership)</li>
+        </ul>
+
+        <h3>API Key authentication</h3>
+        <p>
+          Simplest form of auth. The client includes a secret key in the request (header preferred over query
+          param to avoid logging). Good for server-to-server calls and public APIs with tiered access.
+        </p>
+        <ul>
+          <li>Always send in <code>Authorization: Bearer sk_live_xxx</code> header, never in the URL</li>
+          <li>Hash keys before storing (SHA-256); never store plaintext</li>
+          <li>Scope keys to minimum required permissions</li>
+          <li>Support programmatic rotation without downtime</li>
+        </ul>
+
+        <h3>OAuth 2.0 + JWT</h3>
+        <p>
+          The standard for user-delegated access. The access token is short-lived (15 min – 1 hour); the
+          refresh token is long-lived (days – weeks) and stored server-side for revocation. JWT encodes claims
+          (user ID, scopes, expiry) in the token body — no DB lookup needed to validate most requests.
+        </p>
+        <ul>
+          <li>Sign JWTs with RS256 (asymmetric) for public key verification by multiple services</li>
+          <li>Include <code>exp</code>, <code>iat</code>, <code>jti</code> (unique token ID) claims</li>
+          <li>Validate <code>aud</code> (audience) to prevent token misuse across services</li>
+          <li>Store refresh tokens in <code>HttpOnly; Secure; SameSite=Strict</code> cookies to prevent XSS theft</li>
+        </ul>
+
+        <h3>Input validation — never trust the client</h3>
+        <ul>
+          <li>Validate type, range, length, and format for every input field</li>
+          <li>Use allowlists for string fields where possible (e.g. <code>sort</code> parameter)</li>
+          <li>Parameterize all database queries — never concatenate user input into SQL</li>
+          <li>Limit request body size (<code>1mb</code> default is a good starting point)</li>
+          <li>Return 400 with field-level error details — never expose internal error messages</li>
+        </ul>
+
+        <h3>CORS — Cross-Origin Resource Sharing</h3>
+        <p>
+          Configure CORS to allow only trusted origins. Avoid <code>Access-Control-Allow-Origin: *</code> on
+          APIs that carry user data or accept credentials.
+        </p>
+        <span class="code-label">JavaScript Example — Strict CORS configuration</span>
+        <pre><code class="language-javascript">import cors from 'cors';
+
+const ALLOWED_ORIGINS = new Set([
+  'https://app.example.com',
+  'https://admin.example.com',
+  ...(process.env.NODE_ENV === 'development' ? ['http://localhost:5173'] : []),
+]);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow server-to-server requests (no origin header)
+    if (!origin || ALLOWED_ORIGINS.has(origin)) return callback(null, true);
+    callback(new Error(`CORS: ${origin} not allowed`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Request-ID'],
+  credentials: true,
+  maxAge: 86400, // preflight cache: 24 hours
+}));</code></pre>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 6</span>
+        <h2>API Design for Evolution — How to Change APIs Without Breaking Clients</h2>
+        <p>
+          The hardest part of API design is not building v1 — it is changing v1 without breaking the clients
+          that depend on it. A few rules make this tractable:
+        </p>
+
+        <h3>Additive-only evolution (the safest approach)</h3>
+        <p>
+          You can always add new optional fields to a response without breaking existing clients (they ignore
+          fields they don't know about). You can add new optional request parameters with sensible defaults.
+          You can add new endpoints. These are <strong>non-breaking changes</strong>:
+        </p>
+        <ul>
+          <li>Adding new response fields</li>
+          <li>Adding new optional request parameters</li>
+          <li>Adding new endpoints or HTTP methods to existing endpoints</li>
+          <li>Changing error messages (but not error codes)</li>
+          <li>Expanding an enum with new values (clients should ignore unknown values)</li>
+        </ul>
+
+        <h3>Breaking changes — require a new version</h3>
+        <ul>
+          <li>Removing or renaming a response field</li>
+          <li>Changing a field's type (string → number)</li>
+          <li>Changing HTTP method for an existing endpoint</li>
+          <li>Changing the URL structure</li>
+          <li>Adding a required request parameter</li>
+          <li>Narrowing an enum (removing values)</li>
+        </ul>
+
+        <h3>Deprecation lifecycle</h3>
+        <ol>
+          <li>Announce the deprecation with a minimum 6-month migration window for public APIs</li>
+          <li>Add <code>Deprecation: true</code> and <code>Sunset: date</code> headers to deprecated endpoints</li>
+          <li>Log usage of deprecated endpoints to identify clients that haven't migrated</li>
+          <li>Reach out directly to active consumers before sunset</li>
+          <li>Keep the old version alive for 30 days past the sunset date before removal</li>
+        </ol>
+
+        <h3>HATEOAS — Hypermedia as the Engine of Application State</h3>
+        <p>
+          The highest level of REST maturity. Responses include links describing what the client can do next,
+          removing the need for clients to hard-code URL structures:
+        </p>
+        <span class="code-label">JavaScript Example — HATEOAS response</span>
+        <pre><code class="language-javascript">// Response to GET /api/v1/orders/789
+{
+  "data": {
+    "id": "789",
+    "status": "pending",
+    "total": 149.99
+  },
+  "_links": {
+    "self":    { "href": "/api/v1/orders/789",         "method": "GET"    },
+    "cancel":  { "href": "/api/v1/orders/789/cancel",  "method": "POST"   },
+    "pay":     { "href": "/api/v1/orders/789/payment", "method": "POST"   },
+    "customer":{ "href": "/api/v1/users/42",           "method": "GET"    }
+  }
+}
+// A client that follows _links never needs to build URLs itself.
+// Renaming /orders → /purchases only requires a server change, not a client change.</code></pre>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 7</span>
+        <h2>API Documentation — The Contract Your Consumers Actually Read</h2>
+        <p>
+          An API without documentation is unusable to anyone outside the team that built it. Documentation is
+          not optional — it is part of the product.
+        </p>
+
+        <h3>OpenAPI / Swagger specification</h3>
+        <p>
+          The industry standard for describing REST APIs. A YAML or JSON file that defines every endpoint,
+          its parameters, request/response schemas, authentication requirements, and example values. Tooling
+          generates interactive docs (Swagger UI, Redoc), client SDKs, and mock servers from the spec.
+        </p>
+        <ul>
+          <li>Define schemas for every request body and response object — not just fields, but types, constraints, and examples</li>
+          <li>Include at least one success example and one error example per endpoint</li>
+          <li>Use <code>$ref</code> to define shared schemas once and reference them everywhere</li>
+          <li>Spec-first (API-first) development: write the OpenAPI spec before the implementation, use it as the contract between teams</li>
+        </ul>
+
+        <h3>What good documentation must include</h3>
+        <ul>
+          <li>Base URL and environment URLs (staging, production)</li>
+          <li>Authentication instructions with a working example (curl + language SDKs)</li>
+          <li>Every endpoint: method, path, path parameters, query parameters, request body, all response codes and bodies</li>
+          <li>Error codes reference with human-readable explanations and remediation steps</li>
+          <li>Rate limits and quotas per plan tier</li>
+          <li>Changelog with deprecation notices</li>
+          <li>Getting-started guide that produces a real response in under 5 minutes</li>
+        </ul>
+
+        <h3>Developer experience metrics</h3>
+        <ul>
+          <li><strong>TTFHW</strong> (Time to First Hello World) — how long until a new developer gets a valid response? Target: under 5 minutes</li>
+          <li><strong>TTFPA</strong> (Time to First Productive App) — how long to build something real? This is the measure of whether your API delivers on its promise</li>
+        </ul>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>API Design Quality Checklist</h2>
+        <p>Run this checklist before publishing any API endpoint:</p>
+        <ul>
+          <li><strong>Naming:</strong> URL uses nouns, plural for collections, no verbs, no implementation-detail leakage</li>
+          <li><strong>HTTP methods:</strong> GET for reads, POST for creates, PUT for full updates, PATCH for partial, DELETE for removal</li>
+          <li><strong>Status codes:</strong> 201 on create, 204 on empty delete, 400 for validation, 401 for auth, 403 for authz, 404 for missing, 409 for conflict, 429 for rate limit — never 200 for errors</li>
+          <li><strong>Error body:</strong> Includes <code>code</code>, <code>message</code>, field-level <code>details</code>, <code>requestId</code></li>
+          <li><strong>Pagination:</strong> All collection endpoints accept <code>limit</code>/<code>page</code> (or cursor), have a maximum limit, return total count</li>
+          <li><strong>Versioning:</strong> Version prefix present from day one (<code>/v1/</code>)</li>
+          <li><strong>Security:</strong> HTTPS only, auth required on all non-public endpoints, input validated, SQL parameterised</li>
+          <li><strong>Idempotency:</strong> POST mutations accept <code>Idempotency-Key</code> header</li>
+          <li><strong>Caching:</strong> <code>Cache-Control</code> header set on GET responses, ETag/conditional GET for cacheable resources</li>
+          <li><strong>Rate limiting:</strong> <code>X-RateLimit-*</code> headers on all responses, 429 with <code>Retry-After</code></li>
+          <li><strong>Async ops:</strong> Long-running operations return 202 with a job/status endpoint</li>
+          <li><strong>Documentation:</strong> OpenAPI spec exists, every endpoint has at least one request and one error example</li>
+          <li><strong>Evolution:</strong> New fields are optional, no fields removed or renamed without a version bump</li>
+          <li><strong>CORS:</strong> Configured to allow only expected origins, not <code>*</code> on credentialed endpoints</li>
+        </ul>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common Questions</h2>
+
+        <h3>REST vs GraphQL — how do I decide?</h3>
+        <p>
+          Start with REST. GraphQL pays off when you have multiple clients with very different data requirements
+          (web needs 30 fields, mobile needs 8), or when your backend is an aggregation of many services that
+          each hold a slice of the data a page needs. If your API is simple CRUD with a stable consumer, REST
+          is easier to build, cache, and maintain.
+        </p>
+
+        <h3>Should I version from day one even if I have no external consumers?</h3>
+        <p>
+          Yes. The moment you have a mobile app in production, you have an external consumer — app stores do
+          not let you force-update users. A <code>/v1/</code> prefix costs nothing to add but is painful to
+          retrofit later.
+        </p>
+
+        <h3>What's the difference between PUT and PATCH?</h3>
+        <p>
+          <code>PUT</code> replaces the entire resource — fields you omit are deleted (or reset to defaults).
+          <code>PATCH</code> applies a partial update — only fields included in the body are changed. Use
+          <code>PATCH</code> for forms where users edit a subset of a record; use <code>PUT</code> for
+          replace-entire-configuration operations.
+        </p>
+
+        <h3>When should I use WebSockets instead of polling?</h3>
+        <p>
+          When the client needs updates in under 1 second, or when the server-push rate is high (a message
+          every few hundred milliseconds). For infrequent updates (every few seconds), Server-Sent Events
+          (SSE) is simpler than WebSockets and works over HTTP/2. For truly infrequent updates (every
+          30+ seconds), polling is the simplest and most reliable choice.
+        </p>
+
+        <h3>How granular should rate limits be?</h3>
+        <p>
+          Apply at least three tiers: global (protect infra), per-API-key (protect fair use), and per-endpoint
+          (protect expensive operations). A <code>POST /search</code> that triggers a full-text scan needs a
+          tighter limit than <code>GET /users/{id}</code>.
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A great API is not a technical artefact — it is a product. It has a consumer, a contract, and a
+          lifecycle. The six architecture styles are each optimised for a different consumer need: pick REST
+          for resources, GraphQL for flexible queries, gRPC for high-speed microservice calls, WebSockets for
+          real-time streams, webhooks for event-driven push, and SOAP for enterprise contracts. Within REST,
+          the rules are simple: nouns in URLs, HTTP methods for actions, correct status codes, consistent error
+          bodies, pagination on all collections, HTTPS everywhere, version from day one, and idempotency keys
+          on mutations. Performance is the sum of caching every safe response, pooling every connection,
+          pushing long operations async, and rate-limiting aggressively at the gateway. Every line of
+          production API code is a promise to every client that integrates with it — design it like you intend
+          to keep that promise for the next five years.
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="content-card">
+        <h2>Related Reading</h2>
+        <ul>
+          <li><a href="./api-gateway-pattern-microservices.html">API Gateway Pattern in Microservices</a> — how an API gateway handles routing, auth, rate limiting, and circuit breaking across multiple upstream services.</li>
+          <li><a href="./stop-designing-rest-apis-mid-level-dev.html">Stop Designing REST APIs Like a Mid-Level Dev</a> — client-centric resources, additive-only evolvability, HATEOAS, and async job resources.</li>
+          <li><a href="./access-token-vs-refresh-token-security.html">Access Tokens vs Refresh Tokens: Security Deep Dive</a> — JWT lifecycle, rotation strategies, and XSS/CSRF defence patterns for API auth.</li>
+        </ul>
+      </section>
+
+    </main>
+  </body>
+</html>

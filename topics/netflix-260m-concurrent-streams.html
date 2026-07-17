@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How Netflix Handles 260 Million Concurrent Streams Without Buffering | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1574375927938-d5a98e8ffe85?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Streaming video interface showing playback controls"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Architecture · Backend · 30 min</span>
+          </div>
+        </figure>
+
+        <h1>How Netflix Handles 260 Million Concurrent Streams Without Buffering</h1>
+        <p class="summary">
+          Netflix serves 260M+ subscribers across 200+ countries, accounting for 37%+ of peak US internet traffic.
+          The secret is not a single clever trick — it is a layered architecture of purpose-built CDN appliances,
+          parallel encoding pipelines, adaptive bitrate algorithms, and a microservices backend on AWS that can
+          evacuate an entire region in 6 minutes.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: Netflix Tech Blog · High Scalability</span>
+          <span class="meta-item">Domain: Streaming / CDN / System Design</span>
+          <span class="meta-item">Published: 2026-07-16</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Netflix is the internet's single largest consumer of bandwidth. At peak US evening hours, its traffic
+          represents more than 37% of all downstream internet traffic in the country. Serving that load — without
+          buffering, across 200+ countries and 2,200+ device types — requires every layer of the stack to be
+          purpose-engineered. This guide walks through every piece: encoding, CDN hardware, adaptive bitrate,
+          the AWS backend, and the chaos engineering that validates it all.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Three-layer model:</strong> Netflix infrastructure has exactly three tiers: the Client SDK
+            (on your device), the AWS Backend (microservices, databases, encoding pipeline), and Open Connect
+            (the custom CDN). Each tier has a distinct failure mode and a distinct scaling strategy.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Stranger Things Season 1 launch</span>
+        <p>
+          July 2016. Stranger Things Season 1 drops on Netflix. Within the first weekend, 20 million streams
+          are active simultaneously across the globe. Behind the scenes, that launch required encoding 9,570
+          output files — one for every combination of video quality, audio track, subtitle language, and device
+          profile — consuming 190,000 CPU hours just for a single season of one show.
+        </p>
+        <p>
+          Every one of those files had to be distributed to the right Open Connect Appliance (OCA) nodes around
+          the world before the launch date. A single missed distribution to a major ISP would mean buffering for
+          millions of users. Netflix's engineering solved this with a nightly proactive caching algorithm that
+          predicts demand and pre-positions content — so that by the time any user presses play, the data is
+          already sitting in a server inside their ISP's datacenter.
+        </p>
+        <p>
+          That single use case — 9,570 files, 190,000 CPU hours, zero buffering on launch night — captures the
+          engineering ambition behind the entire Netflix infrastructure stack.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Architecture Overview</span>
+        <h2>The Three-Layer Model: Client, AWS Backend, Open Connect CDN</h2>
+        <p>
+          Netflix's architecture separates cleanly into three layers, each with a distinct function:
+        </p>
+        <ul>
+          <li>
+            <strong>Client SDK:</strong> Runs on every device (Smart TV, phone, browser, game console). Responsible
+            for adaptive bitrate selection, OCA health probing, license acquisition, and the playback state machine.
+            The client is not thin — Netflix engineers call it "the most sophisticated video player in the world."
+          </li>
+          <li>
+            <strong>AWS Backend:</strong> Runs in three AWS regions (N. Virginia, Portland OR, Dublin). Handles
+            everything non-video: user authentication, content metadata, recommendations, billing, A/B testing,
+            and the control plane for playback (which OCAs to use, which license server, which manifest URL).
+            Also runs the encoding pipeline — 300,000 CPUs encode content in parallel.
+          </li>
+          <li>
+            <strong>Open Connect CDN:</strong> Netflix's private CDN. Over 1,000 OCA locations embedded directly
+            inside ISP datacenters worldwide. Handles 100% of actual video byte delivery. No third-party CDN
+            is in the critical path.
+          </li>
+        </ul>
+        <p>
+          The key insight of this architecture is the separation of control plane (AWS) from data plane (Open
+          Connect). When you press play, your device contacts AWS to get a list of OCA URLs. Then it streams
+          video bytes directly from the OCA — AWS never touches the video data.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Why build a private CDN?</strong> By 2012, Netflix accounted for so much internet traffic
+            that it made economic sense to offer ISPs free OCA hardware in exchange for datacenter colocation.
+            ISPs save money on peering costs (traffic stays inside their network rather than crossing expensive
+            interconnects). Netflix gets faster delivery and lower CDN costs. Both sides win.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Encoding Pipeline</span>
+        <h2>Content Ingestion: From Studio Master to 9,570 Output Files</h2>
+        <p>
+          When a studio delivers a show to Netflix, it arrives as a multi-terabyte high-resolution master file.
+          Before a single user can watch a second of it, Netflix runs it through an encoding pipeline with 70+
+          processing components.
+        </p>
+        <p>
+          The pipeline is heavily parallelized. The source video is first split into short chunks (typically a
+          few seconds each). Each chunk is encoded independently across thousands of machines simultaneously.
+          This is why 300,000 CPUs can work on a single season at once — they are each processing a different
+          chunk at a different quality level.
+        </p>
+        <p>The output of this pipeline for a single season includes:</p>
+        <ul>
+          <li>Video tracks at multiple resolutions (240p, 360p, 480p, 720p, 1080p, 4K HDR)</li>
+          <li>Multiple codec versions (H.264 for legacy devices, H.265/HEVC for 4K, AV1 for modern clients)</li>
+          <li>Audio tracks for every language dub</li>
+          <li>Subtitle tracks for every language</li>
+          <li>Variants optimized for 2,200 different device profiles</li>
+        </ul>
+        <p>
+          The 9,570 files for Stranger Things S2 and the 190,000 CPU hours represent a real production number
+          from Netflix engineering blog posts. Each combination of (codec × resolution × audio track × subtitle
+          × device profile) is a distinct output file. Every file must be validated before distribution begins.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Codec Strategy</span>
+        <h2>Video Encoding Deep Dive: H.264, HEVC, AV1, and Per-Title Encoding</h2>
+        <p>
+          Netflix uses three video codecs simultaneously, each targeting a different device tier and bandwidth
+          profile:
+        </p>
+        <ul>
+          <li>
+            <strong>H.264 (AVC):</strong> The legacy codec. Supported by essentially every device ever made.
+            Netflix uses it for older smart TVs, mobile devices with limited CPU, and anywhere hardware
+            decoding is not available for newer codecs. Higher file sizes than alternatives.
+          </li>
+          <li>
+            <strong>H.265 (HEVC):</strong> Required for 4K HDR content. Approximately 40% smaller file sizes
+            than H.264 at equivalent quality. Hardware decoding is available on most modern devices. Licensed
+            codec with per-device royalty costs.
+          </li>
+          <li>
+            <strong>AV1:</strong> Open source, royalty-free codec developed by the Alliance for Open Media
+            (Google, Netflix, Mozilla, Amazon, Intel, ARM). Approximately 20% more efficient than HEVC —
+            meaning the same visual quality at 20% lower bitrate. Netflix began rolling out AV1 for mobile
+            streaming in 2020. AV1 encoding is compute-intensive (can take 20x longer than H.264) but the
+            streaming savings are significant at Netflix scale.
+          </li>
+        </ul>
+        <p>
+          Beyond codec choice, Netflix pioneered <strong>per-title encoding</strong>. The traditional approach
+          was a fixed bitrate ladder — everyone gets the same 240p/360p/480p/720p/1080p quality levels regardless
+          of content. Netflix discovered that this wastes bandwidth for complex content and wastes bits on simple
+          content.
+        </p>
+        <p>
+          A static animated show (low spatial complexity, minimal scene changes) can achieve excellent quality
+          at much lower bitrates than live-action with rapid camera movement. Per-title encoding analyzes
+          each title independently and builds a custom bitrate ladder for it. A simple animated show might look
+          great at 1 Mbps. A dark, high-action thriller might need 4 Mbps to look equivalent. Per-title encoding
+          reduced Netflix's average streaming bitrate by ~20% without any perceptible quality loss.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Per-shot encoding (Shot-Constrained Encoding):</strong> Netflix went further in 2018,
+            encoding not just per-title but per-scene. A feature film might have quiet dialogue scenes
+            (encodable at low bitrate) and explosive action sequences (requiring much higher bitrate). The
+            encoder now adjusts dynamically within a single title.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">CDN Infrastructure</span>
+        <h2>Open Connect: The ISP-Embedded CDN with 1,000+ Locations</h2>
+        <p>
+          Open Connect is Netflix's private CDN, and it is one of the most architecturally unusual CDN designs
+          in existence. Most companies use shared CDN providers (Akamai, Cloudflare, Fastly). Netflix built its
+          own hardware and physically installs it inside ISP network infrastructure.
+        </p>
+        <p>
+          <strong>OCA hardware:</strong> Each Open Connect Appliance is a commodity PC server running FreeBSD
+          and NGINX as the HTTP server. They come in two hardware profiles:
+        </p>
+        <ul>
+          <li>
+            <strong>Large OCAs (Flash-based):</strong> Flash storage arrays with 100+ TB of NVMe SSD capacity.
+            Deployed at Tier-1 ISPs and large exchanges. Serve the full Netflix catalog. Very high IOPS, low
+            latency for popular content.
+          </li>
+          <li>
+            <strong>Small OCAs (HDD-based):</strong> Traditional hard drive arrays at smaller ISPs. Cannot
+            hold the entire catalog — instead they cache a predicted subset of content likely to be requested
+            by that ISP's subscriber base in the near future.
+          </li>
+        </ul>
+        <p>
+          <strong>The nightly proactive fill algorithm:</strong> This is the key design insight. Netflix does
+          not wait for a cache miss to populate an OCA (unlike a traditional pull CDN). Instead, every night,
+          Netflix's demand prediction system queries AWS to identify which content is likely to be popular in
+          the next 24-48 hours for each ISP's subscriber base. It then proactively copies that content from
+          nearby OCAs (or from AWS origin if needed) to local OCAs, completing the fill before demand peaks.
+        </p>
+        <p>
+          The goal is that by the time any user presses play on a title, the content is already on an OCA
+          inside their ISP's datacenter — a cache miss should never happen for popular content. Netflix has
+          reported that up to 100% of Netflix video traffic can be served from within ISP networks via OCAs,
+          meaning zero bytes cross expensive peering connections.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Why ISPs accept free hardware:</strong> Netflix traffic accounts for a massive fraction of
+            peak internet bandwidth. Without OCAs, that traffic crosses expensive peering interconnects between
+            ISPs. When an OCA is installed inside an ISP's network, that traffic stays internal — saving the ISP
+            real money on transit costs. ISPs get free hardware and reduced costs; Netflix gets faster delivery
+            and zero CDN bills. The arrangement works because Netflix's scale makes it economically rational.
+          </p>
+        </div>
+        <p>
+          By 2013, Netflix's catalog was already over 3 petabytes. Today it is substantially larger. Distributing
+          that data globally and keeping it fresh on OCAs is itself a significant distributed systems challenge —
+          essentially a planet-scale file synchronization system.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Adaptive Streaming</span>
+        <h2>Adaptive Bitrate Streaming: How the Client Decides Quality</h2>
+        <p>
+          Adaptive Bitrate Streaming (ABR) is the mechanism that prevents buffering when your network degrades.
+          Netflix uses DASH (Dynamic Adaptive Streaming over HTTP) and HLS (HTTP Live Streaming) depending on
+          the device and platform.
+        </p>
+        <p>
+          At its core, ABR works as follows: the video is pre-encoded at multiple quality levels (the bitrate
+          ladder from the encoding pipeline). The client downloads short segments (typically 4-10 seconds each)
+          one at a time, and before each download, it estimates available bandwidth and selects the highest
+          quality level that can be downloaded faster than it is played back.
+        </p>
+        <p>The Netflix ABR algorithm is more sophisticated than a simple bandwidth check:</p>
+        <ul>
+          <li>
+            <strong>Throughput estimation:</strong> The client maintains a running estimate of download
+            throughput using a windowed average of recent chunk download speeds, with exponential decay to
+            weight recent observations more heavily.
+          </li>
+          <li>
+            <strong>Buffer health:</strong> The client tracks how much video is buffered ahead. If the buffer
+            is large (say, 30+ seconds), the algorithm is more aggressive about upgrading quality. If the
+            buffer is thin, it downgrades quality to protect playback continuity.
+          </li>
+          <li>
+            <strong>OCA switching:</strong> If a specific OCA is delivering poor performance (high latency,
+            low throughput, packet loss), the client can switch to a different OCA URL from the list returned
+            by the AWS playback service. The client continuously probes all returned OCA URLs and routes chunks
+            to the best-performing one.
+          </li>
+          <li>
+            <strong>Quality descent before OCA switch:</strong> The algorithm degrades video quality before
+            deciding to switch OCA servers, because a quality downgrade is transparent to the user whereas
+            switching OCAs mid-stream can cause a brief stall.
+          </li>
+        </ul>
+        <p>
+          The net result is that most users never see the buffering spinner — the quality silently drops from
+          1080p to 720p to 480p during a congested moment, then silently climbs back when conditions improve.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">AWS Backend</span>
+        <h2>The AWS Backend: Three Regions, Seven Pillars</h2>
+        <p>
+          Netflix's non-video backend runs entirely on AWS, spread across three geographic regions: US East
+          (N. Virginia), US West (Portland, OR), and EU West (Dublin, Ireland). Each region runs three
+          Availability Zones. This gives Netflix 9 independent failure domains, and the system is designed to
+          survive the complete loss of any single region.
+        </p>
+        <p>The seven key components of the AWS backend:</p>
+        <ol>
+          <li>
+            <strong>Zuul (API Gateway):</strong> The edge proxy. All client API calls enter through Zuul.
+            Handles authentication, rate limiting, A/B test routing, and canary deployments. Zuul is
+            open-source and maintained by Netflix.
+          </li>
+          <li>
+            <strong>Eureka (Service Discovery):</strong> The service registry. Every microservice registers
+            itself with Eureka on startup. Other services discover it by name rather than hardcoded IP.
+            Eureka is designed to prefer availability over consistency — it will serve stale registrations
+            rather than return errors during partition events.
+          </li>
+          <li>
+            <strong>Hystrix (Circuit Breaker):</strong> Wraps every inter-service call. If a downstream
+            service begins failing or slowing, Hystrix opens the circuit and executes a fallback (return
+            cached data, return a default, skip the call entirely). This prevents cascading failures from
+            propagating across the microservices graph. Hystrix is now in maintenance mode; Resilience4j
+            is the modern replacement.
+          </li>
+          <li>
+            <strong>Cassandra:</strong> Distributed wide-column store used for viewing history, user profiles,
+            and other large-scale persistent data. Netflix is one of Cassandra's largest production users and
+            has contributed significantly to its development. Cross-region replication ensures data is available
+            even during a region failure.
+          </li>
+          <li>
+            <strong>DynamoDB:</strong> Used for session state and other low-latency key-value lookups.
+          </li>
+          <li>
+            <strong>Kafka:</strong> The event backbone. Every user action (play, pause, seek, rate, search)
+            generates events that flow through Kafka to analytics pipelines, recommendation engines,
+            and A/B test tracking systems.
+          </li>
+          <li>
+            <strong>Mantis:</strong> Netflix's internal stream processing platform (similar to Apache Flink).
+            Used for real-time analytics, anomaly detection, and operational intelligence. Mantis queries can
+            be pushed to running jobs without redeployment.
+          </li>
+        </ol>
+        <p>
+          Region evacuation is a tested capability: Netflix can route 100% of traffic away from a failing
+          AWS region within approximately 6 minutes using pre-configured DNS failover and auto-scaling in
+          the remaining regions.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resilience Engineering</span>
+        <h2>Chaos Engineering: The Simian Army</h2>
+        <p>
+          Netflix's most famous infrastructure contribution is the concept of <em>Chaos Engineering</em> —
+          deliberately injecting failures into production systems to verify they can survive them. This emerged
+          from the insight that you cannot rely on testing in staging environments, because staging never
+          perfectly mirrors production load patterns and failure modes.
+        </p>
+        <p>The Simian Army consists of several tools:</p>
+        <ul>
+          <li>
+            <strong>Chaos Monkey:</strong> Randomly terminates EC2 instances in production during business
+            hours. Forces teams to build services that survive random instance death without impacting users.
+            Created in 2011 and open-sourced.
+          </li>
+          <li>
+            <strong>Chaos Gorilla:</strong> Simulates the failure of an entire AWS Availability Zone. Tests
+            that multi-AZ architecture actually works at traffic scale.
+          </li>
+          <li>
+            <strong>Chaos Kong:</strong> Simulates the failure of an entire AWS region. Netflix runs
+            monthly forced region-failure tests using Chaos Kong. The 6-minute region evacuation time is
+            validated by these tests.
+          </li>
+          <li>
+            <strong>Latency Monkey:</strong> Injects artificial delays into service calls to test that
+            timeouts and fallbacks are correctly configured.
+          </li>
+          <li>
+            <strong>Conformity Monkey:</strong> Checks that instances conform to best practices (correct
+            security groups, proper tagging, right instance types) and terminates non-conforming instances.
+          </li>
+          <li>
+            <strong>Security Monkey:</strong> Monitors for security policy violations and alerts or disables
+            violating configurations.
+          </li>
+        </ul>
+        <p>
+          The underlying principle is not just "systems must tolerate failures" — it is "systems must
+          <em>survive</em> failures without human intervention." Chaos Engineering validates that the
+          auto-recovery mechanisms actually work before a real failure occurs at 3 AM on a Sunday.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The key insight:</strong> Any complex system will fail. The question is whether you
+            discover those failures during a controlled chaos experiment during business hours, or during
+            an uncontrolled production incident at 2 AM. Chaos Engineering shifts the discovery to the
+            former.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Microservices Architecture</span>
+        <h2>700+ Microservices, Spinnaker, and Titus</h2>
+        <p>
+          Netflix operates over 700 microservices. Each service is owned by a small team that controls
+          its own deployment pipeline independently. This is the organizational scaling strategy: when
+          you have hundreds of engineers, a single deploy pipeline becomes a bottleneck. Microservices
+          let teams deploy independently at whatever cadence their service requires.
+        </p>
+        <p>Three tools power Netflix's microservices operations:</p>
+        <ul>
+          <li>
+            <strong>Spinnaker:</strong> Open-source continuous delivery platform developed by Netflix in
+            collaboration with Google. Handles canary deployments, blue-green deployments, automated
+            rollbacks, and multi-cloud deployments. Every Netflix microservice deploys through Spinnaker.
+          </li>
+          <li>
+            <strong>Titus:</strong> Netflix's container management platform, built on top of Apache Mesos.
+            Schedules and runs Docker containers at scale across their AWS fleet. Handles resource allocation,
+            bin-packing, and failure recovery for containerized workloads.
+          </li>
+          <li>
+            <strong>Atlas:</strong> Netflix's time-series metrics system. Handles billions of metric
+            data points per minute from all services. Powers the dashboards and alerting that keep
+            700+ services observable.
+          </li>
+        </ul>
+        <p>
+          Interestingly, Netflix has gradually moved some workloads back toward larger services in recent
+          years — finding that 700+ microservices introduces operational complexity that smaller teams
+          struggle to manage. This is a recurring pattern in the industry: microservices are not free,
+          and the right granularity depends on team size and organizational maturity.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">End-to-End Flow</span>
+        <h2>Press Play: The Complete Playback Flow</h2>
+        <p>
+          Every time a Netflix user presses play, the following sequence executes in under 1 second before
+          a single video frame renders:
+        </p>
+        <ol>
+          <li>
+            <strong>Client sends play intent:</strong> The Netflix app on your device sends a play request
+            to the Playback Apps service on AWS, authenticated via the user's session token through Zuul.
+          </li>
+          <li>
+            <strong>License acquisition:</strong> For DRM-protected content (essentially everything),
+            the client requests a Widevine/FairPlay/PlayReady license from Netflix's license server.
+            This cryptographically binds the content to the device.
+          </li>
+          <li>
+            <strong>OCA selection:</strong> The Playback Apps service queries the Open Connect steering
+            service, which knows which OCAs are nearest to the user (based on BGP routing data and ISP
+            identification). It returns up to 10 OCA URLs for the requested content.
+          </li>
+          <li>
+            <strong>Client probes OCAs:</strong> The client sends test requests to all returned OCA URLs
+            simultaneously to measure latency and throughput to each. This takes roughly 100-200ms.
+          </li>
+          <li>
+            <strong>Best OCA wins:</strong> The client selects the OCA with the best performance
+            characteristics and begins downloading the first video chunk at the highest quality level
+            that its measured bandwidth can support.
+          </li>
+          <li>
+            <strong>Continuous monitoring:</strong> Throughout playback, the client monitors chunk
+            download times and adjusts quality level up or down. If the selected OCA degrades, the
+            client can switch to another OCA from the original returned list.
+          </li>
+          <li>
+            <strong>Playback events:</strong> Every quality change, buffer event, and chunk download
+            is logged via Kafka to Netflix's data pipeline for analysis and recommendation improvement.
+          </li>
+        </ol>
+        <div class="callout">
+          <p>
+            <strong>The client is not a dumb player:</strong> Netflix's client SDK contains sophisticated
+            logic for OCA health scoring, bandwidth estimation, adaptive algorithm tuning, and DRM
+            management. A significant amount of Netflix's engineering investment lives in the client —
+            not just the backend.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Adaptive Bitrate Client Simulator</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * Simplified ABR client simulator — bandwidth estimation + quality selection + OCA health.
+ * Demonstrates the core decision loop that runs inside every Netflix client.
+ */
+
+const QUALITY_LEVELS = [
+  { name: '240p',  bitrate: 300_000  },   // 300 kbps
+  { name: '480p',  bitrate: 1_000_000 },  // 1 Mbps
+  { name: '720p',  bitrate: 3_000_000 },  // 3 Mbps
+  { name: '1080p', bitrate: 8_000_000 },  // 8 Mbps
+  { name: '4K',    bitrate: 16_000_000 }, // 16 Mbps
+];
+
+const SAFETY_FACTOR = 0.8;        // Only upgrade if bandwidth > 80% of next level's bitrate
+const BUFFER_TARGET_SECONDS = 30; // Try to keep 30s buffered
+const MIN_BUFFER_SECONDS = 5;     // If buffer < 5s, downgrade quality aggressively
+
+class ABRClient {
+  constructor(ocaUrls) {
+    this.ocaUrls     = ocaUrls;
+    this.ocaHealth   = Object.fromEntries(ocaUrls.map(u => [u, { score: 1.0, samples: [] }]));
+    this.bwSamples   = []; // recent bandwidth measurements (bps)
+    this.bufferLevel = 0;  // seconds of video buffered
+    this.currentQualityIdx = 0;
+  }
+
+  /** Record a chunk download result to update bandwidth estimate */
+  recordDownload(ocaUrl, bytes, durationMs) {
+    const bps = (bytes * 8) / (durationMs / 1000);
+    this.bwSamples.push(bps);
+    if (this.bwSamples.length > 10) this.bwSamples.shift(); // sliding window
+
+    // Update OCA health score (exponential moving average of throughput ratio)
+    const health = this.ocaHealth[ocaUrl];
+    const expectedBps = QUALITY_LEVELS[this.currentQualityIdx].bitrate;
+    const ratio = Math.min(bps / expectedBps, 2.0);
+    health.score = 0.7 * health.score + 0.3 * ratio;
+    health.samples.push({ bps, timestamp: Date.now() });
+  }
+
+  /** Estimate available bandwidth using harmonic mean (less sensitive to spikes) */
+  estimateBandwidth() {
+    if (this.bwSamples.length === 0) return 1_000_000; // default 1 Mbps
+    const harmonicMean = this.bwSamples.length /
+      this.bwSamples.reduce((sum, x) => sum + 1 / x, 0);
+    return harmonicMean;
+  }
+
+  /** Select quality level for next chunk */
+  selectQuality() {
+    const estimatedBw = this.estimateBandwidth();
+    const bufferSafe  = this.bufferLevel >= MIN_BUFFER_SECONDS;
+
+    // If buffer is critically low, drop to lowest quality immediately
+    if (this.bufferLevel < MIN_BUFFER_SECONDS) {
+      this.currentQualityIdx = 0;
+      return QUALITY_LEVELS[0];
+    }
+
+    // Find the highest quality level we can sustain
+    let targetIdx = 0;
+    for (let i = QUALITY_LEVELS.length - 1; i >= 0; i--) {
+      if (estimatedBw * SAFETY_FACTOR >= QUALITY_LEVELS[i].bitrate) {
+        targetIdx = i;
+        break;
+      }
+    }
+
+    // Smooth transitions: only upgrade one level at a time, downgrade immediately
+    if (targetIdx > this.currentQualityIdx && bufferSafe) {
+      this.currentQualityIdx = Math.min(this.currentQualityIdx + 1, targetIdx);
+    } else if (targetIdx < this.currentQualityIdx) {
+      this.currentQualityIdx = targetIdx; // downgrade immediately
+    }
+
+    return QUALITY_LEVELS[this.currentQualityIdx];
+  }
+
+  /** Pick the best OCA for the next chunk request */
+  selectOCA() {
+    return this.ocaUrls.reduce((best, url) => {
+      return this.ocaHealth[url].score > this.ocaHealth[best].score ? url : best;
+    }, this.ocaUrls[0]);
+  }
+
+  /** Simulate fetching one chunk */
+  async fetchNextChunk(chunkIndex) {
+    const quality  = this.selectQuality();
+    const oca      = this.selectOCA();
+    const chunkUrl = `${oca}/chunk/${chunkIndex}/${quality.name}`;
+
+    const start = Date.now();
+    try {
+      const response = await fetch(chunkUrl);
+      const buffer   = await response.arrayBuffer();
+      const elapsed  = Date.now() - start;
+
+      this.recordDownload(oca, buffer.byteLength, elapsed);
+      this.bufferLevel += 4; // each chunk = 4 seconds of video
+
+      console.log(`Chunk ${chunkIndex}: ${quality.name} from ${oca} (${(buffer.byteLength/1024).toFixed(0)} KB in ${elapsed}ms)`);
+      return { quality, oca, bytes: buffer.byteLength, ms: elapsed };
+    } catch (err) {
+      // OCA failed — penalize its health score
+      this.ocaHealth[oca].score *= 0.5;
+      console.warn(`OCA ${oca} failed for chunk ${chunkIndex}, retrying with next best`);
+      throw err;
+    }
+  }
+}
+
+// Usage
+const client = new ABRClient([
+  'https://oca1.isp.example.com',
+  'https://oca2.isp.example.com',
+  'https://oca3.isp.example.com',
+]);
+
+// Simulate 5 chunks of playback
+for (let i = 0; i < 5; i++) {
+  const result = await client.fetchNextChunk(i);
+  client.bufferLevel -= 4; // each second played consumes 1 second of buffer
+}
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">JavaScript Example</span>
+        <h2>Parallel Encoding Job Dispatcher with Worker Pool</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">/**
+ * Encoding job dispatcher — demonstrates how Netflix parallelizes encoding
+ * across 300,000 CPUs by distributing independent chunk-encode jobs.
+ * This simulates the coordinator that splits a video into chunks and
+ * dispatches them to a worker pool.
+ */
+
+const CHUNK_DURATION_SECONDS = 6;
+const QUALITY_PROFILES = ['240p', '360p', '480p', '720p', '1080p', '4K-HEVC', '4K-AV1'];
+const MAX_CONCURRENT_JOBS = 50; // In reality, Netflix uses hundreds of thousands
+
+class EncodingJobDispatcher {
+  constructor(workerCount = MAX_CONCURRENT_JOBS) {
+    this.workerCount  = workerCount;
+    this.activeJobs   = new Map();  // jobId -> Promise
+    this.completedJobs = [];
+    this.failedJobs   = [];
+  }
+
+  /** Splits a video into chunks and returns a list of encode jobs */
+  generateJobs(videoPath, totalDurationSeconds) {
+    const jobs = [];
+    const chunkCount = Math.ceil(totalDurationSeconds / CHUNK_DURATION_SECONDS);
+
+    for (let chunk = 0; chunk < chunkCount; chunk++) {
+      for (const profile of QUALITY_PROFILES) {
+        jobs.push({
+          id:        `${videoPath}:chunk${chunk}:${profile}`,
+          videoPath,
+          startSec:  chunk * CHUNK_DURATION_SECONDS,
+          endSec:    Math.min((chunk + 1) * CHUNK_DURATION_SECONDS, totalDurationSeconds),
+          profile,
+          attempts:  0,
+        });
+      }
+    }
+
+    console.log(`Generated ${jobs.length} encoding jobs (${chunkCount} chunks × ${QUALITY_PROFILES.length} profiles)`);
+    return jobs;
+  }
+
+  /** Encode a single chunk — in production, this dispatches to a remote worker */
+  async encodeChunk(job) {
+    job.attempts++;
+    const duration = job.endSec - job.startSec;
+    const complexityMs = Math.random() * 2000 + 500; // simulated encoding time
+
+    await new Promise(resolve => setTimeout(resolve, complexityMs));
+
+    // Simulate occasional failures (5% failure rate)
+    if (Math.random() < 0.05) {
+      throw new Error(`Encoder worker failure for ${job.id}`);
+    }
+
+    const outputSizeKB = duration * { '240p': 50, '360p': 100, '480p': 200, '720p': 500,
+      '1080p': 1000, '4K-HEVC': 1800, '4K-AV1': 1500 }[job.profile];
+
+    return {
+      jobId:       job.id,
+      outputPath:  `/encoded/${job.videoPath}/${job.profile}/chunk_${job.startSec}.mp4`,
+      sizeKB:      outputSizeKB,
+      encodedInMs: complexityMs,
+    };
+  }
+
+  /** Process all jobs with a bounded worker pool and retry on failure */
+  async dispatch(jobs, maxRetries = 3) {
+    const queue  = [...jobs];
+    const active = new Set();
+    const results = [];
+
+    const runNext = async () => {
+      if (queue.length === 0) return;
+      const job = queue.shift();
+
+      const promise = (async () => {
+        let lastError;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            const result = await this.encodeChunk(job);
+            this.completedJobs.push(result);
+            results.push(result);
+            return result;
+          } catch (err) {
+            lastError = err;
+            if (attempt < maxRetries) {
+              console.warn(`Retry ${attempt + 1}/${maxRetries} for ${job.id}: ${err.message}`);
+              await new Promise(r => setTimeout(r, 100 * (attempt + 1))); // exponential backoff
+            }
+          }
+        }
+        console.error(`Job permanently failed: ${job.id} after ${maxRetries} retries`);
+        this.failedJobs.push({ job, error: lastError });
+      })();
+
+      active.add(promise);
+      promise.finally(() => {
+        active.delete(promise);
+        runNext(); // start next job when this one finishes
+      });
+    };
+
+    // Start initial batch up to worker count
+    const initialBatch = Math.min(this.workerCount, queue.length);
+    for (let i = 0; i < initialBatch; i++) await runNext();
+
+    // Wait for all remaining jobs
+    while (active.size > 0) {
+      await Promise.race(active);
+    }
+
+    return {
+      completed: this.completedJobs.length,
+      failed:    this.failedJobs.length,
+      results,
+    };
+  }
+}
+
+// Encode a 1-hour episode (3,600 seconds = 600 chunks × 7 profiles = 4,200 jobs)
+const dispatcher = new EncodingJobDispatcher(50);
+const jobs = dispatcher.generateJobs('stranger-things-s2-ep1', 3600);
+const summary = await dispatcher.dispatch(jobs);
+
+console.log(`Encoding complete: ${summary.completed} succeeded, ${summary.failed} failed`);
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical checklist</span>
+        <h2>Building a Video Streaming Platform — What to Get Right</h2>
+        <ul class="check-list">
+          <li>Separate control plane (metadata, auth, CDN routing) from data plane (actual video bytes) — they have different scaling requirements.</li>
+          <li>Implement ABR from day one — never serve a single bitrate to all users on all connections.</li>
+          <li>Pre-position popular content on edge nodes proactively; do not wait for cache misses on popular releases.</li>
+          <li>Use per-title (or per-scene) encoding rather than a fixed bitrate ladder to save 20%+ on storage and bandwidth.</li>
+          <li>Encode in AV1 for modern clients, H.265 for 4K, H.264 as fallback — never assume codec support.</li>
+          <li>Build chaos engineering into your release process before you need it, not after an incident.</li>
+          <li>Make region evacuation a tested and automated procedure with a known time bound (Netflix: ~6 minutes).</li>
+          <li>Use circuit breakers on all downstream service calls — a slow recommendation service should never degrade playback.</li>
+          <li>Collect per-chunk playback telemetry — quality, OCA chosen, bandwidth — for tuning and anomaly detection.</li>
+          <li>ISP partnerships (or CDN selection) should optimize for last-mile proximity, not just geographic proximity.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions about Netflix's architecture</h2>
+
+        <h3>Does Netflix use AWS for everything, or do they own datacenters?</h3>
+        <p>
+          Netflix closed its last proprietary datacenter in 2016 and runs its entire microservices backend
+          on AWS. However, the Open Connect CDN appliances (the actual video delivery hardware) are owned
+          by Netflix and co-located inside ISP network facilities. So the answer is: AWS for the backend,
+          private hardware for video delivery.
+        </p>
+
+        <h3>What happens when an OCA goes offline?</h3>
+        <p>
+          The client receives multiple OCA URLs from the playback service. If the primary OCA fails mid-stream,
+          the client's health scoring immediately penalizes that OCA and switches to the next best option.
+          The AWS playback service also tracks OCA health in real time and stops returning unhealthy OCAs
+          in new playback sessions.
+        </p>
+
+        <h3>How does Netflix handle 4K HDR content on slow connections?</h3>
+        <p>
+          The ABR algorithm will not attempt 4K quality on a connection that cannot sustain 16 Mbps.
+          The client will select 1080p or lower. Netflix also has a streaming quality setting in account
+          preferences that caps the maximum quality, which is useful for mobile data saving.
+        </p>
+
+        <h3>Why does Netflix invest in AV1 encoding when it takes 20x longer than H.264?</h3>
+        <p>
+          Because at 260M subscribers streaming many hours per week, a 20% reduction in bitrate translates
+          to enormous bandwidth savings — enough to justify very large encoding compute investments. AV1
+          encoding runs once (at ingest time); the savings run forever on every stream served. The math is
+          overwhelmingly in favor of AV1 for a platform at Netflix's scale.
+        </p>
+
+        <h3>How does Chaos Kong actually work — do real users see failures?</h3>
+        <p>
+          Chaos Kong is run in a controlled way. Netflix monitors user experience metrics during the test
+          and is prepared to abort if real user impact is detected. The goal is that with proper multi-region
+          architecture, traffic evacuates to other regions fast enough that most users experience only a
+          brief quality dip rather than an error. Monthly testing ensures this remains true as the system evolves.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaways</h2>
+        <p>
+          Netflix's ability to serve 260 million concurrent streams without buffering comes down to five
+          compounding design decisions: <strong>private CDN hardware inside ISP networks</strong> (eliminating
+          expensive last-mile transit), <strong>nightly proactive cache filling</strong> (eliminating cache
+          misses on popular content), <strong>per-title adaptive bitrate encoding</strong> (minimizing bytes
+          per stream), <strong>client-side ABR intelligence</strong> (adjusting quality invisibly before
+          buffering occurs), and <strong>chaos-validated multi-region AWS architecture</strong> (surviving
+          any single region failure). No single one of these is the secret — the system performs because
+          every layer is purpose-engineered and they compound together.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Further exploration</h2>
+        <ul>
+          <li><a href="./engineering-papers-behind-netflix-uber-amazon-google.html">Engineering Papers Behind Netflix, Uber, Amazon, and Google</a></li>
+          <li><a href="./microservices-architecture-patterns.html">Microservices Architecture Patterns — Merged Guide</a></li>
+          <li><a href="./cloud-native-architecture-service-mesh.html">Cloud-Native Architecture and Service Mesh</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

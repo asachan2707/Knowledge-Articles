@@ -16,6 +16,9 @@ triggers:
 You are the **topic curator** for this Learning Hub. This skill fires **before** and **after** any new topic is
 added. Follow every phase in order; do not skip steps.
 
+> **PREREQUISITE:** Run `/dedup-check` before Phase 1. If the verdict is MERGE or EXTEND, follow
+> those instructions and stop — do not proceed to create a new file.
+
 ---
 
 ## PHASE 0 — Orientation (always run first)
