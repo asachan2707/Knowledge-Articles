@@ -4701,6 +4701,29 @@
 
         var durationRow = document.getElementById('duration-row');
 
+        // ── Filter state persistence (sessionStorage) ────────────────────
+        var FILTER_STORAGE_KEY = 'lh_filters_v1';
+
+        function saveFilterState() {
+          try {
+            sessionStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify({
+              query: query,
+              mode: activeCategoryMode,
+              cats: Array.from(activeCategories),
+              sort: activeSort,
+              duration: activeDuration
+            }));
+          } catch (e) {}
+        }
+
+        function loadFilterState() {
+          try {
+            var raw = sessionStorage.getItem(FILTER_STORAGE_KEY);
+            if (!raw) return null;
+            return JSON.parse(raw);
+          } catch (e) { return null; }
+        }
+
         // ── State variables ───────────────────────────────────────────────
         // activeCategories: Set of toggled category strings.
         // Special modes: 'hot' and 'unread' are exclusive singles stored in activeCategoryMode.
@@ -4710,6 +4733,8 @@
         var activeSort = 'relevance';
         var activeDuration = 'all';
         var query = '';
+
+        // (filter restore runs after all functions are defined — see bottom of script)
 
         // ── Red reset button ─────────────────────────────────────────────
         function isFiltered() {
@@ -4843,25 +4868,29 @@
           resultCount.textContent = visible + (visible === 1 ? ' topic' : ' topics');
           if (visible === 0) emptyState.classList.remove('is-hidden');
           else emptyState.classList.add('is-hidden');
+          saveFilterState();
           updateResetBtn();
           updateSequenceBadges();
         }
 
-        // Forward the active search query to topic pages via ?q= so highlight.js
-        // can auto-highlight on the destination page.
+        // ── Open topic cards in a new tab ────────────────────────────────
+        // All .topic-card <a> elements open in a new tab so the filtered
+        // landing page is always preserved. Also appends ?q= when a search
+        // query is active so the destination page can highlight matches.
         grid.addEventListener('click', function (event) {
-          var q = query.trim();
-          if (!q) return;
           var card = event.target.closest('.topic-card');
           if (!card) return;
-          // Only intercept plain left-clicks without modifiers.
+          // Let the browser handle Ctrl/Cmd/Shift/middle-click natively.
           if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
           var href = card.getAttribute('href');
           if (!href) return;
-          // Append ?q= (or &q= if the href already has a query string).
-          var sep = href.indexOf('?') === -1 ? '?' : '&';
-          window.location.href = href + sep + 'q=' + encodeURIComponent(q);
+          var q = query.trim();
+          if (q) {
+            var sep = href.indexOf('?') === -1 ? '?' : '&';
+            href = href + sep + 'q=' + encodeURIComponent(q);
+          }
+          window.open(href, '_blank', 'noopener');
         });
 
         // ── Utility chip click (All / Unread / Top picks) ────────────────
@@ -4927,6 +4956,9 @@
           applyFilters();
         });
 
+        // Active-pill × click (remove a single category filter)
+        // saveFilterState() is called inside applyFilters() so this is covered.
+
         function fullReset() {
           searchInput.value = '';
           query = '';
@@ -4942,6 +4974,7 @@
             chip.classList.toggle('active', isAll);
             chip.setAttribute('aria-selected', isAll ? 'true' : 'false');
           });
+          try { sessionStorage.removeItem(FILTER_STORAGE_KEY); } catch (e) {}
           applyFilters();
         }
 
@@ -5032,6 +5065,27 @@
           if (e && e.key && e.key !== READ_STORAGE_KEY) return;
           syncReadFromStorage();
         });
+
+        // Restore persisted filter state now that all functions are defined
+        (function () {
+          var saved = loadFilterState();
+          if (!saved) return;
+          query = saved.query || '';
+          activeCategoryMode = saved.mode || 'all';
+          activeCategories = new Set(saved.cats || []);
+          activeSort = saved.sort || 'relevance';
+          activeDuration = saved.duration || 'all';
+          if (query) searchInput.value = query;
+          if (activeDuration !== 'all') {
+            durationRow.querySelectorAll('.chip[data-duration]').forEach(function (chip) {
+              var isActive = chip.dataset.duration === activeDuration;
+              chip.classList.toggle('active', isActive);
+              chip.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
+          }
+          syncChipAndRowState();
+          syncActivePills();
+        })();
 
         sortSelect.value = activeSort;
         applyFilters();
