@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Uber Surge Pricing During Rain: Real-Time Demand/Supply and Dynamic Pricing | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1534274988757-a28bf1a57c17?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Rainy city street at night" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Deep Dive · Real-Time · Architecture · 25 min</span>
+          </div>
+        </figure>
+        <h1>Uber Surge Pricing During Rain: System Design Deep Dive on Real-Time Demand/Supply and Dynamic Pricing</h1>
+        <p class="summary">
+          How Uber computes and propagates surge multipliers in seconds across thousands of geographic
+          hexagons. Full technical breakdown: H3 geo-hashing, Kafka stream processing, the demand/supply
+          ratio algorithm, driver state machine, surge propagation to 100M+ devices, and the race
+          conditions that corrupt pricing calculations.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Real-Time Systems · Pricing</span>
+          <span class="meta-item">Credit: CodeFarm (Medium)</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Surge pricing is not a simple "when demand > supply, multiply price by X." It is a real-time
+          stream processing problem: millions of GPS events per second, partitioned into geo-hexagons,
+          aggregated into demand/supply ratios every 30 seconds, multipliers computed per hexagon, and
+          updates propagated to every app instance globally — all in under 5 seconds end-to-end.
+          The complexity is in making this pipeline accurate, low-latency, and crash-safe simultaneously.
+        </p>
+        <div class="callout">
+          <p><strong>Scale:</strong> Uber operates in 70+ countries. At peak (Friday evening + rain),
+          ~5M ride requests per hour globally, ~3M drivers online, position updates every 3–5 seconds.
+          That is ~1M GPS events per second. The surge pricing pipeline must process all of them.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Mumbai monsoon, 4 PM, 6.5× surge in 8 minutes</span>
+        <p>
+          Mumbai, monsoon season. At 15:52, it starts raining heavily. By 16:00, 340,000 simultaneous
+          ride requests are active in the city. Available drivers: 48,000. Demand/supply ratio: 7.08.
+          Surge multiplier: 6.5×. A 5km trip that would cost ₹150 now costs ₹975.
+        </p>
+        <p>
+          The surge did not appear instantly — it built over 8 minutes as the pipeline detected the
+          demand spike, computed ratios per hexagon, applied the multiplier function, and pushed
+          updates to all active apps. During those 8 minutes, riders who tapped "Request Ride" at the
+          pre-surge price saw a different price on the next screen. That inconsistency — quote given,
+          price changed before confirmation — is a race condition with real financial consequences.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Geographic Partitioning: H3 Hexagons</h2>
+        <p>
+          Uber uses Uber's own H3 library — a hierarchical hexagonal geospatial indexing system.
+          The world is divided into hexagons at multiple resolutions. For surge pricing, resolution 7
+          hexagons (~5 km² each) are the primary unit of analysis. Each hexagon is an independent
+          pricing zone.
+        </p>
+        <p>Why hexagons over squares or circles?</p>
+        <ul>
+          <li>Hexagons have equal edge-to-edge distance in all directions — squares have different nearest-neighbour distances for cardinal vs diagonal neighbours.</li>
+          <li>Hexagonal tessellation covers a map surface with no gaps and no overlaps.</li>
+          <li>H3 provides parent/child resolution traversal — a resolution-7 hexagon contains exactly 7 resolution-8 hexagons, enabling drill-down without recomputing indices.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>The Demand/Supply Pipeline</h2>
+        <ol>
+          <li><strong>Event ingestion</strong> — rider requests and driver GPS updates stream into Kafka topics <code>ride-requests</code> and <code>driver-positions</code>.</li>
+          <li><strong>H3 encoding</strong> — a stateless enrichment service converts each (lat, lng) to an H3 hexagon ID at resolution 7.</li>
+          <li><strong>Stream aggregation</strong> — a Flink or Kafka Streams job maintains a 5-minute sliding window count per hexagon: active requests and available drivers.</li>
+          <li><strong>Surge computation</strong> — every 30 seconds, per hexagon: compute demand/supply ratio, apply multiplier function, publish to <code>surge-updates</code> topic.</li>
+          <li><strong>Surge propagation</strong> — fan-out service pushes updated multipliers to all app instances with users in that hexagon.</li>
+        </ol>
+
+        <span class="code-label">JavaScript Example — Surge Multiplier Computation</span>
+        <pre><code>// surge-computer.js — runs as a Kafka Streams processor
+
+// Demand/supply ratio → surge multiplier mapping
+// Calibrated based on empirical data: what multiplier attracts enough drivers?
+const SURGE_TABLE = [
+  { maxRatio: 1.0,  multiplier: 1.0 },
+  { maxRatio: 1.5,  multiplier: 1.25 },
+  { maxRatio: 2.0,  multiplier: 1.5 },
+  { maxRatio: 2.5,  multiplier: 2.0 },
+  { maxRatio: 3.5,  multiplier: 2.5 },
+  { maxRatio: 5.0,  multiplier: 3.0 },
+  { maxRatio: 7.0,  multiplier: 5.0 },
+  { maxRatio: Infinity, multiplier: 8.0 }, // hard cap — regulatory/PR reasons
+];
+
+function computeSurgeMultiplier(activeRequests, availableDrivers) {
+  if (availableDrivers === 0) {
+    return availableDrivers === 0 && activeRequests === 0 ? 1.0 : 8.0; // no drivers = max surge
+  }
+  const ratio = activeRequests / availableDrivers;
+  const entry = SURGE_TABLE.find(t => ratio <= t.maxRatio);
+  return entry.multiplier;
+}
+
+// Sliding window aggregator per hexagon (conceptual — actual uses Kafka Streams DSL)
+class HexagonAggregator {
+  constructor(hexId, windowMs = 5 * 60 * 1000) {
+    this.hexId = hexId;
+    this.windowMs = windowMs;
+    this.requests = [];  // {timestamp, count}
+    this.drivers = new Map(); // driverId → {lastSeen, status}
+  }
+
+  onRideRequest(count, timestamp) {
+    this.requests.push({ timestamp, count });
+    this.evictExpired(timestamp);
+  }
+
+  onDriverUpdate(driverId, status, timestamp) {
+    this.drivers.set(driverId, { lastSeen: timestamp, status });
+    this.evictStaleDrivers(timestamp);
+  }
+
+  evictExpired(now) {
+    const cutoff = now - this.windowMs;
+    this.requests = this.requests.filter(r => r.timestamp > cutoff);
+  }
+
+  evictStaleDrivers(now) {
+    const cutoff = now - 120_000; // 2 min without update = driver gone offline
+    for (const [id, d] of this.drivers) {
+      if (d.lastSeen < cutoff) this.drivers.delete(id);
+    }
+  }
+
+  computeSurge() {
+    const activeRequests = this.requests.reduce((s, r) => s + r.count, 0);
+    const availableDrivers = [...this.drivers.values()]
+      .filter(d => d.status === 'available').length;
+    return {
+      hexId: this.hexId,
+      multiplier: computeSurgeMultiplier(activeRequests, availableDrivers),
+      activeRequests,
+      availableDrivers,
+      computedAt: Date.now()
+    };
+  }
+}
+
+// Surge smoothing: prevent rapid oscillation (annoys drivers and riders)
+class SurgeSmoothing {
+  constructor() { this.previous = new Map(); }
+
+  smooth(hexId, newMultiplier) {
+    const prev = this.previous.get(hexId) ?? 1.0;
+    // Max change per 30s window: ±1.0x (prevents instant 1x → 6x jumps)
+    const maxDelta = 1.0;
+    const smoothed = Math.min(newMultiplier, prev + maxDelta);
+    this.previous.set(hexId, smoothed);
+    return smoothed;
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Driver State Machine</h2>
+        <p>
+          A driver's availability for surge calculation depends on their state. The state machine:
+        </p>
+        <pre><code>idle (available for dispatch)
+  ↓ accepted ride request
+en-route-to-pickup
+  ↓ arrived at pickup geofence
+waiting-at-pickup
+  ↓ rider confirmed pickup
+in-trip
+  ↓ arrived at destination geofence
+completing-trip
+  ↓ payment confirmed
+idle</code></pre>
+        <p>
+          Only drivers in <code>idle</code> state within a hexagon count as "available supply."
+          A driver en-route to pickup in hexagon A should not count as supply in hexagon A — they
+          are committed. This distinction is what makes demand/supply ratios accurate enough to
+          be actionable.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The Race Condition: Price Quote vs Price Confirmation</h2>
+        <p>
+          The most dangerous data consistency issue in surge pricing: a rider is shown a 1.5× quote,
+          then the surge updates to 2.5× before they confirm. Do they pay 1.5× or 2.5×?
+        </p>
+        <p>
+          Uber's approach (based on patents and public engineering blogs):
+        </p>
+        <ol>
+          <li>Issue a <strong>price token</strong> with the quote: a signed JWT containing the quoted price, hexagon, valid-until timestamp (typically 60 seconds).</li>
+          <li>The rider must confirm within 60 seconds to lock in the quoted price.</li>
+          <li>On confirmation, the server verifies the token has not expired. If expired, re-quote at the current surge.</li>
+          <li>If the surge drops between quote and confirmation, the lower price wins (good for rider experience).</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Hexagon boundary effects</strong> — a driver at the border of two hexagons may contribute to the wrong hexagon's supply count. Fix: count drivers with location confidence radius &gt; hexagon size as contributing to all overlapping hexagons.</li>
+          <li><strong>Kafka partition imbalance</strong> — if surge events are partitioned by hexagon ID and one city (Mumbai during rain) generates 80% of events, that partition is a hot spot. Fix: add a random partition suffix when throughput spikes; re-aggregate in a downstream Flink job.</li>
+          <li><strong>Surge propagation lag during connectivity spikes</strong> — the very events that drive high demand (a major event ending, sudden rain) also cause network congestion, delaying the surge propagation to app clients. Fix: cache the last-known surge multiplier per hexagon in Redis with 2-minute TTL; fall back to cached value if push delivery fails.</li>
+          <li><strong>Driver GPS spoofing</strong> — fake driver positions in a hexagon inflate supply count and suppress surge multipliers, hurting legitimate drivers. Fix: validate GPS readings against real-time road network topology; a driver 500m from the nearest road is a spoofed signal.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Uber's surge pricing is a distributed stream processing system operating under a 30-second
+          update cadence. The accuracy of the multiplier depends on a precise driver state machine
+          (only idle drivers count as supply), a geo-partition model that eliminates boundary effects
+          (H3 hexagons), and a price-token mechanism that prevents quote-confirmation race conditions.
+          The hard part is not the multiplier formula — it is the event pipeline that delivers correct
+          demand/supply counts to the computation layer within the 30-second window.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

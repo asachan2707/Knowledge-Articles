@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Thread Pool to Send 10 Million SMS in One Hour | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Mobile phone notifications" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Backend · 22 min</span>
+          </div>
+        </figure>
+        <h1>Design a Thread Pool to Send 10 Million SMS Messages in One Hour</h1>
+        <p class="summary">
+          A complete system design interview answer: thread pool sizing maths, work queue architecture,
+          back-pressure, dead-letter queues, provider rate limit management, retry strategy, and the
+          distributed scaling path when a single machine is not enough.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Backend Engineering · Interview Prep</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          10 million messages in one hour is 2,778 messages per second. At an average SMS API
+          call latency of 200ms, a single thread can dispatch 5 messages per second. That means
+          you need at minimum 556 concurrent threads to hit the target — before accounting for
+          retries, rate limits, and failure overhead. The interview is testing whether you can
+          translate a volume requirement into a concrete concurrency model, then explain what
+          breaks at each layer.
+        </p>
+        <div class="callout">
+          <p><strong>The interviewer's real question:</strong> Can you design a system that is
+          <em>reliably</em> fast, not just theoretically fast? A naive thread pool that ignores
+          provider rate limits, back-pressure, and retry storms will be slower than a well-designed
+          one with half the threads.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The marketing blast that bricked three servers</span>
+        <p>
+          A SaaS company needed to send a promotional SMS to 10M users at noon. They spun up 2,000
+          threads, each pulling from a database queue. By 12:01, their SMS provider was returning
+          429 (Too Many Requests) for 80% of calls. The retry logic kicked in — all 2,000 threads
+          retried simultaneously. Provider connections exhausted. Database connection pool saturated.
+          The app servers went OOM. Zero messages sent. Marketing missed their noon window.
+        </p>
+        <p>
+          The root problems: no rate limiting, no back-pressure, and exponential retry without jitter.
+          This design solves all three.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 1 — The Maths (always start here in an interview)</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Parameter</th><th>Value</th><th>Derivation</th></tr></thead>
+            <tbody>
+              <tr><td>Target throughput</td><td>2,778 SMS/s</td><td>10,000,000 / 3,600</td></tr>
+              <tr><td>SMS API p50 latency</td><td>200ms</td><td>Typical for Twilio/AWS SNS</td></tr>
+              <tr><td>Calls per thread/s</td><td>5</td><td>1000ms / 200ms</td></tr>
+              <tr><td>Threads needed (theoretical)</td><td>556</td><td>2,778 / 5</td></tr>
+              <tr><td>Overhead factor</td><td>1.4×</td><td>Retries, GC, scheduling jitter</td></tr>
+              <tr><td>Target thread pool size</td><td>~780</td><td>556 × 1.4, rounded to 800</td></tr>
+              <tr><td>Machines needed (1,000 threads/server)</td><td>1</td><td>Single machine is sufficient</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          State the maths explicitly in the interview before drawing any diagram. It tells the
+          interviewer you reason from numbers, not intuition.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 2 — Architecture Overview</h2>
+        <p>Five components:</p>
+        <ol>
+          <li><strong>Job Store</strong> — PostgreSQL or Redis with the full list of phone numbers and message templates. Partitioned for parallel consumption.</li>
+          <li><strong>Work Queue</strong> — an in-memory bounded queue feeding the thread pool. Bounded size = back-pressure mechanism.</li>
+          <li><strong>Thread Pool</strong> — fixed-size pool of worker threads. Each thread pulls from the work queue, calls the SMS API, handles the result.</li>
+          <li><strong>Rate Limiter</strong> — token bucket shared across all threads, capped at provider's limit (e.g., Twilio: 1,000 msg/s per account).</li>
+          <li><strong>Dead-Letter Queue (DLQ)</strong> — failed messages after max retries land here for manual review or offline retry.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 3 — Thread Pool Implementation</h2>
+        <span class="code-label">JavaScript Example — Thread Pool with Work Queue and Back-Pressure</span>
+        <pre><code>// sms-dispatcher.js — Node.js (worker_threads equivalent using async workers)
+// Note: In Node.js we achieve concurrency with async I/O rather than OS threads,
+// but the logical model is identical to a Java/Python thread pool.
+
+import { Semaphore } from 'async-mutex'; // npm: async-mutex
+
+const CONCURRENCY = 800;          // max concurrent API calls
+const RATE_LIMIT = 1000;          // calls per second (provider limit)
+const MAX_RETRIES = 3;
+const semaphore = new Semaphore(CONCURRENCY);
+
+// Token bucket for rate limiting
+class TokenBucket {
+  constructor(rate) {
+    this.tokens = rate;
+    this.rate = rate;
+    this.lastRefill = Date.now();
+  }
+  async acquire() {
+    while (true) {
+      const now = Date.now();
+      const elapsed = (now - this.lastRefill) / 1000;
+      this.tokens = Math.min(this.rate, this.tokens + elapsed * this.rate);
+      this.lastRefill = now;
+      if (this.tokens >= 1) { this.tokens -= 1; return; }
+      await new Promise(r => setTimeout(r, 10)); // wait 10ms, re-check
+    }
+  }
+}
+
+const rateLimiter = new TokenBucket(RATE_LIMIT);
+
+async function sendSmsWithRetry(phone, message, attempt = 0) {
+  try {
+    await rateLimiter.acquire(); // honour provider rate limit
+    const response = await fetch('https://api.twilio.com/sms', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${process.env.TWILIO_TOKEN}` },
+      body: JSON.stringify({ to: phone, body: message })
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw Object.assign(new Error(err.message), { status: response.status });
+    }
+    return { phone, success: true };
+  } catch (err) {
+    if (attempt >= MAX_RETRIES) {
+      return { phone, success: false, error: err.message, final: true }; // → DLQ
+    }
+    // Exponential backoff with jitter: 100ms, 200ms, 400ms ± 50%
+    const delay = 100 * Math.pow(2, attempt) * (0.5 + Math.random() * 0.5);
+    await new Promise(r => setTimeout(r, delay));
+    return sendSmsWithRetry(phone, message, attempt + 1);
+  }
+}
+
+async function dispatchBatch(recipients, message) {
+  const results = { sent: 0, failed: 0, dlq: [] };
+  const start = Date.now();
+
+  // Process all recipients with bounded concurrency (semaphore = back-pressure)
+  await Promise.all(recipients.map(async (phone) => {
+    const [, release] = await semaphore.acquire();
+    try {
+      const result = await sendSmsWithRetry(phone, message);
+      if (result.success) results.sent++;
+      else { results.failed++; results.dlq.push(result); }
+    } finally {
+      release(); // release slot back to pool
+    }
+  }));
+
+  const elapsed = (Date.now() - start) / 1000;
+  console.log(`Dispatched ${results.sent} OK, ${results.failed} failed in ${elapsed.toFixed(1)}s`);
+  console.log(`Throughput: ${(results.sent / elapsed).toFixed(0)} msg/s`);
+  return results;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 4 — Distributed Scaling (when 1 machine is not enough)</h2>
+        <p>
+          If the provider raises the limit to 10,000 msg/s or the volume grows to 100M messages,
+          a single machine becomes the bottleneck. The distributed extension:
+        </p>
+        <ol>
+          <li><strong>Partition the job store</strong> — divide phone numbers into N shards (e.g., by hash of phone number mod N). Each worker node claims one or more shards.</li>
+          <li><strong>Distributed work queue</strong> — replace the in-memory queue with SQS, Kafka, or Redis Streams. Workers consume independently; visibility timeout prevents double-processing.</li>
+          <li><strong>Distributed rate limiter</strong> — replace the in-process token bucket with a Redis-backed distributed rate limiter (Lua script or Redlock). All nodes share the same rate limit against the provider.</li>
+          <li><strong>Coordinator</strong> — a lightweight orchestrator (Temporal, Airflow, or a simple cron) monitors progress, rebalances shards if a node dies, and triggers the DLQ retry job.</li>
+        </ol>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Scale</th><th>Architecture</th><th>Throughput ceiling</th></tr></thead>
+            <tbody>
+              <tr><td>10M msgs / 1hr</td><td>Single machine, async worker pool</td><td>~3,000 msg/s</td></tr>
+              <tr><td>100M msgs / 1hr</td><td>10 machines + Redis rate limiter + SQS</td><td>~30,000 msg/s</td></tr>
+              <tr><td>1B msgs / 1hr</td><td>100+ machines + Kafka + multi-account SMS providers</td><td>~300,000 msg/s</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 5 — Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Provider throttle without 429</strong> — some providers silently drop messages instead of returning 429 under extreme load. Build end-to-end delivery confirmation (delivery receipts / DLR) and treat no-receipt-in-60s as a failure.</li>
+          <li><strong>Retry storm</strong> — without jitter, all retries fire at the same instant. The jitter formula above (0.5 + 0.5*random) ensures spread.</li>
+          <li><strong>Memory growth under backlog</strong> — if the work queue is unbounded and the provider is slow, you'll queue millions of jobs in memory and OOM. Always bound the queue. When full, apply back-pressure (block the producer or drop to disk).</li>
+          <li><strong>Invalid phone numbers</strong> — pre-validate with a regex or E.164 library before dispatching. A 10% invalid rate wastes 1M API calls and occupies threads that could be sending real messages.</li>
+          <li><strong>Partial success reporting</strong> — at 10M messages, you need a way to know exactly which numbers succeeded and which failed. Write results to a columnar store (Parquet on S3) partitioned by outcome; never keep 10M rows in a single DB table.</li>
+          <li><strong>Opt-out compliance</strong> — query a DNC (Do Not Call) list before dispatching. At 2,778 msg/s, a missed opt-out can generate thousands of regulatory violations before anyone notices.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The answer to "design a thread pool for 10M SMS" is not a thread count — it is a system
+          with four interlocking components: a bounded work queue that provides back-pressure, a
+          semaphore that limits concurrency, a rate limiter that respects the provider's ceiling,
+          and a dead-letter queue that ensures no message is silently lost. The thread count follows
+          from the maths; the architecture follows from the failure modes.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

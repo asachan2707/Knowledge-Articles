@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Python Side Project That Became a Monthly Income Machine | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Python code on a screen" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Python · Automation · Finance · 18 min</span>
+          </div>
+        </figure>
+        <h1>The Python Side Project That Became a Monthly Income Machine</h1>
+        <p class="summary">
+          Turning repetitive, zero-creativity work tasks into a productised Python automation service.
+          Covers the full stack: task identification, script architecture, scheduling, error recovery,
+          client delivery, and the business model that makes it recurring income — not a one-time gig.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Python · Automation · Freelance Engineering</span>
+          <span class="meta-item">Credit: Suleman Safdar (Medium)</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The best automation businesses are not built by finding a clever tech idea — they are built by
+          noticing you are acting like a human API. You receive input (a spreadsheet, an email, a CSV drop),
+          you transform it the same way every time, and you deliver output. That loop is a Python script
+          waiting to exist, and every business that relies on someone doing it manually is a potential client.
+        </p>
+        <div class="callout">
+          <p><strong>Core insight:</strong> The value of an automation is not in the code — it is in
+          reliability and trust. A script that runs correctly at 3 AM every Monday without you touching it
+          is worth more to a client than any feature. Build for operator-free operation from day one.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · "I was the bottleneck every Monday morning"</span>
+        <p>
+          Every Monday the author downloaded three CSV files from three client portals, cleaned inconsistent
+          column names, merged them, ran a few calculations, and emailed a formatted report. It took 90 minutes.
+          After four months and 18 repetitions, the pattern was clear: zero creativity was involved. The inputs
+          changed but the transformation was identical.
+        </p>
+        <p>
+          The first script took a weekend to write and cut Monday mornings to 5 minutes. The second realisation
+          came when a colleague complained about the same pattern in their own team. The same script, lightly
+          parameterised, was worth money. That weekend side project became the first paying client.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 1 — Identifying Automatable Work</h2>
+        <p>
+          The signal is simple: if you have done a task more than three times without significant variation,
+          it is automatable. The four highest-value categories in small-to-medium businesses:
+        </p>
+        <ul>
+          <li><strong>Report generation</strong> — pulling data from one or more sources, aggregating, formatting, and sending. Every company does this. Most do it manually.</li>
+          <li><strong>Data reconciliation</strong> — comparing records between two systems (ERP vs spreadsheet, CRM vs finance tool) and surfacing discrepancies.</li>
+          <li><strong>File transformation pipelines</strong> — received CSV → clean parquet → upload to BI tool. The receiving end never changes, the sending end never changes, only the human in the middle does.</li>
+          <li><strong>Notification and alerting</strong> — checking a threshold (inventory below X, invoice overdue Y days) and sending an email or Slack message. Trivially automatable, extremely sticky.</li>
+        </ul>
+
+        <div class="callout">
+          <p><strong>Qualification test:</strong> Can you describe the task in under 30 seconds with no ambiguity?
+          If yes, it is automatable. If you find yourself saying "well sometimes it depends…", it is not ready yet.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 2 — The Script Architecture That Actually Works in Production</h2>
+        <p>
+          Beginner automation scripts are brittle because they are written for the happy path. Production-grade
+          automation has three mandatory properties: <strong>idempotency</strong> (safe to re-run),
+          <strong>observability</strong> (you know when it ran, what it did, and what failed),
+          and <strong>parameterisation</strong> (the same logic works for multiple clients without forking).
+        </p>
+        <p>
+          The recommended structure is a three-layer model: <code>extract → transform → load</code> (ETL),
+          but with an explicit state checkpoint between each layer so a crash at any point can resume from
+          the last good state rather than restarting from scratch.
+        </p>
+        <span class="code-label">JavaScript Example — ETL Pipeline with Checkpointing</span>
+        <pre><code>// automation-pipeline.js
+// Node.js 20+ — same architectural pattern as the Python original
+import fs from 'fs/promises';
+import path from 'path';
+
+const STATE_FILE = './pipeline-state.json';
+
+async function loadState() {
+  try {
+    const raw = await fs.readFile(STATE_FILE, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return { lastRun: null, phase: 'idle', processedRows: 0 };
+  }
+}
+
+async function saveState(state) {
+  await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+async function extract(config) {
+  // Simulate fetching a CSV from an SFTP or API
+  const raw = await fs.readFile(config.inputPath, 'utf8');
+  const rows = raw.trim().split('\n').map(line => {
+    const [date, amount, description] = line.split(',');
+    return { date, amount: parseFloat(amount), description: description?.trim() };
+  });
+  return rows.filter(r => !isNaN(r.amount)); // drop malformed rows
+}
+
+function transform(rows, config) {
+  // Normalise, aggregate, apply business rules
+  const byDate = new Map();
+  for (const row of rows) {
+    const key = row.date.slice(0, 7); // YYYY-MM
+    const existing = byDate.get(key) ?? { month: key, total: 0, count: 0 };
+    existing.total += row.amount;
+    existing.count += 1;
+    byDate.set(key, existing);
+  }
+  return Array.from(byDate.values())
+    .map(r => ({ ...r, avg: +(r.total / r.count).toFixed(2) }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+}
+
+async function load(summary, config) {
+  const lines = ['Month,Total,Count,Avg', ...summary.map(r =>
+    `${r.month},${r.total},${r.count},${r.avg}`)];
+  await fs.writeFile(config.outputPath, lines.join('\n'));
+  console.log(`[load] Written ${summary.length} rows to ${config.outputPath}`);
+}
+
+async function run(config) {
+  const state = await loadState();
+  const startTime = Date.now();
+  console.log(`[pipeline] Starting — last run: ${state.lastRun ?? 'never'}`);
+
+  try {
+    await saveState({ ...state, phase: 'extracting' });
+    const raw = await extract(config);
+
+    await saveState({ ...state, phase: 'transforming', processedRows: raw.length });
+    const summary = transform(raw, config);
+
+    await saveState({ ...state, phase: 'loading' });
+    await load(summary, config);
+
+    await saveState({
+      lastRun: new Date().toISOString(),
+      phase: 'idle',
+      processedRows: raw.length,
+      durationMs: Date.now() - startTime
+    });
+    console.log(`[pipeline] Done in ${Date.now() - startTime}ms`);
+  } catch (err) {
+    await saveState({ ...state, phase: 'error', error: err.message });
+    console.error('[pipeline] FAILED:', err.message);
+    throw err; // re-throw so the scheduler knows to alert
+  }
+}
+
+// Usage:
+run({ inputPath: './data/invoices.csv', outputPath: './reports/summary.csv' });</code></pre>
+
+        <p>The <code>STATE_FILE</code> survives a process crash. On the next scheduled run, the operator
+        (or a monitoring alert) can inspect the phase and decide whether to resume or restart. This is what
+        "production-grade" means in practice.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 3 — Scheduling: Cron, Cloud, and Reliability</h2>
+        <p>
+          A script that only runs when you manually trigger it is not an automation — it is a time-saver.
+          True automation runs without you. The progression of scheduling options:
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Option</th><th>Setup</th><th>Reliability</th><th>Cost</th><th>Best for</th></tr></thead>
+            <tbody>
+              <tr><td>Cron on laptop</td><td>5 min</td><td>Low (machine off = missed run)</td><td>Free</td><td>Never — only for testing</td></tr>
+              <tr><td>Linux VPS cron</td><td>30 min</td><td>High (99.9% uptime)</td><td>~$5/mo</td><td>1–5 clients at low margin</td></tr>
+              <tr><td>GitHub Actions (scheduled)</td><td>20 min</td><td>High</td><td>Free tier generous</td><td>Scripts with no secrets and public repos</td></tr>
+              <tr><td>AWS Lambda + EventBridge</td><td>1–2 hrs</td><td>Very high (managed)</td><td>Near-zero at low volume</td><td>Multi-client with per-client configs</td></tr>
+              <tr><td>Modal / Prefect / Dagster</td><td>2–4 hrs</td><td>Very high + observability</td><td>$0–$30/mo</td><td>Data pipeline work at scale</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          The recommended starting point is a <strong>$5 DigitalOcean VPS with cron</strong>. The upgrade
+          trigger is when a missed run would cost the client money. At that point, move to a managed scheduler
+          with alerting.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 4 — Error Recovery and Alerting</h2>
+        <p>
+          The single most important feature you can add to a client-facing automation is an alert when
+          something goes wrong. Not logs you check manually — an immediate notification.
+        </p>
+        <p>
+          The failure taxonomy for automation pipelines:
+        </p>
+        <ul>
+          <li><strong>Source changed</strong> — the client renamed a column, moved a file, or changed the export format. Most common failure. Fix: validate schema on extraction, fail loudly before touching the database.</li>
+          <li><strong>Network/credential failure</strong> — SFTP password rotated, API token expired. Fix: credential expiry monitoring with proactive alerts 7 days before.</li>
+          <li><strong>Logic error with new data</strong> — division by zero, unexpected null, date format change. Fix: unit tests over transformation layer with representative edge-case fixtures.</li>
+          <li><strong>Output delivery failure</strong> — SMTP server bounced, wrong recipient list. Fix: delivery receipt confirmation with retry.</li>
+        </ul>
+        <p>
+          A simple alerting pattern: wrap the entire pipeline in a try/catch that sends a Slack webhook or
+          email on failure with the phase name, error message, and a link to the logs. Clients who see
+          "your Monday report failed at 06:01 due to a missing column — we are investigating" trust the
+          service infinitely more than if the report simply did not arrive.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Step 5 — The Business Model: Why This Becomes Recurring Income</h2>
+        <p>
+          A one-time automation is a freelance project. A <em>maintained</em> automation is a product.
+          The difference is a service level agreement and a retainer.
+        </p>
+        <p>
+          The productised service model that converts well:
+        </p>
+        <ol>
+          <li><strong>Setup fee</strong> (£500–£2,000 depending on complexity) — covers initial build, testing, and deployment.</li>
+          <li><strong>Monthly retainer</strong> (£150–£500/month) — covers monitoring, source changes (when the client changes their export format), and on-call response.</li>
+          <li><strong>The retention driver</strong> — the client's data pipeline runs invisibly every Monday. They forget it exists. Cancellation means recreating the problem they no longer think about.</li>
+        </ol>
+        <p>
+          The key insight is that retainer income is not "support" — it is <em>change management</em>.
+          Every time the client's source system changes (and it always changes), they need you.
+          Build this expectation into the contract language from day one.
+        </p>
+        <div class="callout">
+          <p><strong>Scaling signal:</strong> Once you have three clients on retainers running the same
+          core architecture with different configs, extract the config into a YAML or JSON file per client
+          and run one parameterised deployment. The fourth and fifth clients cost almost no additional
+          engineering time.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>State file corruption</strong> — if the process is killed mid-write, the state file may be half-written. Use atomic writes: write to a temp file, then <code>rename()</code> (which is atomic on POSIX filesystems).</li>
+          <li><strong>Timezone landmines</strong> — cron runs in server timezone, client data is in their local timezone, report comparisons break. Fix: store all timestamps as UTC, convert only at display time.</li>
+          <li><strong>Silent data quality degradation</strong> — the pipeline succeeds but produces wrong numbers because an upstream system changed a calculation. Fix: add statistical assertions (total revenue this month should be ±20% of last month; alert on outliers).</li>
+          <li><strong>Client CSV encoding chaos</strong> — Windows clients produce CP-1252 encoded CSVs; your UTF-8 parser breaks on £ signs. Always detect encoding with <code>chardet</code> or pass it as a config option.</li>
+          <li><strong>Memory exhaustion on large files</strong> — streaming parsers (<code>csv.reader</code> in Python, readline in Node) for files over ~100MB. Never <code>readFileSync</code> an unknown-size input.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Checklist: From Script to Income</h2>
+        <ul>
+          <li>☐ Task passes the 30-second description test</li>
+          <li>☐ Script is idempotent (safe to re-run on same input)</li>
+          <li>☐ Schema validation on extraction (fail loud, fail early)</li>
+          <li>☐ State file with atomic writes for crash recovery</li>
+          <li>☐ Failure alert to Slack or email within 5 minutes of error</li>
+          <li>☐ Scheduler runs without manual intervention</li>
+          <li>☐ Config is parameterised (one script, N clients)</li>
+          <li>☐ Deployment documented so a non-engineer can understand what it does</li>
+          <li>☐ Retainer contract includes "source change support" language</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./python-automation-stack.html">The Python Automation Stack</a> — libraries and tools for building production-grade automation pipelines.</li>
+          <li><a href="./4200-automating-tasks-python-claude.html">$4200/Month with Python + Claude</a> — monetising AI-assisted automation at the next level.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The profitable automation is not the clever one — it is the boring one that runs every Monday,
+          never misses, alerts immediately on failure, and adapts when the client changes their export format.
+          Write for operator-free operation from day one, charge a retainer for the change management
+          that always comes, and parameterise early so the fifth client costs you an afternoon, not a week.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

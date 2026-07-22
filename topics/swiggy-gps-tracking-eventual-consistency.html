@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Swiggy Shows Wrong Rider Location: Real-Time GPS Tracking & Eventual Consistency | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1526367790999-0150786686a2?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="GPS map tracking" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Deep Dive · Backend · Real-Time · 22 min</span>
+          </div>
+        </figure>
+        <h1>Swiggy Shows Wrong Rider Location: System Design Deep Dive on Real-Time GPS Tracking and Eventual Consistency</h1>
+        <p class="summary">
+          Why the delivery rider dot on the map lags or jumps. A full technical deep dive:
+          GPS update pipelines, WebSocket fan-out, Redis Geo data structures, Kalman filter for
+          location smoothing, eventual consistency trade-offs between rider device and customer map,
+          and the architecture Swiggy, Uber Eats, and DoorDash use at scale.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Real-Time Systems · Location Tracking</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The rider tracking dot on a food delivery app looks deceptively simple. Under the hood it
+          involves a high-frequency GPS write pipeline, a geospatial data store, a pub/sub fan-out
+          to every active customer tracking that rider, and a client-side prediction layer that
+          makes a 5-second-stale location look like real-time movement. Every component has a failure
+          mode that manifests as the dot jumping, freezing, or showing the wrong location.
+        </p>
+        <div class="callout">
+          <p><strong>Scale:</strong> Swiggy handles ~2M daily orders. At peak, ~200,000 riders are
+          simultaneously active. If each rider sends a GPS update every 5 seconds, that is 40,000
+          location writes per second system-wide. Each write must be fanned out to potentially
+          multiple customers tracking that rider — multiplying the effective write rate 2–5×.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The rider who was "almost there" for 8 minutes</span>
+        <p>
+          A customer tracked their delivery rider for 12 minutes. The dot stopped moving 800 metres
+          away and displayed "2 minutes away" for 8 minutes. The rider had actually arrived and was
+          searching for the building entrance.
+        </p>
+        <p>
+          What happened: the rider's phone lost data connectivity in an underground car park. The app
+          buffered GPS updates locally but could not push them. The server's cached location was the
+          last known position — 800m away. The estimated arrival calculation was based on stale
+          coordinates. The customer's last-mile experience was broken not by the location system but
+          by the stale-data fallback strategy.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The GPS Write Pipeline</h2>
+        <p>
+          The rider app sends location updates at configurable frequency (typically every 3–10 seconds).
+          The pipeline from rider device to customer screen:
+        </p>
+        <ol>
+          <li><strong>Rider device</strong> → GPS coordinates (lat, lng, accuracy, bearing, speed, timestamp)</li>
+          <li><strong>Load balancer</strong> → persistent WebSocket connection per rider</li>
+          <li><strong>Location ingestion service</strong> → validates, filters, writes to Redis Geo</li>
+          <li><strong>Event bus (Kafka)</strong> → publishes <code>rider-location-updated</code> event</li>
+          <li><strong>Fan-out service</strong> → determines which customers are tracking this rider, pushes via WebSocket</li>
+          <li><strong>Customer device</strong> → renders updated position on the map</li>
+        </ol>
+
+        <h3>Data structure: Redis GEO</h3>
+        <p>
+          Redis's <code>GEOADD</code> command stores latitude/longitude as a 52-bit geohash in a
+          sorted set. This enables O(log N) proximity queries (find all riders within X km of a
+          point) used for the "nearby riders" feature and ETA calculations.
+        </p>
+
+        <span class="code-label">JavaScript Example — Location Ingestion and Fan-Out</span>
+        <pre><code>// location-service.js — Node.js + ioredis + ws
+import Redis from 'ioredis';
+import WebSocket from 'ws';
+import { Kafka } from 'kafkajs';
+
+const redis = new Redis(process.env.REDIS_URL);
+const kafka = new Kafka({ clientId: 'location-service', brokers: [process.env.KAFKA_BROKER] });
+const producer = kafka.producer({ idempotent: true });
+
+// Active WebSocket connections: riderId → ws, customerId → ws
+const riderConnections = new Map();
+const customerConnections = new Map();
+
+// Active tracking subscriptions: riderId → Set<customerId>
+const trackingSubscriptions = new Map();
+
+async function handleRiderLocationUpdate(riderId, location) {
+  const { lat, lng, bearing, speed, accuracy, ts } = location;
+
+  // 1. Filter junk readings (GPS accuracy > 50m is unreliable)
+  if (accuracy > 50) return;
+
+  // 2. Smooth with simple moving average (Kalman filter in production)
+  const smoothed = await smoothLocation(riderId, lat, lng);
+
+  // 3. Write to Redis GEO (used for proximity queries, ETA)
+  await redis.geoadd('rider:locations', smoothed.lng, smoothed.lat, riderId);
+
+  // 4. Write last-known location hash with full metadata
+  await redis.hset(`rider:${riderId}:location`,
+    'lat', smoothed.lat, 'lng', smoothed.lng,
+    'bearing', bearing, 'speed', speed, 'ts', ts,
+    'accuracy', accuracy
+  );
+  await redis.expire(`rider:${riderId}:location`, 300); // 5min TTL — stale if no update
+
+  // 5. Publish event for fan-out
+  await producer.send({
+    topic: 'rider-location-updated',
+    messages: [{ key: riderId,
+                 value: JSON.stringify({ riderId, lat: smoothed.lat, lng: smoothed.lng,
+                                        bearing, speed, ts }) }]
+  });
+}
+
+// Fan-out: push to customers tracking this rider
+async function handleLocationEvent(message) {
+  const update = JSON.parse(message.value.toString());
+  const { riderId } = update;
+
+  const subscribers = trackingSubscriptions.get(riderId) ?? new Set();
+  for (const customerId of subscribers) {
+    const ws = customerConnections.get(customerId);
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'rider-location', ...update }));
+    } else {
+      // Connection dropped — clean up subscription
+      subscribers.delete(customerId);
+    }
+  }
+}
+
+// Location smoothing: simple moving average over last 3 readings
+const locationHistory = new Map();
+function smoothLocation(riderId, lat, lng) {
+  const history = locationHistory.get(riderId) ?? [];
+  history.push({ lat, lng });
+  if (history.length > 3) history.shift(); // keep last 3
+  locationHistory.set(riderId, history);
+  return {
+    lat: history.reduce((s, p) => s + p.lat, 0) / history.length,
+    lng: history.reduce((s, p) => s + p.lng, 0) / history.length
+  };
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Client-Side Prediction: Making Stale Data Look Real-Time</h2>
+        <p>
+          Even with 5-second server updates, the rider dot should move <em>continuously</em> on the
+          customer map — not jump every 5 seconds. The technique is dead-reckoning: interpolate
+          position between updates using last-known speed and bearing.
+        </p>
+        <pre><code>// client-side location interpolation (runs in the customer's browser/app)
+class RiderTracker {
+  constructor() {
+    this.lastKnown = null;
+    this.interpolationFrame = null;
+  }
+
+  onLocationUpdate(update) {
+    this.lastKnown = { ...update, receivedAt: Date.now() };
+    // Restart interpolation loop
+    if (this.interpolationFrame) cancelAnimationFrame(this.interpolationFrame);
+    this.interpolate();
+  }
+
+  interpolate() {
+    if (!this.lastKnown) return;
+    const elapsed = (Date.now() - this.lastKnown.receivedAt) / 1000; // seconds
+    const speed = this.lastKnown.speed ?? 10; // m/s default if unknown
+    const bearing = this.lastKnown.bearing ?? 0;
+
+    // Project position forward based on last known speed and bearing
+    const distanceMoved = speed * elapsed; // metres
+    const predicted = projectPoint(
+      this.lastKnown.lat, this.lastKnown.lng, bearing, distanceMoved
+    );
+    this.renderDot(predicted.lat, predicted.lng);
+
+    // Stop predicting after 30s without server update (rider offline)
+    if (elapsed < 30) {
+      this.interpolationFrame = requestAnimationFrame(() => this.interpolate());
+    }
+  }
+
+  renderDot(lat, lng) { /* update map marker position */ }
+}
+
+function projectPoint(lat, lng, bearingDeg, distanceM) {
+  const R = 6371000; // Earth radius in metres
+  const d = distanceM / R;
+  const bearing = bearingDeg * Math.PI / 180;
+  const lat1 = lat * Math.PI / 180;
+  const lng1 = lng * Math.PI / 180;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) +
+                          Math.cos(lat1) * Math.sin(d) * Math.cos(bearing));
+  const lng2 = lng1 + Math.atan2(Math.sin(bearing) * Math.sin(d) * Math.cos(lat1),
+                                   Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
+  return { lat: lat2 * 180 / Math.PI, lng: lng2 * 180 / Math.PI };
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Eventual Consistency Model</h2>
+        <p>
+          The tracking system is explicitly eventually consistent. The source of truth is the rider's
+          device GPS. Every other copy — Redis, customer WebSocket, customer-rendered map — is
+          eventually consistent with it. The acceptable lag:
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Data consumer</th><th>Acceptable lag</th><th>What breaks if lag exceeds this</th></tr></thead>
+            <tbody>
+              <tr><td>Customer map display</td><td>5–10s</td><td>Dot appears frozen; poor UX</td></tr>
+              <tr><td>ETA calculation</td><td>30s</td><td>Wrong "X minutes away" estimate</td></tr>
+              <tr><td>Dispatch system (match rider to order)</td><td>5s</td><td>Wrong rider selected for new order</td></tr>
+              <tr><td>Geofence triggers (rider arrived at restaurant)</td><td>10s</td><td>Restaurant notified too late to prepare</td></tr>
+              <tr><td>Billing / route reconstruction</td><td>Eventual (minutes)</td><td>No real-time implication</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>GPS drift in urban canyons</strong> — tall buildings cause multipath reflection. GPS reports the rider at a location 50–200m off. Fix: use fused location (GPS + cell tower + WiFi) and apply Kalman filtering. Accuracy &gt; 50m is a reliable filter threshold for drop-in junk readings.</li>
+          <li><strong>Battery-saver mode kills location updates</strong> — Android aggressive battery management can pause GPS reporting for minutes. Fix: ride the foreground service lifecycle correctly; display an in-app banner when location accuracy drops.</li>
+          <li><strong>WebSocket fan-out bottleneck</strong> — one rider may have 5 customers tracking them (multiple orders, multiple shared tracking links). At scale, the fan-out service must be horizontally scaled. Use consistent hashing to route all events for a given <code>riderId</code> to the same fan-out worker pod.</li>
+          <li><strong>Stale Redis GEO during connectivity gaps</strong> — if a rider loses signal for 5 minutes, their Redis GEO entry is 5 minutes stale. The 5-minute TTL (300s) on the hash should trigger a "location unavailable" UI state rather than serving the last known position indefinitely.</li>
+          <li><strong>Time sync mismatch</strong> — rider device clock may be wrong (no NTP). Use server-assigned timestamps on ingestion, not device timestamps. The device timestamp is useful only for calculating GPS fix age relative to the device's local time.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Real-time GPS tracking is an eventually consistent system by design. The server is always
+          behind the rider's actual position. The architecture manages this gap: a 5-second write
+          cadence from the device, client-side dead-reckoning between updates, Redis GEO for O(log N)
+          proximity queries, and a TTL-based "location unavailable" fallback when the connection drops.
+          The customer experience is defined not by the freshness of the last GPS ping, but by how
+          gracefully the system handles the inevitable connectivity gaps.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

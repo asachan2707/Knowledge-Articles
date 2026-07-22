@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BookMyShow: Same Seat Sold Twice — Race Conditions and Distributed Locking | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Cinema theatre seating" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Deep Dive · Backend · Architecture · 24 min</span>
+          </div>
+        </figure>
+        <h1>BookMyShow: Same Seat Sold Twice — System Design Deep Dive on Race Conditions and Distributed Locking</h1>
+        <p class="summary">
+          How a seat reservation system can double-sell a seat under concurrent load — and the
+          distributed locking, optimistic concurrency, and seat-state machine design that prevents it.
+          Full deep dive: Redlock, advisory locks in PostgreSQL, the seat lifecycle state machine,
+          seat hold TTLs, payment race conditions, and the reconciliation job that catches the edge cases.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Distributed Locking · Concurrency</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A cinema seat is a classic scarce shared resource. Two users see the same seat available,
+          both select it, both pay — one arrives at the theatre to find a stranger in their seat.
+          This is not a booking system bug; it is a fundamental concurrency problem. The seat is a
+          shared mutable state, and without serialisation at the critical section (the reservation),
+          the race condition is guaranteed to manifest at sufficient scale.
+        </p>
+        <div class="callout">
+          <p><strong>Scale context:</strong> BookMyShow handles 10–15M bookings/month. On a blockbuster
+          release (Avengers, RRR, KGF), a single show sells out in under 60 seconds, with 100,000+
+          concurrent users on the same 200-seat hall. At that concurrency:seat ratio, naive locking
+          strategies fail immediately.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Pathaan release: 5,000 duplicate bookings in 4 minutes</span>
+        <p>
+          When Pathaan released, BookMyShow saw 10M users hit the platform simultaneously at 12:00 AM.
+          For popular halls in Mumbai, a single 300-seat show had 50,000+ concurrent booking attempts.
+          Without effective distributed locking, multiple users completed payment for the same seat.
+          Each duplicate booking required manual detection, refunds, and customer support.
+        </p>
+        <p>
+          The operational cost per duplicate booking was ₹800–1,200 (refund processing, support,
+          goodwill credit). At 5,000 duplicates, that is ₹4–6M in operational cost from a single
+          film release. The fix was architectural, not just a hotfix.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The Seat State Machine</h2>
+        <p>
+          Every seat in every show follows a strict state machine. No transition is valid unless the
+          seat is in the correct prior state. The state machine is the contract that makes the seat
+          system correct.
+        </p>
+        <pre><code>available
+  ↓ user selects seat (lock acquired)
+held (with TTL: 10 minutes)
+  ↓ user completes payment
+booked (permanent)
+
+available ← held (TTL expires, lock released)
+available ← held (user abandons, explicit release)</code></pre>
+        <p>
+          The <code>held</code> state is the critical section. Only one user may hold a seat at a
+          time. The distributed lock's job is to ensure the transition <code>available → held</code>
+          is atomic and mutually exclusive.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Distributed Locking: Redlock and Alternatives</h2>
+
+        <h3>Option 1: Redis-based lock (Redlock algorithm)</h3>
+        <p>
+          Redis's <code>SET key value NX PX ttl</code> is an atomic "set if not exists with TTL."
+          Redlock runs this across 3–5 independent Redis nodes; a lock is acquired only if a majority
+          of nodes grant it. This protects against single-node failure.
+        </p>
+        <p>
+          <strong>Redlock is controversial.</strong> Martin Kleppmann's 2016 critique showed it is
+          unsafe under GC pauses (lock TTL expires while the lock holder is paused, another process
+          acquires the lock, both proceed). For seat booking — where the consequence of a collision
+          is a duplicate booking, not data corruption — Redlock is widely used in practice and the
+          GC-pause risk is mitigated by keeping the critical section short (just the DB write, not
+          the payment flow).
+        </p>
+
+        <h3>Option 2: PostgreSQL Advisory Locks</h3>
+        <p>
+          PostgreSQL's <code>pg_try_advisory_lock(seatId)</code> is a session-level mutex stored in
+          the database itself. No external Redis cluster required. Automatically released when the
+          DB connection closes. Horizontally scalable only to the number of PG connections, so it
+          has a ceiling — but for a system that already uses PostgreSQL as the source of truth, it
+          is the simplest correct solution.
+        </p>
+
+        <h3>Option 3: Optimistic concurrency (version column)</h3>
+        <p>
+          Add a <code>version</code> column to the seat row. On update, include
+          <code>WHERE version = $known_version</code>. If another transaction updated first, the
+          row count is 0 — retry or return conflict. No locks held, high throughput, but requires
+          retry logic and is less suitable for high-contention seats (popular seats = many retries
+          = degraded throughput under load).
+        </p>
+
+        <span class="code-label">JavaScript Example — Seat Hold with Redis Lock + PostgreSQL Write</span>
+        <pre><code>// seat-reservation.js — Node.js + ioredis + PostgreSQL
+import Redis from 'ioredis';
+const redis = new Redis(process.env.REDIS_URL);
+
+const HOLD_TTL_MS = 600_000;  // 10 minutes
+const LOCK_TTL_MS = 5_000;    // 5 second lock — just long enough for the DB write
+
+async function holdSeat(showId, seatId, userId) {
+  const lockKey = `seat-lock:${showId}:${seatId}`;
+  const lockValue = `${userId}-${Date.now()}`; // unique per acquisition attempt
+
+  // 1. Acquire distributed lock (atomic SET NX PX)
+  const locked = await redis.set(lockKey, lockValue, 'NX', 'PX', LOCK_TTL_MS);
+  if (!locked) {
+    throw new Error('Seat is currently being reserved by another user');
+  }
+
+  try {
+    // 2. Verify seat is still available (under lock — no race possible)
+    const seat = await db.query(
+      `SELECT status FROM seats WHERE show_id = $1 AND seat_id = $2 FOR UPDATE`,
+      [showId, seatId]
+    );
+    if (!seat.rows[0] || seat.rows[0].status !== 'available') {
+      throw new Error('Seat no longer available');
+    }
+
+    // 3. Transition to 'held' with TTL metadata
+    const holdExpiry = new Date(Date.now() + HOLD_TTL_MS);
+    await db.query(
+      `UPDATE seats SET status = 'held', held_by = $1, hold_expires_at = $2
+       WHERE show_id = $3 AND seat_id = $4 AND status = 'available'`,
+      [userId, holdExpiry, showId, seatId]
+    );
+
+    // 4. Store hold in Redis for fast TTL-based cleanup
+    await redis.set(`seat-hold:${showId}:${seatId}`, userId, 'PX', HOLD_TTL_MS);
+
+    return { held: true, expiresAt: holdExpiry };
+  } finally {
+    // 5. Release lock — only if we still own it (use Lua for atomic check-and-delete)
+    const releaseScript = `
+      if redis.call('GET', KEYS[1]) == ARGV[1] then
+        return redis.call('DEL', KEYS[1])
+      else
+        return 0
+      end
+    `;
+    await redis.eval(releaseScript, 1, lockKey, lockValue);
+  }
+}
+
+async function confirmBooking(showId, seatId, userId, paymentId) {
+  // Verify the hold is still valid and belongs to this user
+  const seat = await db.query(
+    `SELECT status, held_by, hold_expires_at FROM seats
+     WHERE show_id = $1 AND seat_id = $2 FOR UPDATE`,
+    [showId, seatId]
+  );
+
+  const row = seat.rows[0];
+  if (!row || row.status !== 'held') throw new Error('Seat hold expired or not found');
+  if (row.held_by !== userId) throw new Error('Seat held by different user');
+  if (new Date(row.hold_expires_at) < new Date()) throw new Error('Hold expired');
+
+  // Transition to 'booked' (permanent)
+  await db.query(
+    `UPDATE seats SET status = 'booked', payment_id = $1, booked_at = NOW(),
+                      held_by = NULL, hold_expires_at = NULL
+     WHERE show_id = $2 AND seat_id = $3 AND held_by = $4`,
+    [paymentId, showId, seatId, userId]
+  );
+
+  // Remove from Redis hold store
+  await redis.del(`seat-hold:${showId}:${seatId}`);
+
+  return { booked: true };
+}
+
+// TTL expiry cleanup (runs every minute)
+async function releaseExpiredHolds() {
+  const expired = await db.query(
+    `UPDATE seats SET status = 'available', held_by = NULL, hold_expires_at = NULL
+     WHERE status = 'held' AND hold_expires_at < NOW()
+     RETURNING show_id, seat_id`
+  );
+  console.log(`[cleanup] Released ${expired.rowCount} expired holds`);
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>The Payment Race Condition</h2>
+        <p>
+          The hold-to-booked transition has its own race condition: the user's payment succeeds, but
+          the <code>confirmBooking()</code> call arrives after the hold TTL expires and the seat was
+          re-held by another user.
+        </p>
+        <p>
+          Solution: <strong>extend the hold on payment initiation, not on payment completion.</strong>
+          When the user clicks "Pay Now," extend the Redis hold TTL to 15 minutes immediately (before
+          redirecting to the payment gateway). The payment can take up to 5 minutes; the extended
+          hold covers it. On payment success, call <code>confirmBooking()</code> which does a final
+          state check.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Seat Display: Eventual Consistency is OK for the Grid</h2>
+        <p>
+          The seat map shown to users does NOT need to be strongly consistent. "Available" vs "held"
+          is a cosmetic distinction for display — what matters is that the actual reservation attempt
+          (the lock acquisition) is strongly consistent.
+        </p>
+        <p>
+          The seat grid is served from a Redis cache that is refreshed every 2 seconds via a Kafka
+          consumer. A user may see a seat as "available" when it was actually just held by another
+          user — but when they click it, the lock acquisition will fail and they will see "seat
+          taken." The 2-second eventual consistency window is acceptable; the reservation layer is
+          always strongly consistent.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Lock TTL shorter than DB write duration</strong> — if the PostgreSQL update takes longer than the lock TTL (e.g. during a deadlock or slow query), the lock expires and another user can acquire it while the first user's write is in-flight. Fix: set lock TTL to 5× the p99 DB write duration under load.</li>
+          <li><strong>Redis single-point failure</strong> — if using a single Redis node (not Redlock), lock loss on node restart = all seats unlocked simultaneously = potential duplicate booking storm. Fix: Redis Sentinel + AOF persistence; or use PostgreSQL advisory locks as primary mechanism (failsafe at DB level).</li>
+          <li><strong>User refreshes during hold</strong> — if a user refreshes the booking page, the client may re-request a hold on the same seat they already hold, consuming a second hold slot (if the system does not dedup by userId). Fix: <code>SETNX</code> keyed by both seatId AND userId; if the user already holds the seat, return the existing hold's TTL.</li>
+          <li><strong>Seat status cache serving stale data after forced release</strong> — an admin forcibly releases a hold (fraud case, VIP override), but the Redis cache still shows it as held. Fix: pub/sub invalidation of the seat cache on every admin action, same as the cart invalidation pattern.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The BookMyShow duplicate-booking problem is solved by a two-layer strategy: a distributed
+          lock (Redis or PostgreSQL advisory) that serialises the <code>available → held</code>
+          transition, and a seat state machine that makes illegal transitions structurally impossible.
+          The seat display can be eventually consistent — the booking layer must be strongly consistent.
+          The most important engineering insight: holding a lock only for the DB write (milliseconds),
+          not for the entire payment flow (minutes), keeps the system throughput high while still
+          preventing double-sells.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

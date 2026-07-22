@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Netflix Buffers on New Season Launch: CDN Architecture and Cache Prewarming | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1574375927938-d5a98e8ffe85?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Streaming video buffering" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Deep Dive · Architecture · CDN · 24 min</span>
+          </div>
+        </figure>
+        <h1>Netflix Buffers on New Season Launch: System Design Deep Dive on CDN Architecture and Cache Prewarming</h1>
+        <p class="summary">
+          Why 50 million viewers trying to watch Stranger Things Season 5 on launch night causes
+          buffering — and the architecture that prevents it. Open Connect CDN design, ISP edge
+          appliances, tiered caching, adaptive bitrate streaming, and the proactive prewarming
+          pipeline that prefills Netflix's edge cache before the first user hits play.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · CDN · Streaming Architecture</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A CDN is a cache. Every cache has a cold start problem: the first request for any content
+          must travel to the origin and pay full latency. When 50 million users simultaneously request
+          the same video at exactly 12:00 AM, every one of those requests is a cache miss — they hit
+          origin simultaneously, saturate bandwidth, and cause buffering. The solution is prewarming:
+          push the content to every edge cache node before any user requests it.
+        </p>
+        <div class="callout">
+          <p><strong>Netflix's scale:</strong> ~15,000 Open Connect Appliances (OCA) deployed in
+          ~1,000 ISP networks worldwide. Each stores a subset of the Netflix catalogue. The total
+          CDN capacity exceeds 500 Tbps. On a major launch night, Netflix may serve 1 Tbps from a
+          single region.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · "Stranger Things" Season 3 premiere: the 40-minute buffer spiral</span>
+        <p>
+          When Stranger Things Season 3 launched, Netflix saw unprecedented simultaneous stream starts.
+          The first ~15 minutes were smooth — users had been on the platform already, and the CDN
+          was pre-warmed for the first episode. At ~40 minutes in, users who had paused and resumed
+          hit bitrate-specific segments that had expired from the edge cache. Rebuffer rate spiked 4×.
+        </p>
+        <p>
+          The fix for Season 4 prewarmed not just the first few segments of Episode 1 but all bitrate
+          variants of all segments for the first three episodes — the "binge buffer" strategy, optimised
+          for the expected watch pattern of the specific show's audience.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Netflix's Open Connect CDN Architecture</h2>
+        <p>
+          Most CDNs (Akamai, Cloudflare) are shared infrastructure. Netflix built their own —
+          Open Connect — deployed physically inside ISP networks. The hierarchy:
+        </p>
+        <ol>
+          <li><strong>Origin (AWS us-east-1)</strong> — stores full catalogue as source files. Never serves playback traffic directly.</li>
+          <li><strong>Netflix-owned PoPs (Points of Presence)</strong> — ~50 worldwide. Filled from origin via scheduled jobs. Serve tier-3 OCAs.</li>
+          <li><strong>Tier-2 OCAs (Large cluster OCAs)</strong> — ~200–500 per major metro. Filled from PoPs. Serve tier-1 OCAs.</li>
+          <li><strong>Tier-1 OCAs (Embedded OCAs)</strong> — physical servers placed inside ISP data centres. Serve end users. The last hop before the user's device.</li>
+        </ol>
+        <p>
+          Why inside ISPs? It eliminates the ISP's own peering cost for Netflix traffic (ISPs love it),
+          reduces latency to near-zero (physically inside the ISP network), and gives Netflix precise
+          control over cache fill timing.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Cache Prewarming Pipeline</h2>
+        <p>
+          For a major release, Netflix's proactive cache fill pipeline runs 12–24 hours before the
+          content becomes publicly viewable:
+        </p>
+        <ol>
+          <li><strong>Popularity prediction</strong> — ML model predicts per-title demand per geography. A new season of a high-engagement show = top-1% demand signal in all regions simultaneously.</li>
+          <li><strong>Variant inventory</strong> — the title is available in 6 video profiles (240p to 4K HDR) × 3 audio tracks × 5 subtitle tracks. The prewarm job selects which combinations to push to which OCAs.</li>
+          <li><strong>Tiered push</strong> — PoPs are filled first (24h before), then tier-2 OCAs (12h before), then tier-1 OCAs (4h before). Rate-limited per tier to avoid saturating OCA disks.</li>
+          <li><strong>Verification</strong> — before launch, each OCA self-reports cache hit rate for a synthetic probe request. OCAs below threshold trigger an emergency fill from tier-2.</li>
+        </ol>
+
+        <span class="code-label">JavaScript Example — Prewarm Job Orchestration</span>
+        <pre><code>// prewarm-orchestrator.js — Node.js prewarm scheduler
+const TIERS = ['origin', 'pop', 'tier2', 'tier1'];
+const FILL_OFFSETS_HOURS = { pop: 24, tier2: 12, tier1: 4 }; // before launch
+const RATE_LIMIT_MBPS = { pop: 10_000, tier2: 5_000, tier1: 2_000 };
+
+async function scheduleTitlePrewarm(titleId, launchTime, regions) {
+  const variants = await getVideoVariants(titleId); // all bitrate/audio/subtitle combos
+  const popularityByRegion = await predictDemand(titleId, regions);
+
+  for (const tier of ['pop', 'tier2', 'tier1']) {
+    const fillTime = new Date(launchTime - FILL_OFFSETS_HOURS[tier] * 3600 * 1000);
+
+    await scheduleJob(fillTime, async () => {
+      const nodes = await getNodesForTier(tier, regions);
+      const jobs = nodes.map(node => ({
+        nodeId: node.id,
+        region: node.region,
+        // Prioritise top-demanded variants for high-demand regions
+        variants: selectVariants(variants, popularityByRegion[node.region], tier)
+      }));
+
+      await batchFill(jobs, RATE_LIMIT_MBPS[tier]);
+      await verifyFill(nodes, titleId, threshold = 0.95); // 95% cache coverage
+    });
+  }
+}
+
+async function batchFill(jobs, rateLimitMbps) {
+  // Concurrent fills, rate-limited per node
+  const CONCURRENCY = 50;
+  for (let i = 0; i < jobs.length; i += CONCURRENCY) {
+    const batch = jobs.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(job =>
+      fillNode(job.nodeId, job.variants, rateLimitMbps / CONCURRENCY)
+    ));
+  }
+}
+
+function selectVariants(allVariants, demandLevel, tier) {
+  // Tier 1 (closest to user): only top variants for this demand level
+  // High demand regions: push all bitrates including 4K
+  // Low demand regions: push only popular bitrates (1080p and below)
+  if (tier === 'tier1' && demandLevel < 0.5) {
+    return allVariants.filter(v => v.bitrate <= 5_000_000); // ≤5Mbps
+  }
+  return allVariants; // all variants for high-demand and upstream tiers
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Adaptive Bitrate Streaming (ABR) and Cache Granularity</h2>
+        <p>
+          Netflix uses HLS and DASH. Video is split into 4–10 second segments. Each segment exists
+          in multiple quality variants. The ABR algorithm on the client dynamically selects the
+          bitrate based on available bandwidth, switching per-segment.
+        </p>
+        <p>
+          Cache granularity: each segment at each bitrate is a separate cacheable object.
+          A 2-hour movie at 6 bitrates = ~1,800 segments × 6 = ~10,800 cache objects.
+          All 10,800 must be warm on every tier-1 OCA in the ISP serving the user.
+        </p>
+
+        <h3>Partial fill strategy</h3>
+        <p>
+          Not every OCA stores the full catalogue — it would require petabytes per appliance.
+          Netflix's strategy:
+        </p>
+        <ul>
+          <li><strong>First-episode guarantee:</strong> Episode 1 of every recent release is pinned on all OCAs globally — always warm.</li>
+          <li><strong>Popularity-tiered fill:</strong> Top 1,000 titles by region are always warm in tier-1 OCAs for that region.</li>
+          <li><strong>Long-tail on-demand:</strong> Content outside the top tier is cache-on-demand: tier-1 misses pull from tier-2, never from origin.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Cache stampede on segment expiry</strong> — when TTL expires on a popular segment, all users whose player hits that segment simultaneously cause a cache miss storm. Fix: use "cache TTL jitter" — add a random ±10% jitter to every segment TTL so expirations stagger naturally across time.</li>
+          <li><strong>OCA disk eviction during fill</strong> — while tier-1 OCAs are being pre-filled, users watching long-tail content cause LRU evictions that push out prewarm content. Fix: use a "pinned" flag on prewarm content that bypasses LRU for the fill window. Remove the pin after launch + 6 hours.</li>
+          <li><strong>ISP route changes during streaming</strong> — mid-stream, the ISP changes routing and the user's requests land on a different OCA that has a cold cache for this specific title/bitrate. Fix: session stickiness by OCA IP at the DNS level for the duration of a play session.</li>
+          <li><strong>4K segment size</strong> — a single 4K HDR segment is 30–50 MB. For a new release, the first 60 seconds = ~15 segments × 50 MB = 750 MB per user who autoplay-previews the trailer. At 10M simultaneous preview loads, that is 7.5 PB of bandwidth in 60 seconds. Fix: pre-generate trailer segments at 1080p max for the preview; serve 4K only for confirmed play intent.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Netflix's buffering problem on launch night is solved by treating caches as writable
+          systems, not passive lazy-loaders. Proactive prewarming — starting 24 hours before launch,
+          filling tier by tier, verifying with synthetic probes — ensures no user request is a cache
+          miss on a major release. The sophistication is in which variants to push where (per-region
+          demand prediction), how fast (rate-limited to avoid saturating OCA disks), and how to
+          pin content against LRU eviction during the fill window.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>System Design Interview: Prevent a Payment from Being Processed Twice | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563013544-824ae1b704d3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Payment processing terminal" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Backend · Security · 20 min</span>
+          </div>
+        </figure>
+        <h1>System Design Interview: How Would You Prevent a Payment from Being Processed Twice?</h1>
+        <p class="summary">
+          A complete interview answer covering idempotency keys, distributed locking, database
+          constraints, crash-recovery with the Outbox pattern, Kafka exactly-once semantics, and
+          the reconciliation jobs that catch what all other layers miss. The layered defence every
+          senior engineer must know.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Payments · Interview Prep</span>
+          <span class="meta-item">Credit: Javarevisited (Medium)</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A payment can be duplicated at every layer of the stack: the client double-taps the Pay
+          button; the network times out and the client retries; the payment service crashes after
+          charging but before recording; Kafka redelivers an event the consumer already processed.
+          No single mechanism stops all of these. The correct answer is a layered defence — client
+          key, server lock, database constraint, event deduplication, and a reconciliation job
+          for the gaps everything else misses.
+        </p>
+        <div class="callout">
+          <p><strong>Interview signal:</strong> Candidates who answer "use an idempotency key" are
+          at L4. Candidates who explain idempotency keys <em>and</em> the crash scenario between
+          charge and record <em>and</em> why you still need reconciliation are at L6+.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The ₹12,000 double-charge that made headlines</span>
+        <p>
+          A food delivery app processed a ₹600 order during a network instability event. The payment
+          service charged the card, received the gateway response, and began writing the transaction
+          record to PostgreSQL. The DB connection dropped. The write failed. The service returned 500.
+          The client retried. The gateway, queried again, returned the same charge response (it was
+          idempotent on their side). The service treated the second response as a new charge and
+          issued a second debit. Twenty users reported the same issue that hour — total ₹12,000 in
+          duplicate charges before monitoring caught it.
+        </p>
+        <p>
+          The fix was not complex — it required storing the gateway's transaction ID immediately on
+          receipt and checking for it before any second write. But the gap between "charge happened"
+          and "we recorded it" was where the bug lived, and it required explicit design to close.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Layer 1 — Idempotency Keys (client to server)</h2>
+        <p>
+          The client generates a UUID <em>before</em> sending the payment request. This key is bound
+          to the logical operation (this cart checkout), not the HTTP request. On retry, the same key
+          is sent. The server stores the result keyed by this ID; retries return the stored result
+          without re-processing.
+        </p>
+
+        <p>Key design decisions interviewers probe:</p>
+        <ul>
+          <li><strong>Who generates it?</strong> Always the client. If the server generates it, the "create key" call itself can be retried and generate multiple keys.</li>
+          <li><strong>What is it bound to?</strong> Bind to <code>user_id + order_id</code> hash — not just a random UUID — so even a client that loses the key can re-derive it deterministically.</li>
+          <li><strong>TTL?</strong> 24–72 hours. Long enough that retries within a session succeed; short enough that a week-old key does not block a legitimate repeat purchase.</li>
+          <li><strong>What is stored?</strong> The full response (status code + body), not just a boolean. Return the exact same response on every duplicate.</li>
+        </ul>
+
+        <span class="code-label">JavaScript Example — Idempotency Key Handler</span>
+        <pre><code>// payment-service.js — idempotency key handling
+import crypto from 'crypto';
+
+function deriveIdempotencyKey(userId, orderId) {
+  return crypto.createHash('sha256')
+    .update(`payment:${userId}:${orderId}`)
+    .digest('hex');
+}
+
+async function processPayment(userId, orderId, amount, paymentMethod) {
+  const idemKey = deriveIdempotencyKey(userId, orderId);
+  const cacheKey = `idem:${idemKey}`;
+
+  // 1. Check for existing result (in-flight or completed)
+  const existing = await redis.get(cacheKey);
+  if (existing) {
+    const result = JSON.parse(existing);
+    if (result.status === 'processing') {
+      throw new Error('Payment is currently being processed — retry in a few seconds');
+    }
+    return result; // return the stored outcome without re-charging
+  }
+
+  // 2. Mark as in-flight (prevents duplicate concurrent requests)
+  const acquired = await redis.set(cacheKey, JSON.stringify({ status: 'processing' }),
+    'EX', 300, 'NX'); // NX = only set if not exists
+  if (!acquired) {
+    throw new Error('Concurrent payment detected — retry shortly');
+  }
+
+  try {
+    // 3. Call payment gateway
+    const gatewayResult = await chargeCard(paymentMethod, amount);
+
+    // 4. Persist to database (gateway txn ID is stored immediately)
+    await db.query(
+      `INSERT INTO payments (user_id, order_id, idempotency_key, gateway_txn_id, amount, status)
+       VALUES ($1, $2, $3, $4, $5, 'success')
+       ON CONFLICT (idempotency_key) DO NOTHING`, // DB-level safety net
+      [userId, orderId, idemKey, gatewayResult.transactionId, amount]
+    );
+
+    const result = { status: 'success', transactionId: gatewayResult.transactionId, amount };
+    // 5. Store completed result with 48hr TTL
+    await redis.setex(cacheKey, 172800, JSON.stringify(result));
+    return result;
+  } catch (err) {
+    await redis.del(cacheKey); // allow retry on genuine error
+    throw err;
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Layer 2 — Database Unique Constraint</h2>
+        <p>
+          The idempotency key check in Redis is fast but non-atomic with the database write. Under
+          extremely rare race conditions (two requests arriving within microseconds before the Redis
+          key is set), both could pass the Redis check. The database constraint is the fallback:
+        </p>
+        <pre><code>-- payments table: unique constraint at DB level
+CREATE TABLE payments (
+  id              BIGSERIAL PRIMARY KEY,
+  user_id         BIGINT NOT NULL,
+  order_id        BIGINT NOT NULL,
+  idempotency_key CHAR(64) NOT NULL UNIQUE,  -- SHA-256 hex
+  gateway_txn_id  VARCHAR(128) UNIQUE,        -- prevents duplicate gateway records
+  amount          NUMERIC(12,2) NOT NULL,
+  status          VARCHAR(20) NOT NULL,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX payments_order_success
+  ON payments (user_id, order_id)
+  WHERE status = 'success';
+-- Prevents two successful payments for the same order even if idempotency key is different</code></pre>
+        <p>
+          The partial index (<code>WHERE status = 'success'</code>) allows a failed payment attempt
+          to be retried (different idempotency key if the client rotates), while blocking a second
+          successful charge for the same order.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Layer 3 — The Crash Recovery Gap (the hardest part)</h2>
+        <p>
+          The most dangerous window: the service calls the gateway, receives a successful charge
+          response, and then crashes before writing to the database. On restart/retry:
+        </p>
+        <ul>
+          <li>The gateway is re-called. It returns the same charge response (it is idempotent).</li>
+          <li>The service writes the record — a second write for the first charge, or a true second charge if the gateway created a new transaction.</li>
+        </ul>
+        <p>
+          The fix: store the gateway's <code>transaction_id</code> immediately in the outbox table
+          (same transaction as the order write) <em>before</em> calling the gateway. On crash+retry,
+          check for an existing <code>gateway_txn_id</code> before making a new call.
+        </p>
+        <pre><code>// crash-safe payment with outbox
+async function crashSafePayment(client, userId, orderId, amount) {
+  await client.query('BEGIN');
+
+  // Store payment intent with gateway_txn_id = NULL (pending)
+  const { rows } = await client.query(
+    `INSERT INTO payments (user_id, order_id, idempotency_key, amount, status)
+     VALUES ($1, $2, $3, $4, 'pending')
+     ON CONFLICT (idempotency_key) DO UPDATE SET status = payments.status
+     RETURNING id, gateway_txn_id, status`,
+    [userId, orderId, deriveIdempotencyKey(userId, orderId), amount]
+  );
+
+  if (rows[0].gateway_txn_id) {
+    await client.query('ROLLBACK');
+    return { status: rows[0].status, transactionId: rows[0].gateway_txn_id }; // already charged
+  }
+
+  await client.query('COMMIT');
+  const paymentId = rows[0].id;
+
+  // Call gateway AFTER commit — if we crash here, on retry we detect pending record above
+  const gatewayResult = await chargeCard(paymentMethod, amount);
+
+  // Update with gateway result
+  await db.query(
+    'UPDATE payments SET gateway_txn_id = $1, status = $2 WHERE id = $3',
+    [gatewayResult.transactionId, 'success', paymentId]
+  );
+  return { status: 'success', transactionId: gatewayResult.transactionId };
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Layer 4 — Event Deduplication (Kafka/queues)</h2>
+        <p>
+          If payments are triggered or confirmed via events, Kafka's at-least-once delivery can
+          replay an event that was already processed:
+        </p>
+        <ul>
+          <li><strong>Consumer-side dedup store</strong> — store processed <code>event_id</code> in Redis with a TTL matching Kafka's retention period. On receive: check before processing.</li>
+          <li><strong>Kafka idempotent producer</strong> (<code>enable.idempotence=true</code>) — prevents the producer from publishing the same message twice due to retries.</li>
+          <li><strong>Exactly-once transactions</strong> — Kafka supports transactional producers + consumers. Expensive but guarantees exactly-once end-to-end.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Layer 5 — Reconciliation Jobs (the safety net)</h2>
+        <p>
+          No matter how well-designed the above layers are, edge cases slip through. A reconciliation
+          job runs every hour (or every 5 minutes for high-value transactions):
+        </p>
+        <ol>
+          <li>Query the payment gateway API for all transactions in the last window.</li>
+          <li>Cross-reference against the payments table.</li>
+          <li>Flag any gateway charge with no matching DB record → alert + manual review.</li>
+          <li>Flag any DB record with status=success but no matching gateway charge → refund candidate.</li>
+        </ol>
+        <p>
+          Stripe, Razorpay, and Braintree all expose reconciliation APIs exactly for this purpose.
+          Use them. Reconciliation is not a sign of a broken system — it is defence-in-depth for a
+          system that handles money.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Defence-in-Depth Summary</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Layer</th><th>What it stops</th><th>What it misses</th></tr></thead>
+            <tbody>
+              <tr><td>Idempotency key (Redis)</td><td>Client retries, user double-tap</td><td>Concurrent race, crash between charge and record</td></tr>
+              <tr><td>DB unique constraint</td><td>Race condition bypassing Redis</td><td>Cross-service duplicates, event replay</td></tr>
+              <tr><td>Crash recovery (pending record)</td><td>Service crash between charge and write</td><td>Gateway-side duplicates</td></tr>
+              <tr><td>Event dedup store</td><td>Kafka at-least-once replay</td><td>Long-TTL events, consumer restarts</td></tr>
+              <tr><td>Reconciliation job</td><td>Everything else</td><td>Nothing — this is the final safety net</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./api-concurrency-multiple-users.html">Multiple Users Hitting Your API</a> — distributed locking and race conditions.</li>
+          <li><a href="./5-backend-system-design-patterns.html">5 Backend System Design Patterns</a> — Outbox, Saga, Idempotency in depth.</li>
+          <li><a href="./whatsapp-duplicate-messages-idempotency.html">WhatsApp Duplicate Messages</a> — idempotency at messaging scale.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Preventing duplicate payments requires a layered defence, not a single mechanism.
+          Idempotency keys stop client retries; database constraints stop race conditions; the
+          pending-record pattern stops crash-recovery gaps; event deduplication stops queue
+          replays; and reconciliation catches everything else. In an interview, naming all five
+          layers and explaining <em>which failure each one addresses</em> is what separates
+          L4 from L6.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

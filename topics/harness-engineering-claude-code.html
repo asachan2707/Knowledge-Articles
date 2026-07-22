@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Harness Engineering Claude Code: Building a Production AI Coding Agent | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1586717799252-bd134ad00e26?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="AI coding assistant terminal" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Agentic · Claude Code · Setup · Production · Engineering · 28 min</span>
+          </div>
+        </figure>
+        <h1>Harness Engineering Claude Code: Building a Production AI Coding Agent</h1>
+        <p class="summary">
+          What it actually takes to build Claude Code as a production system — the harness
+          engineering behind the agent loop, tool execution, permission system, context management,
+          streaming output, and the software architecture decisions that make an AI coding agent
+          reliable, safe, and fast at enterprise scale.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Agentic Systems · AI Engineering · Claude Code · Production</span>
+          <span class="meta-item">Filter: Agentic · Claude Code · Setup</span>
+          <span class="meta-item">Credit: <a href="https://levelup.gitconnected.com/building-claude-code-with-harness-engineering-a-deep-dive-into-ai-coding-agents" target="_blank" rel="noopener">Building Claude Code with Harness Engineering (levelup.gitconnected.com)</a></span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Claude Code is not just an API wrapper that calls Claude and prints the response. It is a
+          production engineering artifact: an agentic loop that coordinates tool execution, context
+          management, streaming I/O, permission enforcement, and state persistence across an
+          arbitrarily long task. The engineering decisions behind it are the same ones you face when
+          building any production AI agent — and most of them are not about the AI at all.
+        </p>
+        <div class="callout">
+          <p><strong>Harness engineering:</strong> The infrastructure layer that wraps an AI model
+          to make it useful in production. The harness handles tool dispatching, permission checks,
+          output rendering, error recovery, and session management — everything the model itself
+          cannot do. The model is the intelligence; the harness is the reliability.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The Agent Loop Architecture</h2>
+        <p>
+          An AI coding agent runs a loop: send message to model → receive response → if response
+          contains a tool call, execute it → send result back → repeat until no more tool calls.
+          This is the ReAct (Reasoning + Acting) pattern.
+        </p>
+        <pre><code>// Simplified agent loop pseudocode (not Claude Code's actual implementation)
+async function runAgentLoop(initialPrompt, tools, maxTurns = 50) {
+  const messages = [{ role: 'user', content: initialPrompt }];
+  let turn = 0;
+
+  while (turn < maxTurns) {
+    turn++;
+
+    // 1. Send to model
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-8',
+      max_tokens: 8096,
+      tools: tools.map(t => t.schema),
+      messages,
+    });
+
+    // 2. Append assistant message
+    messages.push({ role: 'assistant', content: response.content });
+
+    // 3. Check for tool use
+    const toolUses = response.content.filter(b => b.type === 'tool_use');
+    if (toolUses.length === 0) {
+      // Model responded without tool use = task complete or needs input
+      if (response.stop_reason === 'end_turn') break;
+    }
+
+    // 4. Execute all tool calls in this turn
+    const toolResults = await Promise.all(
+      toolUses.map(async toolUse => {
+        const tool = tools.find(t => t.name === toolUse.name);
+        const result = await executeTool(tool, toolUse.input);
+        return { type: 'tool_result', tool_use_id: toolUse.id, content: result };
+      })
+    );
+
+    // 5. Send tool results back
+    messages.push({ role: 'user', content: toolResults });
+  }
+
+  return messages;
+}</code></pre>
+        <p>
+          This loop is the foundation. Every engineering decision that follows is about making this
+          loop safe, observable, fast, and correct under real-world conditions.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Tool Architecture: The Tool Registry</h2>
+        <p>
+          A production agent has many tools. The tool registry manages their lifecycle:
+          registration, schema validation, permission checks, execution routing, and error handling.
+        </p>
+        <pre><code>// Tool registry — manages all available tools
+class ToolRegistry {
+  constructor(permissionSystem) {
+    this.tools = new Map();
+    this.permissions = permissionSystem;
+  }
+
+  register(tool) {
+    // Validate tool schema at registration time, not call time
+    if (!tool.name || !tool.description || !tool.schema || !tool.execute) {
+      throw new Error(`Tool ${tool.name} missing required fields`);
+    }
+    this.tools.set(tool.name, tool);
+    return this;
+  }
+
+  async execute(toolName, input, context) {
+    const tool = this.tools.get(toolName);
+    if (!tool) throw new Error(`Unknown tool: ${toolName}`);
+
+    // Permission check before execution
+    const allowed = await this.permissions.check(toolName, input, context);
+    if (!allowed.granted) {
+      if (allowed.requiresConfirmation) {
+        // Pause loop, prompt user, wait for response
+        const confirmed = await context.promptUser(
+          `Allow ${toolName} with input: ${JSON.stringify(input, null, 2)}?`
+        );
+        if (!confirmed) return { content: 'User denied this action.', isError: true };
+      } else {
+        return { content: `Permission denied for ${toolName}`, isError: true };
+      }
+    }
+
+    // Execute with timeout and error handling
+    try {
+      return await Promise.race([
+        tool.execute(input, context),
+        timeout(tool.timeoutMs ?? 30_000, toolName),
+      ]);
+    } catch (err) {
+      context.logger.error({ toolName, err }, 'Tool execution failed');
+      return { content: `${toolName} failed: ${err.message}`, isError: true };
+    }
+  }
+
+  // Returns tool schemas for the model's `tools` parameter
+  getSchemas() {
+    return [...this.tools.values()].map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.schema,
+    }));
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>The Permission System</h2>
+        <p>
+          Claude Code's permission model is one of its most important engineering decisions. Tools
+          are classified by risk level, and the user's permission mode determines which require
+          confirmation.
+        </p>
+        <pre><code>// Permission system — three tiers of tool risk
+const ToolRisk = {
+  READ_ONLY: 'read-only',       // Read files, grep, list dirs — always allowed
+  WRITE: 'write',               // Edit files, create files — auto-allowed in most modes
+  DESTRUCTIVE: 'destructive',   // Delete files, git push, run servers — require confirmation
+  NETWORK: 'network',           // HTTP calls to external services — require confirmation
+  SHELL: 'shell',               // Arbitrary bash — require explicit allow pattern
+};
+
+class PermissionSystem {
+  constructor(mode, allowList = []) {
+    // Modes: 'plan' (read-only), 'auto' (permissive), 'manual' (ask for everything)
+    this.mode = mode;
+    this.allowList = allowList; // pre-approved patterns
+  }
+
+  async check(toolName, input, context) {
+    const risk = this.getToolRisk(toolName, input);
+
+    if (this.mode === 'plan') {
+      // Plan mode: only read-only tools allowed
+      return { granted: risk === ToolRisk.READ_ONLY, requiresConfirmation: false };
+    }
+
+    if (this.mode === 'auto') {
+      // Auto mode: allow everything except destructive shell commands not on allowList
+      if (risk === ToolRisk.SHELL) {
+        const allowed = this.allowList.some(pattern => new RegExp(pattern).test(input.command));
+        return { granted: allowed, requiresConfirmation: !allowed };
+      }
+      return { granted: true, requiresConfirmation: false };
+    }
+
+    // Manual mode: everything requires confirmation
+    return { granted: false, requiresConfirmation: true };
+  }
+
+  getToolRisk(toolName, input) {
+    const riskMap = {
+      'Read': ToolRisk.READ_ONLY,
+      'Grep': ToolRisk.READ_ONLY,
+      'Edit': ToolRisk.WRITE,
+      'Write': ToolRisk.WRITE,
+      'Bash': input?.command?.match(/rm|drop|truncate|git push/) ? ToolRisk.DESTRUCTIVE : ToolRisk.SHELL,
+      'WebFetch': ToolRisk.NETWORK,
+    };
+    return riskMap[toolName] ?? ToolRisk.DESTRUCTIVE;
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Context Management: The Sliding Window Problem</h2>
+        <p>
+          Claude has a 200k token context window. A long agentic session — reading many files,
+          making many tool calls — will eventually exhaust it. Context management is the harness's
+          job, not the model's.
+        </p>
+        <p><strong>Claude Code's strategies:</strong></p>
+        <ul>
+          <li><strong>Automatic compaction:</strong> When the context exceeds a threshold (e.g., 70% of max), the harness sends the full conversation to the model and asks it to produce a concise summary. The summary replaces the detailed history. Future turns have a shorter but semantically complete context.</li>
+          <li><strong>Tool result truncation:</strong> Long tool outputs (large file reads, grep results with hundreds of matches) are truncated before being appended to context. The model is told the result was truncated and offered to request more.</li>
+          <li><strong>Lazy file reading:</strong> The harness does not preload all relevant files into context. It gives the model Read/Grep tools and lets it request files on demand — only content the model actively requested enters context.</li>
+          <li><strong>Rolling window for long tasks:</strong> For very long tasks, older completed subtask results are summarised and moved out of context while recent ones remain in full detail.</li>
+        </ul>
+        <pre><code>// Context budget tracking
+class ContextBudget {
+  constructor(maxTokens = 200_000) {
+    this.maxTokens = maxTokens;
+    this.used = 0;
+    this.COMPACTION_THRESHOLD = 0.70; // compact at 70%
+  }
+
+  add(tokens) { this.used += tokens; }
+  remaining() { return this.maxTokens - this.used; }
+  shouldCompact() { return this.used / this.maxTokens > this.COMPACTION_THRESHOLD; }
+
+  truncateToolResult(result, toolName) {
+    const MAX_RESULT_TOKENS = 8_000; // ~32k characters
+    const chars = result.length;
+    if (chars <= MAX_RESULT_TOKENS * 4) return result;
+
+    const truncated = result.slice(0, MAX_RESULT_TOKENS * 4);
+    const dropped = chars - MAX_RESULT_TOKENS * 4;
+    return `${truncated}\n\n[...${dropped} characters truncated. Use the ${toolName} tool again with more specific parameters to get the rest.]`;
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Streaming Output: The User Experience Layer</h2>
+        <p>
+          Without streaming, the user stares at a blank terminal for 10 seconds while the model
+          generates a response. Streaming delivers text tokens as they are produced, which is
+          critical for perceived responsiveness in an interactive coding session.
+        </p>
+        <pre><code>// Streaming response handler
+async function streamingAgentTurn(messages, tools) {
+  process.stdout.write('\n'); // visual separator
+
+  let fullText = '';
+  let toolUses = [];
+
+  const stream = await anthropic.messages.stream({
+    model: 'claude-opus-4-8',
+    max_tokens: 8096,
+    tools: tools.getSchemas(),
+    messages,
+  });
+
+  for await (const event of stream) {
+    if (event.type === 'content_block_delta') {
+      if (event.delta.type === 'text_delta') {
+        process.stdout.write(event.delta.text); // stream text to terminal
+        fullText += event.delta.text;
+      }
+      if (event.delta.type === 'input_json_delta') {
+        // Accumulate tool input JSON (streamed in chunks)
+        // Don't display to user — too noisy
+      }
+    }
+    if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+      // Signal to user that a tool is being invoked
+      process.stdout.write(`\n[Calling ${event.content_block.name}...]\n`);
+    }
+  }
+
+  const finalMessage = await stream.getFinalMessage();
+  return finalMessage;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>State Persistence: Resumable Sessions</h2>
+        <p>
+          A coding agent session can last hours. If the terminal is closed, the session should be
+          resumable from where it left off — not restarted. This requires persisting the full
+          message history and tool state.
+        </p>
+        <pre><code>// Session persistence
+import { createHash } from 'crypto';
+import fs from 'fs/promises';
+
+class SessionStore {
+  constructor(sessionDir) {
+    this.sessionDir = sessionDir;
+  }
+
+  sessionPath(sessionId) {
+    return `${this.sessionDir}/${sessionId}.jsonl`;
+  }
+
+  async append(sessionId, turn) {
+    // JSONL: one JSON object per line for streaming-safe appends
+    const line = JSON.stringify({ ts: Date.now(), ...turn }) + '\n';
+    await fs.appendFile(this.sessionPath(sessionId), line, 'utf-8');
+  }
+
+  async load(sessionId) {
+    const content = await fs.readFile(this.sessionPath(sessionId), 'utf-8');
+    return content.trim().split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+  }
+
+  generateSessionId(cwd, gitBranch) {
+    // Stable session ID tied to project + branch
+    return createHash('sha256')
+      .update(`${cwd}:${gitBranch}`)
+      .digest('hex')
+      .slice(0, 16);
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Key Engineering Lessons from Harness Design</h2>
+        <ul>
+          <li><strong>The model is not the agent.</strong> The model generates text. The agent is the harness that executes actions, checks permissions, manages context, and talks to the user. These are separate concerns and should be separate code.</li>
+          <li><strong>Tool errors must return to the model, not crash the loop.</strong> Every tool execution must be wrapped in try/catch. The error is returned as a tool result so the model can reason about it and try an alternative approach.</li>
+          <li><strong>Max turn limits are safety rails, not success criteria.</strong> A 50-turn limit prevents infinite loops; it is not a quality floor. If the agent consistently hits the limit, the task decomposition or tool design is wrong.</li>
+          <li><strong>Streaming is not optional for interactive agents.</strong> A 10-second silent terminal is not an acceptable UX for a coding agent. Stream tokens from the first byte.</li>
+          <li><strong>Permission prompts must be atomic from the user's perspective.</strong> Never ask "is this OK?" mid-task without showing exactly what the action is. Permission request = full context, specific action, reversibility assessment.</li>
+          <li><strong>Context is a resource — budget it like memory.</strong> Every tool result added to context costs future capacity. Tool output truncation and session compaction are not optimisations; they are correctness requirements for long tasks.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Building a production AI coding agent is 20% AI and 80% harness engineering. The model
+          handles reasoning; the harness handles everything that makes reasoning safe to deploy:
+          tool execution, permission enforcement, context budgeting, streaming output, session
+          persistence, and error recovery. The architecture described here — tool registry, tiered
+          permission system, context budget tracker, streaming loop, JSONL session store — is the
+          minimum viable harness for a reliable agent. Any missing layer becomes an incident.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

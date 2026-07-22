@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>20 Java Backend Interview Questions for Senior Engineers | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Code interview on screen" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Interview · Java · Senior Level · 28 min</span>
+          </div>
+        </figure>
+        <h1>20 Java Backend Interview Questions for Senior Engineers</h1>
+        <p class="summary">
+          The questions senior Java backend engineers are actually asked, with architect-level answers.
+          Covers JVM internals, concurrency primitives, Spring Boot production patterns, JPA/Hibernate
+          pitfalls, GC tuning, reactive programming, microservice design, and the "why" behind Java's
+          most misunderstood guarantees.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Java · Backend · Interview Prep · Senior Level</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Senior Java interviews test not just "does it compile" but "would you bet production on
+          this." The questions below probe the gap between Java knowledge and Java judgment — the
+          difference between knowing what <code>volatile</code> does and knowing when <em>not</em>
+          to use it.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>1. What is the Java Memory Model (JMM) and why does it matter for concurrency?</h2>
+        <p>
+          The JMM defines when writes made by one thread are visible to other threads. Without it,
+          the compiler and CPU are free to reorder instructions for performance — meaning a write
+          in Thread A may never be seen by Thread B, or may appear in a different order than written.
+        </p>
+        <p>
+          Key guarantees: the <strong>happens-before</strong> relationship. A happens-before B means
+          all writes visible to A are visible to B. Happens-before is established by:
+          <code>synchronized</code> (unlock → lock), <code>volatile</code> writes/reads,
+          <code>Thread.start()</code> / <code>Thread.join()</code>, and
+          <code>java.util.concurrent</code> operations.
+        </p>
+        <p><strong>Interview signal:</strong> Candidates who only say "volatile makes a variable
+        thread-safe" miss the JMM. Correct: volatile establishes happens-before for reads and writes,
+        which prevents some but not all race conditions. <code>volatile</code> does NOT make compound
+        actions (check-then-act, read-modify-write) atomic.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>2. What is the difference between <code>synchronized</code>, <code>volatile</code>, and <code>AtomicInteger</code>?</h2>
+        <ul>
+          <li><code>synchronized</code>: mutual exclusion + visibility. Only one thread executes the block at a time. Establishes happens-before at exit. Heavier — involves monitor acquisition, context switches under contention.</li>
+          <li><code>volatile</code>: visibility only. Reads always see the latest write. No mutual exclusion — does NOT prevent race conditions on compound operations (<code>i++</code> is read-modify-write = 3 operations, not 1).</li>
+          <li><code>AtomicInteger</code>: atomic compound operations via CAS (Compare-And-Swap). <code>incrementAndGet()</code> is atomic. Implemented with <code>volatile</code> + CPU-level CAS instruction. Non-blocking — no lock acquisition, no context switch.</li>
+        </ul>
+        <p><strong>When to use each:</strong> AtomicInteger for counters. volatile for flags/state that are written by one thread and read by many. synchronized for compound operations on multiple variables that must be consistent together.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>3. What is the N+1 query problem in Hibernate and how do you fix it?</h2>
+        <p>
+          When you load a list of N entities, and Hibernate issues 1 query for the list + N separate
+          queries for each entity's lazy-loaded association. For 1,000 orders, loading each order's
+          <code>customer</code> generates 1,001 queries instead of 1 join.
+        </p>
+        <p><strong>Fixes:</strong></p>
+        <ul>
+          <li><code>@EntityGraph</code> or <code>FETCH JOIN</code> in JPQL: eagerly fetch the association in a single query.</li>
+          <li><code>@BatchSize(size = 100)</code> on the collection: Hibernate batches the lazy-load queries into groups of 100 (reduces 1,000 queries to 10).</li>
+          <li>DTO projections with JPQL: SELECT specific fields instead of full entities — Hibernate never loads the entity graph at all.</li>
+        </ul>
+        <p><strong>Detection:</strong> Hibernate statistics or a query-counting DataSource wrapper (like P6Spy or DataSourceProxy). Any screen with query counts in the hundreds = N+1 candidate.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>4. Explain G1 GC vs ZGC vs Shenandoah. When would you choose each?</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>GC</th><th>Max pause</th><th>Throughput</th><th>Heap size sweet spot</th><th>Use case</th></tr></thead>
+            <tbody>
+              <tr><td>G1</td><td>~200ms (tunable)</td><td>High</td><td>4GB–64GB</td><td>General-purpose: most microservices</td></tr>
+              <tr><td>ZGC</td><td>&lt; 1ms</td><td>Slightly lower</td><td>Scales to TBs</td><td>Low-latency services (trading, real-time)</td></tr>
+              <tr><td>Shenandoah</td><td>&lt; 10ms</td><td>Moderate</td><td>4GB–500GB</td><td>Interactive, large heaps, OpenJDK preference</td></tr>
+              <tr><td>Serial/Parallel</td><td>High (stop-the-world)</td><td>Highest</td><td>&lt; 4GB</td><td>Batch jobs, single-core containers</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <strong>JVM flag examples:</strong><br/>
+          G1: <code>-XX:+UseG1GC -XX:MaxGCPauseMillis=200</code><br/>
+          ZGC: <code>-XX:+UseZGC -XX:ZAllocationSpikeTolerance=2</code>
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>5. What is a ConcurrentModificationException and how do you prevent it?</h2>
+        <p>
+          Thrown when a collection is structurally modified (add/remove) while being iterated by its
+          own iterator. The iterator's <code>modCount</code> check detects this at the next
+          <code>next()</code> call (fail-fast behaviour).
+        </p>
+        <p><strong>Prevention strategies:</strong></p>
+        <ul>
+          <li>Use <code>CopyOnWriteArrayList</code>: iterator sees a snapshot; mutations are safe but expensive for write-heavy cases.</li>
+          <li>Collect removals to a separate list, apply after iteration.</li>
+          <li>Use <code>Iterator.remove()</code> instead of <code>Collection.remove()</code> during iteration — safe because the iterator tracks its own modification.</li>
+          <li><code>ConcurrentHashMap.forEach</code> vs <code>keySet().iterator()</code> — the former is safe for concurrent structural modification (weakly consistent).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>6. What is a <code>ThreadLocal</code> memory leak and when does it happen?</h2>
+        <p>
+          <code>ThreadLocal</code> values are stored in the <code>ThreadLocalMap</code> of the thread
+          itself. In thread-pool environments (Tomcat, Spring), threads are <em>reused</em> — they are
+          never garbage collected between requests. If a <code>ThreadLocal</code> is set during a
+          request but not removed, the value lives for the lifetime of the thread (potentially forever),
+          preventing GC of the stored object.
+        </p>
+        <p>
+          <strong>Fix:</strong> Always call <code>threadLocal.remove()</code> in a <code>finally</code>
+          block at the end of the request lifecycle, or use Spring's
+          <code>RequestContextHolder</code> (which manages cleanup automatically).
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>7. What is Spring's <code>@Transactional</code> and what are its proxy limitations?</h2>
+        <p>
+          <code>@Transactional</code> works via AOP proxy: Spring wraps the bean in a proxy that
+          intercepts the method call, begins the transaction, calls the actual method, and commits or
+          rolls back.
+        </p>
+        <p><strong>The self-invocation problem:</strong> If method A in a bean calls method B in the
+        same bean, and method B is <code>@Transactional</code>, the transaction is NOT applied to B.
+        The call bypasses the proxy entirely — it's a direct <code>this.B()</code> call, not
+        <code>proxy.B()</code>.</p>
+        <p><strong>Other gotchas:</strong></p>
+        <ul>
+          <li>Default propagation is <code>REQUIRED</code>: joins existing transaction or starts a new one. <code>REQUIRES_NEW</code> starts a new transaction, suspending the outer one — useful for audit logging that must commit even if the outer TX rolls back.</li>
+          <li>Default rollback is unchecked exceptions only (<code>RuntimeException</code> and <code>Error</code>). Checked exceptions do NOT trigger rollback unless <code>rollbackFor</code> is set.</li>
+          <li><code>@Transactional</code> on <code>private</code> methods is silently ignored.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>8. Explain Project Loom virtual threads. How do they change backend architecture?</h2>
+        <p>
+          Virtual threads (Java 21) are lightweight threads managed by the JVM, not the OS. Creating
+          1 million virtual threads is cheap — they are not mapped 1:1 to OS threads. When a virtual
+          thread blocks on I/O, the JVM unmounts it from its carrier thread; another virtual thread
+          runs on that carrier. This is structured concurrency via cooperative scheduling.
+        </p>
+        <p><strong>Backend implications:</strong></p>
+        <ul>
+          <li>Thread-per-request models (Spring MVC, JDBC) become viable again at high concurrency. A 10k req/s service no longer needs a reactive programming model to avoid OS thread saturation.</li>
+          <li>Reactive programming (WebFlux, RxJava) advantage narrows — the primary motivation (non-blocking I/O without thread exhaustion) is now addressable with simpler imperative code on virtual threads.</li>
+          <li><code>synchronized</code> blocks still pin virtual threads to carrier threads (OS threads). Prefer <code>ReentrantLock</code> in code that will run on virtual threads.</li>
+          <li>ThreadLocal memory leak risk is amplified — millions of cheap virtual threads holding ThreadLocals can exhaust heap. Use <code>ScopedValue</code> (Java 21 preview) as the replacement.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>9. What are the differences between <code>ConcurrentHashMap</code> and <code>Collections.synchronizedMap()</code>?</h2>
+        <ul>
+          <li><code>synchronizedMap</code>: wraps every method in a synchronized block on the map itself. Only one thread can read OR write at any time. Simple but high contention under concurrent reads.</li>
+          <li><code>ConcurrentHashMap</code>: lock striping (Java 8+: CAS + segment-level synchronization). Reads are lock-free. Writes lock only the affected bucket. Concurrent reads and non-conflicting writes execute in parallel. Higher throughput under contention.</li>
+        </ul>
+        <p>
+          <code>ConcurrentHashMap</code> is weakly consistent: iterators reflect the state at some
+          point during iteration, not necessarily the current state. It does NOT support null keys or
+          values (<code>synchronizedMap</code> inherits from <code>HashMap</code> which does).
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>10. How would you design a rate limiter in Java?</h2>
+        <p>
+          Token bucket algorithm: a bucket fills at a fixed rate. Each request consumes one token.
+          Requests when the bucket is empty are rejected. Allows short bursts up to bucket capacity.
+        </p>
+        <pre><code>// Java rate limiter using Guava's RateLimiter (token bucket)
+import com.google.common.util.concurrent.RateLimiter;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class PerUserRateLimiter {
+    private final ConcurrentHashMap&lt;String, RateLimiter&gt; limiters = new ConcurrentHashMap&lt;&gt;();
+    private final double permitsPerSecond;
+
+    public PerUserRateLimiter(double permitsPerSecond) {
+        this.permitsPerSecond = permitsPerSecond;
+    }
+
+    public boolean tryAcquire(String userId) {
+        RateLimiter limiter = limiters.computeIfAbsent(userId,
+            k -> RateLimiter.create(permitsPerSecond));
+        return limiter.tryAcquire(); // non-blocking — returns false if over limit
+    }
+}
+
+// Usage in Spring filter
+@Component
+public class RateLimitFilter extends OncePerRequestFilter {
+    private final PerUserRateLimiter limiter = new PerUserRateLimiter(100); // 100 req/s per user
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res,
+                                     FilterChain chain) throws IOException, ServletException {
+        String userId = extractUserId(req);
+        if (!limiter.tryAcquire(userId)) {
+            res.setStatus(429); // Too Many Requests
+            res.getWriter().write("{\"error\": \"Rate limit exceeded\"}");
+            return;
+        }
+        chain.doFilter(req, res);
+    }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>11–20: Quick-Reference Senior Questions</h2>
+        <ul>
+          <li><strong>11. What causes a deadlock in Java and how do you detect it?</strong> — Two threads each hold a lock the other needs. JVM thread dump shows BLOCKED threads with "waiting to acquire" cycles. Prevention: always acquire locks in a consistent global order; use <code>tryLock(timeout)</code> with fallback.</li>
+          <li><strong>12. What is the difference between <code>equals()</code> and <code>==</code> for Strings?</strong> — <code>==</code> compares references (are these the same object?). <code>equals()</code> compares content. String pool interning means literal Strings may pass <code>==</code> even from different compile units, but new <code>String(...)</code> always creates a new object. Always use <code>equals()</code> for content comparison.</li>
+          <li><strong>13. What is the difference between <code>Callable</code> and <code>Runnable</code>?</strong> — <code>Runnable.run()</code> returns void and cannot throw checked exceptions. <code>Callable.call()</code> returns a value and can throw checked exceptions. Use <code>Callable</code> with <code>ExecutorService.submit()</code> to get a <code>Future</code> for the result.</li>
+          <li><strong>14. What is a WeakReference and when would you use it?</strong> — A reference that does not prevent GC. If the referent has no strong references, it can be collected even if WeakReferences exist. Used in caches (WeakHashMap) where entries should expire when the key is no longer referenced elsewhere.</li>
+          <li><strong>15. What is Spring Boot's auto-configuration mechanism?</strong> — <code>@SpringBootApplication</code> includes <code>@EnableAutoConfiguration</code>, which uses <code>spring.factories</code> (or <code>AutoConfiguration.imports</code> in Boot 3) to load auto-configuration classes. Each class is annotated with <code>@Conditional</code> — it activates only when specified classes are on the classpath, beans are absent, etc. You can exclude auto-configs with <code>exclude</code> on the annotation.</li>
+          <li><strong>16. Explain Java's CompletableFuture composition.</strong> — <code>thenApply</code> (transform result synchronously), <code>thenCompose</code> (chain async operations, flatten futures), <code>thenCombine</code> (combine two independent futures), <code>allOf</code> / <code>anyOf</code> (wait for many). Run on common pool by default; pass a custom <code>Executor</code> for I/O-bound chains.</li>
+          <li><strong>17. What is the difference between <code>@Component</code>, <code>@Service</code>, <code>@Repository</code>, and <code>@Controller</code>?</strong> — All are specialisations of <code>@Component</code>; they are semantically equivalent for component scanning but carry different semantic meaning. <code>@Repository</code> also enables Spring's exception translation (SQL exceptions → DataAccessException hierarchy). <code>@Controller</code> enables Spring MVC request mapping.</li>
+          <li><strong>18. What is connection pool exhaustion and how do you diagnose it?</strong> — All connections in HikariCP pool are in use; new requests wait or fail with "Unable to acquire connection within XXXms." Diagnosis: HikariCP JMX metrics (<code>HikariPool-1.pool.TotalConnections</code>, <code>ActiveConnections</code>). Causes: long-running queries holding connections, N+1 queries, missing <code>finally</code> block for connection release, slow downstream (the DB is backed up).</li>
+          <li><strong>19. When would you use WebFlux vs Spring MVC?</strong> — WebFlux is non-blocking; the same thread handles multiple in-flight requests via event loop. Optimal for I/O-bound workloads with high concurrency (API gateways, streaming). Spring MVC + virtual threads (Java 21) closes much of the performance gap. WebFlux is harder to debug (stack traces are non-linear); prefer MVC + virtual threads unless reactive composition across multiple async sources is a core requirement.</li>
+          <li><strong>20. What is the Open Session in View anti-pattern?</strong> — Spring's default OSIV keeps the Hibernate session open across the full HTTP request including the view rendering layer. This means lazy-loaded associations can be accessed in Thymeleaf/JSP templates without triggering <code>LazyInitializationException</code> — but it also means unbounded queries can fire during view rendering, making it impossible to reason about query counts. Production recommendation: disable OSIV (<code>spring.jpa.open-in-view=false</code>) and use eager loading or DTO projections explicitly.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Senior Java interviews are distinguished by depth over breadth. The questions above test
+          whether a candidate understands the JMM, JVM GC internals, Hibernate session lifecycle,
+          and Spring's AOP proxy model — not whether they can recite API signatures. The expected
+          answer to every question above includes at least one: a concrete failure scenario, a
+          production decision heuristic, or a specific flag/metric that makes the concept observable.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

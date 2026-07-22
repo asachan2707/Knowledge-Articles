@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>5 Backend System Design Patterns Every Engineer Should Know | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="System architecture diagram" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Backend · Patterns · Architecture · 25 min</span>
+          </div>
+        </figure>
+        <h1>5 Backend System Design Patterns Every Engineer Should Know</h1>
+        <p class="summary">
+          The Outbox Pattern, Saga Pattern, Cache-Aside Pattern, Idempotency Pattern, and CQRS — explained
+          from the angle of the production failure that motivated each. Includes low-level implementation
+          details, failure modes, and JavaScript code examples for every pattern.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Backend Engineering · Architecture Patterns</span>
+          <span class="meta-item">Credit: CodeToDeploy (Medium)</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          These five patterns exist because distributed systems fail in specific, repeatable ways.
+          Events get lost. Transactions partially commit. Caches go stale. Services receive the same
+          request twice. Reads compete with writes for the same database connection pool. Each pattern
+          is a hard-won answer to one of those failure modes — learn the failure first, the pattern
+          will be obvious.
+        </p>
+        <div class="callout">
+          <p><strong>The Black Friday failure scenario:</strong> An e-commerce system using Node.js,
+          PostgreSQL, Redis, and Kafka failed in production: customers charged twice, inventory counts
+          inconsistent, orders never reached shipping, and product APIs slowed to a crawl. All five
+          patterns below would have prevented different parts of that failure.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · One order. Two charges. Three database rows. Zero shipping.</span>
+        <p>
+          At 08:00 on Black Friday, the checkout service processed a payment, wrote the order to the
+          database, and tried to publish an "order-placed" event to Kafka. The publish failed — network
+          blip, 200ms timeout. The checkout service returned a 500 error to the client. The client retried.
+          The payment gateway, having already charged the card, returned the same charge ID — which the
+          checkout service interpreted as success for the retry. Two order rows. One charge that looked
+          like two. No "order-placed" event ever reached the shipping service.
+        </p>
+        <p>
+          The root problem: the payment write and the Kafka publish were not atomic. Any failure between
+          them left the system in an inconsistent state with no recovery path. This is the problem the
+          Outbox Pattern solves.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Pattern 1 — The Outbox Pattern</h2>
+        <p>
+          <strong>Problem it solves:</strong> You need to write to a database and publish an event to a
+          message broker atomically. If the app crashes between the two, events are lost or duplicated.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Instead of publishing directly to Kafka/SNS/RabbitMQ, write the
+          event to an <code>outbox</code> table in the same database transaction as your business data.
+          A separate relay process (a poller or CDC connector like Debezium) reads the outbox and
+          publishes to the broker, marking events as published after confirmation.
+        </p>
+        <p>
+          <strong>Guarantees:</strong> Events are published if-and-only-if the transaction commits.
+          No event is ever lost due to a crash between DB write and broker publish.
+          (Delivery is at-least-once — consumers must be idempotent.)
+        </p>
+
+        <span class="code-label">JavaScript Example — Outbox Pattern</span>
+        <pre><code>// outbox-pattern.js — Node.js + pg
+async function placeOrderWithOutbox(client, order) {
+  await client.query('BEGIN');
+  try {
+    // 1. Write business data
+    const { rows } = await client.query(
+      `INSERT INTO orders (user_id, product_id, quantity, status)
+       VALUES ($1, $2, $3, 'pending') RETURNING id`,
+      [order.userId, order.productId, order.quantity]
+    );
+    const orderId = rows[0].id;
+
+    // 2. Write event to outbox IN THE SAME TRANSACTION
+    await client.query(
+      `INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload, published)
+       VALUES ('order', $1, 'order-placed', $2, false)`,
+      [orderId, JSON.stringify({ orderId, ...order })]
+    );
+
+    await client.query('COMMIT');
+    return orderId;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  }
+}
+
+// Relay process (runs separately, e.g., every 100ms or via Debezium CDC)
+async function relayOutboxEvents(kafkaProducer) {
+  const { rows } = await pool.query(
+    `SELECT * FROM outbox_events WHERE published = false ORDER BY created_at LIMIT 100`
+  );
+  for (const event of rows) {
+    await kafkaProducer.send({
+      topic: event.event_type,
+      messages: [{ key: event.aggregate_id, value: event.payload }]
+    });
+    await pool.query(
+      'UPDATE outbox_events SET published = true, published_at = NOW() WHERE id = $1',
+      [event.id]
+    );
+  }
+}</code></pre>
+        <p>
+          <strong>Production note (Debezium):</strong> Replace the polling relay with a CDC connector
+          pointing at the outbox table. Debezium tails the PostgreSQL WAL — zero polling, sub-second
+          latency, and no dual-write coordination needed in the app.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Pattern 2 — The Saga Pattern</h2>
+        <p>
+          <strong>Problem it solves:</strong> A business transaction spans multiple microservices
+          (payment service, inventory service, shipping service). There is no distributed transaction
+          manager. Partial failures leave data inconsistent across services.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Break the transaction into a sequence of local transactions,
+          each publishing an event. If any step fails, trigger compensating transactions (rollbacks)
+          in reverse order. Two implementations:
+        </p>
+        <ul>
+          <li><strong>Choreography</strong> — each service listens for events and reacts. No central coordinator. Decoupled but hard to trace.</li>
+          <li><strong>Orchestration</strong> — a central saga orchestrator sends commands and receives responses. Easier to debug; single point of coordination.</li>
+        </ul>
+
+        <span class="code-label">JavaScript Example — Saga Orchestrator</span>
+        <pre><code>// saga-orchestrator.js
+const SAGA_STEPS = ['reserve-inventory', 'charge-payment', 'create-shipment'];
+
+async function executeOrderSaga(orderId, orderData) {
+  const completedSteps = [];
+
+  for (const step of SAGA_STEPS) {
+    try {
+      await executeStep(step, orderId, orderData);
+      completedSteps.push(step);
+      console.log(`[saga] Step ${step} OK for order ${orderId}`);
+    } catch (err) {
+      console.error(`[saga] Step ${step} FAILED: ${err.message}. Rolling back...`);
+      // Compensate in reverse order
+      for (const doneStep of completedSteps.reverse()) {
+        await compensate(doneStep, orderId);
+        console.log(`[saga] Compensated ${doneStep}`);
+      }
+      throw new Error(`Saga failed at step ${step}`);
+    }
+  }
+  return { success: true, orderId };
+}
+
+async function executeStep(step, orderId, data) {
+  // In production: send command via message bus, await response with timeout
+  const handlers = {
+    'reserve-inventory': () => inventoryService.reserve(data.productId, data.quantity),
+    'charge-payment':    () => paymentService.charge(data.userId, data.amount),
+    'create-shipment':   () => shippingService.create(orderId, data.address)
+  };
+  return handlers[step]();
+}
+
+async function compensate(step, orderId) {
+  const compensators = {
+    'reserve-inventory': () => inventoryService.release(orderId),
+    'charge-payment':    () => paymentService.refund(orderId),
+    'create-shipment':   () => shippingService.cancel(orderId)
+  };
+  return compensators[step]?.();
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Pattern 3 — Cache-Aside (Lazy Loading)</h2>
+        <p>
+          <strong>Problem it solves:</strong> Database reads for hot data (product catalogue, user
+          profiles) create unsustainable load at scale. Caching everything eagerly is wasteful and
+          causes write-amplification.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> The application is responsible for all cache interaction.
+          On a read: check the cache first; on a miss, read from the database and populate the cache.
+          On a write: update the database and <em>invalidate</em> (not update) the cache entry.
+        </p>
+        <p>
+          <strong>Why invalidate, not update?</strong> Updating the cache on write introduces a race:
+          two simultaneous writes may set the cache in different orders than they committed to the
+          database, leaving the cache permanently inconsistent. Invalidation forces the next read to
+          re-hydrate from the source of truth.
+        </p>
+
+        <span class="code-label">JavaScript Example — Cache-Aside with Redis</span>
+        <pre><code>// cache-aside.js — Node.js + ioredis + pg
+import Redis from 'ioredis';
+const redis = new Redis(process.env.REDIS_URL);
+const CACHE_TTL = 300; // 5 minutes
+
+async function getProduct(productId) {
+  const cacheKey = `product:${productId}`;
+
+  // 1. Cache hit?
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  // 2. Cache miss — read from DB
+  const { rows } = await pool.query('SELECT * FROM products WHERE id = $1', [productId]);
+  if (!rows[0]) return null;
+
+  // 3. Populate cache with TTL
+  await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(rows[0]));
+  return rows[0];
+}
+
+async function updateProduct(productId, updates) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'UPDATE products SET name = $1, price = $2 WHERE id = $3',
+      [updates.name, updates.price, productId]
+    );
+    // Invalidate, don't update — prevents race conditions
+    await redis.del(`product:${productId}`);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}</code></pre>
+        <p>
+          <strong>Failure mode — Cache Stampede:</strong> When a popular item's TTL expires, thousands
+          of requests simultaneously miss the cache and flood the DB. Fix: use a probabilistic early
+          expiration (refresh at 80% of TTL with small probability) or a distributed lock that allows
+          only one request to rehydrate while others wait.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Pattern 4 — Idempotency Pattern</h2>
+        <p>
+          <strong>Problem it solves:</strong> Network failures cause clients to retry requests.
+          Without idempotency, a payment gets charged twice, an order is placed twice, an email
+          is sent twice.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> The client generates a unique <code>Idempotency-Key</code>
+          header per logical operation (not per request). The server stores the result keyed by
+          this ID. On retry, the stored result is returned without re-executing the operation.
+        </p>
+
+        <span class="code-label">JavaScript Example — Idempotency Key Middleware</span>
+        <pre><code>// idempotency-middleware.js — Express middleware
+import crypto from 'crypto';
+
+async function idempotencyMiddleware(req, res, next) {
+  const key = req.headers['idempotency-key'];
+  if (!key) return next(); // non-idempotent routes skip this
+
+  // Validate key format (prevent injection — UUID v4 only)
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(key)) {
+    return res.status(400).json({ error: 'Invalid idempotency key format' });
+  }
+
+  const cacheKey = `idempotency:${req.path}:${key}`;
+
+  // Check if we've seen this key before
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    const { statusCode, body } = JSON.parse(cached);
+    return res.status(statusCode).json(body); // return stored result
+  }
+
+  // Intercept the response to store it
+  const originalJson = res.json.bind(res);
+  res.json = async (body) => {
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      await redis.setex(cacheKey, 86400, // 24 hours
+        JSON.stringify({ statusCode: res.statusCode, body }));
+    }
+    return originalJson(body);
+  };
+
+  next();
+}
+
+// Client-side: generate key once, bind to operation, not request
+function generateIdempotencyKey(userId, orderId) {
+  // Deterministic key: same operation always produces the same key
+  return crypto.createHash('sha256')
+    .update(`${userId}:${orderId}`)
+    .digest('hex')
+    .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12}).*/, '$1-$2-4$3-a$4-$5');
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Pattern 5 — CQRS (Command Query Responsibility Segregation)</h2>
+        <p>
+          <strong>Problem it solves:</strong> Write-heavy and read-heavy operations compete for the
+          same database connections and indexes. Writes need normalised data (ACID, transactional);
+          reads need denormalised data (fast joins, aggregations, search).
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Separate the write model (Command side) from the read model
+          (Query side). Commands mutate state through the domain model. Queries read from a
+          purpose-built read store (a materialised view, an Elasticsearch index, a Redis cache).
+          The read store is updated asynchronously via events from the command side.
+        </p>
+        <p>
+          <strong>Consistency model:</strong> Eventual consistency — the read model may lag the write
+          model by milliseconds to seconds. Acceptable for product listings, analytics dashboards,
+          activity feeds. Not acceptable for financial balances or ticket availability.
+        </p>
+
+        <span class="code-label">JavaScript Example — CQRS Split with Event Sync</span>
+        <pre><code>// cqrs.js — command/query split with Redis read model
+// ── Command side (writes to PostgreSQL) ──────────────────────────────────────
+async function createReview(userId, productId, rating, text) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO reviews (user_id, product_id, rating, text)
+       VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
+      [userId, productId, rating, text]
+    );
+    // Publish event for read model update
+    await client.query(
+      `INSERT INTO outbox_events (event_type, payload, published)
+       VALUES ('review-created', $1, false)`,
+      [JSON.stringify({ reviewId: rows[0].id, productId, rating })]
+    );
+    await client.query('COMMIT');
+    return rows[0];
+  } finally {
+    client.release();
+  }
+}
+
+// ── Event handler: update read model ─────────────────────────────────────────
+async function handleReviewCreated(event) {
+  const { productId, rating } = event;
+  // Update denormalised product read model in Redis
+  const statsKey = `product:${productId}:stats`;
+  const multi = redis.multi();
+  multi.hincrby(statsKey, 'reviewCount', 1);
+  multi.hincrbyfloat(statsKey, 'ratingSum', rating);
+  await multi.exec();
+  // The average is computed at read time: ratingSum / reviewCount
+}
+
+// ── Query side (reads from Redis, never hits PostgreSQL) ──────────────────────
+async function getProductStats(productId) {
+  const stats = await redis.hgetall(`product:${productId}:stats`);
+  const count = parseInt(stats.reviewCount ?? 0);
+  const sum   = parseFloat(stats.ratingSum ?? 0);
+  return {
+    reviewCount: count,
+    avgRating: count > 0 ? +(sum / count).toFixed(2) : null
+  };
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Pattern Interaction Map</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Pattern</th><th>Solves</th><th>Cost</th><th>Pairs with</th></tr></thead>
+            <tbody>
+              <tr><td>Outbox</td><td>Lost events after DB write</td><td>Extra table + relay process</td><td>Saga, CQRS</td></tr>
+              <tr><td>Saga</td><td>Distributed transaction consistency</td><td>Compensating transactions, complexity</td><td>Outbox (for event delivery)</td></tr>
+              <tr><td>Cache-Aside</td><td>DB read hotspots</td><td>Eventual consistency, stampede risk</td><td>CQRS (as the read store)</td></tr>
+              <tr><td>Idempotency</td><td>Duplicate execution on retry</td><td>Storage, key management discipline</td><td>All patterns — always needed</td></tr>
+              <tr><td>CQRS</td><td>Read/write contention, complex queries</td><td>Eventual consistency, sync complexity</td><td>Outbox (for read model updates)</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./api-concurrency-multiple-users.html">Multiple Users Hitting Your API</a> — concurrency, locking, and race conditions.</li>
+          <li><a href="./system-design-interview-prevent-duplicate-payment.html">Prevent a Payment from Being Processed Twice</a> — idempotency in depth.</li>
+          <li><a href="./amazon-cart-cache-invalidation.html">Amazon Cart: Cache Invalidation Deep Dive</a> — cache-aside at production scale.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          These five patterns are not design choices you make upfront — they are answers to failures
+          you will hit. Start with idempotency everywhere, add the Outbox when events go missing,
+          reach for Saga when a distributed transaction crosses service boundaries, use Cache-Aside
+          when your database becomes the bottleneck, and split to CQRS when reads and writes are at
+          war with each other. Learn the failure, and the pattern will be obvious.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

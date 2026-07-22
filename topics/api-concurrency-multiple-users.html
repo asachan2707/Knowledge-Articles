@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>What Happens When Multiple Users Hit Your API at the Same Time? | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server infrastructure" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Backend · Engineering · 20 min</span>
+          </div>
+        </figure>
+        <h1>What Happens When Multiple Users Hit Your API at the Same Time?</h1>
+        <p class="summary">
+          A deep technical walk-through of concurrent API request handling: thread pools, connection
+          queuing, race conditions on shared state, rate limiting, optimistic and pessimistic locking,
+          and how production systems at Stripe, GitHub, and Shopify prevent data corruption under load.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Backend Engineering · Concurrency</span>
+          <span class="meta-item">Credit: GainJavaKnowledge (Medium)</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          When a single request hits your API, it is easy to reason about. When 10,000 arrive in the
+          same second, every assumption you made about sequential execution breaks. Shared counters
+          corrupt. Inventory oversells. Balances go negative. The difference between an API that handles
+          concurrency correctly and one that does not is not visible in unit tests — it surfaces under load,
+          in production, at the worst possible moment.
+        </p>
+        <div class="callout">
+          <p><strong>Core insight:</strong> A web server does not "clone itself" for concurrent requests.
+          It runs requests across a bounded thread pool. Your application code is the same singleton
+          instance handling all of them simultaneously. Any mutable shared state — a counter, a cache
+          entry, a database row — is a potential race condition.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The Flash Sale That Oversold 4,000 Units</span>
+        <p>
+          An e-commerce site ran a flash sale: 500 units of a limited product. Their check-then-decrement
+          logic was: read stock → if stock > 0, place order → decrement stock. Under normal load, this
+          works. At 09:00, 8,000 concurrent requests arrived.
+        </p>
+        <p>
+          Thread A read stock = 1. Thread B read stock = 1. Both saw stock > 0. Both placed orders.
+          Both decremented. Final stock: -1. They oversold. At high concurrency, this exact race replicated
+          thousands of times in under a second — 4,000 orders placed for 500 items.
+        </p>
+        <p>
+          This is the "check-then-act" race condition, and it is the most common concurrency bug in
+          backend systems.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>How a Web Server Actually Handles Concurrent Requests</h2>
+        <p>
+          Every production HTTP server manages a thread pool (or event loop + async I/O). The mechanics:
+        </p>
+        <ul>
+          <li><strong>Thread-per-request (Java/Spring, Python Django sync)</strong> — each request gets its own OS thread. The pool has a fixed ceiling (Tomcat default: 200 threads). Beyond that, requests queue. If the queue fills, the server returns 503. Each thread runs your handler code concurrently with all others.</li>
+          <li><strong>Event loop (Node.js, Python async)</strong> — a single thread handles all I/O events. CPU-bound work blocks everyone; I/O-bound work yields. No thread-safety issues on CPU work; but I/O with shared state still has race conditions if not awaited sequentially.</li>
+          <li><strong>Worker processes (Gunicorn, uWSGI)</strong> — multiple Python processes, each with their own memory. No shared in-process state, but shared database rows are still racy.</li>
+        </ul>
+        <p>
+          The key insight: <em>the database is always shared</em>. No matter how your app server is
+          structured, all concurrent requests write to the same underlying storage, and that is where
+          race conditions bite hardest.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The Four Concurrency Problems You Will Actually Hit</h2>
+
+        <h3>1. Lost Update (the counter problem)</h3>
+        <p>Two transactions read the same value, both increment, one overwrites the other. Net effect: one increment is lost.</p>
+
+        <h3>2. Dirty Read</h3>
+        <p>Transaction A reads a row that Transaction B has modified but not yet committed. B rolls back. A made a decision on phantom data.</p>
+
+        <h3>3. Non-Repeatable Read</h3>
+        <p>Transaction A reads a row twice. Between reads, Transaction B updates it. A sees different values for the same query — can break audit logic.</p>
+
+        <h3>4. Phantom Read</h3>
+        <p>Transaction A queries "all orders with status=pending". Transaction B inserts a new pending order. A's count is now wrong without re-querying.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>Solution 1 — Optimistic Locking</h2>
+        <p>
+          Add a <code>version</code> column to every row that can be concurrently updated. On update,
+          include the version you read in the WHERE clause. If the row was modified by someone else, the
+          UPDATE affects 0 rows — you detect the conflict and retry.
+        </p>
+        <p>
+          <strong>When to use:</strong> Low-contention updates where conflicts are rare. Reads are fast;
+          write conflicts are cheap to retry. Typical use: optimistic updates on user profiles, settings,
+          non-critical counters.
+        </p>
+        <p><strong>Not suitable for:</strong> High-contention shared resources (inventory, ticket seats).
+        Under heavy load, the retry storm causes thundering-herd behaviour.</p>
+
+        <span class="code-label">JavaScript Example — Optimistic Locking with Version Column</span>
+        <pre><code>// optimistic-lock.js — Node.js + pg (postgres)
+import pg from 'pg';
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+
+async function updateInventoryOptimistic(productId, delta, maxRetries = 3) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const client = await pool.connect();
+    try {
+      // Read current state including version
+      const { rows } = await client.query(
+        'SELECT stock, version FROM products WHERE id = $1',
+        [productId]
+      );
+      if (!rows[0]) throw new Error('Product not found');
+
+      const { stock, version } = rows[0];
+      if (stock + delta < 0) throw new Error('Insufficient stock');
+
+      // Write with version check — affected rows = 0 means conflict
+      const result = await client.query(
+        `UPDATE products
+         SET stock = $1, version = $2
+         WHERE id = $3 AND version = $4`,
+        [stock + delta, version + 1, productId, version]
+      );
+
+      if (result.rowCount === 0) {
+        // Conflict: someone else updated between our read and write
+        if (attempt === maxRetries - 1) throw new Error('Conflict after max retries');
+        await new Promise(r => setTimeout(r, 50 * (attempt + 1))); // backoff
+        continue; // retry
+      }
+
+      return { success: true, newStock: stock + delta, version: version + 1 };
+    } finally {
+      client.release();
+    }
+  }
+}
+
+// Usage
+await updateInventoryOptimistic('prod-123', -1); // decrement by 1</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Solution 2 — Pessimistic Locking (SELECT FOR UPDATE)</h2>
+        <p>
+          Lock the row at read time. No other transaction can modify it until you commit or rollback.
+          Eliminates the race window entirely — at the cost of serialising all writes to that row.
+        </p>
+        <p><strong>When to use:</strong> High-contention resources where conflict probability is high
+        and retry cost is too expensive (ticket booking, flash sale inventory, bank transfers).</p>
+        <p><strong>Not suitable for:</strong> Long transactions — holding a row lock for seconds blocks
+        every other writer, creating a queue and then a timeout cascade.</p>
+
+        <span class="code-label">JavaScript Example — Pessimistic Locking with SELECT FOR UPDATE</span>
+        <pre><code>// pessimistic-lock.js
+async function reserveInventoryPessimistic(productId, quantity) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock the row: no other transaction can read (with FOR UPDATE) or write it
+    const { rows } = await client.query(
+      'SELECT stock FROM products WHERE id = $1 FOR UPDATE',
+      [productId]
+    );
+    if (!rows[0]) throw new Error('Product not found');
+
+    const { stock } = rows[0];
+    if (stock < quantity) {
+      await client.query('ROLLBACK');
+      throw new Error(`Only ${stock} units available`);
+    }
+
+    await client.query(
+      'UPDATE products SET stock = stock - $1 WHERE id = $2',
+      [quantity, productId]
+    );
+
+    // Insert the order atomically within the same transaction
+    await client.query(
+      'INSERT INTO orders (product_id, quantity, status) VALUES ($1, $2, $3)',
+      [productId, quantity, 'confirmed']
+    );
+
+    await client.query('COMMIT');
+    return { success: true, remaining: stock - quantity };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Solution 3 — Atomic Database Operations</h2>
+        <p>
+          For simple counters, the safest approach is to push the check-and-update into a single
+          atomic SQL statement. The database engine guarantees atomicity — no application-level locking needed.
+        </p>
+        <span class="code-label">JavaScript Example — Atomic Decrement with Check</span>
+        <pre><code>// atomic-update.js — single statement, no locks needed for this pattern
+async function atomicDecrement(productId, quantity) {
+  const result = await pool.query(
+    `UPDATE products
+     SET stock = stock - $1
+     WHERE id = $2 AND stock >= $1
+     RETURNING stock`,
+    [quantity, productId]
+  );
+  if (result.rowCount === 0) {
+    throw new Error('Insufficient stock or product not found');
+  }
+  return result.rows[0].stock; // remaining stock
+}
+// Postgres guarantees this is atomic: no two threads can both succeed
+// if the combined decrement would go below 0.</code></pre>
+        <p>
+          This pattern is what Shopify uses for flash sale inventory. The <code>AND stock >= $1</code>
+          condition and the <code>UPDATE</code> execute atomically at the row level. The application
+          just checks <code>rowCount</code>.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Solution 4 — Rate Limiting</h2>
+        <p>
+          Rate limiting does not solve race conditions — it reduces the blast radius. By capping requests
+          per user, per IP, or per resource, you reduce peak concurrency and buy time for the locking
+          mechanisms above.
+        </p>
+        <p>
+          The three production-grade rate limiting algorithms:
+        </p>
+        <ul>
+          <li><strong>Token Bucket</strong> — allows bursts up to bucket capacity, then refills at a steady rate. Used by Stripe (per-API-key) and GitHub (5,000 req/hr).</li>
+          <li><strong>Leaky Bucket</strong> — requests queue and drain at a constant rate regardless of arrival pattern. Smooths traffic but cannot handle bursts.</li>
+          <li><strong>Fixed Window Counter</strong> — N requests per time window. Simple but vulnerable to boundary spikes (N requests at 23:59:59 and N more at 00:00:00 = 2N in 2 seconds).</li>
+          <li><strong>Sliding Window Log</strong> — exact but memory-intensive; stores timestamps of every request. Used when precision matters (billing, compliance).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Solution 5 — Queue-Based Serialisation</h2>
+        <p>
+          For operations where strict ordering matters (payment processing, ledger updates), route all
+          requests for the same resource through a single-consumer queue. Concurrent HTTP requests become
+          serialised jobs. The trade-off: latency increases; contention disappears entirely.
+        </p>
+        <p>
+          Stripe processes all payments for a given card through a serialised queue keyed on the card ID.
+          No two charges on the same card can execute simultaneously — this eliminates double-charge races
+          without any application-level locking.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Lock timeout cascades</strong> — pessimistic locks held too long queue up waiters. When they finally time out, they all retry simultaneously. Set lock_timeout at the DB level (<code>SET lock_timeout = '1s'</code>).</li>
+          <li><strong>Deadlock</strong> — Thread A locks row X then Y; Thread B locks Y then X. Both wait forever. Fix: always acquire locks in a consistent global order, or use <code>SELECT FOR UPDATE SKIP LOCKED</code> to move past locked rows.</li>
+          <li><strong>Thundering herd on retry</strong> — optimistic lock conflicts all retry at the same instant. Always add jittered backoff (<code>delay = base * (1 + Math.random())</code>).</li>
+          <li><strong>Read replicas serving stale data</strong> — directing reads to replicas for performance means the "check" half of check-then-act sees stale data. Force reads to the primary for any resource subject to high-contention writes.</li>
+          <li><strong>ORM hiding the problem</strong> — most ORMs do a SELECT then UPDATE by default. This is a read-modify-write without a lock. Always verify what SQL your ORM generates for update operations.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Decision Matrix</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Scenario</th><th>Recommended pattern</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr><td>Counter increment (page views, likes)</td><td>Atomic SQL or Redis INCR</td><td>Lightweight; no row locking needed</td></tr>
+              <tr><td>Inventory decrement (flash sale)</td><td>Atomic UPDATE with stock >= N check</td><td>Single statement; no lock overhead</td></tr>
+              <tr><td>Ticket booking (seat selection)</td><td>SELECT FOR UPDATE</td><td>Must hold seat until payment confirmed</td></tr>
+              <tr><td>User profile update</td><td>Optimistic locking (version)</td><td>Low contention; conflicts are rare</td></tr>
+              <tr><td>Payment processing</td><td>Queue serialisation + idempotency key</td><td>Order matters; retries must be safe</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./system-design-interview-prevent-duplicate-payment.html">Prevent a Payment from Being Processed Twice</a> — idempotency keys and distributed locking for payments.</li>
+          <li><a href="./system-design-interview-flash-sale-oversell.html">Avoid Overselling Inventory During a Flash Sale</a> — a dedicated deep dive on the exact scenario above.</li>
+          <li><a href="./bookmyshow-race-condition-distributed-locking.html">BookMyShow: Race Conditions and Distributed Locking</a> — ticket booking under extreme concurrency.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Concurrency bugs are invisible in testing and catastrophic under load. The fix is not
+          "add a lock everywhere" — it is choosing the right isolation primitive for each resource:
+          atomic SQL for simple counters, pessimistic locks for high-contention short transactions,
+          optimistic locking for low-contention data, and queue serialisation when ordering matters.
+          Rate limiting reduces blast radius but is not a substitute for correct locking.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Amazon Cart Shows Old Data: Cache Invalidation & Distributed Session Consistency | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1472851294608-062f824d29cc?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Online shopping cart" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Deep Dive · Backend · Architecture · 25 min</span>
+          </div>
+        </figure>
+        <h1>Amazon Cart Shows Old Data: System Design Deep Dive on Cache Invalidation and Distributed Session Consistency</h1>
+        <p class="summary">
+          Why removing a cart item on mobile shows it again on desktop. A deep technical analysis:
+          cache-aside with version vectors, pub/sub invalidation buses, Redis Hash data structures,
+          eventual vs strong consistency trade-offs, and the full distributed session architecture
+          that prevents stale reads at Amazon scale.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Caching · Distributed Systems</span>
+          <span class="meta-item">Credit: CodeFarm (Medium)</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          "There are only two hard things in Computer Science: cache invalidation and naming things."
+          — Phil Karlton. The Amazon cart stale-data problem is the canonical real-world manifestation
+          of the first one. You remove an item on your phone. You open your laptop. The item is back.
+          The source of truth (the database) is correct, but the cache serving your laptop's request
+          has not been told yet.
+        </p>
+        <div class="callout">
+          <p><strong>The key insight:</strong> The cart is not one cached object — it is a distributed
+          object replicated across potentially dozens of cache nodes in different regions. A write on
+          one device must invalidate every copy of the cart, on every cache node, before the next read
+          on any other device. The design question is how to do this without making reads and writes
+          prohibitively slow.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The Prime Day cart that kept resurrecting items</span>
+        <p>
+          During Prime Day, a user removed an out-of-stock item from their cart on mobile, saw the cart
+          update, and proceeded to the next product page. They opened the cart on their desktop browser
+          30 seconds later — the removed item was back. They removed it again. Checked on mobile — the
+          desktop removal had not propagated yet. The item appeared and disappeared three times across
+          two devices before finally stabilising.
+        </p>
+        <p>
+          What happened: mobile removal wrote to the database and invalidated the mobile-side cache node.
+          The desktop was served by a different cache node in a different AZ. The invalidation event
+          propagated via an async message bus with a 45-second lag during Prime Day traffic. Every read
+          during that 45-second window served stale data.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The Cart Data Model at Scale</h2>
+        <p>
+          Amazon's cart is stored in a distributed key-value store (DynamoDB or a similar system)
+          with the following logical structure:
+        </p>
+        <pre><code>// Cart data model
+{
+  userId: "usr_789xyz",
+  version: 42,                  // logical clock — increments on every write
+  lastModified: 1721654400000,  // epoch ms
+  items: {
+    "prod_A1": { quantity: 2, addedAt: ..., price: 29.99 },
+    "prod_B2": { quantity: 1, addedAt: ..., price: 14.99 }
+  },
+  sessionMetadata: {
+    deviceId: "iphone_14_pro_abc",
+    region: "ap-south-1"
+  }
+}</code></pre>
+        <p>
+          In Redis, the cart is stored as a <strong>Hash</strong> per <code>userId</code>:
+        </p>
+        <ul>
+          <li>Key: <code>cart:{userId}</code></li>
+          <li>Fields: one per product ID, value = JSON-encoded item metadata</li>
+          <li>Extra field: <code>_version</code> — incremented atomically on every write</li>
+          <li>Extra field: <code>_lastModified</code> — epoch timestamp for TTL-free staleness detection</li>
+        </ul>
+        <p>
+          Using a Hash instead of a String means individual items can be updated with
+          <code>HSET</code>/<code>HDEL</code> without serialising/deserialising the entire cart.
+          For a cart with 50 items, this reduces serialisation cost by ~50×.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Cache Invalidation Strategies</h2>
+
+        <h3>1. Cache-Aside (Read Path)</h3>
+        <p>
+          On every read: check cache first. On miss: read from DynamoDB, populate cache with a TTL.
+          Simple. The problem: TTL-based expiry is coarse. A 5-minute TTL means stale data for up to
+          5 minutes. Acceptable for product descriptions; not acceptable for cart state.
+        </p>
+
+        <h3>2. Write-Through (Write Path)</h3>
+        <p>
+          On every write: update both the database and the cache synchronously.
+          Strong consistency — the cache is always current. Cost: every write pays double latency.
+          For cart operations (add, remove, update quantity), this latency is usually acceptable.
+        </p>
+
+        <h3>3. Write-Behind / Write-Back</h3>
+        <p>
+          Write to cache first; flush to database asynchronously. Higher write throughput, but
+          a crash between cache write and DB flush loses data. Not suitable for cart — lost
+          items = lost revenue.
+        </p>
+
+        <h3>4. Event-Driven Invalidation (the Amazon approach)</h3>
+        <p>
+          On any cart mutation: write to the database, then publish a
+          <code>cart-invalidated:{userId}</code> event to a pub/sub bus (Redis Pub/Sub, Kafka, or
+          SNS). All cache nodes subscribed to that user's invalidation topic delete their copy of
+          the cart. The next read on any node triggers a fresh DB fetch.
+        </p>
+
+        <span class="code-label">JavaScript Example — Cart Mutation with Cache Invalidation</span>
+        <pre><code>// cart-service.js — Node.js + ioredis + DynamoDB
+import Redis from 'ioredis';
+const redisPub = new Redis(process.env.REDIS_URL);
+const redisSub = new Redis(process.env.REDIS_URL); // separate connection for sub
+const redisCache = new Redis(process.env.REDIS_URL);
+
+const CART_TTL = 3600; // 1hr — fallback TTL even with event-driven invalidation
+const INVALIDATION_CHANNEL = 'cart-invalidation';
+
+// Subscribe to invalidation events (all cache nodes run this)
+redisSub.subscribe(INVALIDATION_CHANNEL, (err) => {
+  if (err) console.error('Subscribe failed:', err.message);
+});
+redisSub.on('message', async (channel, message) => {
+  if (channel !== INVALIDATION_CHANNEL) return;
+  const { userId, version } = JSON.parse(message);
+  const cacheKey = `cart:${userId}`;
+  // Only delete if our cached version is <= the invalidation version
+  const cachedVersion = await redisCache.hget(cacheKey, '_version');
+  if (!cachedVersion || parseInt(cachedVersion) <= version) {
+    await redisCache.del(cacheKey);
+    console.log(`[cache] Invalidated cart:${userId} at version ${version}`);
+  }
+});
+
+async function updateCart(userId, productId, quantity) {
+  // 1. Write to DynamoDB (source of truth)
+  const newVersion = await writeCartToDB(userId, productId, quantity);
+
+  // 2. Update local cache (write-through for this node)
+  const cacheKey = `cart:${userId}`;
+  if (quantity === 0) {
+    await redisCache.hdel(cacheKey, productId);
+  } else {
+    await redisCache.hset(cacheKey, productId, JSON.stringify({ quantity }));
+  }
+  await redisCache.hset(cacheKey, '_version', newVersion);
+  await redisCache.expire(cacheKey, CART_TTL);
+
+  // 3. Publish invalidation to all other cache nodes
+  await redisPub.publish(INVALIDATION_CHANNEL,
+    JSON.stringify({ userId, version: newVersion }));
+}
+
+async function getCart(userId) {
+  const cacheKey = `cart:${userId}`;
+  const cached = await redisCache.hgetall(cacheKey);
+
+  if (cached && Object.keys(cached).length > 1) { // has items beyond metadata
+    return parseCart(cached);
+  }
+  // Cache miss — fetch from DynamoDB
+  const cart = await fetchCartFromDB(userId);
+  if (cart) {
+    await hydrateCache(cacheKey, cart);
+  }
+  return cart;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Distributed Session Consistency: The Multi-Device Problem</h2>
+        <p>
+          The cart is associated with a <em>user</em>, not a <em>session</em>. A user may have 4 active
+          sessions: phone, tablet, laptop, smart TV. Each may be served by a different backend node
+          in a different region, with its own local Redis cache.
+        </p>
+
+        <h3>The conflict model</h3>
+        <p>
+          Concurrent writes from multiple devices create conflicting versions. Without a conflict
+          resolution strategy, last-write-wins can silently discard cart additions from one device.
+        </p>
+
+        <h3>Version vectors (Amazon's actual approach)</h3>
+        <p>
+          Each device maintains its own version counter. The cart is annotated with a vector of
+          <code>{ deviceId: version }</code> pairs. On merge:
+        </p>
+        <ol>
+          <li>Compare version vectors.</li>
+          <li>If one dominates (all entries ≥ the other), take the dominant version.</li>
+          <li>If they are concurrent (neither dominates), merge using application-specific logic (for carts: union of items; for removals: removals win — "add-wins" causes ghost items, "remove-wins" is safer).</li>
+        </ol>
+
+        <h3>Session affinity as a partial fix</h3>
+        <p>
+          Sticky sessions route all requests from one user to the same cache node. This eliminates
+          cross-node stale reads at the cost of load balancing flexibility. Amazon does NOT use sticky
+          sessions for cart reads — it uses event-driven invalidation instead.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Consistency Trade-Off Matrix</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Operation</th><th>Acceptable consistency</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr><td>Cart display</td><td>Eventual (< 2s)</td><td>Visual lag is tolerable; no money at stake yet</td></tr>
+              <tr><td>Checkout total calculation</td><td>Strong</td><td>Wrong total = financial error</td></tr>
+              <tr><td>Payment confirmation</td><td>Strong</td><td>Must reflect true stock and price</td></tr>
+              <tr><td>Cart quantity badge (header)</td><td>Eventual (< 5s)</td><td>Cosmetic; user accepts minor delay</td></tr>
+              <tr><td>Out-of-stock detection</td><td>Strong at checkout</td><td>Must not charge for unavailable item</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Invalidation event lost</strong> — the pub/sub message drops (Redis Pub/Sub has no persistence guarantees). Fix: fallback TTL on all cache entries (1hr max) so no entry is stale forever; also run a periodic revalidation job for high-value carts (carts with items ≥ checkout threshold).</li>
+          <li><strong>Split-brain between write and invalidation publish</strong> — DB write succeeds, invalidation publish fails. Next read on another node serves stale data. Fix: wrap write + publish in the Outbox pattern. The relay guarantees eventual publish.</li>
+          <li><strong>Cache stampede on high-profile sale</strong> — many users open the same product's cart simultaneously after a stale TTL expires. Fix: "probabilistic early expiration" — start background refresh when remaining TTL < 20% with small probability.</li>
+          <li><strong>Version counter overflow</strong> — version is a 32-bit int on many systems; at high write rates it wraps around. Use 64-bit integers or timestamps as logical clocks.</li>
+          <li><strong>Bloom filter false positives</strong> — a Bloom filter can confirm an item is NOT in the cart (for quick "does this user have items?" checks) but cannot confirm it IS. Never use a Bloom filter for positive cart membership — it will generate false positives and trigger unnecessary DB reads.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./5-backend-system-design-patterns.html">5 Backend Patterns</a> — Cache-Aside and Outbox patterns in full detail.</li>
+          <li><a href="./api-concurrency-multiple-users.html">Concurrent API Requests</a> — race conditions in write-heavy scenarios.</li>
+          <li><a href="./redis-production-guide.html">Redis Production Guide</a> — data structures, persistence, clustering.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Stale cart data is not a bug in the cart service — it is an expected property of a
+          distributed cache. The architecture should make stale windows explicit, bounded, and
+          bounded differently for different operations: eventual consistency (< 2s) for display,
+          strong consistency for checkout. Event-driven invalidation via pub/sub shrinks the stale
+          window; version vectors resolve concurrent writes from multiple devices; and the Outbox
+          pattern ensures invalidation events are never silently dropped.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

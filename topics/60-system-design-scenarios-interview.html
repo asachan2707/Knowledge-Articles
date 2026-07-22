@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>60+ Real-World System Design Scenarios: The Ultimate Interview Reference | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611273426858-450d8e3c9fce?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="System architecture whiteboard" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Architecture · 60 min</span>
+          </div>
+        </figure>
+        <h1>60+ Real-World System Design Scenarios: The Ultimate Interview Reference</h1>
+        <p class="summary">
+          60+ curated system design problems with the core architectural insight for each — the single
+          most important decision that separates a passing answer from a senior-level answer. Organised
+          by domain: storage, real-time, scale, consistency, and reliability. Designed as a rapid
+          pre-interview review.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Interview · Architecture</span>
+          <span class="meta-item">Filter: Interview</span>
+          <span class="meta-item">Credit: <a href="https://medium.com/@Deep-concept/5ff986d7b7bd" target="_blank" rel="noopener">60+ Real-World System Design Scenarios (Deep Concept, Medium)</a></span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          System design interviews test pattern recognition under pressure. The candidate who passes
+          is not the one who has the "correct" architecture memorised — it is the one who can identify
+          which class of problem they are solving and which architectural tradeoffs are central to it.
+          This reference organises 60+ scenarios into recognisable problem families, each with the
+          core insight that unlocks the design.
+        </p>
+        <div class="callout">
+          <p><strong>How to use this:</strong> For each scenario, identify: (1) the dominant constraint
+          (read-heavy? write-heavy? latency-sensitive? consistency-critical?), (2) the breakpoint at
+          scale (what fails first?), (3) the one architectural decision that addresses both. That
+          three-sentence answer is a passing response. Everything else is depth.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 1: URL Shortener and Redirect Systems</h2>
+        <ul>
+          <li><strong>Design a URL shortener (TinyURL/Bit.ly)</strong><br/>Core insight: The redirect read path is 100:1 vs write. Cache the full shortcode→URL mapping in Redis with a long TTL. The hard constraint is shortcode uniqueness at scale — use base62 encoding of a distributed auto-increment ID (Snowflake), not random strings (collision risk at scale).</li>
+          <li><strong>Design a URL shortener with analytics</strong><br/>Addition: write click events to Kafka, consume async for analytics aggregation. Never write analytics in the redirect hot path — it adds latency to the 99th percentile.</li>
+          <li><strong>Design a QR code service</strong><br/>Same as URL shortener. QR generation is CPU-bound — pre-generate and store, not on-demand per request at scale.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 2: Rate Limiter and Throttling</h2>
+        <ul>
+          <li><strong>Design an API rate limiter</strong><br/>Core insight: Token bucket (allows bursts, intuitive) vs sliding window log (accurate, memory-heavy) vs sliding window counter (approximate, Redis efficient). Production recommendation: sliding window counter in Redis with <code>INCRBY + EXPIRE</code> or a Sorted Set for the log. Decision: accuracy vs memory.</li>
+          <li><strong>Design a distributed rate limiter (multi-region)</strong><br/>Addition: each region has its own Redis. Rate limits can be exceeded slightly due to replication lag — decide whether to allow temporary over-limit (AP) or require cross-region consensus (CP). AP is usually correct for rate limiting; brief over-limit is preferable to added latency.</li>
+          <li><strong>Design a DDoS mitigation layer</strong><br/>Core insight: move rate limiting to the edge (CDN / load balancer), not the application. Application-level rate limiting is too slow and expensive under DDoS load.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 3: Messaging and Chat</h2>
+        <ul>
+          <li><strong>Design WhatsApp / Discord chat</strong><br/>Core insight: WebSocket for delivery (persistent connection per client), Kafka for message fanout between servers, message DB with <code>(conversationId, messageId)</code> compound key. The hard problem: offline delivery — store undelivered messages, push on reconnect, track read receipts.</li>
+          <li><strong>Design a group chat with 100,000 members</strong><br/>Core insight: fanout-on-read for large groups. Do not write each message to 100k inboxes. Store messages in a group-level log; clients pull on open.</li>
+          <li><strong>Design a real-time typing indicator</strong><br/>Core insight: this is presence, not messaging. Use a separate lightweight pub/sub channel. Suppress if the user stops typing for 2s. Never persist typing events to the database.</li>
+          <li><strong>Design end-to-end encryption for messages</strong><br/>Core insight: server stores only ciphertext. Key exchange uses Signal Protocol (double ratchet + X3DH). The server cannot decrypt — it only relays. Key challenge: key backup when user gets a new device.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 4: Social Networks and Feed</h2>
+        <ul>
+          <li><strong>Design Twitter's timeline / Instagram feed</strong><br/>Core insight: hybrid fanout. Fanout-on-write for normal accounts (< 1M followers), fanout-on-read for celebrities (> 1M). Read path merges both. The decision point: write amplification vs read latency.</li>
+          <li><strong>Design Facebook's news feed ranking</strong><br/>Core insight: this is an ML ranking problem, not primarily a storage problem. The distribution mechanism is the same as timeline; the ranking model runs offline. In the interview, focus on the serving layer (pre-computed feed in a feed cache), not the ML architecture.</li>
+          <li><strong>Design a "like" counter that shows 1.2M likes</strong><br/>Core insight: approximate counts via Redis INCR are sufficient. Exact counts require distributed locks and are unnecessary. Edge: 1 person double-clicking the like button — client-side dedup + idempotent API (like is a toggle, not an increment).</li>
+          <li><strong>Design a trending topics system</strong><br/>Core insight: stream the last 60 minutes of posts into a sliding window count per hashtag. Use HyperLogLog for unique user counts (memory-efficient approximate cardinality). Trend = recent velocity, not absolute count (prevents gaming by old viral content).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 5: Search and Typeahead</h2>
+        <ul>
+          <li><strong>Design Google typeahead / autocomplete</strong><br/>Core insight: a Trie structure is the textbook answer; in production, a Redis Sorted Set with prefix score keys is simpler and horizontally scalable. Pre-compute the top N completions per prefix offline from query logs. Serve from Redis in &lt; 5ms.</li>
+          <li><strong>Design Elasticsearch-like full-text search</strong><br/>Core insight: inverted index — each term maps to the list of document IDs containing it. TF-IDF or BM25 for relevance scoring. Distributed: shard documents by ID, replicate for read scale. Primary challenge in interview: indexing pipeline (bulk write throughput) vs query serving (sub-100ms reads).</li>
+          <li><strong>Design a product search for an e-commerce site</strong><br/>Addition to full-text: faceted filtering (category, price range, brand) via term aggregations. Elasticsearch aggregations are expensive at scale — pre-compute facet counts for common filter combinations.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 6: Storage and File Systems</h2>
+        <ul>
+          <li><strong>Design a distributed file storage (Dropbox/Google Drive)</strong><br/>Core insight: chunked uploads — split large files into 4MB chunks, upload each independently, store in S3/GCS with a metadata DB tracking chunk→file mapping. Dedup at chunk level using content hash (SHA-256). The hard problem: sync conflict resolution between devices.</li>
+          <li><strong>Design a key-value store (Redis/DynamoDB)</strong><br/>Core insight: consistent hashing for node assignment, virtual nodes for even distribution, gossip protocol for membership. Hard problems: replication (quorum reads/writes), partitioning (data skew on hot keys), eviction (LRU vs LFU vs TTL).</li>
+          <li><strong>Design a distributed log (Kafka)</strong><br/>Core insight: append-only log partitioned by key, replicated with leader-follower, consumers read at their own pace with offset tracking. Hard problem: exactly-once delivery — requires idempotent producers AND transactional consumers.</li>
+          <li><strong>Design S3 (object storage)</strong><br/>Core insight: flat namespace (no real directories), immutable objects (no in-place updates), eventual consistency for GETs after PUT (now strongly consistent in real S3). Architecture: metadata service (which node holds the object?) + data nodes (actual bytes). Hard: erasure coding for storage efficiency vs replication.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 7: Payments and Financial Systems</h2>
+        <ul>
+          <li><strong>Design a payment processing system</strong><br/>Core insight: idempotency key per payment request (client-generated, stored server-side with Redis NX). Outbox pattern for payment events. Never confirm payment before writing the order record. Hard: handling payment gateway timeouts — poll for status, do not retry the charge without idempotency key.</li>
+          <li><strong>Design a wallet / balance system</strong><br/>Core insight: use a ledger model (append-only debit/credit entries) instead of a mutable balance column. Current balance = sum of ledger entries. This provides full audit trail and makes race conditions visible (two credits arrive — both are recorded, no update collision).</li>
+          <li><strong>Design a fraud detection system</strong><br/>Core insight: two-tier. Synchronous lightweight rule engine (&lt;50ms) in the payment path. Async ML model for deeper analysis. Never block the payment path on the ML model's latency. Flag suspicious transactions for human review, not auto-block — false positives are expensive.</li>
+          <li><strong>Design a subscription billing system</strong><br/>Core insight: idempotent charge jobs. Billing cycle events published to Kafka; billing worker consumes, charges, records. Hard: prorating mid-cycle changes — store price at time of subscription, not current price.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 8: Maps and Location</h2>
+        <ul>
+          <li><strong>Design Google Maps / Uber's map layer</strong><br/>Core insight: geohashing tiles at multiple zoom levels. Each tile is cached independently. Route calculation uses A* or Dijkstra on a road graph (precomputed shortest paths for common origin-destination pairs). Hard: real-time traffic integration means edges (roads) have dynamic weights — pre-compute base paths, apply traffic multipliers at serve time.</li>
+          <li><strong>Design "find nearby restaurants" (Yelp/Foursquare)</strong><br/>Core insight: geospatial index. Options: Redis GEO (GEORADIUS query), PostGIS (ST_DWithin), H3 hex index (query adjacent hexagons at appropriate resolution). The right choice depends on update frequency (Redis for frequently-moving objects, PostGIS for static businesses) and query complexity (proximity only vs polygon-in-polygon).</li>
+          <li><strong>Design a real-time driver tracking system</strong><br/>Core insight: write path = high-frequency GPS updates → Redis GEO (latest position) + Kafka (event log). Read path = WebSocket push to customer map. Client-side dead-reckoning between 5s server updates. Hard: accurate ETA with real-time traffic — Kafka stream of traffic events feeds the routing engine every 30 seconds.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 9: Video and Media Streaming</h2>
+        <ul>
+          <li><strong>Design YouTube / Netflix video upload and streaming</strong><br/>Core insight: separate upload pipeline from streaming pipeline. Upload: chunked → transcoding queue → multi-bitrate output → CDN push. Streaming: HLS/DASH adaptive bitrate, CDN-served. Hard: CDN cache prewarming for new releases (push before request, not after).</li>
+          <li><strong>Design a live streaming platform (Twitch)</strong><br/>Core insight: RTMP ingest → transcoding → HLS segments → CDN → viewers. Latency is 5–30s (DASH-LL can reduce to ~1s). Chat is a separate WebSocket system — never coupled to the video pipeline. Hard: ingest failover when encoder disconnects mid-stream.</li>
+          <li><strong>Design an image CDN with on-the-fly resizing</strong><br/>Core insight: never resize at request time for popular images. Enumerate the finite set of sizes needed (thumbnail, card, full), resize on first request per size, cache the result. For truly on-demand (user-uploaded content with arbitrary crop params), resize at edge node with in-memory LRU cache.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 10: Notification and Communication Systems</h2>
+        <ul>
+          <li><strong>Design a push notification system</strong><br/>Core insight: fan-out via Kafka → notification workers → APNs/FCM with rate limiting per provider. Dedup with Redis NX (24h TTL). Token hygiene: delete invalid tokens immediately on 410 from APNs. Celebrity post = fanout-on-read for notifications (same as feed).</li>
+          <li><strong>Design an email delivery system</strong><br/>Core insight: transactional email (OTP, receipts) = immediate, synchronous, small volume. Marketing email = bulk, async, Kafka-queued, respects unsubscribe lists and time-zone-aware delivery windows. Hard: deliverability — SPF/DKIM/DMARC, IP warming, bounce handling.</li>
+          <li><strong>Design a real-time collaborative document (Google Docs)</strong><br/>Core insight: Operational Transformation (OT) or CRDT to merge concurrent edits. Each character edit is a delta; deltas are merged on the server and broadcast to all collaborators via WebSocket. Hard: OT requires a central sequencer — all edits are ordered by a single server. CRDT is decentralised but has merge complexities for rich-text.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category 11: Distributed Systems Fundamentals</h2>
+        <ul>
+          <li><strong>Design a distributed ID generator (Snowflake)</strong><br/>Core insight: 64-bit IDs = timestamp (41 bits) + machine ID (10 bits) + sequence (12 bits). Monotonically increasing within a machine. Hard: clock skew — if system clock goes backward, the generator must wait until current timestamp exceeds last-issued timestamp.</li>
+          <li><strong>Design a leader election system (Zookeeper-like)</strong><br/>Core insight: distributed lock in a consensus store (etcd, ZooKeeper). Candidate that acquires ephemeral node becomes leader. Ephemeral = auto-released on disconnect. Hard: split-brain during network partition — Raft consensus requires majority agreement before electing.</li>
+          <li><strong>Design a distributed cache (Memcached/Redis Cluster)</strong><br/>Core insight: consistent hashing for node assignment, virtual nodes for even distribution. Cache-aside read pattern. Hard: thundering herd on cache miss — mutex lock pattern (only one thread fetches from DB, others wait for cache population).</li>
+          <li><strong>Design a circuit breaker</strong><br/>Core insight: three states — closed (normal), open (reject all requests, no downstream calls), half-open (allow one probe request to test recovery). Transitions: closed→open on error rate threshold, open→half-open after timeout, half-open→closed on probe success. Hard: choosing error rate threshold and timeout — too sensitive = nuisance trips, too lenient = cascading failures.</li>
+          <li><strong>Design a job scheduler (Celery/Temporal)</strong><br/>Core insight: task queue (Kafka or Redis) + worker pool + result store + dead-letter queue. At-least-once delivery by default (retry on failure); deduplicate at the task ID level for idempotency. Hard: cron scheduling in distributed systems — which worker runs the 9 AM job? Use a leader-elected scheduler service, not per-worker cron.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Interview Pattern Quick-Reference</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>If the problem involves…</th><th>The key pattern is…</th><th>The failure mode to address is…</th></tr></thead>
+            <tbody>
+              <tr><td>High read volume</td><td>Cache-aside (Redis), CDN, read replicas</td><td>Cache stampede, stale data, cache invalidation</td></tr>
+              <tr><td>High write volume</td><td>Append-only log, write-through queue, sharding</td><td>Hot keys, write contention, replication lag</td></tr>
+              <tr><td>Real-time fanout</td><td>Pub/sub (Kafka/Redis), WebSocket, SSE</td><td>Fan-out storm (celebrity problem), connection limits</td></tr>
+              <tr><td>Concurrent mutations</td><td>Distributed lock (Redis NX), optimistic concurrency, CRDT</td><td>Deadlock, lock expiry, GC pause invalidation</td></tr>
+              <tr><td>Consistency guarantees</td><td>Outbox pattern, Saga, idempotency key</td><td>Partial failure, duplicate processing, split-brain</td></tr>
+              <tr><td>Global scale</td><td>Multi-region replication, geohashing, CDN</td><td>Cross-region consistency, network partition</td></tr>
+              <tr><td>Search</td><td>Inverted index (Elasticsearch), BM25 ranking</td><td>Index freshness, query latency under load</td></tr>
+              <tr><td>Time-series data</td><td>Append-only log, time-bucketed partitioning, compaction</td><td>Old data retention cost, query range scans</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Deep Dives in This Hub</h2>
+        <ul>
+          <li><a href="./amazon-cart-cache-invalidation.html">Amazon Cart — Cache Invalidation</a></li>
+          <li><a href="./instagram-notification-fanout.html">Instagram — Notification Fanout</a></li>
+          <li><a href="./uber-surge-pricing-system-design.html">Uber — Surge Pricing</a></li>
+          <li><a href="./netflix-cdn-cache-prewarming.html">Netflix — CDN Prewarming</a></li>
+          <li><a href="./bookmyshow-seat-race-condition-distributed-locking.html">BookMyShow — Distributed Locking</a></li>
+          <li><a href="./swiggy-gps-tracking-eventual-consistency.html">Swiggy — GPS Real-Time Tracking</a></li>
+          <li><a href="./system-design-interview-flash-sale-oversell.html">Flash Sale — Oversell Prevention</a></li>
+          <li><a href="./system-design-interview-prevent-duplicate-payment.html">Prevent Duplicate Payments</a></li>
+          <li><a href="./discord-presence-system-design.html">Discord — Presence System</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          System design interviews are not about knowing the "right" architecture. They test whether
+          you can identify the dominant constraint, reason about the breakpoint at scale, and propose
+          a targeted solution with explicit trade-offs. The 60+ scenarios here resolve into fewer than
+          15 fundamental patterns. Recognise the pattern, state the core trade-off, then drive the
+          conversation to depth on the hardest sub-problem. That is what differentiates a senior-level
+          answer.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

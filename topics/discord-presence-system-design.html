@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Discord Presence System Design Interview: At What Scale? | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1614680376573-df3480f0c6ff?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Discord chat interface" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Backend · Architecture · 22 min</span>
+          </div>
+        </figure>
+        <h1>Discord Presence System Design Interview: "At What Scale?" and Follow-Up Variations</h1>
+        <p class="summary">
+          Full interview walkthrough for designing Discord's online/offline/idle presence system.
+          Core design, then interviewer follow-ups at each scale tier: 100k users, 10M users, 150M+
+          users. Covers WebSocket fan-out, presence pub/sub, heartbeat design, eventual consistency
+          trade-offs, and the exact points where naive designs break.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Interview Prep · Distributed Systems</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Presence is the "green dot." Who is online, who is idle, who is offline. It sounds trivial
+          until you ask: at 150M daily active users, how do you propagate a single user's status
+          change to every one of their mutual friends in near-real-time, across 10,000+ WebSocket
+          servers, without overwhelming either the servers or the storage layer?
+        </p>
+        <div class="callout">
+          <p><strong>Why Discord is the canonical example:</strong> Discord has 500M registered users,
+          ~150M daily active users, and communities (servers) that can have 500,000+ members — all of
+          whom subscribe to mutual presence. The fan-out for a presence change in a large server is a
+          hard distributed systems problem.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Interviewer framing · "Design Discord's presence system"</span>
+        <p>
+          Typical interviewer prompt: "Design a system that tracks whether users are online, offline,
+          or idle, and shows that status to their friends and mutual server members in real time."
+          Follow-ups: "What if users have 10,000 mutual server members? What if you have 150M users?
+          What if the presence server crashes? How do you handle mobile app backgrounding?"
+        </p>
+        <p>
+          The correct approach is to start with a minimal correct design, then drive the interviewer
+          to the scale breakpoints — because each breakpoint reveals a different architectural decision.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 1: Core Design (Single Server, 100k Users)</h2>
+        <p>
+          At 100k users, a single presence server with a Redis store and WebSocket connections is sufficient.
+        </p>
+        <p><strong>Data model:</strong></p>
+        <ul>
+          <li>Redis Hash: <code>presence:{userId}</code> → <code>{ status: online|idle|offline, lastSeen: epoch, clientId: ws_abc }</code></li>
+          <li>TTL: 30 seconds. Refreshed by client heartbeat every 15 seconds. Expiry = offline.</li>
+        </ul>
+        <p><strong>Write path (user comes online):</strong></p>
+        <ol>
+          <li>Client opens WebSocket connection to the presence server.</li>
+          <li>Server writes <code>SET presence:{userId} { status: online } EX 30</code>.</li>
+          <li>Server publishes <code>presence-changed:{userId}</code> to Redis Pub/Sub channel.</li>
+          <li>All other users who have this user in their friend/server list receive the update via their WebSocket connections.</li>
+        </ol>
+        <p><strong>Heartbeat:</strong> Client sends a ping every 15 seconds. Server refreshes TTL. Missed heartbeats (server detects connection close or TTL expires) → status transitions to offline.</p>
+
+        <span class="code-label">JavaScript Example — Presence Server Core</span>
+        <pre><code>// presence-server.js — Node.js + ws + ioredis
+import { WebSocketServer } from 'ws';
+import Redis from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL);
+const redisSub = new Redis(process.env.REDIS_URL); // separate sub connection
+
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const PRESENCE_TTL_S = 30;
+
+// Map: userId → WebSocket connection
+const connections = new Map();
+// Map: userId → Set<subscriberId> (users who need to be notified of this user's changes)
+const subscriptions = new Map();
+
+const wss = new WebSocketServer({ port: 3001 });
+
+wss.on('connection', async (ws, req) => {
+  const userId = extractUserIdFromToken(req.headers['authorization']);
+
+  // Register connection
+  connections.set(userId, ws);
+  await setPresence(userId, 'online');
+
+  // Subscribe to presence updates of user's friends/server members
+  const peers = await getPeers(userId); // from DB: all mutual server members + friends
+  for (const peerId of peers) {
+    if (!subscriptions.has(peerId)) subscriptions.set(peerId, new Set());
+    subscriptions.get(peerId).add(userId); // userId wants to know about peerId's changes
+  }
+
+  ws.on('message', async (data) => {
+    const msg = JSON.parse(data);
+    if (msg.type === 'heartbeat') {
+      await redis.expire(`presence:${userId}`, PRESENCE_TTL_S);
+    }
+    if (msg.type === 'status-change') { // idle, dnd, etc.
+      await setPresence(userId, msg.status);
+    }
+  });
+
+  ws.on('close', async () => {
+    connections.delete(userId);
+    await setPresence(userId, 'offline');
+  });
+});
+
+async function setPresence(userId, status) {
+  await redis.setex(`presence:${userId}`, PRESENCE_TTL_S,
+    JSON.stringify({ status, ts: Date.now() }));
+  await redis.publish('presence-changes', JSON.stringify({ userId, status }));
+}
+
+// Subscribe to presence changes and fan out to interested users
+redisSub.subscribe('presence-changes');
+redisSub.on('message', (channel, message) => {
+  const { userId, status } = JSON.parse(message);
+  const interested = subscriptions.get(userId) ?? new Set();
+  for (const subscriberId of interested) {
+    const ws = connections.get(subscriberId);
+    if (ws?.readyState === 1) { // OPEN
+      ws.send(JSON.stringify({ type: 'presence-update', userId, status }));
+    }
+  }
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 2: Multi-Server Scaling (10M Users)</h2>
+        <p>
+          At 10M users, a single presence server can't hold all WebSocket connections.
+          Horizontally scale to 100 presence servers. New problem: user A (on server 1) changes
+          status, but user B (their friend) is connected to server 47. Server 1 must notify server 47,
+          which then pushes to user B's WebSocket.
+        </p>
+
+        <h3>Solution: Pub/Sub routing layer</h3>
+        <p>
+          Each presence server publishes status changes to a shared Kafka topic
+          <code>presence-changes</code>. Every other server consumes from this topic. On receiving
+          a change, each server checks if any of its connected users subscribe to the changed user —
+          if so, pushes the update. This is a broadcast approach — O(servers) fan-out per change.
+        </p>
+
+        <h3>Alternative: Presence routing table</h3>
+        <p>
+          Store a routing table in Redis: <code>user-server:{userId}</code> → server ID. When a
+          presence change occurs, look up which server each subscriber is connected to and publish
+          only to those specific servers. More targeted, less broadcast noise. Required at > 1,000
+          servers.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 3: Large Server Problem (150M Users, 500k-Member Servers)</h2>
+        <p>
+          A user in a 500,000-member server changes status. Naively, this triggers 500,000 presence
+          update notifications. At 150M DAU with each user averaging 5 server memberships, that is
+          an enormous fan-out.
+        </p>
+
+        <h3>The "At What Scale?" breakpoints:</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Scale</th><th>Problem</th><th>Solution</th></tr></thead>
+            <tbody>
+              <tr><td>100k users</td><td>None — single server works</td><td>Redis + single presence server</td></tr>
+              <tr><td>1M users</td><td>Single server saturated (~64k WS connections)</td><td>Horizontal scale + Kafka broadcast</td></tr>
+              <tr><td>10M users</td><td>Pub/sub broadcast to all servers is noisy</td><td>Routing table: only notify servers with subscribers</td></tr>
+              <tr><td>50M users</td><td>Large server fan-out (100k+ member servers)</td><td>Presence aggregation: don't fan out status changes in massive servers</td></tr>
+              <tr><td>150M users</td><td>Heartbeat storm, presence storage at PB scale</td><td>Heartbeat batching, tiered presence (friends vs server members)</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Tiered presence strategy (Discord's actual approach)</h3>
+        <ul>
+          <li><strong>Tier 1 — Direct friends:</strong> Full real-time presence updates. Low fan-out (average user has ~50 friends).</li>
+          <li><strong>Tier 2 — Small servers (&lt; 1,000 members):</strong> Real-time presence via WebSocket push.</li>
+          <li><strong>Tier 3 — Large servers (&gt; 1,000 members):</strong> Pull-based presence. The member list shows presence, but updates are fetched on demand when a user opens the member list, not pushed. Stale by up to 60 seconds — but the bandwidth cost of real-time push for 500k members is not justifiable for the UX value.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Heartbeat Design and Failure Detection</h2>
+        <p>
+          Heartbeat: client sends ping every 15s. Server expects ping within 30s (2× interval for
+          network jitter tolerance). Missed ping = connection lost = offline transition.
+        </p>
+        <p>
+          <strong>Mobile backgrounding:</strong> iOS and Android aggressively kill WebSocket connections
+          when apps are backgrounded. Handling:
+        </p>
+        <ul>
+          <li>On background: send <code>status: away</code> before the app is backgrounded.</li>
+          <li>On disconnect without explicit away: 30s grace period before marking offline (may just be a network blip).</li>
+          <li>On reconnect: server detects <code>presence:{userId}</code> key exists → user was briefly disconnected, not offline → suppress the offline notification if the reconnect comes within the grace period.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Eventual Consistency and the Stale Presence Problem</h2>
+        <p>
+          At scale, presence is explicitly eventually consistent. The green dot a user sees is the
+          last known state, not necessarily the current state. Acceptable because:
+        </p>
+        <ul>
+          <li>The consequence of a stale dot is cosmetic — you think someone is online when they're not.</li>
+          <li>The correct state converges within the heartbeat window (15–30 seconds).</li>
+          <li>Strong consistency for presence (requiring consensus on each status change) would be prohibitively expensive and latency-sensitive.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The Discord presence design is an exercise in recognising which component breaks at which
+          scale — and having a targeted fix for each. Single server → Redis + pub/sub → routing table
+          → tiered presence for large servers → heartbeat batching for mobile. The "at what scale?"
+          framing is also the correct interview strategy: show the interviewer that you know where each
+          design breaks, before they ask.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

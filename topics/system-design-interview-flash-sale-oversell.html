@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>System Design Interview: Avoid Overselling Inventory During a Flash Sale | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1607082348824-0a96f2a4b9da?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Flash sale shopping" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Interview · Backend · Architecture · 22 min</span>
+          </div>
+        </figure>
+        <h1>System Design Interview: How Would You Avoid Overselling Inventory During a Flash Sale?</h1>
+        <p class="summary">
+          Full interview answer for flash sale inventory design: Redis atomic decrements, database
+          pessimistic locking, reservation TTLs, pre-sale warm-up, queue-based purchase serialisation,
+          and the monitoring setup that catches oversell before it becomes a customer problem.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Inventory · Interview Prep</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A flash sale is a concurrency stress test in production clothing. You have N items and
+          potentially 100×N concurrent purchase attempts arriving in the first second. The naive
+          read-check-decrement pattern will oversell every time. The correct design decouples the
+          inventory reservation from the order fulfilment — and makes the reservation layer the only
+          place where concurrency is handled.
+        </p>
+        <div class="callout">
+          <p><strong>Key distinction interviewers look for:</strong> "Inventory available" and
+          "inventory reserved" are not the same thing. The flash sale problem is solved in the
+          reservation layer, not the order layer.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Myntra sold 4,200 units of a 500-unit exclusive drop</span>
+        <p>
+          At 12:00:00 exactly, 62,000 concurrent users hit the checkout endpoint for a limited
+          sneaker release. The application read available stock (500), confirmed it was positive,
+          placed the order, then decremented. Under load, thousands of threads read "500" before
+          any decrement had propagated. 4,200 orders were confirmed. 3,700 customers received
+          cancellation emails two hours later.
+        </p>
+        <p>
+          The trust damage was worse than the technical failure. Every one of those 3,700 cancellations
+          was a user who had already mentally bought the product. The correct design would have
+          either accepted exactly 500 orders or rejected everything beyond 500 instantly — never
+          confirmed and then cancelled.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Principle 1 — The Two-Phase Commit: Reserve, Then Purchase</h2>
+        <p>
+          Flash sale inventory should use a two-phase model:
+        </p>
+        <ol>
+          <li><strong>Reservation phase</strong> — immediately, atomically decrement a Redis counter. If successful, the user has a reservation with a TTL (e.g., 10 minutes to complete checkout).</li>
+          <li><strong>Purchase phase</strong> — the user completes payment. The reservation is converted to a confirmed order in the database. On timeout or failure, the reservation is released back to the Redis counter.</li>
+        </ol>
+        <p>
+          This decoupling means: only 500 users ever get past phase 1. The order/payment system
+          never sees more than 500 concurrent checkout sessions. Oversell is structurally impossible.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Principle 2 — Redis Atomic Decrement (the core mechanism)</h2>
+        <p>
+          Redis executes commands single-threaded. <code>DECR</code> and Lua scripts are atomic —
+          no two clients can race on them. This makes Redis the ideal reservation layer.
+        </p>
+
+        <span class="code-label">JavaScript Example — Redis Atomic Inventory Reservation</span>
+        <pre><code>// inventory-reservation.js — Node.js + ioredis
+import Redis from 'ioredis';
+const redis = new Redis(process.env.REDIS_URL);
+
+// Lua script: atomic check-and-decrement
+// Returns 1 on success, 0 on insufficient stock, -1 on item not found
+const RESERVE_SCRIPT = `
+  local key = KEYS[1]
+  local qty = tonumber(ARGV[1])
+  local userId = ARGV[2]
+  local ttl = tonumber(ARGV[3])
+
+  local current = redis.call('GET', key)
+  if current == false then return -1 end  -- item not found
+  if tonumber(current) < qty then return 0 end  -- insufficient stock
+
+  redis.call('DECRBY', key, qty)
+
+  -- Store reservation with TTL
+  local reservationKey = 'reservation:' .. userId .. ':' .. key
+  redis.call('SETEX', reservationKey, ttl, qty)
+
+  return 1
+`;
+
+const reserveScript = redis.defineCommand('reserve', {
+  numberOfKeys: 1,
+  lua: RESERVE_SCRIPT
+});
+
+async function reserveInventory(productId, quantity, userId, ttlSeconds = 600) {
+  const stockKey = `inventory:${productId}`;
+  const result = await redis.reserve(stockKey, quantity, userId, ttlSeconds);
+
+  if (result === -1) throw new Error('Product not found');
+  if (result === 0)  throw new Error('Sold out');
+  // result === 1: reservation successful
+
+  return {
+    reserved: true,
+    expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+    reservationKey: `reservation:${userId}:${stockKey}`
+  };
+}
+
+async function releaseReservation(productId, quantity, userId) {
+  const stockKey = `inventory:${productId}`;
+  const reservationKey = `reservation:${userId}:${stockKey}`;
+
+  const pipeline = redis.pipeline();
+  pipeline.del(reservationKey);
+  pipeline.incrby(stockKey, quantity); // release back to pool
+  await pipeline.exec();
+}
+
+async function confirmPurchase(productId, quantity, userId) {
+  // 1. Release reservation from Redis
+  await releaseReservation(productId, quantity, userId);
+
+  // 2. Decrement in database (authoritative record)
+  const result = await db.query(
+    `UPDATE products SET stock = stock - $1
+     WHERE id = $2 AND stock >= $1
+     RETURNING stock`,
+    [quantity, productId]
+  );
+  if (result.rowCount === 0) {
+    // Redis said OK but DB says no — should not happen if DB was warm-loaded
+    throw new Error('Database stock inconsistency — requires manual review');
+  }
+  return result.rows[0].stock;
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Principle 3 — Queue-Based Serialisation for Extreme Load</h2>
+        <p>
+          For ultra-high-concurrency events (iPhone launches, concert tickets), even Redis can
+          become a hot key bottleneck when millions of connections hit the same key per second.
+          The solution: a pre-sale queue.
+        </p>
+        <ol>
+          <li>At T-5 minutes, open a queue for purchase intent. Users click "join queue" — they get a queue position, not a purchase.</li>
+          <li>At sale time, drain the queue at the controlled rate the checkout system can handle (e.g., 1,000/s).</li>
+          <li>Only queued users with positions ≤ stock count get a purchase window. All others get "sold out" immediately.</li>
+        </ol>
+        <p>
+          Used by: Ticketmaster (virtual waiting room), Apple Store (access reservation), Puma SNKRS
+          (randomised draw). The queue absorbs the request spike before it hits inventory logic.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Principle 4 — Pre-Sale Warm-Up</h2>
+        <p>
+          Cold Redis is dangerous for flash sales. Steps 15 minutes before go-live:
+        </p>
+        <ol>
+          <li>Load exact inventory counts from the database into Redis (<code>SET inventory:{productId} 500</code>).</li>
+          <li>Warm CDN caches with the product page (prevents the CDN miss cascade at T+0).</li>
+          <li>Pre-scale backend instances to 3× normal capacity.</li>
+          <li>Disable non-essential background jobs that compete for DB connections.</li>
+          <li>Enable circuit breakers on downstream services (payment gateway, email) with shorter timeouts.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <h2>Principle 5 — TTL-Based Reservation Expiry</h2>
+        <p>
+          A user who reserves inventory but abandons checkout holds stock that nobody else can buy.
+          TTL expiry handles this automatically:
+        </p>
+        <ul>
+          <li>Reservation TTL: 10 minutes (enough for checkout; short enough to recirculate quickly).</li>
+          <li>A background worker polls for expired reservations and calls <code>releaseReservation()</code>.</li>
+          <li>Alternatively: Redis keyspace notifications trigger an event on key expiry. More real-time but adds operational complexity.</li>
+        </ul>
+        <div class="callout">
+          <p><strong>Edge case:</strong> If the user completes payment but the <code>confirmPurchase</code>
+          call fails, their reservation TTL may expire and release stock that should be theirs. Fix:
+          extend the reservation TTL immediately on successful payment, then confirm asynchronously.
+          Payment success = TTL extension; order creation = async cleanup.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Redis crash during sale</strong> — Redis is your reservation store. If it goes down, your inventory state is in Redis, not the DB. Fix: Redis Sentinel or Redis Cluster with AOF persistence. Inventory counts must survive a node restart.</li>
+          <li><strong>Redis ↔ DB count drift</strong> — if a TTL expiry releases stock in Redis but the DB is not updated (because the order was already written), counts diverge. Fix: reconciliation job every 5 minutes comparing Redis count to DB available stock.</li>
+          <li><strong>Hot key sharding</strong> — a single popular product's inventory key receives millions of ops/s. Fix: shard the key across N Redis slots (<code>inventory:{productId}:shard{0..N}</code>), atomically decrement a random shard, aggregate across shards for the total count display.</li>
+          <li><strong>Browser refresh attacks</strong> — bots refresh repeatedly to score reservations. Fix: per-user rate limiting at the load balancer (not the application layer — add it early in the stack).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Architecture at a Glance</h2>
+        <pre><code>User → Load Balancer → Rate Limiter (per-user, Redis)
+     → Queue (if using virtual waiting room)
+     → Reservation Service:
+         redis.reserve(productId, qty, userId, ttl=600)
+         → 1: success → return reservation token
+         → 0: sold out → return 409
+     → Checkout Service (only for reservation holders)
+         → Payment Gateway
+         → confirmPurchase() → update DB + release Redis reservation
+     → Async: order-placed event → fulfillment, email, analytics</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./api-concurrency-multiple-users.html">Multiple Users Hitting Your API</a> — the general race condition and locking guide.</li>
+          <li><a href="./bookmyshow-race-condition-distributed-locking.html">BookMyShow: Distributed Locking</a> — seat reservation under concurrency.</li>
+          <li><a href="./system-design-interview-prevent-duplicate-payment.html">Prevent Duplicate Payments</a> — idempotency for the purchase phase.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Flash sale oversell is solved by separating reservation (Redis, atomic, instant) from
+          purchase (database, transactional, async). Redis's single-threaded command execution
+          makes it structurally impossible to oversell at the reservation layer. The rest of the
+          design — TTL expiry, queue-based admission, warm-up, and reconciliation — handles the
+          operational reality that surrounds a working core mechanism.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

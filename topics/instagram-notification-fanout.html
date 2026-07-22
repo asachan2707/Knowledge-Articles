@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Instagram Notification Storm: Fanout Architecture & Push Notification Scalability | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Social media notifications" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Deep Dive · Architecture · Backend · 24 min</span>
+          </div>
+        </figure>
+        <h1>Instagram Notification Storm: System Design Deep Dive on Fanout Architecture and Push Notification Scalability</h1>
+        <p class="summary">
+          One post from a 50M-follower account triggers 50M push notifications. Deep dive on
+          fanout-on-write vs fanout-on-read, the celebrity problem, APNs/FCM rate limits, Kafka
+          partitioning for notification queues, deduplication, and the hybrid strategy that Instagram
+          and Twitter actually use.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Notifications · Architecture</span>
+          <span class="meta-item">Credit: CodeFarm (Medium)</span>
+          <span class="meta-item">Published: 2026-07-22</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          The naive approach to notifications is a for-loop: iterate over all followers, call the
+          push API for each. At 50 million followers, this loop takes hours. It exhausts connection
+          pools, violates provider rate limits, and causes cascading failures in the notification
+          pipeline. The correct design treats notifications as a rate problem, not a volume problem —
+          and solves it with distributed fanout, back-pressure, and provider-aware throttling.
+        </p>
+        <div class="callout">
+          <p><strong>Numbers that matter:</strong> APNs allows ~15M notifications/hour per certificate.
+          FCM allows ~600M/day per project. Instagram serves 2B+ daily active users. Neither provider
+          ceiling is reachable with a naive fanout loop from a single service instance.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Cristiano Ronaldo posts. 600M followers. Notification pipeline melts.</span>
+        <p>
+          Ronaldo has 600M Instagram followers. When he posts, the notification service must fanout
+          to 600M devices. At Instagram's scale, this is ~167,000 notifications per second just for
+          that single post — sustained for about an hour until the tail of follower notification
+          windows closes.
+        </p>
+        <p>
+          Celebrities like this are not edge cases at Instagram — they are the designed-for scenario.
+          The architecture cannot treat a 600M-follower account the same as a 500-follower account.
+          The fanout strategy must be fundamentally different based on account tier.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Fanout Strategies</h2>
+
+        <h3>Fanout-on-Write (Push Model)</h3>
+        <p>
+          When a user posts, immediately write the post ID to every follower's notification inbox.
+          Read time is O(1) — the inbox already has the data.
+        </p>
+        <ul>
+          <li><strong>Pros:</strong> Fast reads; notifications arrive quickly.</li>
+          <li><strong>Cons:</strong> Write amplification. One post from a 10M-follower account = 10M writes. Storage per user scales with follow count × post frequency.</li>
+          <li><strong>Suitable for:</strong> Normal accounts (< 10k followers). The write amplification is manageable.</li>
+        </ul>
+
+        <h3>Fanout-on-Read (Pull Model)</h3>
+        <p>
+          Store only the post itself. When a follower opens the app, compute their notification
+          feed at read time by aggregating posts from all followed accounts.
+        </p>
+        <ul>
+          <li><strong>Pros:</strong> No write amplification; simple storage model.</li>
+          <li><strong>Cons:</strong> Read time scales with number of accounts followed × recency depth. O(n followings) per read. Extremely slow for active users following 1,000+ accounts.</li>
+          <li><strong>Suitable for:</strong> Low-activity feeds or as a fallback for unread tail data.</li>
+        </ul>
+
+        <h3>Hybrid Model (Instagram / Twitter actual approach)</h3>
+        <ul>
+          <li>Normal accounts (< 1M followers): fanout-on-write into follower inboxes.</li>
+          <li>Celebrity accounts (> 1M followers): fanout-on-read — the celebrity's post is NOT pre-written to 600M inboxes. Followers pull it at read time.</li>
+          <li>The client merges both sources: pre-written inbox entries + celebrity pull results.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>The Notification Pipeline Architecture</h2>
+        <ol>
+          <li><strong>Event ingestion</strong> — post-created event lands in Kafka topic <code>post-created</code>.</li>
+          <li><strong>Fanout service</strong> — reads the event, determines the author's follower tier, fetches follower list from the follower-graph service, publishes one <code>notification-job</code> message per follower to a partitioned Kafka topic.</li>
+          <li><strong>Notification workers</strong> — consume from <code>notification-job</code>, look up user device tokens and notification preferences, batch calls to APNs/FCM.</li>
+          <li><strong>Provider gateways</strong> — APNs (iOS), FCM (Android), Web Push — each with their own rate limits and batching APIs.</li>
+          <li><strong>Delivery receipt handler</strong> — processes APNs/FCM delivery callbacks, marks tokens as inactive for bounced tokens.</li>
+        </ol>
+
+        <span class="code-label">JavaScript Example — Fanout Worker with Kafka</span>
+        <pre><code>// notification-fanout-worker.js — Node.js + Kafka
+import { Kafka } from 'kafkajs';
+
+const kafka = new Kafka({ clientId: 'fanout-worker', brokers: [process.env.KAFKA_BROKER] });
+const consumer = kafka.consumer({ groupId: 'notification-fanout-group' });
+const producer = kafka.producer({ idempotent: true }); // exactly-once producer
+
+const CELEBRITY_THRESHOLD = 1_000_000; // followers
+const BATCH_SIZE = 500; // follower IDs per Kafka message batch
+
+async function startFanoutWorker() {
+  await consumer.connect();
+  await producer.connect();
+  await consumer.subscribe({ topic: 'post-created', fromBeginning: false });
+
+  await consumer.run({
+    eachMessage: async ({ message }) => {
+      const post = JSON.parse(message.value.toString());
+      const { postId, authorId, contentType } = post;
+
+      const followerCount = await getFollowerCount(authorId);
+
+      if (followerCount >= CELEBRITY_THRESHOLD) {
+        // Celebrity: store post reference only; followers pull at read time
+        await markCelebrityPost(postId, authorId);
+        console.log(`[fanout] Celebrity post ${postId} — fanout-on-read`);
+        return;
+      }
+
+      // Normal account: fanout-on-write
+      let cursor = null;
+      let totalFanned = 0;
+      do {
+        const { followers, nextCursor } = await getFollowersBatch(authorId, cursor, BATCH_SIZE);
+        cursor = nextCursor;
+        totalFanned += followers.length;
+
+        // Batch publish notification jobs
+        await producer.send({
+          topic: 'notification-jobs',
+          messages: followers.map(followerId => ({
+            key: followerId,  // partition by follower for ordering guarantees
+            value: JSON.stringify({ postId, authorId, followerId, contentType,
+                                    notificationType: 'new-post', ts: Date.now() })
+          }))
+        });
+      } while (cursor);
+
+      console.log(`[fanout] Post ${postId} fanned to ${totalFanned} followers`);
+    }
+  });
+}
+
+// Notification worker: batches APNs/FCM calls
+async function sendNotification(notificationJob) {
+  const { postId, authorId, followerId } = JSON.parse(notificationJob);
+  const user = await getUserPreferences(followerId);
+
+  if (!user.notificationsEnabled || !user.deviceToken) return;
+  if (await isDuplicate(postId, followerId)) return; // dedup check
+
+  // Batch with other pending notifications (external batching service)
+  await notificationBatcher.add({
+    token: user.deviceToken,
+    platform: user.platform, // 'apns' | 'fcm'
+    payload: {
+      title: `New post from ${await getDisplayName(authorId)}`,
+      body: 'Tap to view',
+      data: { postId, type: 'new-post' }
+    }
+  });
+}
+
+// Deduplication: have we already sent this notification?
+async function isDuplicate(postId, followerId) {
+  const key = `notif:sent:${postId}:${followerId}`;
+  const set = await redis.set(key, 1, 'EX', 86400, 'NX'); // 24hr TTL
+  return set === null; // null means key already existed = duplicate
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>APNs and FCM — Provider-Level Constraints</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Provider</th><th>Batch size</th><th>Rate limit</th><th>Retry on failure</th><th>Token invalidity</th></tr></thead>
+            <tbody>
+              <tr><td>APNs (Apple)</td><td>1 (no batch API)</td><td>~15M/hr per certificate</td><td>Exponential backoff; respect Retry-After header</td><td>410 = unregistered token, delete immediately</td></tr>
+              <tr><td>FCM (Google)</td><td>Up to 500 per batch API call</td><td>~1M/min per project</td><td>503/429 = back off; 4xx = dead token</td><td>canonical_ids response field = token changed</td></tr>
+              <tr><td>Web Push</td><td>1 per call (VAPID)</td><td>Varies by browser vendor</td><td>410 = unsubscribed endpoint</td><td>410 = delete subscription</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <strong>Production rule:</strong> Never hit a provider at more than 80% of their rate limit.
+          Use a token-bucket rate limiter per provider within the notification worker. APNs in particular
+          will ban your certificate if you send too aggressively — recovery requires Apple support and
+          takes days.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Modes and Production Gotchas</h2>
+        <ul>
+          <li><strong>Kafka lag during celebrity post</strong> — a 600M-follower post creates 600M Kafka messages. Even with 100 partitions and 1,000 workers, the queue may take 10+ minutes to drain. This is acceptable if SLA is "notification within 30 minutes." If SLA is tighter, pre-scale the worker fleet based on a "celebrity post detected" signal.</li>
+          <li><strong>Stale device tokens</strong> — users uninstall the app but their token remains in the database. APNs returns 410; your worker must delete the token immediately, otherwise every fanout pays the cost of a dead call plus the 410 round-trip. Token graveyard accumulates quickly.</li>
+          <li><strong>Notification flood on re-follow</strong> — if a user unfollows and re-follows, they should not receive all historical posts as new notifications. The notification dedup store (Redis, 24hr TTL) handles this, but the key must be scoped to <code>(postId, followerId)</code>, not just <code>postId</code>.</li>
+          <li><strong>Do-Not-Disturb ignoring</strong> — push notifications sent during a user's DND hours damage engagement. Store user timezone and DND preferences; delay delivery using a scheduled notification queue.</li>
+          <li><strong>Notification grouping</strong> — 50 new posts from 50 different accounts should not generate 50 individual notifications. Group by account or content type and send one summary notification. Both APNs (notification groups) and FCM (collapse key) support this natively.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./amazon-cart-cache-invalidation.html">Amazon Cart Cache Invalidation</a> — event-driven invalidation and distributed consistency.</li>
+          <li><a href="./uber-architecture-driver-tracking.html">Uber Driver Tracking</a> — another real-time fan-out to millions of clients.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The Instagram notification problem is a rate problem, not a storage problem. The hybrid
+          fanout model — write-amplification for normal accounts, pull for celebrities — balances
+          write cost against read latency. Provider rate limits are the real ceiling; a token-bucket
+          rate limiter per provider, combined with Kafka back-pressure, is what prevents the
+          notification pipeline from collapsing the moment a celebrity posts.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
