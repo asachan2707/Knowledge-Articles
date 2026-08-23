@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Gateway Becomes a Bottleneck: Gateway Scaling, Auth Overhead, Edge Caching, and Routing Optimization | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .tier-row{display:flex;gap:1rem;padding:.75rem 0;border-bottom:1px solid #f1f5f9;align-items:flex-start}
+      .tier-row:last-child{border-bottom:none}
+      .tier-num{min-width:2rem;height:2rem;border-radius:8px;background:#e0f2fe;color:#0369a1;font-weight:700;font-size:.8rem;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Network traffic flowing through a gateway" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Architecture · Backend · 24 min</span>
+          </div>
+        </figure>
+        <h1>API Gateway Becomes a Bottleneck: System Design Deep Dive on Gateway Scaling, Authentication Overhead, Edge Caching, and Request Routing Optimization</h1>
+        <p class="summary">
+          A fintech startup's API gateway handles 400 requests per second without issue — then a single
+          viral campaign pushes it to 40,000 RPS, and the gateway that was supposed to protect the
+          backend becomes the single-threaded wall that kills the entire platform. This deep dive covers
+          the four most common gateway bottlenecks (auth overhead, route resolution cost, response
+          aggregation, and single-instance limits), edge caching strategies, horizontal gateway scaling,
+          and the architectural decision of whether a gateway should be a product or code.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · API Gateway · Distributed Architecture</span>
+          <span class="meta-item">Published: 2026-08-05</span>
+        </div>
+      </header>
+
+      <!-- Lead -->
+      <section class="content-card">
+        <p class="lead">
+          The API gateway is meant to be invisible. When it is working correctly, clients talk to it and
+          services respond — the gateway is just a pass-through with benefits (auth, rate limiting, routing).
+          When the gateway becomes a bottleneck, it is the worst kind: a single choke point positioned
+          in front of every single request to every single service. Every millisecond of latency it adds
+          appears in every request. Every concurrent connection it cannot accept manifests as a 503 to the
+          user. The gateway is the most leveraged component in the architecture, which makes its failure
+          modes the most catastrophic.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> A gateway that works at 400 RPS will not automatically work at
+          40,000 RPS. The linear extrapolation breaks at each of four inflection points: JWT verification
+          CPU, route table lookup cost, upstream connection pool exhaustion, and single-machine memory
+          limits. Solving the bottleneck requires understanding which inflection point you have actually hit.</p>
+        </div>
+      </section>
+
+      <!-- Story -->
+      <section class="story-card">
+        <span class="section-label">Story · The Viral Campaign That Killed the Gateway</span>
+        <h2>How a Single Marketing Email Brought Down a Fintech Platform</h2>
+        <p>
+          FinPay, a B2C payments startup, had a textbook API gateway. A single Kong instance sat in
+          front of nine microservices. It handled authentication (RS256 JWT verification), rate limiting
+          (token bucket per user), routing (path-prefix matching), and request logging. At their steady-state
+          load of 400 RPS, the p99 gateway latency was 3ms. Excellent. The team was proud.
+        </p>
+        <p>
+          On Tuesday at 2:00 PM, the marketing team sent a promotional email to 2.1 million users: 5%
+          cashback on all transactions for the next 4 hours. The email had a deep link that pre-loaded
+          the payment flow. Within 90 seconds, inbound RPS crossed 18,000. By 2:03 PM it was at 41,000.
+        </p>
+        <p>
+          The nine backend microservices were fine. They had been scaled horizontally and were running
+          at 35% CPU. The databases were handling the load. The problem was the Kong gateway. It was
+          running on a single <code>c5.2xlarge</code> (8 vCPUs). At 41,000 RPS with RS256 JWT verification
+          on every request, all 8 vCPUs were pinned at 100% on cryptographic operations. The gateway's
+          own request queue started backing up. Upstream connection pool to backend services exhausted.
+          Response times blew past 30 seconds. Kong began dropping connections. Users saw 502s. The
+          cashback campaign destroyed its own success.
+        </p>
+        <p>
+          Post-mortem finding: RS256 JWT verification at 41,000 RPS on 8 vCPUs consumed approximately
+          48 CPU-seconds per second — 6× the available compute. The fix was not horizontal scaling alone.
+          It required JWT verification result caching (a verified token is valid for its stated expiry),
+          a move from RS256 to HS256 for internal service tokens (10× faster), and a gateway cluster
+          behind a layer-4 load balancer. All three changes together brought the CPU utilization to 12%
+          at the same load that had previously pegged it at 100%.
+        </p>
+      </section>
+
+      <!-- Bottleneck 1: Auth Overhead -->
+      <section class="content-card">
+        <span class="section-label">Bottleneck 1</span>
+        <h2>Authentication Overhead: Why JWT Verification Is Expensive at Scale</h2>
+        <p>
+          JWT verification is not a simple string comparison. RS256 — the most common algorithm for
+          public-key JWTs — requires an RSA signature verification operation for every incoming request.
+          The operation involves modular exponentiation with a 2048-bit public key. On a modern x86-64
+          CPU, a single RS256 verification takes approximately 0.3–0.8ms of CPU time. At 40,000 RPS,
+          that is 12,000–32,000ms of CPU time per second — requiring 12–32 CPU cores just for JWT
+          verification, before routing, rate limiting, or proxying a single byte.
+        </p>
+
+        <h3>Algorithm Comparison: CPU Cost per Verification</h3>
+        <table>
+          <thead>
+            <tr><th>Algorithm</th><th>Type</th><th>CPU per verify (approx)</th><th>At 40,000 RPS</th><th>Use case</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>HS256</td><td>HMAC-SHA256 (symmetric)</td><td>~0.01ms</td><td>~0.4 CPU cores</td><td>Internal service tokens (shared secret)</td></tr>
+            <tr><td>HS512</td><td>HMAC-SHA512 (symmetric)</td><td>~0.015ms</td><td>~0.6 CPU cores</td><td>Internal; slightly stronger</td></tr>
+            <tr><td>RS256</td><td>RSA-SHA256 (asymmetric)</td><td>~0.5ms</td><td>~20 CPU cores</td><td>External tokens (public-key distribution)</td></tr>
+            <tr><td>ES256</td><td>ECDSA-SHA256 (asymmetric)</td><td>~0.2ms</td><td>~8 CPU cores</td><td>External tokens, better perf than RS256</td></tr>
+          </tbody>
+        </table>
+
+        <div class="warn-box">
+          <p><strong>Production gotcha:</strong> Many teams use RS256 for all tokens — both external
+          (issued to end-users) and internal (service-to-service). There is no reason to use asymmetric
+          verification for internal tokens where the gateway controls both the signing key and the
+          verification. Switch internal tokens to HS256 immediately. This alone reduces JWT CPU load by 50×.</p>
+        </div>
+
+        <h3>JWT Verification Result Caching</h3>
+        <p>
+          A verified JWT is valid until its <code>exp</code> claim. If the same user makes 100 requests
+          per second (a mobile app with aggressive polling, for example), the gateway is verifying the
+          same JWT 100 times per second — 99 of those verifications are redundant. A token cache that
+          maps <code>token_fingerprint → {claims, expiry}</code> eliminates this.
+        </p>
+        <p>
+          The token fingerprint is the SHA-256 hash of the token string — a 32-byte hash is far
+          cheaper to compute than an RS256 verification. The cache TTL is set to <code>token_expiry - current_time</code>
+          with no additional jitter (unlike data caches, a token expiry is a hard security boundary;
+          expired tokens must not be served from cache).
+        </p>
+
+        <span class="code-label">JavaScript — JWT Verification Cache (Gateway Middleware)</span>
+        <pre><code class="language-javascript">// jwt-cache-middleware.js
+// Eliminates redundant RS256 verifications for the same token.
+import { createHash } from 'crypto';
+import jwt from 'jsonwebtoken';
+import { LRUCache } from 'lru-cache';
+
+const JWT_PUBLIC_KEY = process.env.JWT_PUBLIC_KEY; // RS256 public key PEM
+
+// Cache: SHA-256 fingerprint → { claims, expiresAt }
+// max=50000: enough for concurrent active sessions
+// TTL handled manually (token's own expiry)
+const verifyCache = new LRUCache({ max: 50_000 });
+
+function fingerprint(token) {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export async function jwtMiddleware(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+
+  const token = authHeader.slice(7);
+  const fp = fingerprint(token);
+  const now = Math.floor(Date.now() / 1000);
+
+  // ── Cache hit path ──────────────────────────────────────────────────────────
+  const cached = verifyCache.get(fp);
+  if (cached && cached.expiresAt > now) {
+    req.user = cached.claims;
+    return next();
+  }
+
+  // ── Cache miss: full RS256 verification ─────────────────────────────────────
+  try {
+    const claims = jwt.verify(token, JWT_PUBLIC_KEY, { algorithms: ['RS256'] });
+
+    // Cache for remaining lifetime of token (never exceed 1 hour for safety)
+    const remainingTtlMs = Math.min(
+      (claims.exp - now) * 1000,
+      3_600_000 // 1 hour cap
+    );
+
+    if (remainingTtlMs > 0) {
+      verifyCache.set(fp, { claims, expiresAt: claims.exp }, { ttl: remainingTtlMs });
+    }
+
+    req.user = claims;
+    next();
+  } catch (err) {
+    // Explicit cache miss for invalid tokens prevents repeated verification attempts
+    // from hammering the CPU on the same malformed/expired token
+    return res.status(401).json({ error: 'Invalid token', detail: err.message });
+  }
+}
+
+// Metrics hook — attach to your instrumentation layer:
+// verifyCache.on('hit', () => metrics.increment('gateway.jwt.cache_hit'));
+// verifyCache.on('miss', () => metrics.increment('gateway.jwt.cache_miss'));</code></pre>
+
+        <div class="insight-box">
+          <p><strong>Measured impact:</strong> At a steady token reuse rate of 80% (a typical mobile app
+          where users make multiple requests per session), JWT verification cache reduces RS256 CPU cost
+          by 80×. Combined with switching internal tokens to HS256, the effective CPU cost per request
+          drops from ~0.5ms to ~0.015ms — a 33× reduction. This single change is often enough to
+          eliminate the auth overhead bottleneck entirely.</p>
+        </div>
+      </section>
+
+      <!-- Bottleneck 2: Route Resolution -->
+      <section class="content-card">
+        <span class="section-label">Bottleneck 2</span>
+        <h2>Route Resolution Cost: When the Route Table Becomes a Problem</h2>
+        <p>
+          Route resolution — matching an incoming request path to a backend service — is O(R) where R
+          is the number of routes in the route table, if implemented as sequential regex matching. A
+          gateway managing 500 microservices with 2,000 routes will evaluate up to 2,000 regex patterns
+          per request. At 40,000 RPS, that is 80 million regex evaluations per second.
+        </p>
+        <p>
+          Well-designed gateways (Kong, Envoy) avoid this with trie-based route matching: a prefix tree
+          where the common path prefix is shared and matching is O(path_length) regardless of route
+          count. The path <code>/api/v2/orders/123</code> is matched in O(20) character comparisons, not
+          O(2000) regex evaluations.
+        </p>
+
+        <h3>Route Table Design for Performance</h3>
+        <ul>
+          <li><strong>Prefix matching first, regex matching last.</strong> Every route that can be expressed
+          as a path prefix should be — prefix matching is one hash lookup. Regex routes sit in a separate,
+          shorter evaluation list evaluated only when prefix matching fails.</li>
+          <li><strong>Exact match > prefix match > regex.</strong> Exact match is a single hash map
+          lookup (O(1)). Prefix match is O(path_length). Regex is O(regex_complexity × route_count).</li>
+          <li><strong>Route versioning by host, not path.</strong> Routing <code>v1.api.example.com</code>
+          and <code>v2.api.example.com</code> to different services via Host header matching is faster
+          than evaluating <code>/api/v1/</code> vs <code>/api/v2/</code> path prefixes, because the
+          host header is a single lookup key.</li>
+          <li><strong>Keep the route count below 1,000 per gateway instance.</strong> Above this, even
+          trie-based matching starts to materially contribute to per-request CPU. Consider splitting
+          into domain-specific gateway clusters (one for auth API, one for payments API, one for data API)
+          with an upstream layer-7 router distributing by subdomain or Host header.</li>
+        </ul>
+      </section>
+
+      <!-- Bottleneck 3: Connection Pools -->
+      <section class="content-card">
+        <span class="section-label">Bottleneck 3</span>
+        <h2>Upstream Connection Pool Exhaustion</h2>
+        <p>
+          The gateway proxies every request to a backend service. Each proxied request holds an HTTP
+          connection to the backend open for the duration of the request. A gateway handling 40,000
+          concurrent requests in-flight needs 40,000 concurrent HTTP connections — one per request —
+          unless HTTP/2 multiplexing is enabled.
+        </p>
+
+        <h3>HTTP/1.1 vs HTTP/2 Gateway-to-Backend</h3>
+        <table>
+          <thead>
+            <tr><th>Protocol</th><th>Connections per backend instance</th><th>At 40K RPS / 50ms avg latency</th><th>Connection limit hit</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>HTTP/1.1 (keep-alive, pool 100)</td><td>100 per backend</td><td>2,000 in-flight = 20 backends needed</td><td>At ~8K RPS per backend</td></tr>
+            <tr><td>HTTP/2 (100 streams per conn)</td><td>~40 connections per backend</td><td>40K in-flight over 400 streams</td><td>Rarely; backpressure via WINDOW_UPDATE</td></tr>
+            <tr><td>HTTP/3 (QUIC)</td><td>1 connection per backend (QUIC mux)</td><td>40K streams over 1 UDP path</td><td>Near-never; head-of-line blocking eliminated</td></tr>
+          </tbody>
+        </table>
+
+        <div class="warn-box">
+          <p><strong>Production gotcha:</strong> Most gateway documentation shows HTTP/2 to clients but
+          HTTP/1.1 to backends ("h2c to h1 downgrade"). This preserves compatibility with legacy backends
+          but wastes the multiplexing benefit. Enable HTTP/2 or gRPC on the gateway-to-backend leg for
+          all services that support it. For services that do not, size the per-service connection pool
+          to: <code>pool_size = (target_RPS_to_this_service × p99_latency_seconds) × 1.3</code> (Little's Law × 30% headroom).</p>
+        </div>
+
+        <span class="code-label">JavaScript — Gateway Connection Pool Sizing (Little's Law)</span>
+        <pre><code class="language-javascript">// connection-pool-sizing.js
+// Little's Law: L = λW
+// L = avg concurrent requests in system
+// λ = request rate (RPS)
+// W = avg time request spends in system (seconds)
+
+function computePoolSize(targetRps, p99LatencyMs, headroomFactor = 1.3) {
+  const avgLatencySec = p99LatencyMs / 1000;
+  const concurrentRequests = targetRps * avgLatencySec;
+  const poolSize = Math.ceil(concurrentRequests * headroomFactor);
+  return {
+    targetRps,
+    p99LatencyMs,
+    concurrentRequests: Math.round(concurrentRequests),
+    recommendedPoolSize: poolSize,
+  };
+}
+
+// Example: Payment service at 5,000 RPS, p99 latency 80ms
+console.log(computePoolSize(5_000, 80));
+// { targetRps: 5000, p99LatencyMs: 80, concurrentRequests: 400, recommendedPoolSize: 520 }
+
+// Example: User profile service at 15,000 RPS, p99 latency 12ms
+console.log(computePoolSize(15_000, 12));
+// { targetRps: 15000, p99LatencyMs: 12, concurrentRequests: 180, recommendedPoolSize: 234 }
+
+// Gateway config object for a multi-service setup:
+const GATEWAY_POOL_CONFIG = {
+  paymentService:  { pool: computePoolSize(5_000, 80).recommendedPoolSize,  host: 'payment-svc:3001' },
+  orderService:    { pool: computePoolSize(20_000, 15).recommendedPoolSize,  host: 'order-svc:3002' },
+  profileService:  { pool: computePoolSize(15_000, 12).recommendedPoolSize, host: 'profile-svc:3003' },
+  inventoryService:{ pool: computePoolSize(8_000, 30).recommendedPoolSize,  host: 'inventory-svc:3004' },
+};
+
+// Total connections this gateway instance maintains:
+const totalConnections = Object.values(GATEWAY_POOL_CONFIG)
+  .reduce((sum, svc) => sum + svc.pool, 0);
+console.log('Total gateway upstream connections:', totalConnections);</code></pre>
+      </section>
+
+      <!-- Edge Caching -->
+      <section class="content-card">
+        <span class="section-label">Solution</span>
+        <h2>Edge Caching at the Gateway: What to Cache, What Never to Cache</h2>
+        <p>
+          The most effective gateway scale-out technique is not more CPU — it is not sending the request
+          downstream at all. A gateway-level response cache can absorb 60–80% of inbound traffic for
+          read-heavy APIs before a single byte reaches a backend service.
+        </p>
+        <p>
+          Gateway caching operates on HTTP cache semantics: <code>Cache-Control</code>,
+          <code>ETag</code>, <code>Last-Modified</code>, <code>Vary</code>. A backend service that
+          returns <code>Cache-Control: public, max-age=60</code> gives the gateway permission to serve
+          that response from cache for 60 seconds to any subsequent request matching the same cache key.
+        </p>
+
+        <h3>Cache Key Design</h3>
+        <p>
+          The cache key must capture every request dimension that produces a different response. For
+          a public API, the key is typically: <code>method + path + query_string + Accept header</code>.
+          For a user-specific API with personalized responses, the key must include the user identifier
+          — but this effectively multiplies the cache space by the user count, making it far less
+          effective. User-specific responses should not be cached at the gateway layer; they belong in
+          the application layer or a user-specific CDN.
+        </p>
+
+        <table>
+          <thead>
+            <tr><th>Endpoint type</th><th>Cache at gateway?</th><th>Cache key</th><th>TTL guidance</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Public product catalog</td><td>Yes</td><td>path + Accept</td><td>30–300s</td></tr>
+            <tr><td>Static config / feature flags</td><td>Yes</td><td>path</td><td>60–600s</td></tr>
+            <tr><td>User profile (personalized)</td><td>No</td><td>—</td><td>—</td></tr>
+            <tr><td>Payment / write operations (POST/PUT)</td><td>Never</td><td>—</td><td>—</td></tr>
+            <tr><td>Auth token validation endpoint</td><td>Never (security)</td><td>—</td><td>—</td></tr>
+            <tr><td>Search results (public, high-traffic)</td><td>Yes, with caution</td><td>path + query_string</td><td>10–30s</td></tr>
+          </tbody>
+        </table>
+
+        <div class="warn-box">
+          <p><strong>Vary header trap:</strong> If a backend returns <code>Vary: Accept-Encoding</code>,
+          the gateway must cache separate responses for gzip vs identity encoding. If it returns
+          <code>Vary: Cookie</code> or <code>Vary: Authorization</code>, the cache becomes per-user —
+          effectively useless for a shared cache. Audit your Vary headers before enabling gateway caching.
+          Any response with <code>Vary: Authorization</code> cannot be cached at the gateway; move that
+          cache to the application layer.</p>
+        </div>
+
+        <span class="code-label">JavaScript — Gateway Response Cache with ETag Validation</span>
+        <pre><code class="language-javascript">// gateway-cache.js
+// HTTP-semantics-aware response cache for the API gateway.
+// Respects Cache-Control, ETag, and Vary headers.
+import { createHash } from 'crypto';
+import { LRUCache } from 'lru-cache';
+
+const responseCache = new LRUCache({
+  max: 10_000,       // Maximum cached entries
+  maxSize: 512 * 1024 * 1024, // 512 MB max total size
+  sizeCalculation: (entry) => entry.body.length + 512, // body + metadata overhead
+});
+
+function parseCacheControl(header = '') {
+  const directives = {};
+  for (const part of header.split(',').map(s => s.trim())) {
+    const [key, val] = part.split('=');
+    directives[key.trim()] = val ? parseInt(val.trim(), 10) : true;
+  }
+  return directives;
+}
+
+function buildCacheKey(req) {
+  // Include method, path, query, and Accept (content negotiation)
+  // Never include Authorization — personal responses must not be shared
+  const base = `${req.method}:${req.path}:${req.querystring}`;
+  const accept = req.headers['accept'] || '*/*';
+  return createHash('sha256').update(base + accept).digest('hex');
+}
+
+export async function cacheMiddleware(req, res, proxyFn) {
+  // Only cache GET and HEAD; never POST/PUT/PATCH/DELETE
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return proxyFn(req, res);
+  }
+
+  const key = buildCacheKey(req);
+  const now = Date.now();
+  const cached = responseCache.get(key);
+
+  if (cached && cached.expiresAt > now) {
+    // ── Cache HIT ──────────────────────────────────────────────────────────────
+    const age = Math.floor((now - cached.storedAt) / 1000);
+
+    // ETag conditional request — return 304 if content unchanged
+    if (req.headers['if-none-match'] && req.headers['if-none-match'] === cached.etag) {
+      res.status(304).set({
+        'Cache-Control': cached.headers['cache-control'],
+        'ETag': cached.etag,
+        'Age': String(age),
+        'X-Cache': 'HIT-304',
+      }).end();
+      return;
+    }
+
+    res.status(cached.status)
+      .set({ ...cached.headers, 'Age': String(age), 'X-Cache': 'HIT' })
+      .send(cached.body);
+    return;
+  }
+
+  // ── Cache MISS — proxy to backend ──────────────────────────────────────────
+  const upstream = await proxyFn(req);
+  const cc = parseCacheControl(upstream.headers['cache-control']);
+
+  // Respect no-store and private directives
+  const isCacheable =
+    upstream.status === 200 &&
+    !cc['no-store'] &&
+    !cc['private'] &&
+    (cc['public'] || cc['max-age'] > 0) &&
+    !upstream.headers['vary']?.toLowerCase().includes('authorization');
+
+  if (isCacheable) {
+    const maxAgeSec = cc['max-age'] ?? 60;
+    const etag = upstream.headers['etag'] ||
+      'W/"' + createHash('sha256').update(upstream.body).digest('hex').slice(0, 16) + '"';
+
+    responseCache.set(key, {
+      status: upstream.status,
+      headers: { ...upstream.headers, 'ETag': etag },
+      body: upstream.body,
+      etag,
+      storedAt: now,
+      expiresAt: now + maxAgeSec * 1000,
+    }, { ttl: maxAgeSec * 1000 });
+  }
+
+  res.status(upstream.status)
+    .set({ ...upstream.headers, 'X-Cache': 'MISS' })
+    .send(upstream.body);
+}</code></pre>
+      </section>
+
+      <!-- Horizontal Scaling -->
+      <section class="content-card">
+        <span class="section-label">Scaling</span>
+        <h2>Horizontal Gateway Scaling: The Right Architecture</h2>
+        <p>
+          A single gateway instance has a ceiling. Even with all the optimizations above, a single
+          <code>c5.4xlarge</code> (16 vCPUs) running Kong or Envoy will cap out around 80,000–150,000
+          RPS depending on the middleware chain complexity. Beyond that, you need a gateway cluster.
+        </p>
+
+        <h3>Layer-4 Load Balancer → Gateway Cluster</h3>
+        <p>
+          The standard production architecture is a layer-4 TCP load balancer (AWS NLB, GCP TCP Proxy,
+          or HAProxy) distributing connections across a pool of identical gateway instances. L4 is used
+          here — not L7 — because adding an L7 load balancer in front of a gateway means you have two
+          gateways, which doubles the per-request overhead and creates a cascade failure pattern.
+        </p>
+
+        <div class="tier-row">
+          <div class="tier-num">1</div>
+          <div><strong>L4 Load Balancer (AWS NLB)</strong> — TCP-level distribution across gateway nodes.
+          Near-zero overhead. Handles millions of connections. Does not terminate TLS — gateway does.</div>
+        </div>
+        <div class="tier-row">
+          <div class="tier-num">2</div>
+          <div><strong>Gateway Cluster (Envoy/Kong/custom)</strong> — 3–N identical stateless instances.
+          TLS termination, JWT verification (with cache), rate limiting (shared Redis for cross-instance
+          coordination), route resolution, upstream proxying.</div>
+        </div>
+        <div class="tier-row">
+          <div class="tier-num">3</div>
+          <div><strong>Shared State (Redis Cluster)</strong> — Rate limit counters, JWT token blacklist,
+          distributed response cache (optional). Gateway instances are stateless; shared state lives here.</div>
+        </div>
+        <div class="tier-row">
+          <div class="tier-num">4</div>
+          <div><strong>Backend Services</strong> — Horizontal pod pools per service. Gateway routes to
+          service discovery (Consul, k8s DNS, or static pool) per route table.</div>
+        </div>
+
+        <div class="callout">
+          <p><strong>Rate limiting across a gateway cluster:</strong> If you run 8 gateway instances and
+          each enforces a rate limit of 100 req/s per user in its local memory, a user can hit all 8
+          simultaneously for an effective limit of 800 req/s. Move rate limit counters to Redis using
+          a Lua-script atomic increment to enforce true cross-instance limits. The Redis overhead
+          (sub-millisecond Lua call) is cheaper than the alternative: per-user query tracking in each
+          gateway instance, which does not scale.</p>
+        </div>
+
+        <span class="code-label">JavaScript — Distributed Rate Limiter (Redis Lua, Cross-Gateway)</span>
+        <pre><code class="language-javascript">// distributed-rate-limiter.js
+// Sliding window rate limiter using Redis + Lua for atomic cross-instance enforcement.
+// Works correctly even when 8 gateway instances all serve the same user concurrently.
+import Redis from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL);
+
+// Lua script: atomic sliding window counter
+// Returns [allowed (0/1), current_count, window_reset_ts]
+const SLIDING_WINDOW_LUA = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local window_start = now - window
+
+-- Remove events outside the window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
+
+-- Count current events in window
+local count = redis.call('ZCARD', key)
+
+if count < limit then
+  -- Add this request (scored by timestamp, unique by ts+random)
+  redis.call('ZADD', key, now, now .. ':' .. math.random(1000000))
+  redis.call('EXPIRE', key, math.ceil(window / 1000) + 1)
+  return {1, count + 1, now + window}
+else
+  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+  local reset_at = oldest[2] and (tonumber(oldest[2]) + window) or (now + window)
+  return {0, count, reset_at}
+end
+`;
+
+export class DistributedRateLimiter {
+  constructor({ windowMs = 60_000, maxRequests = 1000 } = {}) {
+    this.windowMs = windowMs;
+    this.maxRequests = maxRequests;
+    this._script = redis.defineCommand('slidingWindow', {
+      numberOfKeys: 1,
+      lua: SLIDING_WINDOW_LUA,
+    });
+  }
+
+  async check(userId) {
+    const key = `ratelimit:${userId}`;
+    const now = Date.now();
+    const [allowed, count, resetAt] = await redis.slidingWindow(
+      key, now, this.windowMs, this.maxRequests
+    );
+    return {
+      allowed: allowed === 1,
+      remaining: Math.max(0, this.maxRequests - count),
+      resetAt,
+      retryAfter: allowed ? 0 : Math.ceil((resetAt - now) / 1000),
+    };
+  }
+}
+
+// Gateway middleware integration:
+const limiter = new DistributedRateLimiter({ windowMs: 60_000, maxRequests: 300 });
+
+export async function rateLimitMiddleware(req, res, next) {
+  const userId = req.user?.sub ?? req.ip;
+  const result = await limiter.check(userId);
+
+  res.set({
+    'X-RateLimit-Limit': '300',
+    'X-RateLimit-Remaining': String(result.remaining),
+    'X-RateLimit-Reset': String(Math.floor(result.resetAt / 1000)),
+  });
+
+  if (!result.allowed) {
+    return res.status(429).json({
+      error: 'Too Many Requests',
+      retryAfter: result.retryAfter,
+    });
+  }
+
+  next();
+}</code></pre>
+      </section>
+
+      <!-- Failure Modes -->
+      <section class="content-card">
+        <span class="section-label">Production Gotchas</span>
+        <h2>Failure Modes: What Actually Breaks Under Load</h2>
+        <ul>
+          <li>
+            <strong>Gateway SPOF with a misconfigured health check.</strong> If the L4 load balancer
+            health check fires once per 30 seconds and a gateway instance dies in between, all connections
+            routed to the dead instance fail for up to 30 seconds. Set health check intervals to 5s,
+            unhealthy threshold to 2 consecutive failures. Recovery time: 10 seconds worst case.
+          </li>
+          <li>
+            <strong>JWT cache poisoning via concurrent token revocation.</strong> If a user's token
+            is revoked (logout, security event), the gateway's JWT verification cache still holds the
+            valid entry until the token's natural expiry. For a 1-hour token, that means up to 1 hour
+            of continued access after revocation. Mitigate with a Redis token blacklist: on revocation,
+            write the token fingerprint to Redis with TTL = token's remaining lifetime. The JWT middleware
+            checks the blacklist before serving from the verification cache.
+          </li>
+          <li>
+            <strong>Rate limit bypass via IP rotation.</strong> Per-user rate limits only work when you
+            can identify the user. Unauthenticated requests are typically rate limited by IP. Mobile
+            carriers NAT thousands of users behind a single IP — a per-IP limit of 100 req/min will
+            reject legitimate users. Use a two-tier limit: per-IP limit (generous, 10,000 req/min) as
+            a DoS layer, per-user limit (strict, 300 req/min) for authenticated traffic.
+          </li>
+          <li>
+            <strong>Response cache serving stale data after backend deployment.</strong> When a
+            backend service deploys with a changed response schema, the gateway cache may serve old
+            responses for up to <code>max-age</code> seconds. Mitigate by including a version hash
+            in the cache key, or by tagging cached responses with a deployment ID and purging on
+            deployment completion.
+          </li>
+          <li>
+            <strong>Gateway config change causing thundering herd.</strong> After updating route tables
+            (e.g., changing 50 routes to new backend instances), all in-flight requests and connections
+            may need to be re-established. Use progressive config rollout (blue/green gateway config)
+            rather than atomic replace. Envoy xDS supports incremental updates for this reason.
+          </li>
+        </ul>
+      </section>
+
+      <!-- Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Gateway Scaling Readiness Checklist</h2>
+        <ul class="check-list">
+          <li>JWT verification cache in place — measure cache hit rate; it should be &gt;70% under normal load.</li>
+          <li>Internal service tokens use HS256 or HS512, not RS256/ES256.</li>
+          <li>Route table uses prefix/trie matching; regex routes are under 50.</li>
+          <li>Connection pool sizes are computed from Little's Law (RPS × p99 latency × 1.3), not a default of 100.</li>
+          <li>HTTP/2 enabled on gateway-to-backend connections for all services that support it.</li>
+          <li>Rate limiting counters stored in Redis, not in-process (cross-instance enforcement).</li>
+          <li>Response cache enabled for public GET endpoints; <code>Vary: Authorization</code> responses excluded.</li>
+          <li>Gateway runs as a cluster behind an L4 load balancer; no single-instance dependency.</li>
+          <li>Health check interval ≤10s, unhealthy threshold ≤2 consecutive failures.</li>
+          <li>Token blacklist in Redis for revocation use cases (logout, account lock).</li>
+        </ul>
+      </section>
+
+      <!-- Related -->
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./api-gateway-pattern-microservices.html">API Gateway Pattern in Microservices Architecture</a> — The six responsibilities of a gateway and full Node.js implementation with JWT auth, rate limiting, and circuit breaker.</li>
+          <li><a href="./microservice-failure-circuit-breaker-resilience.html">One Microservice Failure Takes Down Entire Platform</a> — Circuit breakers, bulkheads, and resilience engineering for the services behind the gateway.</li>
+          <li><a href="./redis-cache-production-outage-stampede.html">Redis Cache Causes Production Outage</a> — TTL jitter and multi-level caching strategy for the shared Redis cluster the gateway depends on.</li>
+        </ul>
+      </section>
+
+      <!-- Takeaways -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A gateway bottleneck is almost never a single problem. In the FinPay outage, the root cause
+          was RS256 verification CPU — but even after fixing that, connection pool exhaustion would have
+          been the next limit, and then single-instance memory. Gateway scaling is an iterative process
+          of identifying and removing the current ceiling: auth overhead, route resolution, connection
+          pools, response caching, and finally horizontal clustering. The architecture that survives at
+          400,000 RPS looks the same in each layer as the one that works at 400 RPS — it just has more
+          instances, shared state, and caches in more places.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Every Frontend Architecture Pattern Explained | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1555099962-4199c345e5dd?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Clean code architecture layers on a developer screen"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Frontend · Architecture · Patterns · 22 min</span>
+          </div>
+        </figure>
+
+        <h1>Every Frontend Architecture Pattern Explained</h1>
+        <p class="summary">
+          From MVC to micro-frontends, from CSR to React Server Components — every architectural
+          pattern in modern frontend development, with the production reasoning behind each choice.
+          The right interview answer is never just what you built; it is why you drew the line
+          between browser, edge, and server where you did.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Frontend · Architecture · Engineering</span>
+          <span class="meta-item" data-added="2026-08-23">Published: 2026-08-23</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Frontend architecture is fundamentally one question asked many times: how much work should
+          the browser do versus the server versus build time? Every pattern — SSR, RSC, micro-frontends,
+          BFF — is a different answer to that question under a specific set of constraints around
+          interactivity, SEO, latency, team size, and data freshness.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The architectural decision:</strong> Move rendering work earlier (toward build time)
+            for performance and SEO. Move it later (toward the browser) for interactivity and
+            personalization. The hard part is drawing the right line for a given product — and
+            recognizing when the line needs to move.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Why architecture patterns proliferated</span>
+        <p>
+          In 2013, a Twitter engineer named Pete Hunt gave a talk at JSConf EU introducing React.
+          The room was skeptical — JSX looked wrong to everyone, mixing markup and logic violated
+          everything they had been taught about separation of concerns. Three years later, component-based
+          architecture had replaced MVC as the dominant mental model for UI development at scale.
+        </p>
+        <p>
+          The shift was not primarily about React's technical merits. It was about a problem that MVC
+          could not solve cleanly at the scale Facebook was operating: bidirectional data flow between
+          models and views produced cascading state mutations that were impossible to debug. Flux —
+          React's companion architecture — replaced two-way binding with a unidirectional loop:
+          action → dispatcher → store → view. Debugging became tractable because there was only one
+          direction data could move.
+        </p>
+        <p>
+          Every architecture pattern since has been a similar story: a real production constraint
+          (SEO, team scaling, performance, personalization) that the previous model could not satisfy
+          cleanly, solved by redrawing the line between where computation happens.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">MVC / MVP / MVVM</span>
+        <h2>The Classic Triad: Model, View, Controller/Presenter/ViewModel</h2>
+        <p>
+          These three patterns predate JavaScript frameworks and were imported from native GUI
+          development (Smalltalk in the 1980s). They share a common goal: separate business logic
+          (Model) from presentation (View) and wire them together with a mediator layer.
+        </p>
+
+        <h3>MVC — Model-View-Controller</h3>
+        <p>
+          The <strong>Controller</strong> receives user input, updates the <strong>Model</strong>,
+          and the Model notifies the <strong>View</strong> to re-render. In classical web MVC
+          (Rails, Django, Laravel), the controller lives on the server: it handles an HTTP request,
+          fetches data, and renders an HTML response. In client-side JavaScript MVC (Backbone.js,
+          AngularJS 1.x), the controller lived in the browser.
+        </p>
+        <p>
+          <strong>The failure mode at scale:</strong> Models and Views develop direct dependencies on
+          each other. A single Model change triggers multiple View updates, which trigger additional
+          Model changes — the "cascading update" problem that Facebook's Flux paper documented in detail.
+          Controllers become "fat controllers" containing business logic that belongs in the Model.
+        </p>
+
+        <h3>MVP — Model-View-Presenter</h3>
+        <p>
+          The <strong>Presenter</strong> replaces the Controller and owns all presentation logic.
+          Critically, the View is passive — it exposes only a thin interface of setters (setTitle,
+          showError, updateList). The Presenter calls these setters; the View never directly accesses
+          the Model. This makes the View trivially unit-testable by swapping it for a mock.
+        </p>
+        <p>
+          MVP is common in Android development (classic Java Android) and large WPF/WinForms
+          applications. Rarely seen in modern JavaScript because component frameworks absorb the
+          Presenter's role into the component itself.
+        </p>
+
+        <h3>MVVM — Model-View-ViewModel</h3>
+        <p>
+          The <strong>ViewModel</strong> exposes an observable state object. The <strong>View</strong>
+          declaratively binds to this state — when the state changes, the View updates automatically
+          via a binding engine (two-way binding). The ViewModel never references the View directly.
+        </p>
+        <p>
+          MVVM was designed for rich desktop UIs (WPF, Xamarin) and is the pattern behind Angular,
+          Vue 2, and Knockout.js. Two-way binding is its superpower and its failure mode: in large
+          applications, changes to one ViewModel trigger cascading bindings across multiple Views,
+          producing the same debugging difficulty that MVC faced.
+        </p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Pattern</th><th>Data flow</th><th>Who owns logic</th><th>Sweet spot</th><th>Failure mode</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>MVC</td><td>Bidirectional</td><td>Controller (thin ideal, fat in practice)</td><td>Server-rendered apps</td><td>Cascading updates, fat controllers</td></tr>
+              <tr><td>MVP</td><td>Presenter mediates all flow</td><td>Presenter</td><td>Testable UI (Android, WPF)</td><td>Boilerplate-heavy thin views</td></tr>
+              <tr><td>MVVM</td><td>Two-way binding</td><td>ViewModel</td><td>Form-heavy desktop / Angular</td><td>Cascading binding storms at scale</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Flux / Redux</span>
+        <h2>Unidirectional Data Flow: The Answer to the Cascading Update Problem</h2>
+        <p>
+          Flux was introduced by Facebook in 2014 specifically to solve the cascading update problem
+          in large MVC SPAs. Redux — created by Dan Abramov and Andrew Clark in 2015 — became the
+          dominant implementation of Flux's ideas by adding a single global store, time-travel
+          debugging, and a pure function (reducer) model for state transitions.
+        </p>
+        <p>The unidirectional loop has four nodes:</p>
+        <ol>
+          <li><strong>Action:</strong> A plain object describing what happened (<code>{ type: 'ADD_TO_CART', payload: item }</code>). Actions are the only way to trigger state changes — no direct writes to the store.</li>
+          <li><strong>Dispatcher (or dispatch function):</strong> Routes the action to the relevant store/reducer. In Redux, <code>store.dispatch(action)</code>.</li>
+          <li><strong>Store (Reducer):</strong> A pure function <code>(prevState, action) → nextState</code>. No side effects, no mutations. Given the same inputs, always returns the same output. This purity is what enables time-travel debugging: you can replay any sequence of actions from any saved state.</li>
+          <li><strong>View:</strong> Subscribes to the store and re-renders when state changes. In React-Redux, <code>useSelector</code> and <code>connect()</code> wire this.</li>
+        </ol>
+        <p>
+          <strong>What Redux solves:</strong> Any part of the UI can know the full application state
+          at any point in time by reading the single store. Any action can be inspected in Redux
+          DevTools — you can step backward and forward through the full state history. State changes
+          are predictable because the only path to mutation is through a reducer.
+        </p>
+        <p>
+          <strong>What Redux costs:</strong> Boilerplate. For every feature you need to define:
+          an action type constant, an action creator function, a case in the reducer, and a selector.
+          Redux Toolkit (2019) reduced this substantially with <code>createSlice</code> and
+          <code>createAsyncThunk</code>.
+        </p>
+
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Redux Toolkit example — counter slice
+import { createSlice, configureStore } from '@reduxjs/toolkit';
+
+// createSlice generates action creators and reducer in one declaration
+const counterSlice = createSlice({
+  name: 'counter',
+  initialState: { value: 0, status: 'idle' },
+  reducers: {
+    increment: (state) => { state.value += 1; },          // Immer allows "mutations" internally
+    decrement: (state) => { state.value -= 1; },
+    incrementByAmount: (state, action) => {
+      state.value += action.payload;
+    },
+  },
+});
+
+export const { increment, decrement, incrementByAmount } = counterSlice.actions;
+
+// Single global store — one source of truth for entire application state
+export const store = configureStore({
+  reducer: {
+    counter: counterSlice.reducer,
+    // other slices...
+  },
+  // Redux DevTools extension is auto-enabled in development
+});
+
+// React hook usage (react-redux useSelector + useDispatch)
+// In a component:
+//   const count = useSelector(state => state.counter.value);
+//   const dispatch = useDispatch();
+//   dispatch(increment());   // fires the action → reducer runs → store updates → component re-renders
+
+// Time-travel debugging: Redux DevTools lets you replay this dispatch log step by step
+console.log(store.getState()); // { counter: { value: 0, status: 'idle' } }
+store.dispatch(increment());
+store.dispatch(incrementByAmount(5));
+console.log(store.getState()); // { counter: { value: 6, status: 'idle' } }
+</code></pre>
+
+        <p>
+          <strong>Modern alternatives that borrow Flux's ideas:</strong> Zustand (smaller, no boilerplate,
+          no provider required), Jotai (atomic state — granular subscriptions per atom), Valtio (proxy-based
+          mutable state with Immer-like ergonomics). All implement unidirectional flow; they differ in
+          how much infrastructure they require around it.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Component-Based Architecture</span>
+        <h2>The Unit of Composition: Self-Contained UI Components</h2>
+        <p>
+          Component-based architecture — the model introduced by React and adopted by Vue, Svelte,
+          Angular 2+, and every modern framework — treats the UI as a tree of composable, self-contained
+          units. Each component owns its markup, logic, and optionally its styles. Components communicate
+          downward via props and upward via callbacks (or events in Vue). State lives as close to where
+          it is needed as possible — in the component that owns it.
+        </p>
+        <p>
+          <strong>Why this replaced MVC in JavaScript:</strong> In a component tree, the data flow
+          is always top-down (parent passes data to children via props). There is no implicit two-way
+          binding creating invisible dependencies across the component tree. A component is a pure
+          function of its props and local state — given the same inputs, it renders the same output.
+          This predictability is why React's model was disruptive: debugging means tracing a specific
+          prop down a tree, not following a web of bidirectional bindings.
+        </p>
+        <p>
+          <strong>Atomic Design</strong> (Brad Frost, 2013) applied a naming hierarchy to component-based
+          architecture: atoms (buttons, inputs), molecules (search bars = input + button), organisms
+          (header = nav + logo + search bar), templates (page layout without data), pages (templates
+          with real data). This taxonomy is widely used in design systems to communicate component
+          granularity across design and engineering teams.
+        </p>
+        <p>
+          <strong>The scaling problem:</strong> Prop drilling — passing props through five levels of
+          components to reach a deeply nested child — creates tight coupling. Solutions: React Context
+          (fine for low-frequency updates like theme/auth, expensive for high-frequency state), Redux
+          or Zustand (centralized store), or component composition (slot pattern).
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Rendering Strategies</span>
+        <h2>CSR, SSR, SSG, ISR, and React Server Components — When to Use Each</h2>
+        <p>
+          The biggest axis in frontend architecture today is where and when HTML is generated. This
+          decision affects First Contentful Paint (FCP), Time to Interactive (TTI), SEO, server cost,
+          and data freshness. The options are not mutually exclusive — modern frameworks support mixing
+          them at the route level.
+        </p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Strategy</th><th>When HTML is generated</th><th>SEO</th><th>Latency</th><th>Data freshness</th><th>Best for</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>CSR</strong> (Client-Side Rendering)</td><td>In the browser at request time</td><td>Poor (SPA shell)</td><td>JS bundle must download + execute</td><td>Real-time</td><td>Dashboards, admin UIs, authenticated apps with no SEO requirement</td></tr>
+              <tr><td><strong>SSR</strong> (Server-Side Rendering)</td><td>On the server at request time</td><td>Good</td><td>TTFB includes server render time</td><td>Per request</td><td>Personalized pages, dynamic content with SEO (e-commerce product pages)</td></tr>
+              <tr><td><strong>SSG</strong> (Static Site Generation)</td><td>At build time</td><td>Excellent</td><td>Served from CDN edge, sub-50ms FCP</td><td>Stale until rebuild</td><td>Marketing sites, documentation, blogs with infrequent content changes</td></tr>
+              <tr><td><strong>ISR</strong> (Incremental Static Regeneration)</td><td>At build time + revalidated on request after TTL</td><td>Excellent</td><td>CDN-served until stale, then regenerated</td><td>Eventually consistent (TTL-based)</td><td>E-commerce catalogs, news listings, content that updates hourly not per-second</td></tr>
+              <tr><td><strong>RSC</strong> (React Server Components)</td><td>On the server (server components) + in browser (client components)</td><td>Good</td><td>Zero JS shipped for server components</td><td>Per request (server) / real-time (client)</td><td>Mixed content pages where some subtrees need interactivity and others do not</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>React Server Components — the Model Shift</h3>
+        <p>
+          RSC (stable in Next.js 13+ App Router) introduces a hard boundary between server components
+          and client components. Server components run only on the server — they can directly access
+          databases, file systems, and secrets without a round-trip API call. They ship zero JavaScript
+          to the browser. Client components (<code>'use client'</code>) run in the browser and handle
+          interactivity. The rule: server components can import client components (they become subtrees),
+          but client components cannot import server components.
+        </p>
+        <p>
+          <strong>Why this matters:</strong> A traditional SSR page hydrates the full component tree
+          in the browser — every component ships JavaScript even if it never does anything interactive.
+          With RSC, static parts of the page (navigation, article text, product descriptions) carry
+          no client-side JavaScript at all. Interactivity (cart button, like button, search input) is
+          isolated to client components. This produces measurably smaller JavaScript bundles and faster
+          Time to Interactive on content-heavy pages.
+        </p>
+        <p>
+          <strong>The failure mode:</strong> Accidental "use client" boundary pollution. If a
+          developer imports a server-only component from a client component, Next.js throws at build
+          time. But wrapping too much of the tree in <code>'use client'</code> re-creates the CSR
+          problem — all that JavaScript ships to the browser again. The discipline is keeping client
+          components as leaf nodes (small, focused on interactivity) and keeping server components
+          as the tree's interior.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Micro-Frontends</span>
+        <h2>When Your Frontend Becomes a Distributed System</h2>
+        <p>
+          Micro-frontends apply the micro-services pattern to the UI layer: decompose a large frontend
+          application into independently deployable, team-owned UI modules, each responsible for a
+          bounded domain. A checkout team owns the checkout module; a product team owns the catalog;
+          a search team owns the search experience. Each can deploy independently without a cross-team
+          coordination release.
+        </p>
+        <p>
+          <strong>The trigger:</strong> Micro-frontends are a team-scaling solution, not a performance
+          optimization. The pain they solve is not slow load times — it is merge queue contention,
+          shared-component version conflicts, and release coordination overhead when 10+ teams commit to
+          the same monorepo frontend. Amazon, Zalando, IKEA, and Spotify have all deployed production
+          micro-frontend architectures.
+        </p>
+        <h3>Integration approaches</h3>
+        <ul>
+          <li><strong>Module Federation (Webpack 5):</strong> Each micro-app exposes remote modules that a shell application loads at runtime. Shared dependencies (React, ReactDOM) are negotiated to avoid loading duplicates. Low network overhead, strong isolation, native to the Webpack ecosystem. The failure mode: shared dependency version skew — if Team A ships React 18.2 and Team B ships React 18.3, the federation runtime must reconcile them.</li>
+          <li><strong>iFrame composition:</strong> Each micro-app renders in its own iframe. Perfect style and script isolation, no shared global state. Suitable for low-cohesion embeddings (a third-party widget inside your app). Not suitable for deeply integrated UX — cross-frame communication is message-passing only, layout constraints are difficult, and each iframe carries its own JavaScript runtime overhead.</li>
+          <li><strong>Web Components:</strong> Each micro-frontend exposes a custom element (<code>&lt;product-card&gt;</code>). Framework-agnostic by design (React, Vue, Svelte, Angular can all produce web components). Shadow DOM provides style encapsulation. Weak spots: SSR support historically poor (improving), React's synthetic event system does not propagate through shadow DOM boundaries without workarounds.</li>
+          <li><strong>Route-level composition (the simpler version):</strong> Each team owns a URL namespace (<code>/checkout/*</code>, <code>/catalog/*</code>), and a gateway/router (Nginx, Cloudflare Worker) routes requests to the correct team's deployed application. No runtime JavaScript federation — each application is fully independent. Simplest to operate, produces visible navigation transitions at route boundaries (full page reload or SPA shell reload), adequate for many real products.</li>
+        </ul>
+        <p>
+          <strong>Costs that micro-frontends impose:</strong> Independent deployments require a contract
+          between teams (shared design tokens, API conventions). Duplicate dependency loading adds
+          bandwidth unless module federation or shared CDN caching is configured carefully. Consistent
+          UX requires a cross-team design system — without it, each team's UI drifts. Observability
+          fragments: error tracking, analytics, and performance monitoring must span team boundaries.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">BFF Pattern</span>
+        <h2>Backend for Frontend: Purpose-Built API Layers per Client</h2>
+        <p>
+          A Backend for Frontend (BFF) is a server-side layer that aggregates, transforms, and
+          optimizes data from multiple backend services for a specific client surface (web, iOS,
+          Android, TV). Rather than a single general-purpose API serving all clients, each client
+          gets an API shaped precisely for its needs.
+        </p>
+        <p>
+          <strong>The problem BFF solves:</strong> A mobile app and a web app have fundamentally
+          different data requirements. The web dashboard needs 15 fields per list item; the mobile
+          app needs 4. A general API returns all 15 — the mobile client downloads 3× the data it
+          uses on every request, over a network where bandwidth is expensive and unreliable. A BFF
+          returns exactly what the client needs, assembled from whatever combination of microservices
+          is required in a single server-to-server round-trip.
+        </p>
+        <p>
+          <strong>Typical BFF responsibilities:</strong>
+        </p>
+        <ul>
+          <li>Response shaping: projecting only the fields the client needs</li>
+          <li>Aggregation: fetching from Order Service + User Service + Notification Service and combining into one response</li>
+          <li>Authentication/session: validating tokens from the client's auth system, forwarding to backend services</li>
+          <li>Protocol translation: the mobile BFF speaks REST; the backend services speak gRPC</li>
+          <li>Caching: client-specific cache TTLs, since mobile and web may have different staleness tolerances</li>
+        </ul>
+        <p>
+          <strong>GraphQL as a BFF-like pattern:</strong> GraphQL's query model — clients specify
+          exactly what fields they need — achieves much of what a BFF provides without a separate
+          server layer per client. Netflix, GitHub, and Shopify use GraphQL as their primary API
+          layer for exactly this reason. The difference: a BFF is an explicit architectural boundary
+          with team ownership; GraphQL is a protocol that solves the field-selection problem but not
+          the aggregation or auth problem on its own.
+        </p>
+        <p>
+          <strong>When BFF hurts:</strong> If one team owns both the BFF and the frontend, it adds
+          a deployment to maintain without meaningful benefit. BFF is valuable when frontend and
+          backend are owned by different teams with different release cadences, or when three or more
+          distinct client surfaces (web, iOS, Android, Smart TV) have genuinely different data requirements.
+        </p>
+
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// BFF server for the web client — aggregates user profile + orders + notifications
+// in one endpoint instead of requiring three client-side API calls
+
+import express from 'express';
+
+const app = express();
+
+// Backend service clients (in reality these would be microservice HTTP/gRPC clients)
+async function fetchUser(userId)          { /* calls User Service */ }
+async function fetchRecentOrders(userId)  { /* calls Order Service */ }
+async function fetchUnreadCount(userId)   { /* calls Notification Service */ }
+
+// Single BFF endpoint: web dashboard home page data
+app.get('/api/bff/dashboard', async (req, res) => {
+  const userId = req.user.id;  // extracted from validated JWT in auth middleware
+
+  // Parallel aggregation — all three backend calls run concurrently
+  const [user, orders, notifCount] = await Promise.all([
+    fetchUser(userId),
+    fetchRecentOrders(userId),
+    fetchUnreadCount(userId),
+  ]);
+
+  // Shape the response for exactly what the web dashboard needs
+  // — no extra fields, no extra round trips
+  res.json({
+    greeting: `Welcome back, ${user.firstName}`,
+    avatar:   user.avatarUrl,
+    // Projection: only 4 fields per order (not all 20+ fields from the Order Service)
+    orders: orders.slice(0, 5).map(o => ({
+      id:     o.id,
+      status: o.status,
+      total:  o.total,
+      date:   o.createdAt,
+    })),
+    unreadNotifications: notifCount,
+  });
+});
+
+// The mobile BFF would expose a different endpoint with different fields,
+// different pagination, and gzip compression tuned for mobile bandwidth constraints
+</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Monorepo Architecture</span>
+        <h2>One Repository, Many Packages — Managing Scale Without Fragmentation</h2>
+        <p>
+          A monorepo hosts multiple packages — the web app, the mobile app, shared component
+          libraries, shared utilities, end-to-end tests — in a single repository. Nx, Turborepo,
+          and pnpm workspaces are the dominant tools. Google, Meta, and Microsoft operate monorepos
+          at an extreme scale (millions of files); frontend teams at mid-scale (5–50 packages) find
+          monorepos solve a real coordination problem.
+        </p>
+        <p>
+          <strong>What monorepos solve:</strong>
+        </p>
+        <ul>
+          <li><strong>Atomic cross-package changes:</strong> When a shared component API changes, you update the component and all consumers in the same commit. No "upgrade the dependency in 8 packages across 8 repositories" coordination needed.</li>
+          <li><strong>Shared tooling consistency:</strong> ESLint, TypeScript, Prettier, Jest configurations live in one place. All packages inherit the same standards without drift.</li>
+          <li><strong>Type-safe cross-package imports:</strong> TypeScript paths resolve across packages in the monorepo. You get autocomplete and type errors across the full codebase, not just within one package.</li>
+          <li><strong>Build caching:</strong> Turborepo and Nx cache build artifacts. If <code>packages/ui</code> has not changed, its build output is replayed from cache — CI goes from 30 minutes to 5 minutes on large changes.</li>
+        </ul>
+        <p>
+          <strong>What monorepos do not solve:</strong> Independent deployment cadences across teams
+          still require careful separation — micro-frontends help here. Very large monorepos can
+          produce slow <code>git status</code>, <code>git blame</code>, and IDE indexing. Sparse
+          checkout (checking out only the packages you own) mitigates this but adds workflow complexity.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Decision Tree</span>
+        <h2>Choosing the Right Pattern for Your Constraints</h2>
+        <ul class="check-list">
+          <li><strong>Authenticated dashboard / admin tool, no SEO requirement:</strong> CSR with React + Zustand. Simplest deployment (static files on CDN). No server to maintain.</li>
+          <li><strong>Marketing site, documentation, blog:</strong> SSG (Next.js, Astro, Eleventy). Sub-50ms FCP from CDN. Rebuild on content change.</li>
+          <li><strong>E-commerce product catalog with SEO + occasional data changes:</strong> ISR with Next.js. Products are SSG-served from CDN, regenerated after TTL. Personalized price/availability uses CSR on the client.</li>
+          <li><strong>E-commerce PDP or checkout with personalization:</strong> SSR (Next.js, Remix). User-specific content (cart, price tier, shipping estimate) must be rendered per request. Cache at CDN where possible (Vary by user tier).</li>
+          <li><strong>Content-heavy page with some interactive components:</strong> React Server Components (Next.js App Router). Article body = server component (zero JS), comments = client component.</li>
+          <li><strong>Multiple teams each owning a UI domain:</strong> Micro-frontends with route-level composition or Module Federation. Invest in a shared design system before starting.</li>
+          <li><strong>Multiple client surfaces (web + mobile + TV) with different data needs:</strong> BFF per client surface. Consider GraphQL if the field-projection problem is the main pain point.</li>
+          <li><strong>Shared components + utilities across multiple frontend apps:</strong> Monorepo with Turborepo or Nx. Invest in CI build caching early — the payoff compounds quickly.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes &amp; Production Gotchas</span>
+        <h2>Where Each Pattern Breaks in Production</h2>
+        <ul>
+          <li><strong>Redux over-adoption:</strong> Putting every piece of UI state in Redux — including component-local state like "is this dropdown open?" — produces a noisy store, excessive re-renders, and 10x the boilerplate of local state. Rule: server state lives in React Query / SWR / TanStack Query; global UI state (theme, auth user) in Redux or Zustand; local component state in <code>useState</code>.</li>
+          <li><strong>SSR memory leaks:</strong> Server components that allocate per-request state in module-level variables (not request-level) leak across requests. In Node.js servers, this produces growing heap memory that manifests as latency degradation hours after deployment. Use <code>AsyncLocalStorage</code> for request-scoped state.</li>
+          <li><strong>Micro-frontend dependency duplication:</strong> Without Module Federation shared scope configuration, React gets bundled twice — once per micro-app. Two React instances in the same page produce "rendered more hooks than the previous render" errors and other invariant violations. Always configure federation shared scope.</li>
+          <li><strong>ISR cache poisoning:</strong> A stale-while-revalidate page regeneration error leaves the old (possibly incorrect) cached response served until the TTL expires and the next regeneration succeeds. ISR requires an on-demand revalidation endpoint (<code>revalidatePath()</code> or <code>revalidateTag()</code> in Next.js) for immediate invalidation on content change.</li>
+          <li><strong>BFF fan-out amplification:</strong> A single BFF request that triggers 10 backend calls at O(n) data (e.g., fetching details for each item in a list) produces 10× load on backend services at high traffic. Apply backend aggregation, cursor-based pagination, and request coalescing at the BFF layer.</li>
+          <li><strong>Client component creep in RSC:</strong> Over time, developers add <code>'use client'</code> to more components "just in case they need interactivity." The JS bundle grows back to CSR size. Conduct periodic audits — remove <code>'use client'</code> from components that have no event handlers or client-only hooks.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+
+        <h3>Is Redux still relevant in 2026?</h3>
+        <p>
+          Yes, for large-scale applications with complex cross-component state. Redux Toolkit made it
+          substantially less verbose. For smaller applications, Zustand (2 KB) or Jotai achieves the
+          same unidirectional flow with less infrastructure. The key question is whether your application
+          genuinely needs a centralized observable store or whether component co-location of state and
+          React Context suffice. If your team is spending time debugging "where did this state change,"
+          Redux's action log is the right tool.
+        </p>
+
+        <h3>When should I use RSC vs SSR?</h3>
+        <p>
+          RSC and SSR solve different problems and are composable. SSR renders the full React tree
+          on the server and sends HTML to the browser (hydration follows). RSC provides a distinction
+          between components that run only on the server (no client JS) and components that run in
+          the browser. Use RSC (Next.js App Router) for pages that mix static server-rendered content
+          with interactive client islands. Use SSR (or RSC + SSR together) when the full page needs
+          to be personalized per request and SEO matters. The App Router in Next.js 13+ uses both
+          by default.
+        </p>
+
+        <h3>Are micro-frontends worth the operational overhead?</h3>
+        <p>
+          Only if team-level independent deployability is a real, current pain point — not a hypothetical
+          future one. If two teams share a frontend and deploy together once a week without conflict,
+          micro-frontends add complexity without benefit. If four teams have merge queue conflicts and
+          blocked releases weekly, micro-frontends solve a real problem. Start with a monorepo; add
+          micro-frontend boundaries only when the coordination overhead becomes concrete.
+        </p>
+
+        <h3>Should the BFF be owned by the frontend team or the backend team?</h3>
+        <p>
+          The frontend team. The BFF exists to serve the frontend's data needs, and those needs change
+          with every UI change. If the BFF is owned by a backend team, every frontend change that
+          requires new data shapes requires a cross-team ticket. Frontend ownership of the BFF is what
+          makes independent deployment valuable.
+        </p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Frontend architecture is not a feature checklist — it is a series of decisions about where
+          computation happens, each with a different performance, scalability, and team-organization
+          tradeoff. MVC and MVVM solve the separation-of-concerns problem in small applications but
+          produce cascading state bugs at scale. Flux/Redux solve the cascading problem with
+          unidirectional flow at the cost of boilerplate. Component-based architecture makes the
+          UI predictable by treating every subtree as a pure function of its inputs. Rendering
+          strategy — CSR, SSR, SSG, ISR, RSC — determines where and when HTML is assembled, with
+          profound consequences for SEO, latency, and JavaScript payload size. Micro-frontends and
+          BFFs are team-scaling solutions, not performance optimizations — apply them only when
+          coordination overhead has become a real cost. The right architecture is the simplest one
+          that satisfies your current constraints. The wrong architecture is the one chosen to satisfy
+          constraints you might have someday.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

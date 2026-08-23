@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OTP Service Fails During Peak Traffic: Rate Limiting, Retry Storms, Provider Failover, and Queue Buffering | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563013544-824ae1b704d3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Mobile phone with OTP message" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Backend · Architecture · 22 min</span>
+          </div>
+        </figure>
+        <h1>OTP Service Fails During Peak Traffic: System Design Deep Dive on Rate Limiting, Retry Storms, Provider Failover, and Queue Buffering</h1>
+        <p class="summary">
+          A ride-hailing app's OTP service handles 800 logins per second on a normal evening. During a
+          concert-night surge, 12,000 users simultaneously try to log in, users get no OTP and tap
+          "Resend" — launching a retry storm that exhausts the SMS provider's rate limit and takes down
+          login for 40 minutes. This deep dive covers OTP-specific rate limiting (user-level, IP-level,
+          phone-number-level velocity limits), how to prevent resend storms, Kafka-based queue buffering
+          to absorb spikes, multi-provider failover with weighted routing, and the idempotency design
+          that prevents duplicate OTP sends.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · OTP · Authentication · Backend Architecture</span>
+          <span class="meta-item">Published: 2026-08-05</span>
+        </div>
+      </header>
+
+      <!-- Lead -->
+      <section class="content-card">
+        <p class="lead">
+          OTP delivery is a deceptively simple problem: generate a 6-digit code, send it via SMS, verify
+          it on entry. The production reality is that every step has a failure mode that standard SMS
+          tutorials do not mention: SMS providers have per-second rate limits that are orders of magnitude
+          below your traffic spike capacity, users who do not receive an OTP immediately will tap "Resend"
+          repeatedly (creating a feedback loop of escalating load), and a single-provider dependency means
+          any Twilio/AWS SNS outage is your outage. Designing an OTP system that survives peak traffic
+          requires treating the authentication flow as a distributed rate-controlled queue, not a synchronous HTTP call.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> The SMS provider rate limit is not your capacity — it is your
+          throughput ceiling. The correct architecture buffers incoming OTP requests in a queue, smooths
+          delivery to the provider's maximum safe throughput, fails over to a secondary provider when the
+          primary hits its limit, and applies per-phone-number velocity limits to prevent both abuse
+          and accidental retry storms from a single impatient user.</p>
+        </div>
+      </section>
+
+      <!-- Story -->
+      <section class="story-card">
+        <span class="section-label">Story · The Concert Night That Killed Login</span>
+        <h2>How 12,000 Simultaneous Logins Took Down a Ride-Hailing Platform for 40 Minutes</h2>
+        <p>
+          RideNow, a major ride-hailing app in South Asia, had a well-tuned backend. During normal evening
+          hours — 6 PM to 10 PM — the authentication service handled 800 logins per second across a fleet
+          of horizontally-scaled Node.js instances. Each login sent an OTP via Twilio's SMS API. Twilio
+          had confirmed a throughput allocation of 1,200 messages per second for RideNow's account.
+          Headroom seemed comfortable.
+        </p>
+        <p>
+          On the night of a major cricket match, a competing app went down due to an unrelated issue.
+          Its users switched to RideNow en masse. At 7:31 PM, inbound login requests surged to 12,000
+          per second. The authentication service scaled horizontally — it was stateless and auto-scaled
+          cleanly. Within 90 seconds, 34 instances were handling login requests in parallel, each making
+          synchronous Twilio API calls.
+        </p>
+        <p>
+          At 7:32 PM, Twilio began returning HTTP 429 (Too Many Requests). The authentication service's
+          Twilio client had no retry logic — it just propagated the 429 as an error to the user: "Failed
+          to send OTP. Please try again." Users tapped "Resend." Every resend was a new Twilio API call.
+          The retry storm began. At 7:33 PM, RideNow was sending 41,000 Twilio API calls per second —
+          34× their allocated limit — and receiving 429 on all of them.
+        </p>
+        <p>
+          The synchronous Twilio calls, all returning 429 rapidly, were fast failures — but 41,000 fast
+          failures per second generated significant load on the authentication service. Connection pool
+          exhaustion to the Redis session store followed. Then the database used for OTP storage hit its
+          connection limit. At 7:41 PM, the authentication service began returning 500s on all requests —
+          not just OTP sends. Login was completely broken. Existing users could not get new session tokens.
+          New users could not register. The platform was effectively locked out for 40 minutes while the
+          team manually throttled requests and cleared the retry queue.
+        </p>
+        <p>
+          The fix required three changes: Kafka-based OTP request buffering (so the queue absorbs the
+          spike instead of hammering Twilio directly), per-phone-number velocity limits (so one user
+          cannot trigger more than 3 OTP sends per 5 minutes), and a weighted failover to AWS SNS as
+          the secondary provider. All three would have prevented the outage entirely.
+        </p>
+      </section>
+
+      <!-- Rate Limiting -->
+      <section class="content-card">
+        <span class="section-label">Layer 1</span>
+        <h2>OTP-Specific Rate Limiting: Three Levels of Velocity Control</h2>
+        <p>
+          Generic API rate limiting (N requests per second per IP) is not sufficient for OTP systems.
+          OTP abuse and accidental retry storms operate at three distinct dimensions, each requiring its
+          own limit:
+        </p>
+
+        <h3>1. Per-Phone-Number Velocity Limit</h3>
+        <p>
+          A single phone number should never receive more than 3 OTP messages in a 5-minute window.
+          This limit has two purposes: it prevents a user from triggering a retry storm by repeatedly
+          tapping "Resend," and it prevents SMS pumping attacks (where fraudsters use automated scripts
+          to trigger thousands of OTP sends to premium-rate numbers, earning termination fees at your
+          expense — a real attack type that costs companies millions annually).
+        </p>
+
+        <h3>2. Per-IP Rate Limit</h3>
+        <p>
+          A single IP address requesting OTPs for many different phone numbers is suspicious — either
+          a botnet stuffing credentials, or a script doing SMS pumping. Limit to 10 OTP requests per
+          IP per 10 minutes. Because mobile carrier NAT can put hundreds of legitimate users behind
+          one IP, this limit must be generous enough not to block real users, but tight enough to
+          catch automated abuse.
+        </p>
+
+        <h3>3. Global Send Rate Limit</h3>
+        <p>
+          The global limit is derived from your SMS provider's allocated throughput. If Twilio gives
+          you 1,200 messages/second, your global OTP send rate should be capped at 1,000 messages/second
+          (83% of capacity, leaving headroom for retries and priority messages). Requests above this
+          limit enter a queue — they are not rejected, just delayed.
+        </p>
+
+        <span class="code-label">JavaScript — Three-Level OTP Rate Limiter (Redis)</span>
+        <pre><code class="language-javascript">// otp-rate-limiter.js
+import Redis from 'ioredis';
+const redis = new Redis(process.env.REDIS_URL);
+
+// Lua: atomic sliding window counter
+const SLIDING_LUA = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+local count = redis.call('ZCARD', key)
+if count < limit then
+  redis.call('ZADD', key, now, now .. ':' .. math.random(999999))
+  redis.call('PEXPIRE', key, window)
+  return {1, count + 1}
+else
+  return {0, count}
+end
+`;
+
+redis.defineCommand('otpLimit', { numberOfKeys: 1, lua: SLIDING_LUA });
+
+export async function checkOtpRateLimit(phoneNumber, ipAddress) {
+  const now = Date.now();
+
+  const [phoneOk, phoneCount] = await redis.otpLimit(
+    `otp:phone:${phoneNumber}`, now, 5 * 60 * 1000, 3
+  );
+  if (!phoneOk) {
+    return {
+      allowed: false,
+      reason: 'PHONE_VELOCITY',
+      message: 'Too many OTP requests for this number. Try again in 5 minutes.',
+      retryAfterSeconds: 300,
+    };
+  }
+
+  const [ipOk] = await redis.otpLimit(
+    `otp:ip:${ipAddress}`, now, 10 * 60 * 1000, 10
+  );
+  if (!ipOk) {
+    return {
+      allowed: false,
+      reason: 'IP_VELOCITY',
+      message: 'Too many requests from this network.',
+      retryAfterSeconds: 600,
+    };
+  }
+
+  // Global send rate (against provider capacity) — checked separately in queue worker
+  return { allowed: true, phoneCount, reason: null };
+}
+
+// OTP request handler:
+export async function requestOtp(req, res) {
+  const { phoneNumber } = req.body;
+  const ip = req.headers['x-forwarded-for']?.split(',')[0] ?? req.ip;
+
+  const rateCheck = await checkOtpRateLimit(phoneNumber, ip);
+  if (!rateCheck.allowed) {
+    return res.status(429).json({
+      error: rateCheck.message,
+      retryAfter: rateCheck.retryAfterSeconds,
+    });
+  }
+
+  // Enqueue for async delivery (see queue buffering section)
+  await enqueueOtpRequest({ phoneNumber, requestedAt: Date.now() });
+
+  res.json({ status: 'queued', message: 'OTP will be delivered within 10 seconds.' });
+}</code></pre>
+
+        <div class="warn-box">
+          <p><strong>SMS pumping prevention:</strong> Never allow OTP sends to phone numbers that
+          the user has not previously verified they own (e.g., numbers added in account settings
+          without prior verification). Do not allow unauthenticated users to freely enter arbitrary
+          phone numbers. Each undeliverable OTP send costs money and can trigger carrier abuse flags
+          that blacklist your sender ID. Add a CAPTCHA or proof-of-work for high-velocity unauthenticated
+          OTP flows.</p>
+        </div>
+      </section>
+
+      <!-- Queue Buffering -->
+      <section class="content-card">
+        <span class="section-label">Layer 2</span>
+        <h2>Kafka Queue Buffering: Absorbing Spikes Without Losing Requests</h2>
+        <p>
+          The fundamental mismatch in the RideNow outage was between inbound request rate (12,000/s)
+          and provider capacity (1,200/s). The authentication service tried to bridge this gap synchronously —
+          impossible. A Kafka queue decouples the two:
+        </p>
+        <ul>
+          <li>The <strong>authentication service</strong> writes OTP requests to a Kafka topic. This
+          is a fast local write (~1ms). The user gets an immediate "OTP on the way" response. No
+          Twilio call happens in the request path.</li>
+          <li>The <strong>OTP worker</strong> consumes from the Kafka topic at the provider's safe
+          throughput rate (1,000 msg/s). It generates and sends the OTP. It is the only component
+          that calls the SMS provider.</li>
+          <li>During a 10× traffic spike, the Kafka topic fills — messages queue. The worker continues
+          to drain at 1,000/s. All 12,000 RPS of requests are accepted; OTP delivery is delayed but
+          not dropped. As the spike subsides, the queue drains completely.</li>
+        </ul>
+
+        <span class="code-label">JavaScript — OTP Queue Producer and Throttled Worker</span>
+        <pre><code class="language-javascript">// otp-queue.js
+// Producer: called from authentication service (fast path)
+// Consumer: OTP worker (throttled at provider's safe rate)
+
+import { Kafka } from 'kafkajs';
+import crypto from 'crypto';
+import Redis from 'ioredis';
+
+const kafka = new Kafka({ brokers: [process.env.KAFKA_BROKER] });
+const producer = kafka.producer();
+const consumer = kafka.consumer({ groupId: 'otp-workers' });
+const redis = new Redis(process.env.REDIS_URL);
+
+// ── PRODUCER: enqueue OTP request ───────────────────────────────────────────
+export async function enqueueOtpRequest({ phoneNumber, requestedAt }) {
+  // Idempotency key: phone + 5-minute window slot
+  // Prevents duplicate enqueues from rapid "Resend" taps within the same window
+  const windowSlot = Math.floor(requestedAt / (5 * 60 * 1000));
+  const idempotencyKey = crypto
+    .createHash('sha256')
+    .update(`${phoneNumber}:${windowSlot}`)
+    .digest('hex')
+    .slice(0, 16);
+
+  // Check if this idempotency key was already enqueued
+  const alreadyQueued = await redis.set(
+    `otp:queued:${idempotencyKey}`, '1',
+    'NX', 'EX', 600 // 10 minute TTL
+  );
+
+  if (!alreadyQueued) {
+    // Already queued in this window — return the same delivery promise
+    return { status: 'already_queued', idempotencyKey };
+  }
+
+  // Generate and store OTP before enqueuing
+  // (stored in Redis with TTL — worker looks it up on send)
+  const otp = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
+  await redis.set(`otp:code:${phoneNumber}`, otp, 'EX', 600); // 10 minute validity
+
+  await producer.send({
+    topic: 'otp-requests',
+    messages: [{
+      key: phoneNumber,       // Partition by phone — same number goes to same partition
+      value: JSON.stringify({
+        phoneNumber,
+        idempotencyKey,
+        requestedAt,
+      }),
+    }],
+  });
+
+  return { status: 'queued', idempotencyKey };
+}
+
+// ── WORKER: throttled consumer at provider's safe rate ───────────────────────
+const PROVIDER_RATE_MS = 1; // 1 message per ms = 1000 msg/s
+let lastSendAt = 0;
+
+async function processOtpMessage(message) {
+  const { phoneNumber, idempotencyKey } = JSON.parse(message.value);
+
+  // Throttle: enforce provider rate limit inside the worker
+  const now = Date.now();
+  const timeSinceLast = now - lastSendAt;
+  if (timeSinceLast < PROVIDER_RATE_MS) {
+    await new Promise(r => setTimeout(r, PROVIDER_RATE_MS - timeSinceLast));
+  }
+  lastSendAt = Date.now();
+
+  // Retrieve pre-generated OTP
+  const otp = await redis.get(`otp:code:${phoneNumber}`);
+  if (!otp) {
+    // OTP expired before delivery — skip (will show as undelivered; user must re-request)
+    console.warn(`[otp-worker] OTP expired before delivery for ${phoneNumber}`);
+    return;
+  }
+
+  await sendOtpWithFailover(phoneNumber, otp);
+}
+
+export async function startOtpWorker() {
+  await consumer.connect();
+  await consumer.subscribe({ topic: 'otp-requests', fromBeginning: false });
+
+  await consumer.run({
+    autoCommit: true,
+    eachMessage: async ({ message }) => processOtpMessage(message),
+  });
+}</code></pre>
+
+        <div class="insight-box">
+          <p><strong>Queue depth as a leading indicator:</strong> The Kafka consumer lag for the
+          <code>otp-requests</code> topic is a real-time metric for OTP delivery delay. Lag of 0
+          means real-time delivery. Lag of 60,000 at 1,000 msg/s means a 60-second delivery delay.
+          Alert when lag exceeds 30,000 (30-second delay). Users who wait more than 30 seconds for
+          an OTP will likely have already given up and tried a competitor. Automatically trigger
+          provider failover (increasing throughput by adding AWS SNS capacity) when lag spikes.</p>
+        </div>
+      </section>
+
+      <!-- Provider Failover -->
+      <section class="content-card">
+        <span class="section-label">Layer 3</span>
+        <h2>Multi-Provider Failover: Weighted Routing with Automatic Fallback</h2>
+        <p>
+          Any single SMS provider has its own infrastructure failures, maintenance windows, and
+          regional outages. A provider that handles 100% of your OTP traffic means 100% of your
+          OTP traffic goes down when they do. The production architecture uses at least two providers
+          with weighted routing and automatic failover.
+        </p>
+        <h3>Provider Selection Strategy</h3>
+        <ul>
+          <li><strong>Primary/secondary split (e.g., 90/10).</strong> Send 90% of traffic to the primary
+          provider (better pricing, established relationship) and 10% to the secondary. The 10% warm-up
+          load ensures the secondary provider account remains active and its routing tables stay fresh —
+          a cold secondary has higher delivery failure rates when it suddenly receives 100% of traffic
+          during a failover.</li>
+          <li><strong>Geographic routing.</strong> Route India phone numbers (+91) to providers with
+          strong Indian carrier relationships (Exotel, Kaleyra). Route US numbers to Twilio. Delivery
+          rates vary significantly by provider × destination combination.</li>
+          <li><strong>Automatic failover trigger.</strong> When the primary provider returns 429 or
+          5xx on ≥10% of calls in a 30-second window, auto-promote the secondary to primary and alert.</li>
+        </ul>
+
+        <span class="code-label">JavaScript — Provider Router with Automatic Failover</span>
+        <pre><code class="language-javascript">// sms-provider-router.js
+import { CircuitBreaker } from './circuit-breaker.js';
+
+const providers = {
+  twilio: {
+    weight: 90,
+    send: async (to, body) => {
+      const resp = await fetch('https://api.twilio.com/2010-04-01/Accounts/ACXXXX/Messages.json', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Basic ' + Buffer.from(`${process.env.TWILIO_SID}:${process.env.TWILIO_TOKEN}`).toString('base64'),
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ To: to, From: process.env.TWILIO_FROM, Body: body }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!resp.ok) throw Object.assign(new Error(`Twilio ${resp.status}`), { status: resp.status });
+      return resp.json();
+    },
+  },
+  awsSns: {
+    weight: 10,
+    send: async (to, body) => {
+      // AWS SDK v3 SNS PublishCommand
+      const { SNSClient, PublishCommand } = await import('@aws-sdk/client-sns');
+      const client = new SNSClient({ region: process.env.AWS_REGION });
+      return client.send(new PublishCommand({ PhoneNumber: to, Message: body }));
+    },
+  },
+};
+
+// Wrap each provider in a circuit breaker
+const breakers = {};
+for (const [name, provider] of Object.entries(providers)) {
+  breakers[name] = new CircuitBreaker(
+    (to, body) => provider.send(to, body),
+    {
+      failureThreshold: 20, // Trip at 20% failure
+      windowMs: 30_000,
+      minRequests: 20,
+      openDurationMs: 60_000,
+      fallback: null, // Failover handled at router level
+    }
+  );
+}
+
+export async function sendOtpWithFailover(phoneNumber, otp) {
+  const message = `Your OTP is ${otp}. Valid for 10 minutes. Do not share.`;
+
+  // Weighted random provider selection
+  const rand = Math.random() * 100;
+  const primary = rand < providers.twilio.weight ? 'twilio' : 'awsSns';
+  const secondary = primary === 'twilio' ? 'awsSns' : 'twilio';
+
+  // Attempt primary
+  if (breakers[primary].state !== 'OPEN') {
+    try {
+      await breakers[primary].execute(phoneNumber, message);
+      // metrics.increment(`otp.sent.${primary}`);
+      return { provider: primary, success: true };
+    } catch (err) {
+      console.warn(`[sms-router] Primary (${primary}) failed: ${err.message}`);
+      // metrics.increment(`otp.primary_failed`);
+    }
+  }
+
+  // Fallback to secondary
+  try {
+    await breakers[secondary].execute(phoneNumber, message);
+    // metrics.increment(`otp.sent.${secondary}.failover`);
+    return { provider: secondary, success: true, failover: true };
+  } catch (err) {
+    console.error(`[sms-router] Both providers failed for ${phoneNumber}: ${err.message}`);
+    // metrics.increment('otp.send_failed');
+    throw new Error('OTP delivery failed on all providers');
+  }
+}</code></pre>
+      </section>
+
+      <!-- Idempotency -->
+      <section class="content-card">
+        <span class="section-label">Design</span>
+        <h2>OTP Idempotency: Preventing Duplicate Sends and Code Confusion</h2>
+        <p>
+          Without idempotency, a user who taps "Resend" three times within a second can receive
+          three different OTPs — only the last one is valid, but they may enter the first one
+          (which is now expired) and receive a confusing "Invalid OTP" error. Worse, each resend
+          consumes SMS credits and counts against the provider's rate limit.
+        </p>
+        <p>
+          The idempotency design has two components:
+        </p>
+        <ul>
+          <li><strong>Generate once, deliver reliably.</strong> The OTP code for a given phone number
+          in a given 5-minute window is generated once and stored in Redis. All delivery attempts (including
+          retries and resends) use the same code. This eliminates the "which OTP is valid?" confusion.</li>
+          <li><strong>Deduplicate queue entries.</strong> Before enqueuing, check if the same idempotency
+          key has already been enqueued in this window (NX Redis SET). If yes, skip the enqueue —
+          the first delivery is in progress. This prevents queue depth from exploding during a
+          user-triggered resend storm.</li>
+        </ul>
+
+        <span class="code-label">JavaScript — OTP Verification with Idempotency</span>
+        <pre><code class="language-javascript">// otp-verify.js
+import Redis from 'ioredis';
+import crypto from 'crypto';
+const redis = new Redis(process.env.REDIS_URL);
+
+const MAX_ATTEMPTS = 5;      // Max wrong attempts before lock
+const LOCKOUT_SECONDS = 300; // 5 minute lockout
+
+export async function verifyOtp(phoneNumber, enteredCode) {
+  // Check for lockout (too many wrong attempts)
+  const lockKey = `otp:lock:${phoneNumber}`;
+  const locked = await redis.get(lockKey);
+  if (locked) {
+    const ttl = await redis.ttl(lockKey);
+    return { valid: false, reason: 'LOCKED', retryAfterSeconds: ttl };
+  }
+
+  // Retrieve valid OTP (constant-time comparison to prevent timing attacks)
+  const stored = await redis.get(`otp:code:${phoneNumber}`);
+  if (!stored) {
+    return { valid: false, reason: 'EXPIRED' };
+  }
+
+  // Constant-time comparison (prevents timing oracle)
+  const storedBuf = Buffer.from(stored.padStart(64, '0'));
+  const enteredBuf = Buffer.from(enteredCode.padStart(64, '0'));
+  const valid = crypto.timingSafeEqual(storedBuf, enteredBuf);
+
+  if (valid) {
+    // Invalidate the code on first successful use (one-time use)
+    await redis.del(`otp:code:${phoneNumber}`);
+    // Clear any attempt counter
+    await redis.del(`otp:attempts:${phoneNumber}`);
+    return { valid: true };
+  }
+
+  // Wrong code — increment attempt counter
+  const attempts = await redis.incr(`otp:attempts:${phoneNumber}`);
+  await redis.expire(`otp:attempts:${phoneNumber}`, 600);
+
+  if (attempts >= MAX_ATTEMPTS) {
+    await redis.set(lockKey, '1', 'EX', LOCKOUT_SECONDS);
+    return { valid: false, reason: 'MAX_ATTEMPTS', retryAfterSeconds: LOCKOUT_SECONDS };
+  }
+
+  return { valid: false, reason: 'WRONG_CODE', attemptsRemaining: MAX_ATTEMPTS - attempts };
+}</code></pre>
+      </section>
+
+      <!-- Failure Modes -->
+      <section class="content-card">
+        <span class="section-label">Production Gotchas</span>
+        <h2>OTP System Failure Modes</h2>
+        <ul>
+          <li>
+            <strong>OTP stored in DB, not Redis.</strong> A PostgreSQL SELECT on every OTP verification
+            under high concurrent login load saturates the connection pool. OTP codes have a short TTL
+            (10 minutes) and high read frequency — exactly the Redis use case. Never store short-lived
+            high-throughput session data in a relational database.
+          </li>
+          <li>
+            <strong>Resend button without client-side cooldown.</strong> A frontend "Resend OTP" button
+            with no cooldown UI is an accidental DDoS gun. Add a 60-second countdown before the button
+            re-enables. Add a client-side idempotency check so rapid taps before the cooldown don't fire
+            multiple requests. This alone eliminates 80% of user-triggered retry storms.
+          </li>
+          <li>
+            <strong>SMS provider webhook delivery failures going undetected.</strong> Providers send
+            delivery status webhooks (delivered, failed, undelivered). If your webhook endpoint is down
+            or the webhook is not configured, you have no visibility into how many OTPs are actually
+            being received by users. You may have a 40% undelivered rate and not know it. Configure
+            delivery status webhooks and alert on delivery failure rates above 5%.
+          </li>
+          <li>
+            <strong>DLT (Distributed Ledger Technology) registration failures in India.</strong>
+            India's TRAI mandates that all commercial SMS senders register their entity and message
+            templates on the DLT platform. Unregistered templates are silently blocked by carriers.
+            If your OTP message text changes (even by one word), it stops delivering — with no error
+            from the provider. Register all OTP templates and test delivery on all major Indian
+            carriers (Jio, Airtel, Vi) after any template change.
+          </li>
+          <li>
+            <strong>Queue consumer lag growing indefinitely during sustained overload.</strong>
+            A Kafka queue absorbs a spike — but not a sustained overload that exceeds provider
+            capacity for hours. If your peak demand is permanently 10,000 OTPs/second and your
+            provider can do 1,200, the queue grows by 8,800 items per second indefinitely.
+            Implement queue depth-based alerts and automatic "OTP via email as fallback" at
+            queue depths above 5 minutes of delivery delay.
+          </li>
+        </ul>
+      </section>
+
+      <!-- Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>OTP System Production Readiness Checklist</h2>
+        <ul class="check-list">
+          <li>Per-phone-number velocity limit: max 3 OTPs per 5-minute window (Redis sliding window).</li>
+          <li>Per-IP velocity limit to detect automated abuse (10 per IP per 10 minutes).</li>
+          <li>OTP request path is async: enqueue to Kafka, return immediately to user.</li>
+          <li>OTP worker throttled to ≤85% of provider's allocated throughput.</li>
+          <li>Idempotency key prevents duplicate code generation for same phone + window.</li>
+          <li>Secondary SMS provider configured with ≥10% warm-up traffic (not cold standby).</li>
+          <li>Circuit breaker on each provider; auto-failover when primary error rate &gt;20%.</li>
+          <li>OTP codes stored in Redis with 10-minute TTL (not in relational DB).</li>
+          <li>OTP verification uses constant-time comparison (no timing oracle).</li>
+          <li>Max 5 wrong attempts per phone number before lockout (anti-brute-force).</li>
+          <li>Frontend "Resend" button has 60-second cooldown.</li>
+          <li>Provider delivery status webhooks configured and monitored.</li>
+          <li>Kafka consumer lag monitored; alert at &gt;30 seconds of delivery delay.</li>
+        </ul>
+      </section>
+
+      <!-- Related -->
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./microservice-failure-circuit-breaker-resilience.html">One Microservice Failure Takes Down Entire Platform</a> — Circuit breaker and bulkhead patterns that protect the OTP service from its own dependencies.</li>
+          <li><a href="./api-gateway-scaling-bottleneck.html">API Gateway Becomes a Bottleneck</a> — Gateway-level rate limiting that forms the first defense layer before OTP requests reach the service.</li>
+          <li><a href="./system-design-interview-thread-pool-sms.html">SMS Notification Dispatcher: Thread Pools at Scale</a> — Thread pool sizing and queue depth math for the SMS dispatch worker layer.</li>
+        </ul>
+      </section>
+
+      <!-- Takeaways -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The RideNow outage was caused by a single architectural assumption: that OTP delivery
+          could be synchronous. As soon as inbound request rate exceeded provider capacity — which
+          will happen during any significant traffic spike — the synchronous path failed, and every
+          retry made it worse. The async queue architecture does not eliminate the capacity mismatch;
+          it converts a hard failure (users get errors) into a soft degradation (users get their
+          OTP 30 seconds later instead of 3 seconds). The multi-provider failover ensures that a
+          single provider outage does not become a login outage. The velocity limits ensure that a
+          single impatient user cannot exhaust the system for everyone else. All three pieces are
+          required: a queue without failover still fails during provider outages, and failover without
+          velocity limits still allows retry storms to consume both providers simultaneously.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

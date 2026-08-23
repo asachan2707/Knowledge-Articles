@@ -229,6 +229,166 @@ idle</code></pre>
         </ul>
       </section>
 
+      <!-- ── INTERVIEW EXPERIENCE ───────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Interview Experience: How Uber Tests This in System Design</h2>
+        <p>
+          The following is drawn from a real Uber onsite system design interview (February 2026).
+          The candidate was strong on the happy path but stumbled on multi-region regulatory edge
+          cases — the exact failure mode that separates L4 from L5 candidates. The full incident
+          analysis is instructive for anyone preparing for a Uber-style interview.
+        </p>
+
+        <h3>The Question (Verbatim)</h3>
+        <div class="callout">
+          <p><em>"We need a system that can calculate dynamic pricing for every hexagonal zone in a city."</em></p>
+        </div>
+        <p><strong>Requirements confirmed during clarification:</strong></p>
+        <ul>
+          <li>Ingest real-time ride requests + driver GPS pings</li>
+          <li>Update surge multipliers at least every 60 seconds</li>
+          <li>Output feeds the pricing service shown directly to riders</li>
+        </ul>
+        <p><strong>Non-Functional Requirements to state upfront (this signals senior-level thinking):</strong></p>
+        <ul>
+          <li>Latency: recalculate within 60s (P99 &lt; 5s for the full pipeline)</li>
+          <li>Scale: 10M+ active users across 500+ cities globally</li>
+          <li>Availability: 99.99%; failure fallback = 1.0× (no surge) — never show a wrong high multiplier</li>
+          <li>Optimize for speed over accuracy — slightly stale multiplier beats no multiplier</li>
+        </ul>
+        <p class="callout">
+          <strong>Pro tip:</strong> The first clarification the candidate asked was "What happens if
+          the surge calculator fails?" — asking about failure mode before starting the design signals
+          senior-level thinking to the interviewer and typically unlocks deeper discussion.
+        </p>
+
+        <h3>Step-by-Step Interview Approach That Worked</h3>
+        <ol>
+          <li><strong>Clarify failure fallback first</strong> — establishes you think about production, not just the happy path.</li>
+          <li><strong>Propose H3 resolution 7 hexagons (~5 km²)</strong> — mentioning Uber's own open-source H3 library by name immediately signals you have studied Uber's actual stack.</li>
+          <li><strong>Sketch the data flow</strong>: GPS pings → H3 mapper → sliding window counters → Flink job → Redis cache → pricing service.</li>
+          <li>
+            <strong>When asked "How does the surge calculator compute the multiplier?"</strong> — give both:
+            <ul>
+              <li>Naive: <code>max(1.0, demand_count / (supply_count * target_ratio))</code></li>
+              <li>Production: add <code>kRing(hex_id, 1)</code> neighbor blending (6 surrounding hexagons) to avoid isolated high-surge zones with no nearby supply; add historical baselines to distinguish "normal Friday" from "Taylor Swift concert Friday."</li>
+            </ul>
+          </li>
+        </ol>
+
+        <h3>Full Data-Flow Diagram (with Regulatory Layer)</h3>
+        <pre><code>[ Driver GPS Pings ] ──► [ H3 Hex Mapper ] ──► [ Supply Counter (per hex) ]
+                                                          │
+[ Ride Requests ]    ──► [ H3 Hex Mapper ] ──► [ Demand Counter (per hex) ]
+                                                          │
+                                                          ▼
+                                              [ Surge Calculator (Flink) ]
+                                                          │
+                              ┌───────────────────────────┤
+                              ▼                           ▼
+                   [ Regulatory Config ]       [ Pricing Cache (Redis) ]
+                   (H3 hex → max cap)                     │
+                              │                           │
+                              └──────────── min() ────────┘
+                                                          │
+                                                          ▼
+                                              [ Rider App: "2.1× Surge" ]</code></pre>
+
+        <h3>The Follow-Up That Broke the Candidate</h3>
+        <div class="callout">
+          <p><em>"How do you handle surge pricing across city boundaries where hexagonal zones overlap
+          different regulatory regions? NYC caps surge at 2.5×. Some cities ban surge entirely."</em></p>
+        </div>
+        <p>
+          The candidate gave a vague answer about "a config per city." The interviewer pushed: how does
+          a globally-processing Flink job know which regulatory rules apply per hex? The candidate
+          stumbled. This was the turning point.
+        </p>
+        <p><strong>The correct answer — Regulatory Config Service:</strong></p>
+        <p>
+          A geo-tagged lookup table maps each H3 hex ID to its regulatory jurisdiction
+          (city/state/country). The Flink job queries this at computation time:
+          <code>min(computed_multiplier, regulatory_cap_for_hex)</code>. The config is pre-loaded
+          into the Flink job's in-memory state at startup and refreshed every 5 minutes via a
+          separate Kafka compacted topic. A compacted topic means each H3 key only retains its
+          latest regulatory config — the Flink job's startup snapshot is always complete without
+          replaying the full history.
+        </p>
+
+        <span class="code-label">JavaScript Example — Regulatory Cap in Surge Calculation</span>
+        <pre><code>// regulatory-surge.js — applies regulatory cap to computed surge multiplier
+
+/**
+ * Returns the surge multiplier capped by the regulatory jurisdiction of the hexagon.
+ * regulatoryCache is a Map pre-populated from the Kafka compacted config topic.
+ *
+ * @param {string} hexId           - H3 hexagon ID at resolution 7
+ * @param {number} rawMultiplier   - multiplier computed from demand/supply ratio
+ * @param {Map}    regulatoryCache - Map&lt;hexId, {jurisdiction, maxSurgeMultiplier}&gt;
+ * @returns {number} capped multiplier
+ */
+function computeCappedSurge(hexId, rawMultiplier, regulatoryCache) {
+  const jurisdiction = regulatoryCache.get(`reg:${hexId}`);
+  if (!jurisdiction) return rawMultiplier; // no regulatory data for this hex → apply raw
+
+  const cap = jurisdiction.maxSurgeMultiplier ?? Infinity;
+  return Math.min(rawMultiplier, cap);
+}
+
+// Regulatory cache loader — runs at Flink job startup and on config topic updates
+async function loadRegulatoryConfig(kafkaConsumer, cache) {
+  // Consume the compacted topic from the beginning to get current config for all hexes
+  for await (const message of kafkaConsumer.consume('surge-regulatory-config')) {
+    const { hexId, jurisdiction, maxSurgeMultiplier } = JSON.parse(message.value);
+    cache.set(`reg:${hexId}`, { jurisdiction, maxSurgeMultiplier });
+  }
+}
+
+// Usage in Flink processor:
+// const capped = computeCappedSurge('8a2a100d2c7ffff', 3.5, regulatoryCache);
+// → returns 2.5 for NYC hexes (cap = 2.5), 3.5 for uncapped hexes</code></pre>
+
+        <h3>The Narrator Technique</h3>
+        <p>
+          When walking through a system design diagram, narrate a user journey rather than pointing
+          at boxes. This transforms a static diagram into a living system in the interviewer's mind:
+        </p>
+        <blockquote style="border-left:3px solid var(--accent,#0f766e);padding-left:1rem;margin:1rem 0;font-style:italic;">
+          "A rider in Brooklyn opens the app. Their lat/long is converted to H3 hex 8a2a100d2c7ffff.
+          The Pricing Service checks Redis for that key and gets 1.8×. The rider sees '1.8× surge.'
+          They tap Request. The server verifies the price token — still valid (within 60s), confirms
+          1.8×. Meanwhile, demand has jumped; the Flink job computes 2.5× for that hex, but NYC's
+          regulatory config caps it at 2.5×, so 2.5× gets written to Redis. The next rider to request
+          will see 2.5×."
+        </blockquote>
+
+        <h3>Lessons from the Failure</h3>
+        <ul>
+          <li><strong>Spend 50% of prep on edge cases</strong> — failure modes, regulatory constraints, multi-region complexity. Happy path knowledge = L4. Edge case depth = L5.</li>
+          <li><strong>Read the Uber Engineering Blog</strong> — H3, Ringpop, Schemaless, and the pricing system architecture are all published. Free, high-signal preparation that most candidates skip.</li>
+          <li><strong>Practice the naive answer AND the production-grade answer</strong> for every likely deep-dive question. The interviewer will always ask "but what about...?"</li>
+          <li><strong>Record mock sessions</strong> — narrating a system design under live challenge is qualitatively different from explaining it to yourself in a mirror. Record and watch yourself stumble.</li>
+        </ul>
+
+        <h3>Behavioral Round: STAR-L Method</h3>
+        <p>
+          When asked "Tell me about a time you disagreed with a technical decision" — lead with data,
+          not opinions. The STAR-L framework:
+        </p>
+        <ul>
+          <li><strong>Situation:</strong> A notification system was polling the DB every 5 seconds, causing CPU spikes at peak hours.</li>
+          <li><strong>Task:</strong> Proposed migrating to a Kafka-based event stream for notification delivery.</li>
+          <li><strong>Action:</strong> Built a proof-of-concept in 3 days. Presented latency data: polling = 5s avg delivery; event-driven = 200ms avg. Addressed Kafka operational complexity concerns directly.</li>
+          <li><strong>Result:</strong> Team adopted the event-driven approach. CPU usage dropped 60%.</li>
+          <li><strong>Learning:</strong> "Data wins arguments, not opinions." Fight technical disagreements with prototypes and benchmarks, not rhetoric.</li>
+        </ul>
+        <p>
+          The "L" (Learning) in STAR-L is what differentiates a good behavioral answer from a great
+          one — it shows reflection and growth, which is exactly what Uber's interviewers assess for
+          senior candidates.
+        </p>
+      </section>
+
       <section class="content-card takeaways">
         <h2>Key Takeaway</h2>
         <p>
@@ -237,7 +397,10 @@ idle</code></pre>
           (only idle drivers count as supply), a geo-partition model that eliminates boundary effects
           (H3 hexagons), and a price-token mechanism that prevents quote-confirmation race conditions.
           The hard part is not the multiplier formula — it is the event pipeline that delivers correct
-          demand/supply counts to the computation layer within the 30-second window.
+          demand/supply counts to the computation layer within the 30-second window. In interviews,
+          the question that reveals L5 depth is not "how does the formula work?" but "how do you handle
+          regulatory caps across jurisdictions?" — prepare the regulatory config service answer and
+          you will be in the top 5% of candidates.
         </p>
       </section>
     </main>

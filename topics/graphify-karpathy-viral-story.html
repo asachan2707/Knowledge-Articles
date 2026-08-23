@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Andrej Karpathy Asked for a Tool — 48 Hours Later, Graphify Went Viral | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611532736597-de2d4265fba3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Developer working at a computer with code and graphs on screen"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Tools · Open Source · Career · 12 min</span>
+          </div>
+        </figure>
+
+        <h1>Andrej Karpathy Asked for a Tool — 48 Hours Later, Graphify Went Viral</h1>
+        <p class="summary">
+          When one of the most respected voices in AI publicly wishes for a tool, the open-source
+          community listens. This is the story of how a developer shipped Graphify in 48 hours,
+          watched it accumulate thousands of GitHub stars, and what every engineer can learn about
+          building and shipping fast.
+        </p>
+        <div class="article-meta">
+          <div>
+            <span class="meta-label">Source</span>
+            <span class="meta-value">Towards Deep Learning</span>
+          </div>
+          <div>
+            <span class="meta-label">Published</span>
+            <span class="meta-value">2026-07-29</span>
+          </div>
+          <div>
+            <span class="meta-label">Focus</span>
+            <span class="meta-value">Open source, shipping fast, AI tooling, career</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Most software projects start with months of planning, architecture reviews, and roadmap
+          ceremonies. Some of the most impactful ones start with a tweet. When Andrej Karpathy —
+          former Tesla AI director, founding OpenAI member, and one of the most followed engineers in
+          the world — publicly expressed a wish for a tool, one developer took the cue, built the
+          thing, and shipped it in under 48 hours. The result went viral.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The core lesson:</strong> You do not need to invent the problem. Find the right
+            person already describing it — loudly, in public — and build the smallest possible
+            answer. The rest is distribution.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">The Origin · How Graphify Was Born</span>
+        <p>
+          The story begins with a familiar frustration. Karpathy had been working with large codebases
+          and AI coding assistants, and he ran into the wall that every serious developer hits: the
+          model does not understand the codebase, it just reads files. Dumping source files into
+          context is expensive, slow, and still does not give the LLM any real picture of how the
+          code is connected. He said, publicly, that he wanted a tool that could visualise a
+          codebase as a knowledge graph — something that would show the architecture, the call
+          relationships, the central modules.
+        </p>
+        <p>
+          Within 48 hours, a developer had shipped exactly that tool, open-sourced it on GitHub,
+          and posted about it. The post was picked up on X/Twitter. Within days, Graphify had
+          accumulated thousands of stars and was being discussed across AI and developer communities.
+          The project name trended. Engineers bookmarked it. People started integrating it with
+          Claude Code, Cursor, and Codex.
+        </p>
+        <p>
+          This is not a rare accident. It is a repeatable pattern — and understanding it is one of
+          the most useful career skills an engineer can develop.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>What Karpathy Asked For</h2>
+        <p>
+          To understand why this request resonated so widely, you have to understand the problem it
+          addresses. Large Language Models have a context window — a fixed number of tokens they can
+          hold at once. That number has grown (16K, 100K, 1M tokens), but so have codebases. A
+          production monolith can easily have hundreds of files and millions of tokens of source
+          code. You cannot fit all of it in.
+        </p>
+        <p>
+          The typical workaround — send the model the files it probably needs — creates a new
+          problem: how do you know which files it needs? You either over-include (expensive,
+          confusing the model with irrelevant code) or under-include (the model lacks the context to
+          answer well). Neither is satisfying.
+        </p>
+        <p>
+          What Karpathy was asking for was a structural representation: a graph that pre-computes
+          the relationships, clusters the modules, and lets an AI assistant navigate the codebase
+          without reading it whole. The insight is that a graph of 500 nodes with labelled edges
+          communicates far more about a codebase than 500 files dumped into a prompt. The model
+          gets the architecture for a fraction of the token cost.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The meta-insight:</strong> Karpathy was not asking for a general AI research
+            project. He was describing a very specific, bounded tool with a very specific use case.
+            That specificity is what made it buildable in 48 hours.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>What Graphify Actually Does</h2>
+        <p>
+          Graphify takes a folder — a codebase, a research directory, a mixed collection of code
+          and docs — and converts it into a queryable knowledge graph. The pipeline runs in multiple
+          stages, each doing a different kind of extraction:
+        </p>
+        <ul class="check-list">
+          <li>
+            <strong>Tree-sitter AST parsing</strong> — extracts the syntax tree of every source file.
+            Function definitions, class hierarchies, imports, and call sites are all structured
+            nodes in the graph rather than raw text.
+          </li>
+          <li>
+            <strong>NetworkX + Leiden algorithm</strong> — once the raw graph is built, the Leiden
+            community-detection algorithm clusters related nodes. You end up with named communities
+            (modules, subsystems) rather than a single undifferentiated blob of nodes.
+          </li>
+          <li>
+            <strong>LLM-driven semantic extraction</strong> — for prose, comments, PDFs, and images,
+            a lightweight LLM pass pulls out concepts and connects them to the code graph.
+          </li>
+          <li>
+            <strong>God-node detection</strong> — high-degree nodes (files or functions that
+            everything else depends on) are surfaced explicitly. These are the leverage points for
+            any refactor or new feature.
+          </li>
+          <li>
+            <strong>71.5x token reduction</strong> — the headline claim. On a sufficiently large
+            codebase, querying the graph instead of loading files slashes the tokens an AI assistant
+            needs to spend per question. The exact reduction scales with codebase size and how
+            widely files would previously have been loaded just-in-case.
+          </li>
+        </ul>
+        <p>
+          The tool integrates with Claude Code, Cursor, Codex, and other AI coding assistants as a
+          skill or MCP server. You build the graph once, then your assistant navigates it across
+          sessions rather than re-reading files every time.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Want the how-to guide?</strong> The detailed walkthrough — installation, usage,
+            command reference, and FAQ — is in the companion article:
+            <a href="graphify-folder-knowledge-graph.html">How to Use Graphify: Turn Any Folder Into a Knowledge Graph</a>.
+            This article is about the story behind it.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The 48-Hour Build</h2>
+        <p>
+          Shipping a working, open-sourceable tool in 48 hours is not magic. It is a set of
+          deliberate choices, each of which eliminates a category of wasted time.
+        </p>
+
+        <h3>Starting from a clear user request</h3>
+        <p>
+          The developer did not need to do user research, write a PRD, or hold discovery sessions.
+          The requirement was already written, in public, by a credible user. "I want a tool that
+          visualises a codebase as a knowledge graph for LLM context reduction." That sentence
+          contains the goal, the mechanism, and the target user. Everything else was implementation.
+        </p>
+
+        <h3>Using existing libraries — not reinventing them</h3>
+        <p>
+          Tree-sitter already exists. NetworkX already exists. The Leiden algorithm already exists
+          as a Python package. The developer's job was to wire them together into a coherent
+          pipeline, not to build graph algorithms from scratch. Every hour spent building something
+          that already exists is an hour not spent on the thing that is actually new.
+        </p>
+
+        <h3>Shipping an MVP, not a perfect product</h3>
+        <p>
+          The first version of Graphify almost certainly had rough edges. It was a working
+          demonstration of the core value proposition — turn a folder into a graph, cut tokens —
+          not a polished product. The polish came later, after real users provided feedback.
+          Waiting for perfection would have meant someone else shipped first.
+        </p>
+
+        <h3>One clear value proposition</h3>
+        <p>
+          "71.5x token reduction." That is one number, one claim, one thing the tool does better
+          than the status quo. It is easy to understand, easy to share, and easy to remember. Tools
+          that try to do ten things have ten claims, none of which are memorable. Graphify had one.
+        </p>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Analysis · Why It Went Viral</span>
+        <h2>Why It Went Viral</h2>
+        <p>
+          Thousands of tools are open-sourced every week. Most of them are not seen by more than a
+          few dozen people. Graphify broke through for reasons that are worth understanding
+          explicitly.
+        </p>
+        <p>
+          <strong>It named a recognisable person's request.</strong> "Andrej Karpathy asked for this"
+          is not a marketing gimmick — it is a genuine signal about the quality of the problem.
+          When someone with Karpathy's technical depth says they want something, it is credible that
+          the problem is real and worth solving. The association also gave the post a ready-made
+          audience: everyone who follows Karpathy.
+        </p>
+        <p>
+          <strong>It solved a widely-felt pain.</strong> LLM context limits are not an obscure
+          research problem. They are the thing every developer hits when they try to use Claude or
+          Cursor on a real codebase. The moment a developer reads "71.5x token reduction," they
+          immediately connect it to their own experience of the problem. That instant recognition is
+          what makes people click, star, and share.
+        </p>
+        <p>
+          <strong>It was open source with zero barrier to try.</strong> No signup. No waitlist. No
+          pricing page. <code>pip install graphifyy</code>. The distance between "I heard about this"
+          and "I am running it on my codebase" was approximately three minutes. Low friction is not
+          just convenient — it is the difference between a tool people try and a tool people
+          bookmark and forget.
+        </p>
+        <p>
+          <strong>It showed a tangible number in the headline.</strong> "71.5x token reduction" is
+          specific enough to be surprising and concrete enough to be testable. Abstract claims
+          ("improves your AI coding experience") are forgettable. A number invites people to argue
+          with it, test it, and share it. All of those behaviours increase distribution.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Lessons for Engineers: Five Things You Can Act On</h2>
+
+        <h3>1. Watch what experts complain about</h3>
+        <p>
+          Karpathy's tweet was a public expression of a problem he could not solve with existing
+          tools. Senior engineers, researchers, and well-known practitioners complain in public
+          constantly. Most people scroll past. A few listen carefully enough to build the thing.
+          Follow people who are doing the hardest versions of the work you care about, and treat
+          their frustrations as a product backlog.
+        </p>
+
+        <h3>2. Build the smallest thing that proves the value</h3>
+        <p>
+          The goal of the first version is not a complete product. It is a proof that the core
+          value proposition works. For Graphify: does turning a folder into a graph actually reduce
+          tokens meaningfully? Yes? Ship that. Everything else is iteration. The fastest way to
+          learn whether your idea is right is to put something in front of users, not to perfect
+          it in private.
+        </p>
+
+        <h3>3. Put the number in the headline</h3>
+        <p>
+          If your tool does something measurably better than the alternative, lead with the
+          measurement. Not "significantly faster" — how much faster? Not "dramatically reduces
+          costs" — by what factor? Numbers are credible, shareable, and memorable in ways that
+          adjectives are not. If you do not have a number, run the experiment until you do.
+        </p>
+
+        <h3>4. Open source amplifies distribution</h3>
+        <p>
+          A paid or closed tool would have had a fraction of Graphify's reach. Open source removes
+          the trust barrier ("I don't know this developer"), the friction barrier ("I have to sign
+          up"), and the cost barrier ("I don't want to pay for an experiment"). Each of those
+          barriers is a reason not to try — and every reason not to try is a reason not to tell
+          others. Open source collapses all three at once.
+        </p>
+
+        <h3>5. Ship in hours, polish in weeks</h3>
+        <p>
+          The goal of the first release is not quality — it is timing. A good-enough tool that
+          exists today beats a perfect tool that ships in three months, because the community forms
+          around the thing that exists. Once a tool has users, it has feedback, contributors, and
+          momentum. None of that is available to a tool that has not shipped yet.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>The Larger Trend: AI Tools That Make AI Cheaper</h2>
+        <p>
+          There is something quietly ironic about Graphify's place in the ecosystem. It is an AI
+          tool — it uses LLMs in its semantic extraction pipeline — whose primary value is making
+          other AI tools cheaper and more effective. The more capable AI coding assistants become,
+          the more valuable structural representations of codebases become, because the bottleneck
+          shifts from model quality to context quality.
+        </p>
+        <p>
+          This is a broader pattern. As inference costs fall and model capabilities rise, the
+          competitive advantage in AI tooling shifts to whoever manages context best. Vector
+          databases, knowledge graphs, hierarchical retrieval, structured prompts — all of these are
+          answers to the same question: how do you tell the model exactly what it needs to know,
+          and nothing else? Graphify is one answer to that question, specialised for codebases.
+        </p>
+        <p>
+          The meta-irony is genuine: the most useful AI tools of the next few years will probably
+          be tools that make AI cheaper to run. That is the direction of the market, and it was
+          visible in Karpathy's original request if you were paying attention.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>The trend to watch:</strong> "Context-efficient AI tooling" is a category, not
+            just a feature. Knowledge graphs, hierarchical retrieval, and structured representations
+            are all bets on the same underlying insight: models are good enough; context is the
+            remaining bottleneck. The engineers who build well here will matter a lot in the next
+            two years.
+          </p>
+        </div>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The Graphify story is not really about Graphify — it is about a repeatable pattern for
+          building things that matter and getting them noticed. Find a real problem expressed clearly
+          by a credible person. Use existing libraries to reach the core value fast. Ship before you
+          are ready. Put the number in the headline. Make it free and easy to try. The tool that
+          went viral in 48 hours was not lucky — it followed a pattern that works, executed with
+          speed and intention. That pattern is learnable.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

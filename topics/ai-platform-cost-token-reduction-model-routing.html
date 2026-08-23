@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Platform Suddenly Becomes Very Expensive: Token Reduction, Model Routing, and LLM Cost Optimization | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Cost charts and AI platform spending analytics" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · AI · Architecture · 20 min</span>
+          </div>
+        </figure>
+        <h1>AI Platform Suddenly Becomes Very Expensive: System Design Deep Dive on Token Reduction, Model Routing, and LLM Cost Optimization</h1>
+        <p class="summary">
+          A B2B SaaS product integrates Claude into its core workflow. Month one: $800. Month two: $3,200.
+          Month three: the CEO asks hard questions. This is not a billing anomaly — it is the predictable
+          result of shipping an LLM integration without understanding the cost structure. This deep dive
+          covers where AI spend actually comes from (hint: it is not prompt length), how model routing
+          can cut costs by 60–80% without degrading quality, prompt caching mechanics and when it saves
+          nothing, output length as the dominant cost driver, and a cost observability system that alerts
+          before the bill arrives.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · AI Architecture · Cost Engineering</span>
+          <span class="meta-item">Published: 2026-08-05</span>
+        </div>
+      </header>
+
+      <!-- Lead -->
+      <section class="content-card">
+        <p class="lead">
+          LLM cost engineering is not about prompt compression. Teams that focus on shortening their
+          system prompts and reducing user input length are optimizing the cheapest part of the bill.
+          The real cost drivers are output token generation (which costs 3–5× more than input tokens
+          per dollar), context repetition (sending the same 4,000-token context on every request instead
+          of caching it), and model overqualification (using Claude Opus for tasks that Claude Haiku
+          handles identically). Fix these three, and you typically see a 60–80% cost reduction with no
+          measurable quality change.
+        </p>
+        <div class="callout">
+          <p><strong>Cost structure (2026 pricing, approximate):</strong><br />
+          Input tokens: $3–15 per million tokens (varies by model tier)<br />
+          Output tokens: $15–75 per million tokens (3–5× input cost)<br />
+          Cached input tokens: $0.30–1.50 per million tokens (10% of uncached input)<br />
+          <strong>Priority order: output control &gt; prompt caching &gt; model routing &gt; input compression</strong></p>
+        </div>
+      </section>
+
+      <!-- Story -->
+      <section class="story-card">
+        <span class="section-label">Story · The $14,000 Month Nobody Planned For</span>
+        <h2>How a $800 Prototype Became a $14,000 Monthly Bill</h2>
+        <p>
+          Formly, a B2B SaaS for automating contract review, integrated Claude Opus into their
+          document analysis flow. The prototype was impressive — Opus understood complex legal language
+          beautifully. The prototype handled 200 documents per day with an average of 8 API calls
+          per document. The bill was $800/month. Totally manageable. They shipped to production.
+        </p>
+        <p>
+          Three months later: 2,400 documents per day, 12× more API calls per document than expected
+          (because the production flow had more steps than the prototype), and an average output of
+          3,200 tokens per analysis (the prototype outputs had been manually curated, not representative).
+          The monthly bill hit $14,000.
+        </p>
+        <p>
+          Post-analysis revealed three root causes: (1) Claude Opus was being used for every step
+          — including steps that were effectively just text classification ("is this a termination
+          clause?") where Haiku would have performed identically. (2) A 6,000-token system prompt
+          (including full legal clause glossary) was being sent fresh on every API call — no caching.
+          (3) The output format was not constrained — the model was generating 2,000–4,000 token
+          explanations when a 150-token structured JSON response was all the application needed.
+        </p>
+        <p>
+          The optimized pipeline: Haiku for classification steps, Sonnet for extraction steps,
+          Opus only for the final analysis requiring deep reasoning. Prompt caching on the static
+          system prompt. JSON output with explicit max_tokens. Result: $2,800/month for the same
+          workload — an 80% reduction. Quality was unchanged; they measured it with an LLM-as-judge
+          evaluation over 500 documents.
+        </p>
+      </section>
+
+      <!-- Cost Structure -->
+      <section class="content-card">
+        <span class="section-label">Foundation</span>
+        <h2>Understanding the LLM Cost Structure Before Optimizing</h2>
+        <p>
+          LLM pricing is per token. Every optimization decision should be evaluated against the
+          token cost it targets. The typical production cost breakdown for a document analysis
+          system (before optimization) looks like this:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Cost component</th><th>% of bill</th><th>Optimization lever</th><th>Achievable reduction</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Output token generation</td><td>50–65%</td><td>max_tokens + structured output</td><td>50–70%</td></tr>
+            <tr><td>Repeated uncached input</td><td>20–35%</td><td>Prompt caching</td><td>85–90% of that component</td></tr>
+            <tr><td>Model overqualification</td><td>10–30%</td><td>Model routing by task type</td><td>60–90% of that component</td></tr>
+            <tr><td>User input (variable)</td><td>5–15%</td><td>Truncation, chunking</td><td>20–40%</td></tr>
+          </tbody>
+        </table>
+
+        <div class="insight-box">
+          <p><strong>The most common mistake:</strong> spending engineering time compressing user
+          input (15% of the bill, 20–40% reducible = 3–6% total savings) while ignoring output
+          length (60% of the bill, 50–70% reducible = 30–42% total savings). Always attack the
+          largest cost component first.</p>
+        </div>
+      </section>
+
+      <!-- Output Control -->
+      <section class="content-card">
+        <span class="section-label">Optimization 1</span>
+        <h2>Output Length Control: The Highest-Leverage Technique</h2>
+        <p>
+          Output tokens cost 3–5× more than input tokens. An LLM that generates 3,000 tokens when
+          you need 200 is wasting your money at the highest possible rate. Two mechanisms control
+          output length:
+        </p>
+
+        <h3>1. max_tokens Parameter</h3>
+        <p>
+          Every LLM API accepts a <code>max_tokens</code> parameter that hard-stops generation.
+          Set it to approximately 120% of your expected maximum response length. For a classification
+          task with a JSON output of 5 fields, <code>max_tokens=150</code>. For a document summary,
+          <code>max_tokens=400</code>. For a full analysis, measure your p95 output length from logs
+          and set max_tokens to p95 + 20%.
+        </p>
+        <p>
+          Not setting max_tokens explicitly is the most expensive single mistake in LLM deployments.
+          Without it, some requests will generate 4,000+ tokens of explanation when the application
+          uses only the first 200 tokens. You pay for all 4,000.
+        </p>
+
+        <h3>2. Structured Output Prompting</h3>
+        <p>
+          Asking the model to return JSON with specific fields is dramatically cheaper than asking
+          for a narrative explanation that happens to contain the same information. Compare:
+        </p>
+        <div class="warn-box" style="background:#fef9c3;border-left-color:#ca8a04">
+          <p><strong>Expensive:</strong> "Analyze this contract and explain whether it contains
+          a termination clause, what the notice period is, and whether there are any unusual terms."<br />
+          → Typical output: 800–1,500 tokens of prose.</p>
+          <p><strong>Cheap:</strong> "Return JSON: {has_termination_clause: bool, notice_period_days: int|null, unusual_terms: string[]}"<br />
+          → Typical output: 50–120 tokens of JSON.</p>
+        </div>
+
+        <span class="code-label">JavaScript — Output-Constrained API Call with Structured Schema</span>
+        <pre><code class="language-javascript">// cost-optimized-analysis.js
+import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+// Output schema enforces structured, minimal responses
+const ANALYSIS_SCHEMA = {
+  type: 'object',
+  properties: {
+    has_termination_clause: { type: 'boolean' },
+    notice_period_days: { type: ['integer', 'null'] },
+    auto_renewal: { type: 'boolean' },
+    governing_law: { type: ['string', 'null'] },
+    unusual_terms: {
+      type: 'array',
+      items: { type: 'string', maxLength: 100 }, // Constrain item length too
+      maxItems: 5, // Cap the array size
+    },
+    risk_level: { type: 'string', enum: ['low', 'medium', 'high'] },
+  },
+  required: ['has_termination_clause', 'auto_renewal', 'risk_level'],
+};
+
+export async function analyzeContract(contractText) {
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001', // Haiku for structured extraction
+    max_tokens: 256,                      // Explicit cap — JSON response is ≤200 tokens
+    system: SYSTEM_PROMPT,               // Cached (see prompt caching section)
+    messages: [{
+      role: 'user',
+      content: `Analyze this contract. Return ONLY valid JSON matching the schema. No explanation.\n\n${contractText.slice(0, 8000)}`, // Truncate input
+    }],
+    // Force JSON output via tool use (most reliable structured output method)
+    tools: [{
+      name: 'contract_analysis',
+      description: 'Return contract analysis as structured data',
+      input_schema: ANALYSIS_SCHEMA,
+    }],
+    tool_choice: { type: 'tool', name: 'contract_analysis' },
+  });
+
+  const toolUse = response.content.find(b => b.type === 'tool_use');
+  return toolUse?.input ?? null;
+}
+
+// Cost comparison (per 1000 documents):
+// Before: prose output ~1500 tokens × $15/M = $22.50/1000 docs
+// After:  JSON output ~150 tokens × $15/M = $2.25/1000 docs
+// Savings: 90% on output alone, before model routing</code></pre>
+      </section>
+
+      <!-- Prompt Caching -->
+      <section class="content-card">
+        <span class="section-label">Optimization 2</span>
+        <h2>Prompt Caching: 90% Cheaper Repeated Context</h2>
+        <p>
+          Prompt caching stores a prefix of your input (typically the system prompt) on the provider's
+          servers and reuses it across requests, charging 10% of the normal input token price for cached
+          tokens. The savings are dramatic for workflows with large, static system prompts.
+        </p>
+
+        <h3>When Caching Saves Money</h3>
+        <ul>
+          <li><strong>Large, static system prompt</strong> — A 4,000-token legal clause glossary
+          sent with every document. Without caching: 4,000 tokens × $3/M = $0.012 per request.
+          With caching: $0.0012 per request after the first call that populates the cache. 90% reduction.</li>
+          <li><strong>Few-shot examples in the prompt</strong> — 20 annotated examples totaling
+          8,000 tokens. Same economics: cached reads cost 90% less.</li>
+        </ul>
+
+        <h3>When Caching Does NOT Save Money</h3>
+        <ul>
+          <li><strong>Short system prompts (&lt;1000 tokens).</strong> The engineering overhead
+          of caching plus the minimum cache block size means there is little saving on short prompts.</li>
+          <li><strong>Prompts that change per user or per request.</strong> If your system prompt
+          includes the user's name, preferences, or current context, caching is impossible — the
+          cached prefix must be identical across requests.</li>
+          <li><strong>Low-volume applications.</strong> Cache TTLs are typically 5 minutes.
+          If you send fewer than 20 requests per 5 minutes, the cache will expire between your
+          requests and you will pay uncached prices on most calls.</li>
+        </ul>
+
+        <span class="code-label">JavaScript — Prompt Caching with Anthropic SDK</span>
+        <pre><code class="language-javascript">// prompt-caching.js
+// Splits system prompt into cacheable static prefix + dynamic suffix.
+// Static prefix (legal glossary, instructions) → cache_control: ephemeral
+// Dynamic suffix (per-request context) → no cache control
+
+import Anthropic from '@anthropic-ai/sdk';
+const client = new Anthropic();
+
+// Static: the full legal clause glossary — 4,000 tokens, same on every call
+const LEGAL_GLOSSARY = `You are a contract analysis assistant...
+[Full glossary here — 4,000 tokens]`;
+
+// Dynamic: per-request instructions — 200 tokens, varies per request type
+function buildSystemPrompt(analysisType) {
+  return `Analysis type: ${analysisType}. Focus on clauses relevant to ${analysisType}.`;
+}
+
+export async function analyzeWithCaching(contractText, analysisType) {
+  return client.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 512,
+    system: [
+      {
+        type: 'text',
+        text: LEGAL_GLOSSARY,
+        cache_control: { type: 'ephemeral' }, // Cache this prefix for 5 minutes
+      },
+      {
+        type: 'text',
+        text: buildSystemPrompt(analysisType), // NOT cached — changes per request
+      },
+    ],
+    messages: [{
+      role: 'user',
+      content: contractText,
+    }],
+  });
+}
+
+// Cost math — 1000 requests per hour:
+// Without caching: 4,000 tokens × $3/M × 1000 = $12/hour just for system prompt
+// With caching (99% cache hit rate): $12 × 0.10 = $1.20/hour
+// Savings: $10.80/hour = $7,776/month on the system prompt alone
+
+// Cache hit rate monitoring:
+// response.usage.cache_read_input_tokens  → tokens served from cache (cheap)
+// response.usage.cache_creation_input_tokens → tokens used to populate cache (normal price)
+// response.usage.input_tokens → uncached input tokens</code></pre>
+      </section>
+
+      <!-- Model Routing -->
+      <section class="content-card">
+        <span class="section-label">Optimization 3</span>
+        <h2>Model Routing: Match Task Complexity to Model Tier</h2>
+        <p>
+          Not every task needs the most capable model. Sending a "classify this email as spam or
+          not spam" request to Claude Opus is like hiring a senior staff engineer to sort the mail.
+          The 2026 model tier economics roughly look like this:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Model tier</th><th>Relative cost</th><th>Best for</th><th>Not ideal for</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Haiku (small/fast)</td><td>1×</td><td>Classification, extraction, formatting, simple Q&amp;A</td><td>Complex reasoning, nuanced writing, multi-step analysis</td></tr>
+            <tr><td>Sonnet (mid)</td><td>5–8×</td><td>Multi-step reasoning, code generation, extraction from complex documents</td><td>Tasks Haiku handles; tasks needing Opus-level depth</td></tr>
+            <tr><td>Opus/large (flagship)</td><td>15–30×</td><td>Complex analysis, creative synthesis, nuanced judgment calls</td><td>Tasks cheaper models handle equivalently</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Routing Decision Framework</h3>
+        <p>
+          The key is identifying which steps in your pipeline genuinely require flagship model capability
+          versus which steps are effectively structured data extraction. A contract analysis pipeline
+          has multiple steps — each with different complexity:
+        </p>
+        <ul>
+          <li><strong>Step: "Does this document contain a termination clause?"</strong> → Binary classification. Haiku.</li>
+          <li><strong>Step: "Extract all date-based obligations from this clause."</strong> → Structured extraction. Haiku or Sonnet.</li>
+          <li><strong>Step: "Identify the top 3 business risks in this contract."</strong> → Reasoning + judgment. Sonnet.</li>
+          <li><strong>Step: "Write a risk memo for the board explaining the unusual liability structure."</strong> → Complex synthesis. Opus.</li>
+        </ul>
+
+        <span class="code-label">JavaScript — Automatic Model Router by Task Type</span>
+        <pre><code class="language-javascript">// model-router.js
+// Routes API calls to the cheapest model that meets quality requirements.
+// Uses a task taxonomy to determine model tier.
+
+import Anthropic from '@anthropic-ai/sdk';
+const client = new Anthropic();
+
+const MODEL_TIERS = {
+  haiku:  'claude-haiku-4-5-20251001',
+  sonnet: 'claude-sonnet-5',
+  opus:   'claude-opus-5',
+};
+
+// Task taxonomy → model tier mapping
+const TASK_TIER_MAP = {
+  // Classification: binary or small-N labels — Haiku always
+  classification: 'haiku',
+  sentiment: 'haiku',
+  routing: 'haiku',
+  tagging: 'haiku',
+  formatting: 'haiku',
+
+  // Extraction: pull structured data from text — Haiku for simple, Sonnet for complex
+  simple_extraction: 'haiku',
+  complex_extraction: 'sonnet',
+  code_extraction: 'sonnet',
+
+  // Generation: write new content — Sonnet for most, Opus for high-stakes
+  summary: 'sonnet',
+  draft: 'sonnet',
+  analysis: 'sonnet',
+  code_generation: 'sonnet',
+
+  // Reasoning: requires deep judgment — Opus
+  legal_analysis: 'opus',
+  risk_assessment: 'opus',
+  architecture_review: 'opus',
+  complex_debugging: 'opus',
+};
+
+export async function routedApiCall({ taskType, prompt, systemPrompt, maxTokens }) {
+  const tier = TASK_TIER_MAP[taskType] ?? 'sonnet'; // Default to Sonnet if unknown
+  const model = MODEL_TIERS[tier];
+
+  const start = Date.now();
+  const response = await client.messages.create({
+    model,
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const latencyMs = Date.now() - start;
+  const inputTokens = response.usage.input_tokens;
+  const outputTokens = response.usage.output_tokens;
+
+  // Log for cost observability (see monitoring section)
+  console.log(JSON.stringify({
+    event: 'llm_call',
+    taskType,
+    model,
+    tier,
+    inputTokens,
+    outputTokens,
+    latencyMs,
+    // Cost estimate (rough, update with actual pricing):
+    estimatedCostUsd: (inputTokens / 1_000_000 * TIER_COSTS[tier].input) +
+                      (outputTokens / 1_000_000 * TIER_COSTS[tier].output),
+  }));
+
+  return response;
+}
+
+const TIER_COSTS = {
+  haiku:  { input: 0.80,  output: 4.00  },
+  sonnet: { input: 3.00,  output: 15.00 },
+  opus:   { input: 15.00, output: 75.00 },
+};</code></pre>
+      </section>
+
+      <!-- Cost Observability -->
+      <section class="content-card">
+        <span class="section-label">Monitoring</span>
+        <h2>Cost Observability: Alert Before the Bill Arrives</h2>
+        <p>
+          The Formly team did not notice their cost explosion until three months in, because they
+          had no per-feature cost tracking. The bill was one big number. They had no idea whether
+          the document classifier or the risk memo generator was responsible for the spike.
+        </p>
+        <p>
+          Every LLM call should emit a structured log event with: task type, model used, input tokens,
+          output tokens, cache hit/miss, and estimated cost. These events can be aggregated in any
+          time-series store (Datadog, Grafana, ClickHouse) to show:
+        </p>
+        <ul>
+          <li><strong>Cost per feature</strong> — which pipeline step drives spend</li>
+          <li><strong>Cost per user</strong> — identify power users or abuse patterns</li>
+          <li><strong>Output token distribution</strong> — p50/p95/p99 output lengths per task type</li>
+          <li><strong>Cache hit rate</strong> — prompt cache effectiveness over time</li>
+          <li><strong>Model routing distribution</strong> — are the right tasks hitting the right models?</li>
+        </ul>
+
+        <span class="code-label">JavaScript — Cost Budget Alert System</span>
+        <pre><code class="language-javascript">// cost-budget-alerter.js
+// Tracks rolling 24-hour LLM spend and alerts before daily budget is exceeded.
+import Redis from 'ioredis';
+const redis = new Redis(process.env.REDIS_URL);
+
+const DAILY_BUDGET_USD = parseFloat(process.env.LLM_DAILY_BUDGET ?? '500');
+const ALERT_THRESHOLD = 0.80; // Alert at 80% of budget
+
+export async function recordLlmCost({ taskType, model, inputTokens, outputTokens, cacheHit }) {
+  const costs = {
+    'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00, cachedInput: 0.08 },
+    'claude-sonnet-5':           { input: 3.00, output: 15.00, cachedInput: 0.30 },
+    'claude-opus-5':             { input: 15.00, output: 75.00, cachedInput: 1.50 },
+  };
+
+  const pricing = costs[model] ?? costs['claude-sonnet-5'];
+  const inputCost = cacheHit
+    ? (inputTokens / 1_000_000) * pricing.cachedInput
+    : (inputTokens / 1_000_000) * pricing.input;
+  const outputCost = (outputTokens / 1_000_000) * pricing.output;
+  const totalCost = inputCost + outputCost;
+
+  // Increment rolling 24-hour counter (in microdollars for integer precision)
+  const dayKey = `llm:cost:${new Date().toISOString().slice(0, 10)}`;
+  const taskKey = `llm:cost:task:${taskType}:${new Date().toISOString().slice(0, 10)}`;
+
+  const [total] = await redis.pipeline()
+    .incrbyfloat(dayKey, totalCost)
+    .expire(dayKey, 86400 * 2)
+    .incrbyfloat(taskKey, totalCost)
+    .expire(taskKey, 86400 * 2)
+    .exec();
+
+  const currentDaySpend = parseFloat(total[1]);
+
+  // Alert at threshold
+  if (currentDaySpend >= DAILY_BUDGET_USD * ALERT_THRESHOLD) {
+    const alreadyAlerted = await redis.set(
+      `llm:alert:${dayKey}`, '1', 'NX', 'EX', 3600
+    );
+    if (alreadyAlerted) {
+      await sendAlert({
+        title: 'LLM Daily Budget Alert',
+        message: `Spent $${currentDaySpend.toFixed(2)} of $${DAILY_BUDGET_USD} daily budget (${Math.round(currentDaySpend/DAILY_BUDGET_USD*100)}%)`,
+        severity: currentDaySpend >= DAILY_BUDGET_USD ? 'critical' : 'warning',
+      });
+    }
+  }
+
+  return { totalCost, currentDaySpend };
+}
+
+async function sendAlert({ title, message, severity }) {
+  // Hook into your alerting system (PagerDuty, Slack, email)
+  console.error(`[${severity.toUpperCase()}] ${title}: ${message}`);
+  // await slackClient.chat.postMessage({ channel: '#platform-alerts', text: message });
+}</code></pre>
+      </section>
+
+      <!-- Failure Modes -->
+      <section class="content-card">
+        <span class="section-label">Production Gotchas</span>
+        <h2>LLM Cost Failure Modes Engineers Miss</h2>
+        <ul>
+          <li>
+            <strong>Streaming responses counted at generation, not consumption.</strong> If you
+            stream a response and the user closes the browser after 100 tokens, you are billed for
+            all tokens generated — not just the tokens the user received. For streaming use cases,
+            set max_tokens aggressively and monitor generation vs. consumption rates.
+          </li>
+          <li>
+            <strong>Tool call overhead.</strong> Using the tools API adds tokens for the tool
+            definition schema on every call. A complex tool with 10 parameters may add 400+ tokens
+            to every request. If you use tools for structured output, measure the token overhead of
+            the schema and factor it into your cost model.
+          </li>
+          <li>
+            <strong>Retry amplification of expensive calls.</strong> If a retry policy retries
+            expensive Opus calls on timeout or error, each retry doubles your cost for that request.
+            For expensive model tiers, retry with exponential backoff and a maximum of 2 retries —
+            not 5.
+          </li>
+          <li>
+            <strong>Prompt caching cold starts on new deployments.</strong> When you deploy a new
+            version of the system prompt, the cache is invalidated. The first N requests after
+            deployment (until the cache warms up) are billed at uncached rates. For high-volume
+            systems, stagger deployments and pre-warm the cache with a synthetic request immediately
+            after deploy.
+          </li>
+          <li>
+            <strong>Long-context documents sent in full when chunking would suffice.</strong>
+            Sending a 50-page contract as a single 80,000-token context costs 8× more than
+            processing it in 10,000-token chunks with a final synthesis step. For most document
+            analysis tasks, chunking with a final aggregation is cheaper and often produces better
+            results (less relevant context diluting the important sections).
+          </li>
+        </ul>
+      </section>
+
+      <!-- Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>LLM Cost Optimization Checklist</h2>
+        <ul class="check-list">
+          <li>max_tokens set explicitly on every API call (never relying on model default).</li>
+          <li>Structured output (JSON via tool use) used wherever possible instead of prose.</li>
+          <li>System prompt split into static prefix (cached) + dynamic suffix (uncached).</li>
+          <li>Prompt cache hit rate &gt;90% for high-frequency API call paths.</li>
+          <li>Model tier assigned per task type; Haiku used for classification and extraction steps.</li>
+          <li>Cost per call logged as a structured event with task type, model, tokens, and USD estimate.</li>
+          <li>Daily cost budget configured; alerts at 80% and 100% of budget.</li>
+          <li>Cost per feature/pipeline step tracked in a time-series dashboard.</li>
+          <li>Long documents chunked before sending; no context over 50K tokens unless necessary.</li>
+          <li>Retry policy for expensive tiers capped at max 2 retries with backoff.</li>
+        </ul>
+      </section>
+
+      <!-- Related -->
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./8-llm-cost-optimization-techniques.html">8 LLM Cost Optimization Techniques</a> — The foundational eight techniques (prompt caching, model routing, output control, batch API, RAG, semantic caching) with precise cost calculations.</li>
+          <li><a href="./build-llm-gateway-python.html">Build an LLM Gateway in Python</a> — Provider abstraction, model routing, cost tracking, and caching in a single gateway service.</li>
+          <li><a href="./api-gateway-scaling-bottleneck.html">API Gateway Becomes a Bottleneck</a> — Scaling the gateway layer that sits in front of your LLM API calls.</li>
+        </ul>
+      </section>
+
+      <!-- Takeaways -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The AI platform cost spike is almost always the same story: a prototype that used careful
+          prompts and eyeballed outputs, shipped to production without output constraints, model
+          routing, or cost instrumentation. Output tokens are the dominant cost driver — not prompt
+          length. The three changes that reliably cut LLM spend by 60–80% are: set max_tokens on
+          every call, route classification and extraction tasks to Haiku instead of Opus, and cache
+          your static system prompt. These are not deep architectural changes — they are configuration
+          decisions that take a day to implement and an evening to instrument. The fourth change —
+          cost observability at the feature and task level — is what prevents the problem from
+          reoccurring, because it tells you immediately which new feature is responsible for the
+          next spike rather than waiting three months for the bill.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

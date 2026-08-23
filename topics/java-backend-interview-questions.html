@@ -251,6 +251,132 @@ public class RateLimitFilter extends OncePerRequestFilter {
         </ul>
       </section>
 
+      <section class="content-card">
+        <span class="section-label">Bonus — 3 Questions That Expose Fake Senior Developers</span>
+        <h2>3 Java Interview Questions That Expose 90% of "Senior Developers"</h2>
+        <p>
+          The questions above test backend engineering depth. The three below target a different failure
+          mode: developers who know Spring Boot cold but have never confronted the JVM's own surprises.
+          Framework expertise conceals language-level blind spots until production.
+        </p>
+
+        <h3>Q1: What does this print, and why?</h3>
+        <pre><code>Integer a = 127;
+Integer b = 127;
+System.out.println(a == b);  // true or false?
+
+Integer c = 128;
+Integer d = 128;
+System.out.println(c == d);  // true or false?</code></pre>
+        <p>
+          <strong>Answer:</strong> <code>a == b</code> prints <code>true</code>;
+          <code>c == d</code> prints <code>false</code>.
+        </p>
+        <p>
+          <strong>Why:</strong> Java's autoboxing calls <code>Integer.valueOf(int)</code>, which caches
+          instances for values in the range <code>-128</code> to <code>127</code> (inclusive) in a
+          static array. <code>Integer.valueOf(127)</code> returns the same cached object every time —
+          so <code>a</code> and <code>b</code> point to the same reference, and <code>==</code> returns
+          <code>true</code>. For 128, no cached instance exists; <code>valueOf(128)</code> allocates two
+          new objects, so <code>c</code> and <code>d</code> are different references — <code>==</code>
+          is <code>false</code>.
+        </p>
+        <p>
+          <strong>Why this exposes fake seniors:</strong> Real senior engineers know that <code>==</code>
+          on boxed primitives is a reference comparison, not a value comparison, and that the cache
+          boundary at 127 is a JLS-mandated constant, not an implementation detail. The fix is always
+          <code>equals()</code>. The production failure this causes: comparisons inside
+          <code>if (userId == expectedId)</code> work in tests (small IDs ≤ 127) but silently fail in
+          production (large IDs).
+        </p>
+
+        <h3>Q2: This code adds an object to a HashMap, then can't find it. Why?</h3>
+        <pre><code>import java.util.*;
+
+class User {
+    int id;
+    String name;
+
+    User(int id, String name) { this.id = id; this.name = name; }
+
+    @Override
+    public boolean equals(Object o) {
+        if (!(o instanceof User u)) return false;
+        return id == u.id && name.equals(u.name);
+    }
+    // hashCode() is NOT overridden
+}
+
+public class Demo {
+    public static void main(String[] args) {
+        Map&lt;User, String&gt; roles = new HashMap&lt;&gt;();
+        User u = new User(1, "alice");
+        roles.put(u, "admin");
+
+        User lookup = new User(1, "alice");
+        System.out.println(roles.get(lookup)); // prints null — why?
+    }
+}</code></pre>
+        <p>
+          <strong>Answer:</strong> <code>roles.get(lookup)</code> returns <code>null</code>
+          even though <code>u.equals(lookup)</code> is <code>true</code>.
+        </p>
+        <p>
+          <strong>Why:</strong> <code>HashMap</code> locates a bucket using <code>hashCode()</code>
+          first, then checks equality. <code>User</code> inherits <code>Object.hashCode()</code>,
+          which is based on object identity (memory address). <code>u</code> and <code>lookup</code>
+          are different objects, so they have different hash codes, land in different buckets, and
+          <code>get()</code> never even reaches the <code>equals()</code> check.
+        </p>
+        <p>
+          <strong>The contract:</strong> If <code>a.equals(b)</code>, then
+          <code>a.hashCode() == b.hashCode()</code> must hold. Violating this contract produces
+          silent data loss — not an exception — making it one of the hardest production bugs to trace.
+          Fix: override <code>hashCode()</code> consistently with <code>equals()</code>
+          (use <code>Objects.hash(id, name)</code>).
+        </p>
+
+        <h3>Q3: What does this code print? (Static initializer ordering)</h3>
+        <pre><code>public class Config {
+    static final int MAX = compute();
+    static final int BASE = 10;
+
+    static int compute() {
+        return BASE * 2;  // BASE is not yet initialized — what is its value here?
+    }
+
+    public static void main(String[] args) {
+        System.out.println(Config.MAX);  // prints 0 or 20?
+    }
+}</code></pre>
+        <p>
+          <strong>Answer:</strong> Prints <code>0</code>, not <code>20</code>.
+        </p>
+        <p>
+          <strong>Why:</strong> Static fields are initialized in <strong>source declaration order</strong>.
+          When <code>MAX = compute()</code> runs, <code>BASE</code> has not yet been assigned its
+          value — it is still at its default value for <code>int</code>, which is <code>0</code>.
+          So <code>compute()</code> returns <code>0 * 2 = 0</code>, and <code>MAX</code> is
+          permanently set to <code>0</code>. Swapping the declaration order
+          (<code>BASE</code> declared before <code>MAX</code>) fixes the problem.
+        </p>
+        <p>
+          <strong>Why this matters in production:</strong> The class loads successfully with no
+          exception or warning. Config values silently take wrong defaults. This pattern typically
+          surfaces when a configuration class initializes a cache size or timeout using a computed
+          constant — everything works in unit tests (which may set the constants explicitly) but
+          behaves incorrectly in integration builds.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Pattern:</strong> A true senior engineer knows these three failure modes cold —
+            autoboxing cache boundary, equals/hashCode contract, and static initializer ordering —
+            because they have either been burnt by one or spent time reading the JLS. Framework
+            mastery cannot substitute for this foundational knowledge.
+          </p>
+        </div>
+      </section>
+
       <section class="content-card takeaways">
         <h2>Key Takeaway</h2>
         <p>
@@ -259,6 +385,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
           and Spring's AOP proxy model — not whether they can recite API signatures. The expected
           answer to every question above includes at least one: a concrete failure scenario, a
           production decision heuristic, or a specific flag/metric that makes the concept observable.
+          The three bonus questions at the end cut even deeper — they target the JVM language contract
+          that Spring cannot hide: autoboxing equality, equals/hashCode, and static initialization
+          order. Get all three right and you have earned the "senior" label at the JVM level.
         </p>
       </section>
     </main>

@@ -19,7 +19,7 @@
             alt="System architecture whiteboard" loading="lazy" />
           <div class="article-hero-overlay"></div>
           <div class="article-hero-content">
-            <span class="article-hero-kicker">System Design · Interview · Architecture · 60 min</span>
+            <span class="article-hero-kicker">System Design · Interview · Architecture · 80 min</span>
           </div>
         </figure>
         <h1>60+ Real-World System Design Scenarios: The Ultimate Interview Reference</h1>
@@ -175,6 +175,313 @@
             </tbody>
           </table>
         </div>
+      </section>
+
+      <!-- ── PART 2 SCENARIOS ───────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Category: Databases and Storage at Scale</h2>
+        <ul>
+          <li>
+            <strong>Design a distributed key-value store (like DynamoDB)</strong><br/>
+            Core insight: consistent hashing assigns keys to nodes; virtual nodes (vnodes) correct
+            for uneven physical node capacity. For conflict resolution, choose either vector clocks
+            (accurate, complex) or last-write-wins (simpler, loses concurrent writes). Read/write
+            quorum: with N replicas, R reads + W writes &gt; N guarantees strong consistency; R=1,
+            W=1 gives eventual consistency for maximum throughput. The hard sub-problem: node joins/leaves
+            must rebalance data without taking the cluster offline — use consistent hashing ring so only
+            the keys between the leaving node and its predecessor need to move.
+          </li>
+          <li>
+            <strong>Design a document database (like MongoDB)</strong><br/>
+            Core insight: BSON documents with collection-level indexes (B-tree on a single field,
+            compound indexes for multi-field queries). The critical decision is the sharding key: it is
+            irreversible after data is written. Choose a high-cardinality field with even write
+            distribution — user_id is good for user-scoped queries; created_at is bad (all inserts go
+            to the "hot" most-recent shard). A bad shard key creates a hot partition that cannot be
+            fixed without a full resharding operation (hours of downtime at scale).
+          </li>
+          <li>
+            <strong>Design a time-series database (for IoT/metrics)</strong><br/>
+            Core insight: time-series data is write-heavy, time-ordered, and rarely updated.
+            LSM-tree-based storage (used by InfluxDB, Cassandra, TimescaleDB) is optimized for
+            sequential writes — far better than B-tree (used by PostgreSQL) for this pattern.
+            Store data in time-partitioned chunks (e.g., one chunk per day per device). Query "last
+            24 hours" scans only today's and yesterday's chunks regardless of total dataset size.
+            Aggregate old data into lower-resolution rollup tables (5-min averages, hourly averages)
+            to control storage growth — raw 1-second samples from 3 years ago have no business value.
+          </li>
+          <li>
+            <strong>Design a graph database for social connections</strong><br/>
+            Core insight: adjacency list in a relational database works up to ~10M nodes and ~100M edges.
+            Beyond that, graph-native storage (Neo4j, Amazon Neptune) stores relationships as first-class
+            citizens with O(1) relationship traversal — each node directly contains pointers to its
+            neighbor nodes, not foreign keys that require a lookup table scan. The query "find all
+            2nd-degree connections of user X" requires two hops: in a relational DB this is two
+            self-joins on a 100M-row edge table — catastrophically slow. In a graph DB it is two
+            pointer dereferences — milliseconds.
+          </li>
+          <li>
+            <strong>Design a vector similarity search system</strong><br/>
+            Core insight: exact k-NN (nearest neighbor) search over N vectors in D dimensions is O(N×D)
+            — far too slow at 100M+ vectors. Approximate nearest-neighbor (ANN) algorithms trade
+            marginal accuracy for massive speed gains. HNSW (Hierarchical Navigable Small World)
+            builds a multi-layer navigable graph: query time is O(log N) with ~95% recall.
+            IVF-PQ (Inverted File Index + Product Quantization) compresses vectors to reduce memory.
+            Pinecone, Weaviate, and pgvector all use HNSW or IVF-PQ internally. Design the update
+            path carefully: HNSW graphs are expensive to rebuild; use an append-only insert strategy
+            with periodic compaction.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category: Search and Discovery Systems</h2>
+        <ul>
+          <li>
+            <strong>Design a full-text search engine</strong><br/>
+            Core insight: an inverted index maps each term to the list of document IDs containing that
+            term (the "posting list"). Query execution merges posting lists: AND = set intersection,
+            OR = set union. BM25 scoring ranks results by term frequency weighted by inverse document
+            frequency — common words (the, is) score low; rare words score high. At scale, shard the
+            index across nodes by document range (not by term — that creates hot shards for common
+            terms). Elasticsearch's shard routing hashes the document ID to determine which shard
+            stores it. Query fan-out: every search queries all shards in parallel, merges top-K results.
+          </li>
+          <li>
+            <strong>Design a product search with filters (faceted search)</strong><br/>
+            Core insight: two data structures serve two query types — inverted index for text
+            matching ("red sneakers"), structured aggregations for facets ("47 results in Electronics,
+            23 in Sports"). Facet counts require computing cardinalities across the result set.
+            Computing "47 results in Electronics" on every query is expensive; Elasticsearch's
+            aggregation pipeline does this but it is the performance bottleneck at scale. Cache
+            aggregation results per filter combination with a short TTL (60s) — facet counts
+            can tolerate slight staleness.
+          </li>
+          <li>
+            <strong>Design a recommendation system</strong><br/>
+            Core insight: collaborative filtering ("users who liked X also liked Y") uses matrix
+            factorization — decompose the user-item interaction matrix into latent feature vectors.
+            ALS (Alternating Least Squares) scales to billions of interactions. Content-based
+            filtering uses item attributes (genre, author, price) to recommend items similar to
+            what the user has liked. Netflix, Spotify, and YouTube use hybrid approaches.
+            The cold-start problem (new user or new item with no interaction history) requires a
+            fallback: content-based recommendations for new items, popular/trending content for new
+            users, plus onboarding questions to bootstrap preferences.
+          </li>
+          <li>
+            <strong>Design a typeahead/autocomplete service</strong><br/>
+            Core insight: a prefix tree (trie) enables instant prefix matching, but a full
+            English-vocabulary trie plus per-user history is ~20GB in memory per server.
+            Production solution: precompute the top-K (typically K=10) suggestions per prefix,
+            store in Redis sorted sets (key = prefix, score = suggestion popularity). Updated
+            offline daily from query logs. For personalized completions, combine global popularity
+            with per-user recency: Redis sorted set merges scores at query time. Latency budget:
+            &lt;50ms end-to-end including network; Redis sorted set ZRANGEBYLEX is sub-millisecond.
+          </li>
+          <li>
+            <strong>Design a plagiarism detection system</strong><br/>
+            Core insight: exact substring matching scales to small corpora; at billion-document
+            scale you need probabilistic methods. Shingling: slide a k-word window over the document,
+            hash each window — a document becomes a set of hash values. MinHash: generate multiple
+            hash functions; the minimum hash across all shingles is the document's signature. Two
+            documents with similar MinHash signatures have similar Jaccard similarity. LSH
+            (Locality-Sensitive Hashing): group documents with similar signatures into buckets —
+            only compare documents in the same bucket, reducing O(n²) to O(n log n). Turnitin and
+            Google Scholar use variants of this approach.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category: Payments and Financial Systems</h2>
+        <ul>
+          <li>
+            <strong>Design a payment processing system</strong><br/>
+            Core insight: idempotency is the foundation. Every payment request must carry a
+            client-generated idempotency key. The server persists the key + status (PENDING /
+            SUCCESS / FAILED) before initiating the charge. If the same key arrives again (network
+            retry), return the stored result rather than charging again. Stripe's idempotency
+            guarantee: same key + same request body = same response for 24 hours. Sequence: persist
+            idempotency record → call payment processor → update record → return response. Never
+            call the payment processor without first writing the idempotency record — a crash
+            between the two would leave an orphan charge with no local record.
+          </li>
+          <li>
+            <strong>Design a fraud detection system</strong><br/>
+            Core insight: two layers at different latency tiers. Layer 1: real-time rules engine
+            (velocity checks: &gt;3 different cards attempted in 5 min = block). Must run in &lt;50ms
+            — synchronous in the payment path. Layer 2: ML scoring model (gradient boosted trees
+            on 100+ features per transaction). Runs in &lt;200ms — also synchronous if latency
+            permits, otherwise async with a brief hold on high-risk transactions. Update rules
+            continuously from ML model outputs: if the ML model consistently marks rule-passing
+            transactions as fraud, update the rule. "Shadow mode" the ML model alongside rules
+            before promoting to production.
+          </li>
+          <li>
+            <strong>Design a digital wallet</strong><br/>
+            Core insight: the ledger pattern — never UPDATE a balance column. Instead, INSERT one
+            transaction row per debit or credit. Current balance = SUM of all transaction amounts
+            for that wallet. An append-only ledger is tamper-evident (deleting a transaction changes
+            the balance), auditable (every state transition is recorded), and idempotent (an
+            idempotency key prevents duplicate inserts). Prevent concurrent credit+debit race
+            conditions: use row-level locking (<code>SELECT ... FOR UPDATE</code>) on the wallet
+            row or optimistic concurrency with a version counter. Never compute balance in
+            application code from the full transaction history at query time — maintain a
+            materialized balance for performance, but validate it against the ledger on any discrepancy.
+          </li>
+          <li>
+            <strong>Design a currency exchange rate service</strong><br/>
+            Core insight: exchange rates change continuously but display staleness of 1 minute is
+            acceptable for most applications. Cache rates in Redis with a 60s TTL; invalidate
+            immediately on significant change (&gt;0.5% delta triggers a push update). Rate source:
+            pull from a primary provider (e.g., ECB, Fixer.io) with automatic failover to a backup
+            on timeout. The tricky sub-problem: rates for exotic currency pairs (USD→KES) may not
+            be directly available — route through intermediary currencies (USD→EUR→KES) and
+            multiply rates, accounting for bid-ask spread at each conversion.
+          </li>
+          <li>
+            <strong>Design a subscription billing system</strong><br/>
+            Core insight: billing cycle as a state machine per subscription: TRIAL → ACTIVE →
+            PAST_DUE → CANCELLED / PAUSED. Use event-driven scheduling rather than cron: each
+            subscription row stores a <code>next_billing_date</code> column; a job queries
+            <code>WHERE next_billing_date &lt;= NOW() AND status = 'ACTIVE'</code> and processes
+            batches. Retry failed charges with exponential backoff over 7 days before moving to
+            PAST_DUE. Dunning management: 3 retry attempts (day 1, day 3, day 7) with customer
+            notification at each step. Move to CANCELLED after final failure and send a reactivation
+            email. Proration: mid-cycle plan changes require crediting unused time and charging for
+            the new plan — store billing cycle start/end dates and prorate at line-item granularity.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category: Content Delivery and Media Systems</h2>
+        <ul>
+          <li>
+            <strong>Design a video streaming platform (YouTube-scale)</strong><br/>
+            Core insight: video upload and video playback are completely separate systems. Upload:
+            raw video → transcoding pipeline (FFmpeg workers) → multiple resolutions (360p, 720p,
+            1080p, 4K) stored in object storage (S3-compatible). Playback: CDN caches video
+            segments close to the viewer. Adaptive Bitrate (ABR) streaming via HLS or DASH: the
+            client downloads a manifest file listing available quality levels; the player algorithm
+            switches quality based on measured bandwidth and buffer level. Hot videos (first 24h
+            of release) are proactively pushed to CDN edge nodes — pull-on-miss is too slow for
+            viral content. Cold videos (&gt;30 days old) can be stored in cold object storage tiers.
+          </li>
+          <li>
+            <strong>Design an image CDN with on-demand resizing</strong><br/>
+            Core insight: generating all size variants at upload time is wasteful (1000s of
+            combinations). On-demand resizing: generate the resized variant on first request, cache
+            it at the CDN edge. Cache key encodes the transformation parameters:
+            <code>{original_id}?w=400&amp;h=300&amp;quality=80&amp;format=webp</code>. Cloudflare
+            Images and Imgix use this model. Cache invalidation: use content-addressable naming
+            (include a hash of the original image in the URL) — when the original changes, the URL
+            changes, so stale variants naturally fall out of cache. Never use the original filename
+            as the cache key for mutable images.
+          </li>
+          <li>
+            <strong>Design a live streaming platform (Twitch-scale)</strong><br/>
+            Core insight: WebRTC for sub-second latency (gaming, auctions, sports betting) vs. HLS
+            for 5-30s latency with massive concurrent viewers. Twitch uses HLS because 100K concurrent
+            viewers are more important than sub-second latency. Stream ingestion: OBS (streamer) →
+            Ingest server (RTMP) → Transcoder (FFmpeg) → HLS segment storage → CDN → viewer.
+            The hard sub-problem: live chat at 100K concurrent viewers. A single WebSocket server
+            cannot handle 100K connections. Fan-out: messages arrive at a chat relay, which publishes
+            to a Pub/Sub system (Redis Pub/Sub or Kafka); chat servers subscribe per channel and push
+            to their connected viewers. Backpressure on the viewer connection: if a viewer's buffer
+            is full, drop chat messages rather than blocking the delivery pipeline.
+          </li>
+          <li>
+            <strong>Design a podcast platform</strong><br/>
+            Core insight: podcast episode discovery uses RSS — a pull model where players periodically
+            poll the feed URL for new episodes. The feed is a simple XML document; generating it on
+            every poll for a large podcast at scale requires caching (Redis or CDN with 5-minute TTL).
+            Store episode audio in object storage; serve via CDN with byte-range support for seek
+            (player jumps to minute 32 without downloading the previous 32 minutes). Analytics:
+            unique listener counting without PII uses hashed device fingerprints (IP + User-Agent
+            hash). Completion rate tracking requires client-side SDKs sending playback events to
+            an analytics pipeline — never server-inferred.
+          </li>
+          <li>
+            <strong>Design a real-time collaborative document editor (Google Docs-style)</strong><br/>
+            Core insight: two users editing simultaneously must produce a consistent merged document
+            regardless of network latency. Two approaches: OT (Operational Transformation) — every
+            operation is transformed against concurrent operations before application; hard to
+            implement correctly. CRDT (Conflict-free Replicated Data Type) — each character has
+            a globally unique ID (user_id + logical clock); merge = union of all character IDs
+            sorted by ID; deletions are "tombstoned" rather than removed. CRDTs are composable
+            and provably correct. Yjs and Automerge implement CRDTs for production collaborative
+            editing. Storage: every operation is appended to an operations log; the document state
+            is the log reduced. Periodic snapshots prevent full-log replay on each open.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Category: Infrastructure and DevOps Systems</h2>
+        <ul>
+          <li>
+            <strong>Design a CI/CD pipeline</strong><br/>
+            Core insight: every pipeline stage must be idempotent and artifact-immutable. Build
+            artifacts are stored in a content-addressable registry (Docker registry tagged by image
+            SHA256, S3 with object key = artifact hash). The same commit always produces the same
+            artifact — no "works on my build" variance. Deployment strategies: blue-green (run
+            old version alongside new until health checks pass, then cut traffic); canary (route
+            1% → 5% → 20% → 100% based on error rate and latency thresholds — roll back
+            automatically if error rate exceeds threshold). Secrets management: never embed secrets
+            in images or pipeline YAML; inject at runtime from a secrets store (Vault, AWS Secrets
+            Manager) with short-lived credentials.
+          </li>
+          <li>
+            <strong>Design a feature flag system</strong><br/>
+            Core insight: flag evaluation must be local (no network call per check — that adds
+            50ms+ latency to every render). Architecture: flag configuration is stored centrally
+            (LaunchDarkly, Unleash, GrowthBook); the SDK caches a snapshot locally with background
+            refresh (&lt;100ms). User/group targeting requires consistent bucketing: hash(user_id +
+            flag_key) mod 100 maps the user to a bucket in [0, 100). Consistent hashing ensures
+            the same user always sees the same variant. Percentage rollout: expose to bucket [0, 10)
+            = 10% of users, then expand. Never use random() per request — a user would see different
+            variants on different page loads.
+          </li>
+          <li>
+            <strong>Design a distributed job scheduler (like Apache Airflow)</strong><br/>
+            Core insight: jobs are modeled as DAGs (Directed Acyclic Graphs) — tasks with
+            dependencies (B cannot start until A succeeds). Each task has a state machine:
+            PENDING → QUEUED → RUNNING → SUCCESS / FAILED / SKIPPED. The hard sub-problem:
+            exactly-once execution at scale. Use optimistic locking + task heartbeat: a worker
+            claims a task by setting status = RUNNING and a claimed_by timestamp; if no heartbeat
+            update within 60s, the scheduler re-queues the task. Idempotent task implementations
+            mean re-queuing is safe: the task produces the same result whether run once or twice.
+            At-least-once execution + idempotent tasks = safe exactly-once semantics.
+          </li>
+          <li>
+            <strong>Design a distributed tracing system (like Jaeger or Zipkin)</strong><br/>
+            Core insight: trace context must be propagated across every service boundary — injected
+            as HTTP headers (<code>traceparent</code> per W3C spec, or proprietary B3 headers).
+            Each service creates a "span" (start time, end time, operation name, parent span ID);
+            spans from one request form a tree rooted at the entry-point span. This tree = one trace.
+            Storage: Cassandra is the standard backend (high write throughput, time-ordered, good
+            for time-range queries). Query patterns: trace by trace ID (O(1) lookup by ID), trace
+            by service + error (secondary index, expensive). Sampling: tracing every request at
+            1M req/s is cost-prohibitive — use head-based sampling (sample 0.1% at entry point)
+            or tail-based sampling (always record traces where error occurred or P99 latency
+            exceeded threshold).
+          </li>
+          <li>
+            <strong>Design an on-call alerting system (like PagerDuty)</strong><br/>
+            Core insight: the biggest operational failure of alerting systems is alert fatigue from
+            lack of deduplication. A single underlying issue fires dozens of monitoring checks
+            simultaneously — all create separate pages. Deduplication: group alerts by
+            service + metric + time window; create one incident per group rather than one per alert.
+            Alert lifecycle state machine: TRIGGERED → ACKNOWLEDGED → RESOLVED. Escalation
+            policies: if primary on-call doesn't ACK within 5 minutes, page secondary; if no ACK
+            in 10 minutes, page engineering manager. Guaranteed delivery: on-call pages must
+            never be silently dropped — use dead-letter queuing for undeliverable pages with
+            fallback channels (SMS if push fails, phone call if SMS fails). Store escalation
+            policy configuration as immutable audit-logged records — accidental policy deletion
+            must not prevent delivery.
+          </li>
+        </ul>
       </section>
 
       <section class="content-card">

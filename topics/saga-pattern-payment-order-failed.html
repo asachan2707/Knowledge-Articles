@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Payment Deducted But Order Failed: Saga Pattern and Distributed Transactions | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Payment terminal and laptop — distributed transaction failure" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Distributed Systems · Backend · 28 min</span>
+          </div>
+        </figure>
+        <h1>Payment Deducted But Order Failed: System Design Deep Dive on the Saga Pattern and Distributed Transactions</h1>
+        <p class="summary">
+          Why ACID transactions cannot span independent microservices, why Two-Phase Commit
+          trades availability for consistency at exactly the wrong moment, and how the Saga pattern
+          — with choreography, orchestration, compensating transactions, the Transactional Outbox,
+          and idempotency keys — gives you the distributed atomicity guarantee your users expect.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Distributed Transactions · Backend Architecture</span>
+          <span class="meta-item">Published: 2026-07-29</span>
+        </div>
+      </header>
+
+      <!-- Lead -->
+      <section class="content-card">
+        <p class="lead">
+          "Payment successful." "Order failed." Those two messages appearing together are not a
+          rare edge case. They are the default outcome when a multi-step distributed transaction
+          is not explicitly designed against partial failure. Distributed systems do not give you
+          ACID across service boundaries for free. You have to build it yourself — and the
+          mechanism is the Saga pattern.
+        </p>
+        <div class="callout">
+          <p><strong>Source:</strong> This article is a production-focused deep dive based on
+          <a href="https://codefarm0.medium.com/payment-deducted-but-order-failed-system-design-deep-dive-on-the-saga-pattern-and-distributed-025b27cb2e0a"
+             target="_blank" rel="noopener">Payment Deducted But Order Failed — System Design Deep Dive on the Saga Pattern and Distributed Transactions</a>.
+          It builds on the brief Saga overview already in this hub and goes to production-level implementation detail.</p>
+        </div>
+      </section>
+
+      <!-- Story -->
+      <section class="story-card">
+        <span class="section-label">Story · Flipkart Big Billion Days — 50,000 users, money gone, no laptop</span>
+        <p>
+          11:57 PM on Big Billion Days. Aarav adds a ₹4,999 laptop to his cart, enters his UPI PIN,
+          and watches the screen. Payment gateway responds in 800 ms: <strong>SUCCESS</strong>.
+          The checkout service calls the inventory service to reserve the unit. The inventory service
+          is under extreme load — 200,000 requests/second — and the response takes 12 seconds before
+          timing out. The checkout service marks the order <strong>FAILED</strong>. Aarav's bank
+          statement shows a debit. Flipkart's order history shows nothing.
+        </p>
+        <p>
+          The automatic refund process runs on a T+3 batch job. Aarav will not see his ₹4,999
+          for three business days. He opens a support ticket. He leaves a one-star review. He tells
+          his family.
+        </p>
+        <p>
+          This scenario hit approximately 50,000 users during a single Big Billion Days event —
+          not because the engineers were negligent, but because <strong>no one explicitly designed
+          the rollback path</strong>. The payment service and the inventory service each worked
+          correctly in isolation. The bug was in the gap between them.
+        </p>
+      </section>
+
+      <!-- Why ACID Breaks -->
+      <section class="content-card">
+        <h2>Why ACID Breaks Across Services</h2>
+
+        <h3>ACID within a single database</h3>
+        <p>
+          Within a single relational database, ACID transactions are cheap and reliable.
+          <code>BEGIN; UPDATE inventory ...; INSERT INTO orders ...; COMMIT;</code> — either
+          both writes succeed or neither does. The database engine handles the rollback. Your
+          application code never sees a half-written state.
+        </p>
+
+        <h3>The cross-service problem</h3>
+        <p>
+          In a microservices architecture, the Payment Service owns its database and the
+          Inventory Service owns its database. They are independent processes connected only
+          by a network. There is no shared transaction coordinator — no single <code>COMMIT</code>
+          that spans both databases.
+        </p>
+        <p>
+          When you charge the card (Payment DB write succeeds) and then call the inventory
+          service (which times out or crashes), you have an <strong>inconsistent distributed
+          state</strong>: money is reserved in Payment DB, no reservation in Inventory DB,
+          no order in Order DB. Nothing will automatically undo the payment.
+        </p>
+
+        <h3>Two-Phase Commit (2PC) — and why it fails at scale</h3>
+        <p>
+          2PC is the classical solution to distributed atomicity. Phase 1: the coordinator asks
+          every participant "are you prepared to commit?" Phase 2: if all say yes, the coordinator
+          sends COMMIT to all; if any say no (or time out), it sends ROLLBACK to all.
+        </p>
+        <p>
+          2PC fails at microservices scale for three compounding reasons:
+        </p>
+        <ul>
+          <li><strong>Blocking locks</strong> — all participants hold their locks from Phase 1 until
+          they receive the Phase 2 decision. A slow participant blocks every other transaction that
+          touches the same rows. Under high load this cascades into lock storms.</li>
+          <li><strong>Coordinator is a single point of failure</strong> — if the coordinator crashes
+          between Phase 1 and Phase 2, participants are left in a "prepared" limbo, locks held,
+          indefinitely waiting. Human intervention is required.</li>
+          <li><strong>CAP theorem violation</strong> — 2PC requires all participants to be reachable.
+          Under a network partition — the exact failure mode you must handle in production — 2PC
+          is unavailable. It chooses consistency over availability, which is the wrong trade-off
+          for an e-commerce checkout that must process orders even when one downstream service is
+          degraded.</li>
+        </ul>
+
+        <div class="callout">
+          <p><strong>The fundamental truth:</strong> In a network partition, you must choose between
+          Consistency and Availability (CAP theorem). For user-facing transactions, availability
+          usually wins — you want to take the order and reconcile asynchronously, not block the
+          user until every downstream service confirms atomically.</p>
+        </div>
+      </section>
+
+      <!-- Saga Pattern -->
+      <section class="content-card">
+        <h2>The Saga Pattern</h2>
+        <p>
+          A Saga is a sequence of local transactions. Each step commits to its own database and
+          publishes an event (or receives a command). If step N fails, the saga executes
+          <strong>compensating transactions</strong> for steps 1 through N-1 to undo the already-committed
+          work.
+        </p>
+        <p>
+          The key property: <strong>no global lock is held across steps.</strong> Each step
+          commits immediately. The saga accepts <em>temporal inconsistency</em> — for a brief
+          period, money may be charged before the order is confirmed. The compensating transactions
+          restore consistency when a failure is detected.
+        </p>
+
+        <h3>What Saga trades away</h3>
+        <p>
+          Saga trades atomicity for availability. It accepts eventual consistency: a user might
+          see their card charged before they see their order confirmed (or before they see a
+          refund initiated). The window of inconsistency is typically seconds to minutes — short
+          enough to be invisible to humans in the normal case, and always resolved to a consistent
+          final state.
+        </p>
+
+        <h3>Saga as a state machine</h3>
+        <p>
+          Every saga has exactly two terminal states: <strong>Completed</strong> (all forward
+          steps succeeded) and <strong>Compensated</strong> (a failure occurred and all
+          compensations ran successfully). A saga is never "abandoned" — it always runs to one
+          of these two terminals.
+        </p>
+        <pre><code>PENDING
+  → step 1 succeeds → STEP_1_DONE
+  → step 2 succeeds → STEP_2_DONE
+  → step 3 fails   → COMPENSATING
+  → comp 2 runs    → STEP_2_COMPENSATED
+  → comp 1 runs    → STEP_1_COMPENSATED
+  → all done       → COMPENSATED (terminal)</code></pre>
+      </section>
+
+      <!-- Choreography vs Orchestration -->
+      <section class="content-card">
+        <h2>Choreography vs Orchestration</h2>
+        <p>
+          There are two implementation styles for Sagas. They differ in where the coordination
+          logic lives.
+        </p>
+
+        <h3>Choreography — event-driven, decentralised</h3>
+        <p>
+          Each service knows what event to listen for and what event to emit after it completes
+          its step. There is no central coordinator. The saga emerges from the chain of events.
+        </p>
+        <span class="code-label">JavaScript — Choreography event chain</span>
+        <pre><code>// OrderService: starts the saga
+async function placeOrder(cart, userId) {
+  const order = await db('orders').insert({ userId, status: 'PENDING', items: cart.items });
+  await kafka.produce('ORDER_PLACED', { orderId: order.id, amount: cart.total, userId });
+  return order;
+}
+
+// PaymentService: reacts to ORDER_PLACED
+kafka.subscribe('ORDER_PLACED', async ({ orderId, amount, userId }) => {
+  try {
+    const charge = await paymentGateway.charge({ userId, amount, idempotencyKey: orderId });
+    await db('payments').insert({ orderId, chargeId: charge.id, status: 'CHARGED' });
+    await kafka.produce('PAYMENT_COMPLETED', { orderId, chargeId: charge.id });
+  } catch (err) {
+    await kafka.produce('PAYMENT_FAILED', { orderId, reason: err.message });
+  }
+});
+
+// InventoryService: reacts to PAYMENT_COMPLETED
+kafka.subscribe('PAYMENT_COMPLETED', async ({ orderId }) => {
+  const order = await db('orders').findById(orderId);
+  try {
+    await db('inventory').reserveItems(order.items, orderId);
+    await kafka.produce('INVENTORY_RESERVED', { orderId });
+  } catch (err) {
+    await kafka.produce('INVENTORY_FAILED', { orderId, reason: err.message });
+  }
+});
+
+// PaymentService: compensates if inventory fails
+kafka.subscribe('INVENTORY_FAILED', async ({ orderId }) => {
+  const payment = await db('payments').findByOrderId(orderId);
+  await paymentGateway.refund({ chargeId: payment.chargeId, idempotencyKey: `refund-${orderId}` });
+  await db('payments').update(orderId, { status: 'REFUNDED' });
+  await kafka.produce('PAYMENT_REFUNDED', { orderId });
+});</code></pre>
+
+        <h3>Orchestration — command-driven, centralised</h3>
+        <p>
+          A dedicated SagaOrchestrator service drives the saga. It sends explicit commands to
+          participants and waits for reply events. It holds the saga's state and decides what
+          to do next at each step.
+        </p>
+        <span class="code-label">JavaScript — Saga Orchestrator (simplified)</span>
+        <pre><code>// SagaOrchestrator — owns the saga state machine
+class CheckoutSagaOrchestrator {
+  async start(sagaId, payload) {
+    await this.saveSagaState(sagaId, 'CHARGING_PAYMENT');
+    await kafka.produce('CMD_CHARGE_PAYMENT', { sagaId, ...payload });
+  }
+
+  async onPaymentCharged(sagaId, chargeId) {
+    await this.saveSagaState(sagaId, 'RESERVING_INVENTORY');
+    await kafka.produce('CMD_RESERVE_INVENTORY', { sagaId, chargeId });
+  }
+
+  async onInventoryReserved(sagaId) {
+    await this.saveSagaState(sagaId, 'CREATING_ORDER');
+    await kafka.produce('CMD_CREATE_ORDER', { sagaId });
+  }
+
+  async onOrderCreated(sagaId) {
+    await this.saveSagaState(sagaId, 'COMPLETED');
+    // saga done — notify user
+  }
+
+  // Compensation path
+  async onInventoryFailed(sagaId) {
+    await this.saveSagaState(sagaId, 'COMPENSATING_PAYMENT');
+    const state = await this.loadSagaState(sagaId);
+    await kafka.produce('CMD_REFUND_PAYMENT', { sagaId, chargeId: state.chargeId });
+  }
+
+  async onPaymentRefunded(sagaId) {
+    await this.saveSagaState(sagaId, 'COMPENSATED');
+    // saga ended with rollback — notify user
+  }
+}
+
+// Participants only respond to commands — no business logic about the saga flow
+kafka.subscribe('CMD_CHARGE_PAYMENT', async ({ sagaId, amount, userId }) => {
+  try {
+    const charge = await paymentGateway.charge({ userId, amount, idempotencyKey: sagaId });
+    await kafka.produce('EVT_PAYMENT_CHARGED', { sagaId, chargeId: charge.id });
+  } catch (err) {
+    await kafka.produce('EVT_PAYMENT_FAILED', { sagaId, reason: err.message });
+  }
+});</code></pre>
+
+        <h3>Choreography vs Orchestration — comparison</h3>
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:0.9rem;">
+            <thead>
+              <tr style="background:var(--surface-alt,#f4f4f4);">
+                <th style="text-align:left;padding:10px 14px;border-bottom:2px solid var(--border,#ddd);">Dimension</th>
+                <th style="text-align:left;padding:10px 14px;border-bottom:2px solid var(--border,#ddd);">Choreography</th>
+                <th style="text-align:left;padding:10px 14px;border-bottom:2px solid var(--border,#ddd);">Orchestration</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Saga state visibility</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Implicit — reconstructed from events</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Explicit — orchestrator holds it</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Service coupling</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Low — services know only their events</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Moderate — orchestrator knows all participants</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Failure handling</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Hard — compensation logic spread across services</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Easy — compensation logic in one place</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Operational observability</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Difficult — need event correlation</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Easy — query the orchestrator's state table</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Adding a step</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Update emitters and listeners in multiple services</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Update orchestrator + add participant handlers</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;">Best fit</td>
+                <td style="padding:9px 14px;">Simple, short sagas (2–3 steps)</td>
+                <td style="padding:9px 14px;">Complex, long sagas (4+ steps, many failure paths)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Compensating Transactions -->
+      <section class="content-card">
+        <h2>Compensating Transactions</h2>
+        <p>
+          A compensating transaction is a business-level semantic undo. It is <em>not</em> a
+          database rollback — the original transaction already committed. A compensation
+          is a new forward transaction that reverses the business effect.
+        </p>
+        <p>
+          For the full checkout saga, here is the forward-backward table:
+        </p>
+
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:0.9rem;">
+            <thead>
+              <tr style="background:var(--surface-alt,#f4f4f4);">
+                <th style="text-align:left;padding:10px 14px;border-bottom:2px solid var(--border,#ddd);">Step</th>
+                <th style="text-align:left;padding:10px 14px;border-bottom:2px solid var(--border,#ddd);">Forward Transaction</th>
+                <th style="text-align:left;padding:10px 14px;border-bottom:2px solid var(--border,#ddd);">Compensating Transaction</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);font-weight:600;">Payment</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Charge card / debit UPI</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Issue full refund to original payment method</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);font-weight:600;">Inventory</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Reserve stock units for order</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Release reservation, return units to available pool</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);font-weight:600;">Order</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Create order record (status: CONFIRMED)</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Cancel order record (status: CANCELLED)</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);font-weight:600;">Notification</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Send "Order Confirmed" email + push</td>
+                <td style="padding:9px 14px;border-bottom:1px solid var(--border,#eee);">Send "Order Cancelled, refund initiated" email</td>
+              </tr>
+              <tr>
+                <td style="padding:9px 14px;font-weight:600;">Shipping</td>
+                <td style="padding:9px 14px;">Schedule pickup with logistics provider</td>
+                <td style="padding:9px 14px;">Cancel pickup request with logistics provider</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Compensations must be idempotent</h3>
+        <p>
+          The compensation step may be called multiple times — the orchestrator may retry due to
+          a network timeout, the message broker may re-deliver. If the refund is issued twice, the
+          customer receives double the money back. This is a real production bug.
+        </p>
+        <p>
+          The rule: <strong>calling a compensation N times must have the same observable effect as
+          calling it once.</strong> The typical implementation is a check-before-act pattern:
+        </p>
+        <span class="code-label">JavaScript — Idempotent refund compensation</span>
+        <pre><code>async function issueRefund({ orderId, chargeId }) {
+  // Check if we already processed this compensation
+  const existing = await db('refunds').where({ orderId }).first();
+  if (existing) {
+    console.log(`[refund] Already refunded orderId=${orderId}, skipping`);
+    return existing; // idempotent: return the same result
+  }
+
+  // Issue the actual refund via payment gateway
+  const refund = await paymentGateway.refund({
+    chargeId,
+    idempotencyKey: `refund-${orderId}` // gateway-side idempotency too
+  });
+
+  // Record the refund (prevents duplicate processing on retry)
+  await db('refunds').insert({
+    orderId,
+    refundId: refund.id,
+    amount: refund.amount,
+    createdAt: new Date()
+  });
+
+  return refund;
+}</code></pre>
+      </section>
+
+      <!-- Transactional Outbox -->
+      <section class="content-card">
+        <h2>The Transactional Outbox Pattern</h2>
+        <p>
+          There is a subtle atomicity problem inside each saga step: the service must write to its
+          database <em>and</em> publish an event to the message broker. These are two separate
+          I/O operations. If the service crashes between them, the database write succeeds but the
+          event is never published — the saga stalls silently.
+        </p>
+        <p>
+          The Transactional Outbox solves this by making the event publication part of the same
+          local database transaction as the business write. Instead of publishing to Kafka directly,
+          you write to an <code>outbox_events</code> table. A separate relay process polls the
+          outbox and forwards events to the broker.
+        </p>
+
+        <span class="code-label">JavaScript — Transactional Outbox write + relay</span>
+        <pre><code>// Step 1: Business write + outbox event in ONE local transaction
+async function createOrder({ id, userId, items, amount }) {
+  await db.transaction(async (trx) => {
+    // Business write
+    await trx('orders').insert({
+      id,
+      userId,
+      items: JSON.stringify(items),
+      amount,
+      status: 'PENDING',
+      createdAt: new Date()
+    });
+
+    // Outbox event — same transaction, same commit
+    await trx('outbox_events').insert({
+      id: uuid(),
+      event_type: 'ORDER_PLACED',
+      aggregate_id: id,
+      payload: JSON.stringify({ orderId: id, userId, items, amount }),
+      published: false,
+      created_at: new Date()
+    });
+    // If this transaction commits, BOTH the order row and the outbox row exist.
+    // If it rolls back, NEITHER exists. No partial state.
+  });
+}
+
+// Step 2: Relay process — separate process, runs on an interval
+async function relayOutboxEvents() {
+  // Fetch unpublished events in creation order
+  const events = await db('outbox_events')
+    .where({ published: false })
+    .orderBy('created_at', 'asc')
+    .limit(100);
+
+  for (const event of events) {
+    try {
+      // Publish to Kafka (or any broker)
+      await kafka.produce(event.event_type, event.payload, {
+        key: event.aggregate_id // partition by aggregate for ordering
+      });
+
+      // Mark published only after broker confirms receipt
+      await db('outbox_events')
+        .where({ id: event.id })
+        .update({ published: true, published_at: new Date() });
+    } catch (err) {
+      // Relay will retry this event on next poll cycle — do not mark published
+      console.error(`[outbox-relay] Failed to publish event ${event.id}:`, err.message);
+    }
+  }
+}
+
+// Relay runs every second (or use Debezium CDC for zero-polling production setup)
+setInterval(relayOutboxEvents, 1000);</code></pre>
+
+        <div class="callout">
+          <p><strong>Production enhancement:</strong> Instead of polling, use <strong>Change Data Capture (CDC)</strong>
+          with Debezium. Debezium tails the PostgreSQL WAL and forwards new <code>outbox_events</code>
+          rows to Kafka automatically — sub-second latency, no polling overhead, and the outbox table
+          never grows unbounded.</p>
+        </div>
+      </section>
+
+      <!-- Idempotency Keys -->
+      <section class="content-card">
+        <h2>Idempotency Keys</h2>
+        <p>
+          Network calls fail. Clients retry. Without idempotency, a retry of a payment call charges
+          the card twice. Idempotency keys prevent this by tying a unique identifier to the
+          operation's outcome, and returning the cached result on any duplicate call.
+        </p>
+        <p>
+          The key must be generated <strong>client-side</strong> — specifically, tied to the
+          cart/checkout session, not to the request attempt. The same key must survive page
+          refreshes, tab closures, and network retries.
+        </p>
+        <span class="code-label">JavaScript — Idempotency key storage and lookup</span>
+        <pre><code>// Server-side idempotency middleware
+async function withIdempotency(idempotencyKey, operation) {
+  // Check for cached result
+  const cached = await db('idempotency_keys')
+    .where({ key: idempotencyKey })
+    .first();
+
+  if (cached) {
+    // Return the same result as the original call — do NOT re-execute
+    console.log(`[idempotency] Cache hit for key=${idempotencyKey}`);
+    return JSON.parse(cached.result);
+  }
+
+  // Execute the operation for the first time
+  const result = await operation();
+
+  // Store the result so future retries return it
+  await db('idempotency_keys').insert({
+    key: idempotencyKey,
+    result: JSON.stringify(result),
+    created_at: new Date(),
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24-hour TTL
+  });
+
+  return result;
+}
+
+// Usage in checkout handler
+app.post('/checkout', async (req, res) => {
+  const idempotencyKey = req.headers['x-idempotency-key']; // UUID from client
+  if (!idempotencyKey) return res.status(400).json({ error: 'x-idempotency-key required' });
+
+  const result = await withIdempotency(idempotencyKey, async () => {
+    return await checkoutService.initiateCheckout(req.body);
+  });
+
+  res.json(result);
+});
+
+// Client side — generate and persist key for the checkout session
+function getOrCreateCheckoutKey(cartId) {
+  const storageKey = `checkout-idempotency-${cartId}`;
+  let key = sessionStorage.getItem(storageKey);
+  if (!key) {
+    key = crypto.randomUUID(); // standard browser API
+    sessionStorage.setItem(storageKey, key);
+  }
+  return key; // same key survives page refreshes within the session
+}</code></pre>
+      </section>
+
+      <!-- Timeout and Failure Handling -->
+      <section class="content-card">
+        <h2>Timeout and Failure Handling</h2>
+        <p>
+          The most dangerous failure mode is not a clean error — it is a <em>silent hang</em>.
+          A service call with no timeout waits forever. The caller's thread pool fills up. The
+          caller becomes unresponsive. The entire system cascades.
+        </p>
+        <p>
+          <strong>Every inter-service call in a saga must have an explicit timeout.</strong>
+          Not relying on OS defaults. Not "the network team said the SLA is 5s." An explicit
+          timeout set in code, sized to 3× the p99 response time of the downstream service.
+        </p>
+
+        <h3>Classifying failures</h3>
+        <ul>
+          <li>
+            <strong>Transient failures</strong> — network blip, brief database overload, GC pause.
+            Expected to resolve if retried in a few seconds. Strategy: retry with exponential
+            backoff + jitter (prevents synchronized retry storms). Cap retries at 3–5 attempts.
+          </li>
+          <li>
+            <strong>Permanent failures</strong> — invalid card, out-of-stock item, fraudulent order
+            flagged. Will not resolve on retry. Strategy: immediately trigger compensation. Do not
+            waste retries on a business error.
+          </li>
+        </ul>
+
+        <span class="code-label">JavaScript — Retry with exponential backoff + jitter</span>
+        <pre><code">async function callWithRetry(fn, { maxRetries = 3, baseDelayMs = 200 } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (isPermanentFailure(err)) {
+        throw err; // Don't retry permanent errors — trigger compensation immediately
+      }
+      lastError = err;
+      if (attempt < maxRetries) {
+        // Exponential backoff with jitter: delay = base * 2^attempt + random(0, base)
+        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * baseDelayMs;
+        console.warn(`[retry] attempt ${attempt + 1} failed, retrying in ${Math.round(delay)}ms`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastError; // All retries exhausted — caller decides: compensate or DLQ
+}
+
+function isPermanentFailure(err) {
+  // HTTP 4xx (except 429 Too Many Requests) are permanent
+  return err.statusCode && err.statusCode >= 400 && err.statusCode < 500
+    && err.statusCode !== 429;
+}
+
+// Usage in saga step
+async function chargePayment({ sagaId, amount, userId }) {
+  const timeout = 5000; // 5s explicit timeout
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await callWithRetry(
+      () => paymentGateway.charge({ userId, amount }, { signal: controller.signal }),
+      { maxRetries: 3, baseDelayMs: 300 }
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}</code></pre>
+      </section>
+
+      <!-- Dead Letter Queue -->
+      <section class="content-card">
+        <h2>Dead Letter Queue for Stuck Sagas</h2>
+        <p>
+          After all retries are exhausted and the failure is not classified as permanent, the saga
+          is stuck. It cannot proceed forward (the step keeps failing) and no one has decided to
+          compensate. Left unresolved, this is a customer with money taken and no order.
+        </p>
+        <p>
+          The mechanism: after N failed retries, publish the saga event to a
+          <strong>Dead Letter Queue (DLQ)</strong>. The DLQ is a special Kafka topic (or queue)
+          that human operators monitor via an operations dashboard.
+        </p>
+        <ul>
+          <li>Each DLQ entry represents a specific customer waiting for resolution.</li>
+          <li>The operations team sees: sagaId, current step, failure reason, customer ID, amount, timestamp.</li>
+          <li>They choose: manually complete (override inventory, confirm order) or manually compensate (trigger refund).</li>
+          <li>The DLQ SLA should be defined in an SLA doc — e.g., "all stuck sagas resolved within 2 hours."</li>
+        </ul>
+
+        <span class="code-label">JavaScript — Publish to DLQ after exhausted retries</span>
+        <pre><code">async function processSagaStep(event) {
+  const { sagaId, step, payload, retryCount = 0 } = event;
+  const MAX_RETRIES = 5;
+
+  try {
+    await executeStep(step, payload);
+  } catch (err) {
+    if (retryCount >= MAX_RETRIES) {
+      // Give up — send to DLQ for human review
+      await kafka.produce('saga.dlq', JSON.stringify({
+        sagaId,
+        step,
+        payload,
+        failureReason: err.message,
+        failedAt: new Date().toISOString(),
+        retryCount
+      }));
+      await db('saga_executions').where({ sagaId }).update({
+        status: 'STUCK',
+        stuckAt: new Date(),
+        stuckStep: step,
+        stuckReason: err.message
+      });
+      // Alert ops team via PagerDuty / Slack webhook
+      await alertOps({ sagaId, step, err });
+      return;
+    }
+
+    // Requeue with incremented retry count
+    const delay = Math.pow(2, retryCount) * 1000;
+    await requeueWithDelay({ ...event, retryCount: retryCount + 1 }, delay);
+  }
+}</code></pre>
+      </section>
+
+      <!-- Saga State Persistence -->
+      <section class="content-card">
+        <h2>Saga State Persistence</h2>
+        <p>
+          Never hold saga state in process memory. If the orchestrator service restarts (deployment,
+          crash, OOM kill), all in-flight sagas are lost. They become permanently stuck with no
+          record of where they were — the DLQ cannot even pick them up because the DLQ entry was
+          never written.
+        </p>
+        <p>
+          Saga state must be persisted durably in a database before any step is initiated. On restart,
+          the orchestrator queries for all non-terminal sagas and resumes them.
+        </p>
+
+        <span class="code-label">SQL — Saga execution state table</span>
+        <pre><code>CREATE TABLE saga_executions (
+  saga_id         UUID PRIMARY KEY,
+  saga_type       VARCHAR(100) NOT NULL,         -- e.g. 'CHECKOUT_SAGA'
+  current_step    VARCHAR(100) NOT NULL,
+  status          VARCHAR(50)  NOT NULL,          -- PENDING, IN_PROGRESS, COMPLETED, COMPENSATING, COMPENSATED, STUCK
+  payload         JSONB        NOT NULL,          -- full saga context (order, user, amounts)
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  completed_at    TIMESTAMPTZ,
+  stuck_reason    TEXT
+);
+
+CREATE INDEX idx_saga_status ON saga_executions(status) WHERE status NOT IN ('COMPLETED', 'COMPENSATED');</code></pre>
+
+        <span class="code-label">JavaScript — Resume in-flight sagas on startup</span>
+        <pre><code">// On orchestrator service startup
+async function resumeInFlightSagas() {
+  const inFlight = await db('saga_executions')
+    .whereNotIn('status', ['COMPLETED', 'COMPENSATED', 'STUCK'])
+    .orderBy('created_at', 'asc');
+
+  console.log(`[startup] Resuming ${inFlight.length} in-flight sagas`);
+
+  for (const saga of inFlight) {
+    // Re-emit the command for the current step — idempotency keys ensure no duplication
+    await orchestrator.resumeFromStep(saga.saga_id, saga.current_step, saga.payload);
+  }
+}</code></pre>
+      </section>
+
+      <!-- Implementation Checklist -->
+      <section class="content-card">
+        <h2>Saga Implementation Checklist</h2>
+        <p>
+          Before you ship a new saga to production, verify every item on this list:
+        </p>
+        <ol style="line-height:1.9;">
+          <li><strong>All saga state persisted to a durable DB</strong> — no in-memory state that dies on restart.</li>
+          <li><strong>Every inter-service call has an explicit timeout</strong> — not OS default, not infinite.</li>
+          <li><strong>Compensating transaction defined for every forward step</strong> — every step that can succeed must have a compensation path.</li>
+          <li><strong>All compensating transactions are idempotent</strong> — calling them N times has the same effect as calling once.</li>
+          <li><strong>Transactional Outbox used for all event emissions</strong> — no dual-write to DB and broker in separate operations.</li>
+          <li><strong>Idempotency keys on all payment calls</strong> — both on your service and passed to the payment gateway.</li>
+          <li><strong>Retry logic distinguishes transient from permanent failures</strong> — permanent failures trigger immediate compensation, not retries.</li>
+          <li><strong>Exponential backoff with jitter on retries</strong> — no fixed-delay retry storms under load.</li>
+          <li><strong>Dead Letter Queue configured with operations dashboard</strong> — every stuck saga is visible to humans within minutes.</li>
+          <li><strong>DLQ SLA defined and monitored</strong> — e.g., "all DLQ entries resolved within 2 hours."</li>
+          <li><strong>Startup resume logic for in-flight sagas</strong> — service restart must not abandon live sagas.</li>
+          <li><strong>End-to-end saga test with forced mid-saga failure injection</strong> — verify the compensation path runs correctly in a staging environment before shipping.</li>
+        </ol>
+      </section>
+
+      <!-- Key Takeaway -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          "Payment deducted, order failed" is not a payment bug or an inventory bug. It is a
+          distributed transaction bug — the absence of an explicit compensation path for partial
+          failures across service boundaries. The Saga pattern does not eliminate the possibility
+          of inconsistency; it makes inconsistency <em>temporary and bounded</em> by guaranteeing
+          that every saga either reaches a COMPLETED or COMPENSATED terminal state. The Transactional
+          Outbox ensures events are reliably emitted; idempotency keys ensure retries are safe;
+          the DLQ ensures nothing gets silently lost. Saga is not a simple pattern — it replaces
+          one hard problem (distributed atomicity) with a set of smaller, manageable engineering
+          problems that can each be solved correctly.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

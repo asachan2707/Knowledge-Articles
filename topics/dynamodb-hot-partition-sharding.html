@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DynamoDB Hot Partition Problem: Partition Keys, Sharding Strategies, and Traffic Distribution | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544383835-bda2bc66a55d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Data server infrastructure representing DynamoDB partitioning" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Database · Backend · 22 min</span>
+          </div>
+        </figure>
+        <h1>DynamoDB Hot Partition Problem: Deep Dive on Partition Keys, Sharding Strategies, and Traffic Distribution</h1>
+        <p class="summary">
+          When a celebrity with one billion followers posts a status update, one billion writes are
+          routed to a single DynamoDB partition in under an hour — and the partition's 1,000 WCU/second
+          ceiling is obliterated. A deep dive into how DynamoDB partitions work, the anatomy of a hot
+          partition, write sharding, composite key design, GSI overloading, adaptive capacity, and DAX.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · DynamoDB · NoSQL · Distributed Databases</span>
+          <span class="meta-item">Published: 2026-07-29</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          DynamoDB's promise is effortless scale: provision capacity, let AWS manage the rest.
+          That promise breaks the moment your traffic distribution is non-uniform. A single overloaded
+          partition key does not just degrade that key — it can throttle your entire table, reject
+          writes, and cascade failures into your application. Understanding <em>why</em> this happens
+          is prerequisite to designing keys that prevent it.
+        </p>
+        <div class="callout">
+          <p><strong>Scale context:</strong> DynamoDB physically shards data across internal partition
+          nodes. Each partition node handles at most <strong>3,000 RCU and 1,000 WCU per second</strong>.
+          No matter how much capacity you provision at the table level, a single partition key cannot
+          exceed these per-partition limits. There is no knob to raise them — the ceiling is in the
+          physical architecture.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Celebrity account: 1 billion writes to one partition in one hour</span>
+        <p>
+          A social media platform stores user activity in DynamoDB with <code>userId</code> as the
+          partition key. A celebrity with 1 billion followers posts a status update. The fan-out
+          service writes a notification record for every follower — each write keyed to
+          <code>userId = "celebrity_123"</code>.
+        </p>
+        <p>
+          At 1 billion writes in one hour, that is approximately <strong>277,778 writes per second</strong>
+          targeting a single partition. The partition supports 1,000 WCU/second. DynamoDB begins
+          returning <code>ProvisionedThroughputExceededException</code> within milliseconds of the
+          first post going out. The retry storms amplify the problem. The platform goes down — not
+          because the database lacked total capacity, but because one key attracted all the traffic.
+        </p>
+        <p>
+          The operational cost: millions in lost ad revenue, SLA breach penalties, and an incident
+          post-mortem that concludes with "we need to rethink our partition key strategy."
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>How DynamoDB Partitions Work</h2>
+        <p>
+          DynamoDB is a key-value and document store built on a hash-partitioned architecture.
+          When you write an item, DynamoDB computes the <strong>MD5 hash of your partition key</strong>
+          and maps the result to one of the internal partition nodes that owns that hash range.
+        </p>
+        <pre><code>Partition assignment:
+  partition = hash(partitionKey) mod numPartitions
+
+Example:
+  hash("celebrity_123") → 0x7A3F...  → partition #42
+  hash("user_456")      → 0x12BC...  → partition #7
+  hash("user_789")      → 0x9D01...  → partition #194</code></pre>
+        <p>
+          Each partition node has hard limits enforced by DynamoDB's internal request router:
+        </p>
+        <ul>
+          <li><strong>3,000 Read Capacity Units (RCU) per second</strong></li>
+          <li><strong>1,000 Write Capacity Units (WCU) per second</strong></li>
+          <li><strong>10 GB of data storage</strong> before a partition split is triggered</li>
+        </ul>
+        <p>
+          When a partition reaches its storage limit, DynamoDB splits it — dividing the hash range
+          between two new partition nodes. This increases storage capacity but does <em>not</em>
+          help with a hot key: both child partitions may now hold items for the same overloaded
+          partition key, but all new writes for that key still hash to the same child. The throughput
+          ceiling does not change.
+        </p>
+        <div class="callout">
+          <p><strong>Important nuance:</strong> DynamoDB splits partitions based on throughput
+          (burst splitting) as well as storage. However, a burst split assigns the hot key's items
+          to one child partition — the other child gets items from the neighbouring hash range.
+          The hot key is still served by a single partition node after the split. Splitting is not
+          a cure for a hot partition key.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Anatomy of a Hot Partition</h2>
+        <p>
+          A hot partition forms when a disproportionate share of traffic targets a small number of
+          partition keys. The canonical example is a popular user in a social platform, but hot
+          partitions appear in many shapes:
+        </p>
+        <ul>
+          <li>A single product ID during a flash sale</li>
+          <li>A date-based key (<code>date = "2026-07-29"</code>) where all today's writes land</li>
+          <li>A status flag (<code>status = "PENDING"</code>) used as a partition key for a queue</li>
+          <li>A tenant ID for a large enterprise customer in a multi-tenant SaaS system</li>
+        </ul>
+        <p>
+          The traffic distribution visualised at the partition level shows the problem clearly:
+        </p>
+        <pre><code>Traffic distribution across 1,000 partitions:
+
+  Partition #42  (userId = "celebrity_123")  ████████████████████ 95%
+  Partition #7   (userId = "user_456")       ▌                     0.3%
+  Partition #194 (userId = "user_789")       ▌                     0.2%
+  ... (997 other partitions)                 ▌▌▌▌▌▌▌▌▌▌           4.5%
+
+Result:
+  Partition #42: 95,000 WCU/s demanded → 1,000 WCU/s allowed
+  Throttle rate: 98.9% of writes rejected
+  Error: ProvisionedThroughputExceededException</code></pre>
+        <p>
+          The other 999 partitions are nearly idle. Provisioning more table-level capacity does not
+          help — it distributes additional WCU across all partitions, raising each partition's
+          allocation slightly, but partition #42's new write demand still overwhelms its ceiling by
+          orders of magnitude.
+        </p>
+        <div class="callout">
+          <p><strong>The key insight:</strong> DynamoDB throttling at the partition level is
+          independent of table-level capacity. You cannot solve a hot partition problem by throwing
+          more provisioned capacity at it. You must redesign the partition key.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Write Sharding: Adding a Shard Suffix</h2>
+        <p>
+          Write sharding artificially distributes writes for a single logical key across multiple
+          physical partition keys by appending a numeric suffix. Instead of all writes going to
+          <code>userId = "celebrity_123"</code>, they are spread across
+          <code>celebrity_123#shard_0</code> through <code>celebrity_123#shard_N</code>.
+        </p>
+
+        <h3>Choosing N: the shard count formula</h3>
+        <p>
+          Set N to the square root of the expected peak writes per second for the hot key. For
+          277,778 WPS: <code>N = sqrt(277,778) ≈ 527</code>. With 527 shards, each shard receives
+          approximately 527 WPS — safely under the 1,000 WCU/second per-partition limit.
+        </p>
+        <pre><code>Rule of thumb:
+  N = ceil(sqrt(peak_wps / 1000)) × safety_factor(2)
+
+  For 277,778 WPS:
+    N = ceil(sqrt(277)) × 2 = ceil(16.6) × 2 = 34 shards
+    Each shard: 277,778 / 34 ≈ 8,170 WPS... still over limit.
+
+  Corrected for 1,000 WCU ceiling:
+    N = ceil(peak_wps / 1000) × safety_factor(1.5)
+    N = ceil(277,778 / 1000) × 1.5 = 278 × 1.5 ≈ 417 shards</code></pre>
+
+        <h3>Write sharding implementation</h3>
+        <span class="code-label">JavaScript Example — Write Sharding Strategy for DynamoDB</span>
+        <pre><code>// dynamodb-sharding.js — AWS SDK v3 + write sharding
+import { DynamoDBClient, PutItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
+import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+
+const client = new DynamoDBClient({ region: 'us-east-1' });
+const TABLE_NAME = 'UserActivity';
+
+// --- Configuration ---
+// N = number of shards per logical partition key
+// Choose based on: ceil(peak_wps / 900) with a safety margin
+const SHARD_COUNT = 32;  // supports up to ~32,000 WPS for this key
+
+/**
+ * Compute the shard suffix for a write operation.
+ * Random distribution ensures uniform load across shards.
+ */
+function getWriteShard(shardCount = SHARD_COUNT) {
+  return Math.floor(Math.random() * shardCount);
+}
+
+/**
+ * Compute a deterministic shard for a given item ID.
+ * Use when you need to find a specific item without scatter-gather.
+ * (e.g., update an existing record you know the ID of)
+ */
+function getDeterministicShard(itemId, shardCount = SHARD_COUNT) {
+  let hash = 0;
+  for (let i = 0; i &lt; itemId.length; i++) {
+    hash = (hash * 31 + itemId.charCodeAt(i)) >>> 0; // unsigned 32-bit
+  }
+  return hash % shardCount;
+}
+
+/**
+ * Write a new activity record for a user.
+ * The shard suffix distributes writes across SHARD_COUNT physical partitions.
+ */
+async function writeUserActivity(userId, activityData) {
+  const shardIndex = getWriteShard();
+  const shardedPK = `${userId}#shard_${shardIndex}`;
+
+  const item = {
+    PK: shardedPK,             // sharded partition key
+    SK: `ACTIVITY#${Date.now()}#${Math.random().toString(36).slice(2)}`,
+    userId,                    // store original userId for queries
+    shardIndex,                // store shard for debugging
+    ...activityData,
+    createdAt: new Date().toISOString(),
+  };
+
+  await client.send(new PutItemCommand({
+    TableName: TABLE_NAME,
+    Item: marshall(item),
+  }));
+
+  return { shardedPK, item };
+}
+
+/**
+ * Read all activity for a user: scatter-gather across all shards.
+ *
+ * This is the trade-off of write sharding: reads must query
+ * all N shards in parallel and merge the results.
+ */
+async function readUserActivity(userId, limit = 100) {
+  // Build parallel queries for all shards
+  const shardQueries = Array.from({ length: SHARD_COUNT }, (_, i) => {
+    const shardedPK = `${userId}#shard_${i}`;
+    return client.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: 'PK = :pk',
+      ExpressionAttributeValues: marshall({ ':pk': shardedPK }),
+      ScanIndexForward: false, // newest first
+      Limit: limit,            // limit per shard — will trim in merge
+    }));
+  });
+
+  // Execute all shard queries in parallel
+  const results = await Promise.allSettled(shardQueries);
+
+  // Collect and flatten items from all shards
+  const allItems = [];
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value.Items) {
+      for (const raw of result.value.Items) {
+        allItems.push(unmarshall(raw));
+      }
+    }
+  }
+
+  // Sort merged results by creation time (most recent first)
+  allItems.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+  return allItems.slice(0, limit);
+}
+
+/**
+ * Aggregate a count metric across all shards.
+ * E.g., total follower count stored as sharded counters.
+ */
+async function getShardedCount(userId, counterType) {
+  const shardQueries = Array.from({ length: SHARD_COUNT }, (_, i) => {
+    const shardedPK = `${userId}#shard_${i}`;
+    return client.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: 'PK = :pk AND SK = :sk',
+      ExpressionAttributeValues: marshall({
+        ':pk': shardedPK,
+        ':sk': `COUNTER#${counterType}`,
+      }),
+    }));
+  });
+
+  const results = await Promise.allSettled(shardQueries);
+
+  let total = 0;
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value.Items?.length) {
+      const item = unmarshall(result.value.Items[0]);
+      total += item.count ?? 0;
+    }
+  }
+
+  return total;
+}
+
+// --- Usage example ---
+async function demo() {
+  // Write: goes to a random shard
+  const write = await writeUserActivity('celebrity_123', {
+    type: 'POST',
+    content: 'Hello world from the celebrity account!',
+  });
+  console.log('Written to shard:', write.shardedPK);
+
+  // Read: scatter-gather across all 32 shards
+  const activities = await readUserActivity('celebrity_123', 20);
+  console.log(`Retrieved ${activities.length} activities across all shards`);
+}
+</code></pre>
+
+        <h3>The scatter-gather trade-off</h3>
+        <p>
+          Write sharding has a significant read cost: every read for a logical key must query all N
+          physical shards in parallel and merge the results. With N = 32, each read spawns 32
+          DynamoDB queries. This is acceptable for write-heavy use cases (fan-out writes, counters,
+          event streams) but costly for read-heavy ones. Always benchmark the read amplification
+          against your access patterns before committing to a shard count.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Composite Key Design</h2>
+        <p>
+          Many hot partition problems are caused by temporal clustering: all writes for a given time
+          period land on the same key. The solution is to encode time into the partition key so that
+          traffic is spread across a time horizon.
+        </p>
+
+        <h3>Time-bucketing: userId#YYYY-MM</h3>
+        <p>
+          For per-user time-series data, include a month bucket in the partition key:
+        </p>
+        <pre><code>// Instead of:
+PK = "celebrity_123"
+SK = "2026-07-29T10:00:00Z"
+
+// Use time-bucketed partition key:
+PK = "celebrity_123#2026-07"    // partition per user per month
+SK = "2026-07-29T10:00:00Z"
+
+// Benefits:
+// - Each month creates a new partition key → no unbounded single-partition growth
+// - Queries for "this month's activity" are single-partition queries (fast)
+// - Cross-month queries require querying 2+ keys (acceptable for analytics)
+// - Hot user's writes still land on one partition per month — combine with sharding for extreme scale</code></pre>
+
+        <h3>Type-date composite for time-series tables</h3>
+        <pre><code>// Time-series event table design:
+// PK = "type#date"  →  distributes by both event type and calendar day
+// SK = timestamp#eventId  →  enables range queries within a day
+
+PK = "ORDER_PLACED#2026-07-29"    // all orders placed today
+PK = "USER_LOGIN#2026-07-29"      // all logins today
+PK = "PAYMENT_SUCCESS#2026-07-29" // all payments today
+
+// Access patterns:
+// "All orders today" → query PK = "ORDER_PLACED#2026-07-29"
+// "Orders this week" → 7 queries (one per day), run in parallel
+// "Orders this month" → 30 queries, run in parallel, merge
+
+// Why this works:
+// Each event type gets its own partition per day
+// Tomorrow's events automatically go to a new partition
+// Historical data never competes with live traffic</code></pre>
+
+        <h3>Preventing seasonal hotspots</h3>
+        <p>
+          Without date-bucketing, a table's "current" partition accumulates all new writes while old
+          partitions sit idle. This creates a rolling hot partition that follows the current date.
+          Adding <code>#YYYY-MM-DD</code> or <code>#YYYY-WW</code> (ISO week number) to the partition
+          key ensures traffic spreads proportionally to data age.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>GSI Overloading</h2>
+        <p>
+          DynamoDB allows only one table per account per region to avoid operational complexity.
+          GSI (Global Secondary Index) overloading is the pattern of storing multiple entity types
+          in a single table using a generic, overloaded partition key scheme — and using a GSI to
+          query across entity types efficiently.
+        </p>
+
+        <h3>The single-table design pattern</h3>
+        <pre><code>// Single table: all entities share the same table
+// Partition key (PK) encodes entity type and ID
+// Sort key (SK) encodes entity subtype or relationship
+
+// User entity
+PK = "USER#u_123"
+SK = "PROFILE"
+data = { name: "Alice", email: "alice@example.com" }
+
+// User's posts
+PK = "USER#u_123"
+SK = "POST#2026-07-01T10:00:00Z#p_001"
+data = { title: "Hello World", content: "..." }
+
+// Post entity (accessed directly by post ID)
+PK = "POST#p_001"
+SK = "METADATA"
+data = { authorId: "u_123", title: "Hello World", likes: 42 }
+
+// Comments on a post
+PK = "POST#p_001"
+SK = "COMMENT#2026-07-01T11:00:00Z#c_007"
+data = { authorId: "u_456", text: "Great post!" }</code></pre>
+
+        <h3>GSI for cross-entity queries</h3>
+        <pre><code>// Add a GSI on (type, createdAt) to query across entity types:
+// GSI PK: entityType  (e.g., "POST", "USER", "COMMENT")
+// GSI SK: createdAt
+
+// "All posts published today" (without scanning the whole table)
+// Query GSI where entityType = "POST" AND createdAt BETWEEN today-start AND today-end
+
+// Sparse GSI: only items with the GSI attribute are indexed
+// Items without entityType = "POST" are invisible to this GSI
+// This is a "sparse index" — reduces GSI write costs and storage
+
+// GSI overloading for status-based queries:
+// Add attribute: GSI1PK = "STATUS#PENDING" (only on items that are PENDING)
+// GSI1SK = createdAt
+// Query: all PENDING items created in last 24 hours → single GSI query
+// When item moves to COMPLETED: remove GSI1PK attribute → item drops from GSI automatically</code></pre>
+
+        <h3>Access patterns and sparse GSIs</h3>
+        <p>
+          Sparse GSIs exploit the fact that DynamoDB only indexes an item in a GSI if the item has
+          the GSI's key attributes. By setting a GSI attribute only on items matching a specific
+          state or type, you create an index that contains exactly the items you need for a given
+          access pattern — without reading or paying for items outside that pattern.
+        </p>
+        <div class="callout">
+          <p><strong>GSI hot partition warning:</strong> GSIs have the same per-partition throughput
+          limits as the base table. If your GSI partition key is poorly chosen (e.g.,
+          <code>entityType = "USER"</code> when you have millions of users), the GSI itself becomes
+          a hot partition. Apply the same sharding and time-bucketing principles to GSI keys.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>DynamoDB Adaptive Capacity</h2>
+        <p>
+          In 2018, AWS introduced Adaptive Capacity (also called "burst capacity" at the partition
+          level). In 2019, they introduced Instant Adaptive Capacity. These features automatically
+          redistribute throughput allocation to hot partitions.
+        </p>
+
+        <h3>How adaptive capacity works</h3>
+        <p>
+          DynamoDB monitors per-partition throughput consumption. When it detects that one partition
+          is consuming a disproportionate share of the table's provisioned capacity while other
+          partitions are underutilised, it temporarily allocates more of the table's capacity to
+          the hot partition — up to the full table-level provision if needed.
+        </p>
+        <pre><code>Standard partition allocation:
+  Table provision: 10,000 WCU total
+  Partitions: 100
+  Default per-partition: 10,000 / 100 = 100 WCU each
+
+  Without adaptive capacity:
+    Hot partition: capped at 100 WCU → throttled
+    99 idle partitions: 9,900 WCU wasted
+
+  With adaptive capacity:
+    Hot partition: can consume up to 10,000 WCU (full table provision)
+    (assuming all other partitions are idle)
+    → No throttle — as long as total table WCU is not exceeded</code></pre>
+
+        <h3>Instant Adaptive Capacity (2019+)</h3>
+        <p>
+          The original adaptive capacity had a 5–30 minute detection and reallocation delay — long
+          enough for a sudden traffic spike to cause significant throttling before the system adjusted.
+          Instant Adaptive Capacity reduced this to seconds for on-demand tables. For provisioned
+          tables, the reallocation still has some lag.
+        </p>
+
+        <h3>Critical limitation: not a design substitute</h3>
+        <div class="callout">
+          <p><strong>Adaptive capacity does not eliminate hot partitions.</strong> It only redistributes
+          unused capacity from idle partitions to the hot one. If your hot partition key demands more
+          WPS than the entire table's provisioned capacity, adaptive capacity cannot help. It also
+          cannot exceed the hard per-partition ceiling of 1,000 WCU/second for a <em>single</em>
+          partition key — that limit is architectural, not a provisioning issue. Good partition key
+          design is still required for write-intensive workloads with popular keys.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>DAX (DynamoDB Accelerator)</h2>
+        <p>
+          DAX is a fully managed, in-memory write-through cache for DynamoDB. It sits between your
+          application and DynamoDB and intercepts read and write requests.
+        </p>
+
+        <h3>DAX cache architecture</h3>
+        <pre><code>Application → DAX Cluster (in-memory cache)
+                  ↓ cache miss / write
+              DynamoDB Table
+
+DAX maintains two caches:
+  1. Item cache   — stores individual items by primary key
+                    TTL: configurable (default: 5 minutes)
+  2. Query cache  — stores result sets of Query/Scan operations
+                    TTL: shorter (default: 5 minutes)
+                    Invalidated on writes to affected items</code></pre>
+
+        <h3>Write-through behaviour</h3>
+        <p>
+          When your application writes to DAX, DAX writes to DynamoDB synchronously
+          (<code>write-through</code>) and updates the item cache with the new value. The write
+          is not acknowledged to the application until both the DAX cache and DynamoDB have
+          confirmed the write. This ensures cache consistency but does not reduce write throughput
+          to DynamoDB — DAX is not a write buffer.
+        </p>
+
+        <h3>When DAX helps vs. does not help</h3>
+        <div class="comparison-table-wrapper">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>Scenario</th>
+                <th>DAX helps?</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Read-heavy workload on popular items</td>
+                <td class="positive">Yes — significantly</td>
+                <td>Cache hit rate approaches 100% for hot items; DynamoDB reads drop to near zero</td>
+              </tr>
+              <tr>
+                <td>GetItem latency sensitive (microseconds required)</td>
+                <td class="positive">Yes</td>
+                <td>DAX item cache returns in ~microseconds vs. single-digit milliseconds for DynamoDB</td>
+              </tr>
+              <tr>
+                <td>Write-heavy hot partition</td>
+                <td class="negative">No</td>
+                <td>DAX is write-through — every write still hits DynamoDB; hot partition WCU problem unchanged</td>
+              </tr>
+              <tr>
+                <td>Strongly consistent reads required</td>
+                <td class="negative">No</td>
+                <td>DAX only caches eventually consistent reads; strongly consistent reads bypass DAX</td>
+              </tr>
+              <tr>
+                <td>Infrequently accessed data (long tail)</td>
+                <td class="negative">Low benefit</td>
+                <td>Cache hit rate is low for sparse access patterns; TTL expires before next read</td>
+              </tr>
+              <tr>
+                <td>Fan-out read amplification (celeb post reads)</td>
+                <td class="positive">Yes</td>
+                <td>Same post item read by millions → cache absorbs repeat reads for the TTL window</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>DAX + write sharding combined</h3>
+        <p>
+          For a celebrity social graph, the right architecture combines both:
+        </p>
+        <ul>
+          <li><strong>Write path:</strong> write sharding with N shards — each write goes to a different physical partition, spreading WCU load</li>
+          <li><strong>Read path:</strong> scatter-gather across all shards, but with DAX in front — after the first scatter-gather, all individual shard results are cached. Subsequent reads for the same user within the TTL window are served entirely from DAX memory</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Partition Key Strategy Comparison</h2>
+        <div class="comparison-table-wrapper">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>Strategy</th>
+                <th>Write Distribution</th>
+                <th>Read Complexity</th>
+                <th>Best For</th>
+                <th>Trade-off</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Plain userId</strong></td>
+                <td class="negative">All writes to one partition</td>
+                <td>Simple single-key query</td>
+                <td>Low-traffic users, uniform access</td>
+                <td>Hot partition guaranteed for popular users</td>
+              </tr>
+              <tr>
+                <td><strong>Write sharding (userId#shard_N)</strong></td>
+                <td class="positive">Distributed across N partitions</td>
+                <td>Scatter-gather across N shards</td>
+                <td>Write-heavy hot users (social, counters)</td>
+                <td>N× read amplification; merge complexity</td>
+              </tr>
+              <tr>
+                <td><strong>Time bucketing (userId#YYYY-MM)</strong></td>
+                <td class="positive">Distributed across time</td>
+                <td>Single query for current bucket; multi-query for history</td>
+                <td>Time-series per-user data</td>
+                <td>Cross-period queries require parallel reads</td>
+              </tr>
+              <tr>
+                <td><strong>Type#date composite</strong></td>
+                <td class="positive">Distributed by type and date</td>
+                <td>Single GSI query per day per type</td>
+                <td>Event tables, audit logs, analytics</td>
+                <td>Need separate access pattern for entity-centric reads</td>
+              </tr>
+              <tr>
+                <td><strong>GSI overloading (single-table)</strong></td>
+                <td class="positive">Distributed by entity type</td>
+                <td>Base table + GSI queries</td>
+                <td>Multiple related entity types, complex access patterns</td>
+                <td>Schema complexity; GSI itself can hot-partition</td>
+              </tr>
+              <tr>
+                <td><strong>Adaptive Capacity (no change)</strong></td>
+                <td class="warning">Unchanged — still one partition</td>
+                <td>No change</td>
+                <td>Moderate uneven access; transient spikes</td>
+                <td>Cannot exceed per-partition 1,000 WCU ceiling; not instant</td>
+              </tr>
+              <tr>
+                <td><strong>DAX caching</strong></td>
+                <td class="negative">No impact on write distribution</td>
+                <td>Reduced — cache absorbs repeat reads</td>
+                <td>Read-heavy hot items; microsecond latency</td>
+                <td>Write-through; no help for write hot partitions</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Putting It Together: Celebrity Social Graph Design</h2>
+        <p>
+          For a system where celebrity accounts can generate millions of writes per hour, the
+          production-grade design combines multiple techniques:
+        </p>
+        <span class="code-label">JavaScript Example — Full Hot-Partition-Safe DynamoDB Design</span>
+        <pre><code>// celebrity-activity-table.js — composite key + write sharding + DAX
+import { DynamoDBClient, PutItemCommand, QueryCommand, BatchWriteItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+
+// Use DAX endpoint for the client (transparent caching for reads)
+const daxClient = new DynamoDBClient({
+  region: 'us-east-1',
+  endpoint: process.env.DAX_ENDPOINT, // e.g. "daxs://my-cluster.abc123.dax-clusters.amazonaws.com"
+});
+
+const TABLE = 'CelebrityActivity';
+const WRITE_SHARDS = 64;          // sqrt(4,000,000 peak WPS / 1000) ≈ 63, round up to 64
+const TIME_BUCKET = 'YYYY-MM';    // monthly buckets
+
+/**
+ * Build the composite sharded partition key.
+ *
+ * Final PK format: {userId}#{YYYY-MM}#shard_{N}
+ *   - userId          → logical identity
+ *   - YYYY-MM         → time bucket (prevents unbounded partition growth)
+ *   - shard_N         → write shard (prevents throughput hot partition)
+ */
+function buildWritePK(userId, shardIndex) {
+  const now = new Date();
+  const bucket = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  return `${userId}#${bucket}#shard_${shardIndex}`;
+}
+
+function buildAllPKsForMonth(userId, yearMonth) {
+  return Array.from({ length: WRITE_SHARDS }, (_, i) =>
+    `${userId}#${yearMonth}#shard_${i}`
+  );
+}
+
+/**
+ * Write a fan-out notification.
+ * Random shard → write lands on a random physical partition.
+ */
+async function writeFanOutNotification(fromUserId, toFollowers, content) {
+  // Batch write to DynamoDB (max 25 per BatchWrite)
+  const batches = [];
+  for (let i = 0; i &lt; toFollowers.length; i += 25) {
+    const chunk = toFollowers.slice(i, i + 25);
+    const requests = chunk.map(followerId => {
+      const shardIndex = Math.floor(Math.random() * WRITE_SHARDS);
+      const pk = buildWritePK(followerId, shardIndex);
+      const sk = `NOTIFICATION#${Date.now()}#${fromUserId}`;
+      return {
+        PutRequest: {
+          Item: marshall({
+            PK: pk,
+            SK: sk,
+            followerId,
+            fromUserId,
+            content,
+            shardIndex,
+            createdAt: new Date().toISOString(),
+          }),
+        },
+      };
+    });
+
+    batches.push(
+      daxClient.send(new BatchWriteItemCommand({
+        RequestItems: { [TABLE]: requests },
+      }))
+    );
+  }
+
+  await Promise.all(batches);
+  console.log(`Fan-out: wrote ${toFollowers.length} notifications across ${WRITE_SHARDS} shards`);
+}
+
+/**
+ * Read all notifications for a follower this month.
+ * Scatter-gather across all 64 shards for the current month bucket.
+ * DAX caches each shard's results after first read.
+ */
+async function getFollowerNotifications(followerId, yearMonth, limit = 50) {
+  const allPKs = buildAllPKsForMonth(followerId, yearMonth);
+
+  // Fan out queries across all shards in parallel
+  const shardResults = await Promise.allSettled(
+    allPKs.map(pk =>
+      daxClient.send(new QueryCommand({
+        TableName: TABLE,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+        ExpressionAttributeValues: marshall({
+          ':pk': pk,
+          ':prefix': 'NOTIFICATION#',
+        }),
+        ScanIndexForward: false,
+        Limit: limit,
+      }))
+    )
+  );
+
+  // Merge and sort
+  const items = [];
+  for (const result of shardResults) {
+    if (result.status === 'fulfilled') {
+      (result.value.Items ?? []).forEach(raw => items.push(unmarshall(raw)));
+    }
+  }
+
+  return items
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .slice(0, limit);
+}
+
+// --- Design summary ---
+/*
+ * Table schema:
+ *   PK = {followerId}#{YYYY-MM}#shard_{0..63}   <- composite, sharded, time-bucketed
+ *   SK = NOTIFICATION#{timestamp}#{fromUserId}  <- enables range scan by time
+ *
+ * Partition key entropy:
+ *   1M followers × 12 months × 64 shards = 768M distinct partition keys
+ *   Traffic uniformly distributed → no hot partition possible
+ *
+ * Write throughput:
+ *   64 shards × 1,000 WCU/s = 64,000 WCU/s per user per month bucket
+ *   Handles celebrity fan-out at scale without throttling
+ *
+ * Read amplification:
+ *   64 parallel queries per user per month read
+ *   DAX caches each shard after first hit → subsequent reads from memory
+ */
+</code></pre>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Hot partitions in DynamoDB are a key design problem, not a capacity problem. Throwing more
+          provisioned WCU at a hot partition does not help — the per-partition 1,000 WCU/second
+          ceiling is architectural. The solution hierarchy is: (1) redesign the partition key to
+          distribute writes naturally; (2) add write sharding with a shard suffix if a single logical
+          key must accept high write volume; (3) add time bucketing to prevent temporal hotspots;
+          (4) use DAX for read amplification from popular items. Adaptive Capacity buys time for
+          moderate spikes but is not a substitute for good key design at celebrity-scale traffic.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

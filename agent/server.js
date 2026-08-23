@@ -80,6 +80,11 @@ function loadArticles() {
   }
 
   walk(path.join(HUB_ROOT, 'topics'));
+
+  // Also load any externally ingested pages (from ingest.js → sources/)
+  const sourcesDir = path.join(__dirname, 'sources');
+  if (fs.existsSync(sourcesDir)) walk(sourcesDir);
+
   console.log(`[agent] Loaded ${articles.length} articles`);
   return articles;
 }

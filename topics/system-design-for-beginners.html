@@ -124,6 +124,84 @@
           The goal is always high throughput <em>and</em> low latency simultaneously — they pull
           in opposite directions under load.
         </p>
+
+        <p class="mini-heading">How a DNS resolution + HTTP request works — in code</p>
+        <pre><code class="language-javascript"><span class="code-label">Node.js — DNS lookup + HTTP request simulation</span>
+const dns = require('dns').promises;
+const https = require('https');
+
+async function makeRequest(hostname, path = '/') {
+  // Step 1: DNS resolution — domain → IP
+  const addresses = await dns.lookup(hostname);
+  console.log(`DNS resolved ${hostname} → ${addresses.address}`);
+
+  // Step 2: HTTP request to resolved IP (via hostname for TLS SNI)
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname,
+      port: 443,          // HTTPS default port
+      path,
+      method: 'GET',
+      headers: { Host: hostname }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        console.log(`Status: ${res.statusCode}`);
+        console.log(`Latency concept: time from req.end() to this callback = RTT`);
+        resolve(body.slice(0, 200)); // first 200 chars
+      });
+    });
+
+    req.on('error', reject);
+    const startTime = Date.now();
+    req.end();
+    console.log(`Request sent at ${startTime}ms`);
+  });
+}
+
+// Usage: node server.js
+makeRequest('example.com', '/').then(console.log).catch(console.error);
+</code></pre>
+
+        <p class="mini-heading">Measuring latency and throughput in Node.js</p>
+        <pre><code class="language-javascript"><span class="code-label">Node.js — Latency &amp; Throughput measurement</span>
+const http = require('http');
+
+// Simple server that records and reports its own throughput
+let requestCount = 0;
+let totalLatency = 0;
+
+const server = http.createServer((req, res) => {
+  const start = Date.now();
+
+  // Simulate some processing
+  setTimeout(() => {
+    requestCount++;
+    const latency = Date.now() - start;
+    totalLatency += latency;
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      requestNumber: requestCount,
+      latencyMs: latency,
+      avgLatencyMs: Math.round(totalLatency / requestCount)
+    }));
+  }, Math.random() * 10); // random 0-10ms processing time
+});
+
+server.listen(3000, () => {
+  console.log('Server on port 3000 (default HTTP port)');
+  console.log('Throughput = requests served per second under load');
+});
+
+// Report throughput every 5 seconds
+setInterval(() => {
+  console.log(`Throughput snapshot: ${requestCount} total requests served`);
+}, 5000);
+</code></pre>
       </section>
 
       <!-- ── SECTION 2: SCALING ─────────────────────────────────────────────── -->
@@ -152,6 +230,77 @@
           drops. This avoids paying for idle capacity while surviving traffic spikes — but requires
           <strong>load testing</strong> upfront to calibrate the thresholds correctly.
         </p>
+
+        <p class="mini-heading">Horizontal scaling with Node.js Cluster module</p>
+        <pre><code class="language-javascript"><span class="code-label">Node.js — Cluster module for horizontal scaling on one machine</span>
+const cluster = require('cluster');
+const http = require('http');
+const os = require('os');
+
+const NUM_WORKERS = os.cpus().length; // one worker per CPU core
+
+if (cluster.isPrimary) {
+  console.log(`Primary PID ${process.pid}: spawning ${NUM_WORKERS} workers`);
+
+  // Spawn workers (horizontal scaling across CPU cores)
+  for (let i = 0; i < NUM_WORKERS; i++) {
+    cluster.fork();
+  }
+
+  // Auto-recovery: restart worker if it crashes
+  cluster.on('exit', (worker, code, signal) => {
+    console.log(`Worker ${worker.process.pid} died (code=${code}). Restarting...`);
+    cluster.fork(); // auto-scale back to target count
+  });
+
+  // Simulate auto-scaling signal: if load is high, fork more workers
+  function checkLoad() {
+    const activeWorkers = Object.keys(cluster.workers).length;
+    // In production: check CPU% via os.loadavg() or metrics API
+    const load = os.loadavg()[0]; // 1-minute load average
+    if (load > 0.8 * NUM_WORKERS &amp;&amp; activeWorkers &lt; NUM_WORKERS * 2) {
+      console.log(`High load (${load.toFixed(2)}): scaling out — adding worker`);
+      cluster.fork();
+    }
+  }
+  setInterval(checkLoad, 10_000); // check every 10s
+
+} else {
+  // Worker: runs the actual HTTP server
+  http.createServer((req, res) => {
+    res.end(`Handled by worker PID ${process.pid}\n`);
+  }).listen(3000);
+
+  console.log(`Worker ${process.pid} started`);
+}
+</code></pre>
+
+        <p class="mini-heading">Load balancer simulation — round-robin across N servers</p>
+        <pre><code class="language-javascript"><span class="code-label">Node.js — Simple round-robin load balancer</span>
+const http = require('http');
+const httpProxy = require('http-proxy'); // npm install http-proxy
+
+const servers = [
+  { host: 'localhost', port: 3001 },
+  { host: 'localhost', port: 3002 },
+  { host: 'localhost', port: 3003 },
+];
+
+const proxy = httpProxy.createProxyServer({});
+let current = 0;
+
+const loadBalancer = http.createServer((req, res) => {
+  const target = servers[current % servers.length];
+  current++;
+  console.log(`Routing request ${current} → ${target.host}:${target.port}`);
+  proxy.web(req, res, { target: `http://${target.host}:${target.port}` });
+});
+
+loadBalancer.listen(3000, () => {
+  console.log('Load balancer listening on port 3000');
+  console.log(`Distributing across ${servers.length} backend servers`);
+});
+</code></pre>
       </section>
 
       <!-- ── SECTION 3: ESTIMATION ─────────────────────────────────────────── -->
@@ -170,6 +319,61 @@
           The memory powers-of-2 table is worth memorising: KB = 10³, MB = 10⁶, GB = 10⁹, TB = 10¹², PB = 10¹⁵.
           Most estimation errors come from off-by-1000x mistakes, not arithmetic.
         </p>
+
+        <p class="mini-heading">Back-of-envelope calculator in code</p>
+        <pre><code class="language-javascript"><span class="code-label">JavaScript — Back-of-envelope estimation calculator</span>
+// ── Unit helpers ──────────────────────────────────────────────
+const KB = 1_000;
+const MB = 1_000 * KB;
+const GB = 1_000 * MB;
+const TB = 1_000 * GB;
+const PB = 1_000 * TB;
+
+function formatBytes(bytes) {
+  if (bytes >= PB) return `${(bytes / PB).toFixed(2)} PB`;
+  if (bytes >= TB) return `${(bytes / TB).toFixed(2)} TB`;
+  if (bytes >= GB) return `${(bytes / GB).toFixed(2)} GB`;
+  if (bytes >= MB) return `${(bytes / MB).toFixed(2)} MB`;
+  return `${(bytes / KB).toFixed(2)} KB`;
+}
+
+// ── Estimation function ───────────────────────────────────────
+function estimateSystem({ dau, actionsPerDay, bytesPerRecord, retentionDays, cpuMsPerReq, coresPerServer }) {
+  const writesPerDay  = dau * actionsPerDay;
+  const writesPerSec  = Math.ceil(writesPerDay / 86_400);
+  const storagePerDay = writesPerDay * bytesPerRecord;
+  const totalStorage  = storagePerDay * retentionDays;
+
+  // Resource estimation: req/sec × cpuMs per req ÷ 1000ms per core
+  const coresNeeded   = Math.ceil(writesPerSec * (cpuMsPerReq / 1000));
+  const serversNeeded = Math.ceil(coresNeeded / coresPerServer);
+
+  console.log('═══ Back-of-Envelope Estimation ═══');
+  console.log(`DAU:               ${dau.toLocaleString()}`);
+  console.log(`Writes/day:        ${writesPerDay.toLocaleString()}`);
+  console.log(`Writes/sec (peak): ${writesPerSec.toLocaleString()}`);
+  console.log(`Storage/day:       ${formatBytes(storagePerDay)}`);
+  console.log(`Total storage:     ${formatBytes(totalStorage)} (${retentionDays}d retention)`);
+  console.log(`CPU cores needed:  ${coresNeeded}`);
+  console.log(`Servers needed:    ${serversNeeded} (${coresPerServer} cores each)`);
+}
+
+// ── Twitter example from the article ─────────────────────────
+estimateSystem({
+  dau:            100_000_000,   // 100M DAU
+  actionsPerDay:  10,            // 10 tweets per user per day
+  bytesPerRecord: 500,           // ~500 bytes per tweet (text only)
+  retentionDays:  365,           // 1 year retention
+  cpuMsPerReq:    10,            // 10ms CPU per write
+  coresPerServer: 4,
+});
+
+// ── Photo-heavy estimation ─────────────────────────────────────
+console.log('\n── Adding photo uploads (10% of tweets have 2MB photos) ──');
+const photoUploadsPerDay = 100_000_000 * 10 * 0.10;
+const photoStoragePerDay = photoUploadsPerDay * 2 * MB;
+console.log(`Photo storage/day: ${formatBytes(photoStoragePerDay)}`);
+</code></pre>
       </section>
 
       <!-- ── SECTION 4: CAP ────────────────────────────────────────────────── -->
@@ -193,6 +397,77 @@
           <li><strong>CP (consistency + partition tolerance):</strong> Banking, payments, stock trading — stale reads are unacceptable.</li>
           <li><strong>AP (availability + partition tolerance):</strong> Social media likes, feeds — temporary inconsistency is fine.</li>
         </ul>
+
+        <p class="mini-heading">Simulating CP vs AP behavior during a network partition</p>
+        <pre><code class="language-javascript"><span class="code-label">JavaScript — CAP theorem: CP vs AP node simulation</span>
+class DistributedNode {
+  constructor(id, strategy) {
+    this.id = id;
+    this.strategy = strategy; // 'CP' or 'AP'
+    this.data = new Map();
+    this.partitioned = false; // simulates network partition
+    this.primary = null;
+  }
+
+  setPrimary(node) { this.primary = node; }
+  simulatePartition() { this.partitioned = true; }
+  healPartition() {
+    this.partitioned = false;
+    // On heal: sync from primary (eventual consistency catch-up)
+    if (this.primary) {
+      for (const [k, v] of this.primary.data) this.data.set(k, v);
+    }
+  }
+
+  read(key) {
+    if (this.partitioned) {
+      if (this.strategy === 'CP') {
+        // CP: refuse reads during partition — return error to ensure consistency
+        throw new Error(`[CP Node ${this.id}] PARTITION: refusing read — consistency cannot be guaranteed`);
+      } else {
+        // AP: serve stale data — availability over consistency
+        console.warn(`[AP Node ${this.id}] PARTITION: serving potentially stale data for key "${key}"`);
+        return this.data.get(key) ?? null;
+      }
+    }
+    return this.data.get(key) ?? null;
+  }
+
+  write(key, value) {
+    if (this.partitioned &amp;&amp; this.strategy === 'CP') {
+      throw new Error(`[CP Node ${this.id}] PARTITION: refusing write — cannot guarantee consistency`);
+    }
+    this.data.set(key, value);
+    return { ok: true, node: this.id, value };
+  }
+}
+
+// ── Demonstration ──────────────────────────────────────────────
+const cpNode = new DistributedNode('replica-1', 'CP');
+const apNode = new DistributedNode('replica-2', 'AP');
+
+cpNode.write('balance', 1000);
+apNode.write('likes', 42);
+
+console.log('Before partition:');
+console.log('CP read balance:', cpNode.read('balance')); // 1000
+console.log('AP read likes:',  apNode.read('likes'));   // 42
+
+// Simulate network partition
+cpNode.simulatePartition();
+apNode.simulatePartition();
+
+console.log('\nDuring network partition:');
+try {
+  console.log('CP read:', cpNode.read('balance'));     // throws
+} catch (e) { console.error(e.message); }             // CP refuses
+
+console.log('AP read:', apNode.read('likes'));         // 42 (stale but available)
+
+// Heal
+apNode.healPartition();
+console.log('\nAfter healing: AP node synced, serves fresh data');
+</code></pre>
       </section>
 
       <!-- ── SECTION 5: DATABASE SCALING ───────────────────────────────────── -->
@@ -244,6 +519,127 @@
           Sharding downsides: complex routing code, expensive cross-shard JOINs, harder data consistency.
           Decision rule: try vertical first → master-slave for reads → sharding for writes.
         </p>
+
+        <p class="mini-heading">Database scaling — SQL examples for each step</p>
+        <pre><code class="language-sql"><span class="code-label">SQL — Index, Partition, and Sharding key examples</span>
+-- STEP 1: Indexing (O(N) → O(log N))
+-- Without index: full scan on 100M rows
+EXPLAIN SELECT * FROM users WHERE email = 'alice@example.com';
+-- → Seq Scan on users (cost=0..2M rows)
+
+-- Add a B-tree index
+CREATE INDEX idx_users_email ON users (email);
+-- Now the same query uses the index
+EXPLAIN SELECT * FROM users WHERE email = 'alice@example.com';
+-- → Index Scan using idx_users_email (cost=0..8)
+
+-- STEP 2: Table Partitioning (PostgreSQL range partitioning)
+CREATE TABLE orders (
+  id         BIGSERIAL,
+  user_id    BIGINT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  total      NUMERIC(10,2)
+) PARTITION BY RANGE (created_at);
+
+-- Create monthly partitions — each has its own smaller index
+CREATE TABLE orders_2026_01 PARTITION OF orders
+  FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
+CREATE TABLE orders_2026_02 PARTITION OF orders
+  FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
+-- PostgreSQL routes queries to the right partition automatically
+
+-- STEP 5: Sharding key decision
+-- BAD shard key: created_at (all writes go to one "hot" shard)
+-- GOOD shard key: user_id (distributes writes evenly)
+-- Hash-based: shard_id = HASH(user_id) % 4
+</code></pre>
+
+        <p class="mini-heading">Master-slave routing in Node.js</p>
+        <pre><code class="language-javascript"><span class="code-label">Node.js — Read/write split with master-slave database pool</span>
+const { Pool } = require('pg'); // npm install pg
+
+// Master handles all WRITES
+const master = new Pool({
+  host: 'db-master.internal',
+  port: 5432,
+  database: 'mydb',
+  user: 'app',
+  password: process.env.DB_PASS,
+  max: 10,
+});
+
+// Read replicas handle READ queries (round-robin between replicas)
+const replicas = [
+  new Pool({ host: 'db-replica-1.internal', port: 5432, database: 'mydb', user: 'app', password: process.env.DB_PASS }),
+  new Pool({ host: 'db-replica-2.internal', port: 5432, database: 'mydb', user: 'app', password: process.env.DB_PASS }),
+];
+let replicaIndex = 0;
+
+function getReadPool() {
+  // Round-robin across replicas
+  const pool = replicas[replicaIndex % replicas.length];
+  replicaIndex++;
+  return pool;
+}
+
+// Application-level routing
+async function dbQuery(sql, params, { write = false } = {}) {
+  const pool = write ? master : getReadPool();
+  const result = await pool.query(sql, params);
+  return result.rows;
+}
+
+// Usage
+async function run() {
+  // Write → goes to master
+  await dbQuery(
+    'INSERT INTO orders (user_id, total) VALUES ($1, $2)',
+    [42, 99.99],
+    { write: true }
+  );
+
+  // Read → goes to a replica
+  const orders = await dbQuery(
+    'SELECT * FROM orders WHERE user_id = $1',
+    [42]
+  );
+  console.log('Orders from replica:', orders);
+}
+
+run().catch(console.error);
+</code></pre>
+
+        <p class="mini-heading">Hash-based sharding router</p>
+        <pre><code class="language-javascript"><span class="code-label">JavaScript — Hash-based sharding key router</span>
+const crypto = require('crypto');
+
+const SHARDS = [
+  { id: 0, host: 'shard-0.db.internal' },
+  { id: 1, host: 'shard-1.db.internal' },
+  { id: 2, host: 'shard-2.db.internal' },
+  { id: 3, host: 'shard-3.db.internal' },
+];
+
+function getShardForKey(userId) {
+  // Convert userId to a 32-bit integer via SHA-256, then mod num_shards
+  const hash = crypto.createHash('sha256').update(String(userId)).digest('hex');
+  const num  = parseInt(hash.slice(0, 8), 16); // first 32 bits
+  return SHARDS[num % SHARDS.length];
+}
+
+// Test distribution
+const counts = Array(SHARDS.length).fill(0);
+for (let userId = 1; userId &lt;= 10_000; userId++) {
+  const shard = getShardForKey(userId);
+  counts[shard.id]++;
+}
+
+console.log('Shard distribution across 10,000 user IDs:');
+counts.forEach((count, i) => {
+  console.log(`  Shard ${i}: ${count} users (${(count / 100).toFixed(1)}%)`);
+});
+// Expect roughly 25% each — hash-based gives even distribution
+</code></pre>
       </section>
 
       <!-- ── SECTION 6: SQL vs NoSQL ───────────────────────────────────────── -->
@@ -274,6 +670,73 @@
           <li>Social media posts, likes, activity feeds → <strong>NoSQL</strong></li>
           <li>High availability with eventual consistency acceptable → <strong>NoSQL</strong></li>
         </ul>
+
+        <p class="mini-heading">SQL vs NoSQL — same query in PostgreSQL and MongoDB</p>
+        <pre><code class="language-javascript"><span class="code-label">Node.js — PostgreSQL (SQL) vs MongoDB (NoSQL) side-by-side</span>
+// ── PostgreSQL (SQL) example ──────────────────────────────────
+const { Client } = require('pg');
+
+async function sqlExample() {
+  const client = new Client({ connectionString: 'postgresql://user:pass@localhost/mydb' });
+  await client.connect();
+
+  // Fixed schema — enforced by the database
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id    SERIAL PRIMARY KEY,
+      name  VARCHAR(100) NOT NULL,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      age   INT CHECK (age > 0)
+    )
+  `);
+
+  await client.query(
+    'INSERT INTO users (name, email, age) VALUES ($1, $2, $3)',
+    ['Alice', 'alice@example.com', 30]
+  );
+
+  // JOIN across tables — SQL strength
+  const result = await client.query(`
+    SELECT u.name, COUNT(o.id) AS order_count, SUM(o.total) AS lifetime_value
+    FROM users u
+    JOIN orders o ON u.id = o.user_id
+    WHERE u.age > 25
+    GROUP BY u.id, u.name
+    ORDER BY lifetime_value DESC
+    LIMIT 10
+  `);
+  console.log('Top customers by lifetime value:', result.rows);
+  await client.end();
+}
+
+// ── MongoDB (NoSQL) example ───────────────────────────────────
+const { MongoClient } = require('mongodb');
+
+async function nosqlExample() {
+  const client = new MongoClient('mongodb://localhost:27017');
+  await client.connect();
+  const db = client.db('mydb');
+
+  // Flexible schema — each document can have different fields
+  await db.collection('products').insertMany([
+    { name: 'Laptop', category: 'Electronics', specs: { ram: '16GB', storage: '512GB' }, tags: ['sale'] },
+    { name: 'T-Shirt', category: 'Clothing', sizes: ['S', 'M', 'L'], color: 'blue' },
+    // ↑ Different fields per document — perfect for product catalogs
+  ]);
+
+  // Rich document queries
+  const electronics = await db.collection('products')
+    .find({ category: 'Electronics', 'specs.ram': '16GB' })
+    .project({ name: 1, specs: 1 })
+    .toArray();
+  console.log('Electronics with 16GB RAM:', electronics);
+
+  await client.close();
+}
+
+sqlExample().catch(console.error);
+nosqlExample().catch(console.error);
+</code></pre>
       </section>
 
       <!-- ── SECTION 7: MICROSERVICES ──────────────────────────────────────── -->
@@ -695,6 +1158,725 @@
           <li><a href="./engineering-papers-behind-netflix-uber-amazon-google.html">10 Engineering Papers Behind Netflix, Uber, Amazon, Google</a> — foundational papers to internalize</li>
           <li><a href="./interview/index.html">Interview Questions — System Design Bank</a> — practice problems with full solutions</li>
         </ul>
+      </section>
+
+      <!-- ── 70+ SYSTEM DESIGN TERMS GLOSSARY ─────────────────────────────── -->
+      <section class="content-card" id="glossary">
+        <h2>70+ System Design Terms Every Beginner Should Know</h2>
+        <p>
+          The vocabulary of system design is the prerequisite for everything else. Interviewers at
+          every level — even for junior roles — expect fluency with these terms. This glossary
+          covers every term you will encounter in an interview, organized by concept area.
+        </p>
+
+        <h3>Group A: Fundamentals</h3>
+        <dl>
+          <dt><strong>Latency</strong></dt>
+          <dd>
+            Time elapsed from when a client sends a request to when it receives the first byte of
+            the response. P99 latency (99th percentile) matters more than average — if P99 is 2
+            seconds, 1 in every 100 users waits 2+ seconds on every request. Interviewers always
+            ask: "What latency SLA do you need?" before you start designing.
+          </dd>
+
+          <dt><strong>Throughput</strong></dt>
+          <dd>
+            The number of requests or volume of data a system processes per unit of time (req/s,
+            MB/s). A system with low latency but low throughput is like a fast but narrow highway —
+            it handles one car quickly but can't handle 10,000 simultaneously. Distinguish throughput
+            (actual rate achieved) from bandwidth (theoretical maximum capacity).
+          </dd>
+
+          <dt><strong>Availability</strong></dt>
+          <dd>
+            The percentage of time a system is operational and responsive. "Five nines" (99.999%)
+            = approximately 5 minutes of downtime per year. Formula: availability = uptime /
+            (uptime + downtime). Achieved through redundancy (multiple servers), automatic failover,
+            and health checks that route around failures. Interviewers often ask you to state a
+            target availability and then design to meet it.
+          </dd>
+
+          <dt><strong>Reliability</strong></dt>
+          <dd>
+            A system behaves correctly — returns accurate results — even when some of its components
+            fail. Availability is a subset of reliability: a system can be available (responding to
+            requests) but unreliable (returning wrong data). A reliable system validates inputs,
+            handles partial failures gracefully, and never silently corrupts data.
+          </dd>
+
+          <dt><strong>Scalability</strong></dt>
+          <dd>
+            The ability to handle increasing load without degrading performance proportionally.
+            Vertical scaling: add more CPU/RAM to an existing machine. Horizontal scaling: add more
+            machines. The interview test: "how does your design behave at 10× current load?" A
+            scalable design identifies which component becomes the bottleneck first and has a plan
+            for it.
+          </dd>
+
+          <dt><strong>Fault Tolerance</strong></dt>
+          <dd>
+            The system continues operating — possibly in a degraded mode — when one or more
+            components fail. Achieved via replication (multiple copies of data), redundancy (multiple
+            instances of services), and graceful degradation (return cached results instead of
+            failing entirely). Different from reliability: a fault-tolerant system expects failures
+            and handles them; a brittle system fails catastrophically at the first component failure.
+          </dd>
+        </dl>
+
+        <h3>Group B: Networking and APIs</h3>
+        <dl>
+          <dt><strong>DNS (Domain Name System)</strong></dt>
+          <dd>
+            The distributed system that translates human-readable domain names (google.com) into
+            IP addresses (142.250.80.46). Works like a hierarchical phone book. DNS lookup adds
+            1–100ms on first visit; cached by the OS and browser after that. TTL (Time To Live)
+            controls how long the cache is valid. DNS is the first component in every system design
+            interview: clients resolve the service's domain before they can connect.
+          </dd>
+
+          <dt><strong>TCP vs UDP</strong></dt>
+          <dd>
+            TCP (Transmission Control Protocol): reliable, ordered, connection-oriented. Guarantees
+            delivery and ordering via acknowledgements and retransmissions. Used for: web (HTTP),
+            email, databases. UDP (User Datagram Protocol): fast, unreliable, connectionless.
+            Sends packets and doesn't check if they arrived. Used for: video streaming, gaming,
+            DNS. TCP overhead adds ~1.5× latency vs UDP for the reliability guarantee.
+          </dd>
+
+          <dt><strong>HTTP/HTTPS</strong></dt>
+          <dd>
+            The stateless request-response protocol that powers the web. Every request is
+            independent — the server holds no session memory between requests. HTTPS adds TLS
+            encryption. HTTP/2 multiplexes multiple requests over a single TCP connection, solving
+            the "head-of-line blocking" problem of HTTP/1.1. HTTP/3 uses QUIC (UDP-based) for
+            lower latency on lossy connections.
+          </dd>
+
+          <dt><strong>REST (Representational State Transfer)</strong></dt>
+          <dd>
+            An architectural style for HTTP APIs using standard verbs (GET = read, POST = create,
+            PUT = update, DELETE = remove) applied to resource URLs (/orders/123). Stateless: every
+            request contains all context needed; no server-side session. Contrast with GraphQL
+            (client specifies exact data shape in a query, avoiding over- and under-fetching) and
+            gRPC (binary protocol, typed contracts, supports streaming — preferred for
+            microservice-to-microservice communication).
+          </dd>
+
+          <dt><strong>WebSocket</strong></dt>
+          <dd>
+            A full-duplex communication channel over a single persistent TCP connection. The client
+            sends an HTTP Upgrade request; the server switches protocols. Both sides can send data
+            at any time without the overhead of a new HTTP request per message. Used for: real-time
+            chat, live dashboards, gaming, collaborative editing. Contrast with HTTP long-polling
+            (client holds a request open until the server has data) and SSE (server pushes events,
+            client can't send back).
+          </dd>
+
+          <dt><strong>API Gateway</strong></dt>
+          <dd>
+            A single entry point that receives all client requests and routes them to the appropriate
+            backend service. Handles cross-cutting concerns: authentication, rate limiting, SSL
+            termination, request logging, and response caching. Examples: AWS API Gateway, Kong,
+            Nginx. Prevents every microservice from re-implementing auth and rate limiting
+            independently. The tradeoff: a single API Gateway can become a bottleneck and a single
+            point of failure — run multiple instances behind a load balancer.
+          </dd>
+        </dl>
+
+        <h3>Group C: Caching</h3>
+        <dl>
+          <dt><strong>Cache</strong></dt>
+          <dd>
+            A fast-access store of precomputed or frequently read data sitting between the client
+            and the primary data source. Cache hit: data found in the cache — fast (&lt;1ms for
+            Redis). Cache miss: must fetch from origin — slow (10–100ms for a DB query). Hit rate
+            = hits / total requests; aim for &gt;90% in production. A cache with 80% hit rate
+            reduces DB load by 5×.
+          </dd>
+
+          <dt><strong>Cache-Aside (Lazy Loading)</strong></dt>
+          <dd>
+            The most common caching pattern. On read: check cache first; on miss, fetch from DB
+            and write to cache. On write: update DB and invalidate (or update) the cache entry.
+            The application code manages the cache explicitly. Risk: thundering herd — many
+            concurrent misses on the same key all hit the DB simultaneously. Mitigation: mutex
+            lock on the cache key during population, or probabilistic early expiry.
+          </dd>
+
+          <dt><strong>Write-Through Cache</strong></dt>
+          <dd>
+            Every write goes to the cache AND the database synchronously before the write
+            completes. The cache is always in sync with the database — no stale reads after a
+            write. Drawback: writes are slower (must wait for both cache and DB to acknowledge).
+            Best for read-heavy workloads where stale data is unacceptable.
+          </dd>
+
+          <dt><strong>Write-Behind (Write-Back) Cache</strong></dt>
+          <dd>
+            Writes go to the cache immediately; a background process flushes them to the database
+            asynchronously. Fastest write path — the caller doesn't wait for the DB. Risk: data
+            loss if the cache node fails before the background flush completes. Use only when
+            occasional data loss is acceptable (e.g., view counts, non-critical metrics).
+          </dd>
+
+          <dt><strong>TTL (Time To Live)</strong></dt>
+          <dd>
+            The duration after which a cached entry is considered expired and must be re-fetched
+            from the origin. Short TTL = fresher data but lower hit rate (more origin requests).
+            Long TTL = higher hit rate but potentially stale data. Add random jitter (±10–20% of
+            TTL) to prevent simultaneous expiry of many keys (the thundering herd problem).
+          </dd>
+
+          <dt><strong>Cache Eviction Policy</strong></dt>
+          <dd>
+            The algorithm a cache uses to decide which entries to remove when it reaches capacity.
+            LRU (Least Recently Used): remove the entry not accessed for the longest time — assumes
+            recently accessed items will be accessed again soon. LFU (Least Frequently Used): remove
+            the entry accessed the fewest times — better for stable hot-key workloads. Most
+            production caches (Redis, Memcached) default to LRU or a variant.
+          </dd>
+
+          <dt><strong>CDN (Content Delivery Network)</strong></dt>
+          <dd>
+            A geographically distributed network of servers (edge nodes) that cache and serve
+            static content (images, JS, CSS, video segments) from the node closest to the user.
+            Reduces latency (content is served from 10ms away instead of 100ms) and reduces load
+            on the origin server. Examples: Cloudflare, AWS CloudFront, Akamai, Fastly. Cache
+            invalidation on content change: use versioned URLs (content hash in filename) so old
+            and new versions can coexist during rollout.
+          </dd>
+        </dl>
+
+        <h3>Group D: Databases</h3>
+        <dl>
+          <dt><strong>SQL vs NoSQL</strong></dt>
+          <dd>
+            SQL (relational): fixed schema, tables with rows and columns, ACID transactions,
+            powerful JOINs. Best for: transactional data, complex queries, strict consistency.
+            NoSQL: flexible schema (documents, key-value, graph, time-series), scales horizontally
+            more easily, often sacrifices some ACID properties for throughput. Neither is
+            universally better — choose based on data shape, query patterns, and consistency needs.
+          </dd>
+
+          <dt><strong>ACID Transactions</strong></dt>
+          <dd>
+            Atomicity (all operations in a transaction succeed or all are rolled back),
+            Consistency (the database remains in a valid state before and after), Isolation
+            (concurrent transactions don't interfere with each other), Durability (committed
+            data survives crashes). SQL databases provide ACID by default. Many NoSQL databases
+            sacrifice isolation and consistency for higher write throughput and horizontal scale.
+          </dd>
+
+          <dt><strong>Index</strong></dt>
+          <dd>
+            A data structure that maintains a sorted reference to one or more columns, enabling
+            fast lookups without scanning every row. B-tree index (the default in PostgreSQL,
+            MySQL): efficient for equality and range queries. Hash index: fastest for equality only.
+            Too many indexes slow down writes (each write must update all indexes). Rule of thumb:
+            index columns that appear in WHERE, JOIN, or ORDER BY clauses of slow queries.
+          </dd>
+
+          <dt><strong>Sharding (Horizontal Partitioning)</strong></dt>
+          <dd>
+            Splitting a large database table across multiple database servers, distributing rows
+            by a "shard key." All rows with the same shard key value live on the same shard. Good
+            shard key: high cardinality, even write distribution (user_id works well). Bad shard
+            key: low cardinality or monotonically increasing (timestamps — all new writes go to
+            the last shard). A bad shard key creates a "hot shard" that becomes the bottleneck.
+          </dd>
+
+          <dt><strong>Replication</strong></dt>
+          <dd>
+            Maintaining copies of data on multiple servers for fault tolerance and read scale.
+            Primary-replica (leader-follower): all writes go to the primary; replicas asynchronously
+            copy changes. Reads can be served from any replica. Replication lag: replicas may be
+            milliseconds to seconds behind the primary — reading from a replica immediately after
+            writing to the primary may return stale data ("read-your-own-writes" violation).
+          </dd>
+
+          <dt><strong>CAP Theorem</strong></dt>
+          <dd>
+            A distributed data store can guarantee at most two of: Consistency (every read reflects
+            the most recent write), Availability (every request gets a non-error response), and
+            Partition Tolerance (the system continues working when network partitions split nodes).
+            In practice, partition tolerance is required in any real distributed system — so you
+            choose CP (consistent but may refuse requests during a partition, e.g., HBase) or AP
+            (always available but may return stale data during a partition, e.g., Cassandra, DynamoDB).
+          </dd>
+
+          <dt><strong>OLTP vs OLAP</strong></dt>
+          <dd>
+            OLTP (Online Transaction Processing): row-oriented storage, optimized for frequent
+            small reads/writes (banking transactions, order creation, user authentication). OLAP
+            (Online Analytical Processing): column-oriented storage (Parquet, ORC), optimized for
+            scanning large amounts of data for aggregations (reports, dashboards, ML feature
+            generation). Never use the same database for both at scale — they have opposite storage
+            and query optimization requirements.
+          </dd>
+        </dl>
+
+        <h3>Group E: Distributed Systems</h3>
+        <dl>
+          <dt><strong>Consistent Hashing</strong></dt>
+          <dd>
+            A technique for distributing data or requests across servers such that adding or
+            removing a server only remaps ~1/N of keys (instead of all of them). Servers are placed
+            on a virtual ring by hashing their IDs; each key is assigned to the nearest server
+            clockwise on the ring. Virtual nodes (vnodes) give each physical server multiple
+            positions on the ring for even load distribution. Used in: distributed caches (Redis
+            Cluster), CDN routing, database sharding (Cassandra, DynamoDB).
+          </dd>
+
+          <dt><strong>Leader Election</strong></dt>
+          <dd>
+            The process by which distributed nodes agree on one node to act as the "leader" (primary)
+            that handles writes or coordinates work; all other nodes are followers that replicate.
+            Algorithms: Raft (understandable, widely used), Paxos (more general, harder to
+            implement), ZooKeeper's ZAB. Critical property: exactly one leader at any time — split
+            brain (two nodes both believe they are leader) causes data inconsistency.
+          </dd>
+
+          <dt><strong>Consensus</strong></dt>
+          <dd>
+            Agreement among distributed nodes on a single value, even when some nodes fail or
+            messages are delayed. Required for: leader election, distributed transactions, and
+            replicated state machines. Both Raft and Paxos require a quorum (majority: N/2 + 1
+            nodes) to agree before committing. A cluster of 3 nodes can tolerate 1 failure; 5
+            nodes can tolerate 2 failures.
+          </dd>
+
+          <dt><strong>Eventual Consistency</strong></dt>
+          <dd>
+            In an AP distributed system, all replicas will converge to the same value given
+            sufficient time and no new updates — but reads during the convergence window may return
+            stale data. DNS is the canonical example (a DNS record change takes minutes to propagate
+            globally). Appropriate for: shopping carts, social media feeds, user profiles, likes/view
+            counts. Not appropriate for: bank balances, inventory levels, appointment booking.
+          </dd>
+
+          <dt><strong>Idempotency</strong></dt>
+          <dd>
+            An operation that produces the same result whether performed once or N times. Critical
+            for retry safety — if a payment API call times out (did it go through?), retrying must
+            not double-charge. Implemented via idempotency keys: the client generates a unique key
+            per operation and includes it in the request; the server persists the key + result and
+            returns the stored result on duplicates. GET requests are inherently idempotent; POST
+            requests are not unless explicitly designed to be.
+          </dd>
+
+          <dt><strong>Exactly-Once Delivery</strong></dt>
+          <dd>
+            A guarantee that a message is processed exactly once — neither dropped (at-most-once)
+            nor processed multiple times (at-least-once). Extremely hard to achieve in distributed
+            systems because network failures make it impossible to distinguish "message not delivered"
+            from "message delivered but ack lost." The practical solution: at-least-once delivery
+            (guaranteed delivery, possible duplicates) + idempotent message processing (duplicates
+            are safe). Kafka's transactional producers provide this combination.
+          </dd>
+        </dl>
+
+        <h3>Group F: Load Balancing and Scaling</h3>
+        <dl>
+          <dt><strong>Load Balancer</strong></dt>
+          <dd>
+            Distributes incoming requests across multiple server instances to prevent any single
+            server from being overwhelmed. Layer 4 (transport-level): routes by TCP/UDP port —
+            fast but cannot inspect request content. Layer 7 (application-level): routes by URL
+            path, HTTP headers, or cookies — enables smart routing (e.g., send /api to API servers,
+            /static to CDN). Algorithms: round-robin (equal distribution), least-connections (route
+            to the least-loaded server), IP hash (same client always reaches the same server —
+            "sticky sessions").
+          </dd>
+
+          <dt><strong>Horizontal Scaling (Scale Out)</strong></dt>
+          <dd>
+            Adding more server instances to handle more load. Each instance handles a share of
+            the traffic. Preferred for stateless services (web servers, API servers, worker
+            processes) — any instance can handle any request. Challenge: stateful services
+            (databases, caches with session data) require careful coordination when adding instances
+            because data must be redistributed.
+          </dd>
+
+          <dt><strong>Vertical Scaling (Scale Up)</strong></dt>
+          <dd>
+            Adding more CPU, RAM, or storage to an existing server. Simpler operationally (no
+            distributed complexity) but has a hard ceiling (the largest available machine) and
+            creates a single point of failure. Suitable for: databases where horizontal scaling
+            is complex, legacy applications that cannot run on multiple instances. The tradeoff:
+            vertical scaling is bounded; horizontal scaling is not.
+          </dd>
+
+          <dt><strong>Auto-Scaling</strong></dt>
+          <dd>
+            Automatically adding or removing server instances based on real-time load metrics
+            (CPU utilization, request rate, queue depth). AWS Auto Scaling Groups, GCP Managed
+            Instance Groups. Key configuration: scale-out threshold (e.g., add instance when CPU
+            &gt;70% for 3 minutes), scale-in threshold (remove instance when CPU &lt;30% for
+            10 minutes), cooldown period (wait 5 minutes after scaling before scaling again —
+            prevents thrashing).
+          </dd>
+
+          <dt><strong>Stateless vs Stateful Services</strong></dt>
+          <dd>
+            Stateless: each request is fully self-contained; any server instance can handle it
+            (REST API servers, web servers). Stateful: the server holds per-client state between
+            requests (WebSocket connections, gaming servers, streaming sessions). Stateless services
+            are trivially horizontally scalable — add more instances, route requests to any of them.
+            Stateful services require sticky routing (same client always reaches the same instance)
+            or externalized state (move state to Redis so any instance can access it).
+          </dd>
+
+          <dt><strong>Reverse Proxy</strong></dt>
+          <dd>
+            A server that sits in front of application servers and forwards incoming requests to
+            them. Handles: SSL termination (decrypts HTTPS, forwards HTTP internally), compression,
+            caching of static responses, and load balancing. Nginx and Caddy are the most common.
+            Contrast with a forward proxy (sits in front of clients, not servers — used for
+            corporate internet filtering or anonymization).
+          </dd>
+        </dl>
+
+        <h3>Group G: Messaging and Events</h3>
+        <dl>
+          <dt><strong>Message Queue</strong></dt>
+          <dd>
+            An asynchronous buffer between services. The producer writes messages to the queue
+            without waiting for processing; the consumer reads and processes messages independently
+            at its own pace. Decouples services — the producer doesn't need to know which service
+            will consume its messages. Examples: RabbitMQ, Amazon SQS. Key properties: durability
+            (messages persist across broker restarts), ordering (FIFO or priority), delivery
+            guarantee (at-least-once: consumer must ack; at-most-once: no ack).
+          </dd>
+
+          <dt><strong>Pub/Sub (Publish-Subscribe)</strong></dt>
+          <dd>
+            A messaging pattern where publishers send events to named "topics" and all subscribers
+            to that topic receive a copy. One-to-many fan-out: one "order placed" event simultaneously
+            reaches the inventory service, billing service, and email service. Contrast with
+            point-to-point queues where each message is consumed by exactly one consumer. Google
+            Pub/Sub and Kafka support pub/sub patterns.
+          </dd>
+
+          <dt><strong>Event Streaming</strong></dt>
+          <dd>
+            A persistent, replayable, ordered log of events that consumers can read at their own
+            pace from any offset. Kafka is the canonical example. Unlike message queues (message
+            is deleted after consumption), event streams retain messages for a configurable period
+            (days to weeks). A new consumer can replay from the beginning of the log — useful for
+            rebuilding derived data stores or replaying events after a bug fix.
+          </dd>
+
+          <dt><strong>Dead Letter Queue (DLQ)</strong></dt>
+          <dd>
+            A secondary queue that receives messages that have failed processing after N retry
+            attempts. Prevents a single bad message from blocking the entire queue forever (a
+            "poison pill"). Production must-have: monitor DLQ message count — a spike indicates
+            a systematic processing failure. DLQ messages should be inspected, the root cause
+            fixed, and then re-processed.
+          </dd>
+        </dl>
+
+        <h3>Group H: Reliability Patterns</h3>
+        <dl>
+          <dt><strong>Circuit Breaker</strong></dt>
+          <dd>
+            A pattern that stops sending requests to a failing downstream service, preventing
+            cascade failures. States: CLOSED (normal operation), OPEN (downstream failing — reject
+            all requests immediately with an error), HALF-OPEN (test: send one request; if it
+            succeeds, close the circuit). Without a circuit breaker, every thread waits for the
+            failing service to timeout, exhausting your thread pool and taking down your own service.
+            Netflix Hystrix popularized this pattern; Resilience4j is the modern Java alternative.
+          </dd>
+
+          <dt><strong>Rate Limiting</strong></dt>
+          <dd>
+            Controls the number of requests a client can make in a given time window. Algorithms:
+            token bucket (tokens accumulate up to a maximum; each request consumes one token —
+            allows controlled bursts), leaky bucket (requests are processed at a fixed rate —
+            smooths output but queues bursts), sliding window counter (counts requests in the
+            last N seconds — accurate, implements well in Redis with INCR + EXPIRE). Protects
+            against: DoS attacks, abusive clients, and accidental retry storms from your own services.
+          </dd>
+
+          <dt><strong>Retry with Exponential Backoff</strong></dt>
+          <dd>
+            On failure, wait before retrying; double the wait on each attempt (1s → 2s → 4s →
+            8s). Prevents retry storms where all clients retry simultaneously, amplifying load on
+            a struggling service. Add jitter (random ±50% of wait time) to desynchronize retries
+            from different clients. Always set a maximum retry count — infinite retries can
+            accidentally DDoS your own downstream service.
+          </dd>
+
+          <dt><strong>Bulkhead</strong></dt>
+          <dd>
+            Isolate components into separate resource pools (thread pools, connection pools,
+            memory) so one failing component cannot exhaust resources for all others. Named after
+            the watertight compartments in a ship's hull. Example: Netflix's Hystrix gave each
+            downstream service its own thread pool — if the recommendations service was slow,
+            it could not consume the threads reserved for the payment service.
+          </dd>
+
+          <dt><strong>Timeout</strong></dt>
+          <dd>
+            The maximum time to wait for a response before treating the request as failed. Always
+            set timeouts on all network calls — a thread waiting indefinitely for a response is a
+            hung thread that never releases its resources, eventually exhausting the thread pool.
+            Set separate timeouts for connection establishment (typically 1–3s) and read completion
+            (depends on operation — typically 5–30s). Combine with retries and circuit breaker
+            for full resilience.
+          </dd>
+
+          <dt><strong>Health Check</strong></dt>
+          <dd>
+            A lightweight HTTP endpoint (GET /health or GET /readyz) that load balancers and
+            orchestrators call periodically to verify an instance is alive and ready for traffic.
+            Liveness probe: is the process alive and not deadlocked? Returns 200 if yes, triggers
+            a restart if consistently failing. Readiness probe: is the service ready to accept
+            requests? (DB connection established, warmup complete.) Load balancer removes an
+            instance from rotation until readiness probe passes.
+          </dd>
+        </dl>
+
+        <h3>Group I: Storage</h3>
+        <dl>
+          <dt><strong>Object Storage</strong></dt>
+          <dd>
+            Stores unstructured data (files, images, videos, backups) as discrete objects with
+            metadata, addressable by a unique key. Infinitely scalable — no hierarchy (flat
+            namespace, though key prefixes simulate directories). Examples: Amazon S3, Google
+            Cloud Storage. Not suitable for transactional data or frequent byte-range updates.
+            Access latency: tens of milliseconds — slower than block storage but orders of
+            magnitude cheaper per GB.
+          </dd>
+
+          <dt><strong>Block Storage</strong></dt>
+          <dd>
+            Raw storage divided into fixed-size blocks (typically 4KB–512KB), addressable by
+            block number. Fast random read/write — databases use block storage because they
+            need to update 4KB pages within large files without rewriting the whole file.
+            Examples: AWS EBS, Google Persistent Disk. Attached to a single VM at a time
+            (unlike object storage, which is shared).
+          </dd>
+
+          <dt><strong>File Storage (NFS/EFS)</strong></dt>
+          <dd>
+            A shared filesystem accessible by multiple servers simultaneously via NFS or SMB
+            protocols. Presents a familiar directory tree. Suitable for: legacy applications
+            that expect a filesystem, shared assets that multiple processes need to read/write.
+            Slower than block storage for database workloads. Examples: AWS EFS, Azure Files.
+          </dd>
+
+          <dt><strong>Data Partitioning</strong></dt>
+          <dd>
+            Dividing a large dataset into smaller independent subsets stored on separate storage
+            nodes. Vertical partitioning: split columns across tables (e.g., rarely-used large
+            columns in a separate table). Horizontal partitioning (sharding): distribute rows
+            across servers by a key. Done to exceed single-node storage capacity or processing
+            throughput. The partition key choice determines whether queries can be efficiently
+            routed to a single partition (fast) or must fan out to all partitions (slow).
+          </dd>
+        </dl>
+
+        <h3>Group J: Security</h3>
+        <dl>
+          <dt><strong>Authentication vs Authorization</strong></dt>
+          <dd>
+            Authentication (AuthN): verifying identity — "who are you?" (login, token validation).
+            Authorization (AuthZ): verifying permissions — "what are you allowed to do?" (role
+            checks, access control lists). Always authenticate before authorizing. OAuth 2.0 is
+            an authorization framework; OpenID Connect (OIDC) adds identity (authentication) on
+            top of OAuth 2.0. Confusing the two is a security design flaw.
+          </dd>
+
+          <dt><strong>JWT (JSON Web Token)</strong></dt>
+          <dd>
+            A compact, URL-safe token containing claims (user_id, roles, expiry timestamp) signed
+            with a secret key (HMAC) or private key (RSA/ECDSA). The server validates the signature
+            without a database lookup — enabling stateless, horizontally scalable authentication.
+            Risk: JWTs cannot be revoked before their expiry time without a token blocklist
+            (which reintroduces the database lookup). Keep JWT lifetime short (15–60 minutes);
+            use refresh tokens for longer sessions.
+          </dd>
+
+          <dt><strong>TLS (Transport Layer Security)</strong></dt>
+          <dd>
+            The cryptographic protocol providing encrypted and authenticated communication over
+            TCP — "the S in HTTPS." TLS 1.3 is the current standard. Terminates at the load
+            balancer or application server; traffic within the data center may be unencrypted
+            unless you implement mTLS (mutual TLS — both sides authenticate). Always use TLS 1.2+;
+            TLS 1.0 and 1.1 have known vulnerabilities and should be disabled.
+          </dd>
+
+          <dt><strong>SQL Injection</strong></dt>
+          <dd>
+            An attack where malicious SQL code is injected into a query through unsanitized user
+            input. Example: <code>SELECT * FROM users WHERE name = '" + userInput + "'"</code>
+            — if userInput is <code>'; DROP TABLE users; --</code>, the database executes a
+            table drop. Prevention: always use parameterized queries or prepared statements —
+            never concatenate user input into SQL strings. SQL injection is one of the oldest
+            vulnerabilities and still appears regularly in production systems.
+          </dd>
+        </dl>
+
+        <h3>Group K: Monitoring and Observability</h3>
+        <dl>
+          <dt><strong>Metrics</strong></dt>
+          <dd>
+            Numerical time-series measurements that quantify system health: request rate (req/s),
+            error rate (%), latency percentiles (P50, P95, P99), CPU utilization, memory usage,
+            queue depth. Stored in time-series databases (Prometheus, Datadog). Metrics enable
+            alerting (page on-call when error rate exceeds 1% for 5 minutes) and dashboards for
+            trend analysis.
+          </dd>
+
+          <dt><strong>Logs</strong></dt>
+          <dd>
+            Timestamped textual records of individual events. Structured logs (JSON format) are
+            machine-searchable; unstructured text logs are not. Aggregated in ELK stack
+            (Elasticsearch + Logstash + Kibana) or Splunk. Log levels: DEBUG (verbose development
+            output), INFO (normal operations), WARN (unexpected but recoverable), ERROR (failure
+            requiring attention), FATAL (process must exit). Never log PII or secrets.
+          </dd>
+
+          <dt><strong>Distributed Tracing</strong></dt>
+          <dd>
+            Tracks a single user request as it flows through multiple microservices. Each service
+            creates a "span" recording the operation name, start/end time, and parent span ID;
+            all spans from one request form a tree called a "trace." Implemented with OpenTelemetry
+            + Jaeger or Zipkin. Answers "why is this specific request slow across 8 services?" —
+            a question that aggregate metrics cannot answer.
+          </dd>
+
+          <dt><strong>SLI / SLO / SLA</strong></dt>
+          <dd>
+            SLI (Service Level Indicator): a measured metric quantifying reliability (e.g.,
+            request success rate = 99.7%). SLO (Service Level Objective): the internal target
+            (e.g., success rate ≥ 99.9%). Error budget = 100% − SLO = 0.1% of requests may
+            fail. SLA (Service Level Agreement): the contractual commitment to customers with
+            financial penalties for breach. Design systems to meet SLOs with sufficient margin
+            to avoid breaching SLAs.
+          </dd>
+        </dl>
+
+        <h3>Group L: Advanced Concepts</h3>
+        <dl>
+          <dt><strong>Microservices</strong></dt>
+          <dd>
+            An architectural style where an application is decomposed into small, independently
+            deployable services, each owning its own data store. Benefits: independent deployment
+            (update one service without touching others), independent scaling, and failure isolation
+            (one service crash doesn't bring down the monolith). Costs: distributed systems
+            complexity — network latency between services, partial failure scenarios, distributed
+            transactions across services.
+          </dd>
+
+          <dt><strong>Service Mesh</strong></dt>
+          <dd>
+            An infrastructure layer that handles all service-to-service communication transparently,
+            without requiring changes to application code. Capabilities: mTLS between services,
+            automatic retries, circuit breaking, load balancing, and observability. Implemented
+            with sidecar proxies (Envoy) injected alongside every service pod. Istio and Linkerd
+            are the main implementations. Tradeoff: significant operational complexity and
+            resource overhead — only justified at organizations running dozens or hundreds of
+            microservices.
+          </dd>
+
+          <dt><strong>Backpressure</strong></dt>
+          <dd>
+            A mechanism for a consumer to signal to a producer to slow down when the consumer
+            cannot keep up. Without backpressure, a fast producer overwhelms a slow consumer —
+            memory overflows, messages are dropped, or the consumer crashes. Implementations:
+            bounded queues (producer blocks when queue is full), reactive streams protocols
+            (consumer explicitly requests N more items from producer). Critical in stream
+            processing pipelines where ingestion rate can spike unpredictably.
+          </dd>
+
+          <dt><strong>Fan-Out</strong></dt>
+          <dd>
+            One event or request triggers parallel work in multiple downstream systems. Example:
+            one "user followed" event triggers: notification service, feed ranking service, and
+            analytics service simultaneously. Fan-out-on-write: when an event occurs, proactively
+            write derived data to all subscribers' stores (fast reads, slow writes at scale for
+            celebrities with millions of followers). Fan-out-on-read: compute derived data at
+            query time (slow reads, simple writes). Hybrid: use write fan-out for regular users,
+            read fan-out for celebrities.
+          </dd>
+
+          <dt><strong>Saga Pattern</strong></dt>
+          <dd>
+            A pattern for managing distributed transactions across multiple services without
+            two-phase commit (2PC). Each step in the saga has a compensating transaction (rollback
+            action). If step N fails, steps N-1 through 1 are compensated in reverse order.
+            Two variants: orchestration saga (one central orchestrator calls each step in order)
+            and choreography saga (each service publishes an event that triggers the next service).
+            Used for: order placement (reserve inventory → charge payment → confirm order; if
+            payment fails → release inventory).
+          </dd>
+
+          <dt><strong>CQRS (Command Query Responsibility Segregation)</strong></dt>
+          <dd>
+            Separates the write model (commands that change state) from the read model (queries
+            that return data). The write service accepts commands, validates them, and appends
+            events to the event store. Read services maintain optimized view models updated
+            asynchronously from those events. Enables: independent scaling of read and write
+            paths, read models optimized for specific query patterns (e.g., a denormalized
+            "user dashboard" view model). Adds eventual consistency between write and read.
+            Justified only when read and write workloads have drastically different shapes.
+          </dd>
+
+          <dt><strong>Back-of-Envelope Estimation</strong></dt>
+          <dd>
+            Quick order-of-magnitude calculations to validate the feasibility of a design
+            before committing to it. Example: "10M daily active users × 5 messages/day × 500
+            bytes/message = 25 GB/day of writes = ~300 KB/s write throughput — easily handled
+            by a single Kafka partition." Interviewers test whether you can sanity-check your
+            own design. Key numbers to memorize: 1M req/day ≈ 12 req/s; SSD: ~100K IOPS;
+            network within datacenter: ~0.5ms round-trip; 1 Gbps ≈ 125 MB/s.
+          </dd>
+
+          <dt><strong>Heartbeat</strong></dt>
+          <dd>
+            A periodic signal a node sends to indicate it is alive. If no heartbeat arrives
+            within a timeout window (e.g., 30 seconds), the coordinator considers the node dead
+            and reassigns its responsibilities. Used in: Kafka broker registration with the
+            controller, Kubernetes kubelet reporting to the control plane, ZooKeeper session
+            maintenance. The heartbeat interval and timeout must be tuned carefully — too short
+            causes false failures during GC pauses; too long causes slow failure detection.
+          </dd>
+
+          <dt><strong>Gossip Protocol</strong></dt>
+          <dd>
+            A decentralized peer-to-peer protocol where each node periodically selects a few
+            random peers and exchanges state information. Like a rumor spreading through a social
+            network — it reaches all nodes in O(log N) communication rounds, even if any
+            individual node is unreachable. Used for: cluster membership tracking (who is up?),
+            failure detection, and configuration propagation. Examples: Cassandra, Consul, Amazon
+            S3's internal metadata system. Eventual convergence makes gossip protocols AP
+            (available + partition-tolerant) but not immediately consistent.
+          </dd>
+
+          <dt><strong>Two-Phase Commit (2PC)</strong></dt>
+          <dd>
+            A distributed protocol for atomic transactions spanning multiple nodes. Phase 1
+            (Prepare): a coordinator asks all participant nodes if they are ready to commit.
+            Phase 2 (Commit/Abort): if all replied "yes," the coordinator sends Commit to all;
+            if any replied "no" or timed out, sends Abort. Problems: the coordinator is a
+            single point of failure; participants are blocked (holding locks) while waiting for
+            Phase 2, which can be seconds during network partitions. Not used in modern
+            large-scale systems — replaced by sagas and eventual consistency patterns.
+          </dd>
+
+          <dt><strong>Bloom Filter</strong></dt>
+          <dd>
+            A space-efficient probabilistic data structure for testing whether an element is a
+            member of a set. False positives are possible (may say "in set" when it's not); false
+            negatives are impossible (if it says "not in set," it's definitely not in the set).
+            Uses ~10 bits per element to represent a set of 1 billion items in ~1.2 GB. Used in:
+            Cassandra (avoid disk lookup for keys that definitely don't exist), Chrome Safe
+            Browsing (check if a URL is in the malicious URL set without downloading the full
+            list), HBase (skip SSTables that don't contain the requested key).
+          </dd>
+        </dl>
       </section>
 
       <!-- ── TAKEAWAY ───────────────────────────────────────────────────────── -->

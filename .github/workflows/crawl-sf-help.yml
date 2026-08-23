@@ -1,0 +1,92 @@
+name: Crawl Salesforce Help Articles
+
+on:
+  workflow_dispatch:
+    inputs:
+      root_url:
+        description: 'Root Salesforce Help URL to crawl'
+        required: false
+        default: 'https://help.salesforce.com/s/articleView?id=ind.admin_life_sciences.htm&type=5'
+      max_depth:
+        description: 'Max depth (1=root only, 2=root+children, 3=root+grandchildren)'
+        required: false
+        default: '3'
+      max_pages:
+        description: 'Max total pages to crawl'
+        required: false
+        default: '100'
+      delay_ms:
+        description: 'Delay between requests in ms (respects rate limits)'
+        required: false
+        default: '1500'
+  schedule:
+    - cron: '0 3 * * 0'   # Every Sunday at 3am UTC
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/scripts/package.json
+
+      - name: Install Node dependencies
+        working-directory: .github/scripts
+        run: npm install
+
+      - name: Install Playwright Chromium + system deps
+        working-directory: .github/scripts
+        run: npx playwright install chromium --with-deps
+
+      - name: Run crawler
+        working-directory: .github/scripts
+        env:
+          ROOT_URL:   ${{ github.event.inputs.root_url || 'https://help.salesforce.com/s/articleView?id=ind.admin_life_sciences.htm&type=5' }}
+          MAX_DEPTH:  ${{ github.event.inputs.max_depth || '3' }}
+          MAX_PAGES:  ${{ github.event.inputs.max_pages || '100' }}
+          DELAY_MS:   ${{ github.event.inputs.delay_ms || '1500' }}
+          OUTPUT_DIR: ../../crawled-output
+        run: node crawl-sf-help.js
+
+      - name: Show crawl summary
+        run: |
+          echo "=== Crawl Summary ==="
+          python3 -c "
+          import json, sys
+          with open('crawled-output/_index.json') as f:
+              d = json.load(f)
+          print(f'Total pages crawled : {d[\"totalCrawled\"]}')
+          print(f'Root URL            : {d[\"rootUrl\"]}')
+          print(f'Generated at        : {d[\"generatedAt\"]}')
+          print()
+          print('Pages by depth:')
+          from collections import Counter
+          depths = Counter(p[\"depth\"] for p in d[\"pages\"])
+          for depth in sorted(depths):
+              print(f'  depth {depth}: {depths[depth]} pages')
+          "
+
+      - name: Upload crawled output as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sf-help-crawled-${{ github.run_number }}
+          path: crawled-output/
+          retention-days: 30
+
+      - name: Commit crawled content to repo
+        # Only auto-commit on scheduled runs to avoid noisy commits on manual runs
+        if: github.event_name == 'schedule'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add crawled-output/
+          git diff --staged --quiet || git commit -m "chore: update crawled SF Help content [skip ci]"
+          git push

@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kafka Deep Dive: Event Ordering, Duplicate Processing, and Offset Management | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Data center with glowing server racks" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Kafka · Backend · 28 min</span>
+          </div>
+        </figure>
+        <h1>Kafka Deep Dive: Event Ordering, Duplicate Processing, and Offset Management</h1>
+        <p class="summary">
+          Two of the most common Kafka production bugs, covered in one definitive guide. Events
+          arriving out of sequence and the same event being processed twice are not random failures —
+          they are predictable consequences of misusing Kafka's guarantees. This article explains
+          exactly why they happen and how to prevent them with the right partition key strategy,
+          offset commit discipline, and idempotent consumer design.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Kafka · Event Streaming · Distributed Systems</span>
+          <span class="meta-item">Published: 2026-07-29</span>
+        </div>
+      </header>
+
+      <!-- ── Story Cards ───────────────────────────────────────────── -->
+
+      <section class="story-card">
+        <span class="section-label">Story 1 · "Order Delivered" before "Order Shipped"</span>
+        <p>
+          An e-commerce platform publishes lifecycle events — <code>ORDER_PLACED</code>,
+          <code>ORDER_SHIPPED</code>, <code>ORDER_DELIVERED</code> — to a Kafka topic. A
+          notification service consumes those events and sends push notifications to customers.
+          One morning, customers started receiving "Your order has been delivered!" messages before
+          "Your order has shipped!" messages. Some customers called support in a panic, convinced
+          the courier had marked a delivery incorrectly.
+        </p>
+        <p>
+          The root cause: the partition key was <code>userId</code>, not <code>orderId</code>.
+          Three consecutive events for the same order landed on three different partitions — each
+          with its own independent commit log and its own independent consumer thread. Thread 2
+          (the <code>DELIVERED</code> event) simply ran faster than Thread 1 (the
+          <code>SHIPPED</code> event) that day under load.
+        </p>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story 2 · Payment processed twice</span>
+        <p>
+          A payments team built a Kafka consumer that processed <code>PAYMENT_INITIATED</code>
+          events and debited customer accounts. During a deployment, the consumer crashed between
+          processing an event and committing its offset. On restart, Kafka replayed from the last
+          committed offset — the consumer saw the same <code>PAYMENT_INITIATED</code> event again
+          and debited the customer a second time.
+        </p>
+        <p>
+          With auto-commit enabled (the default), the offset had not yet been committed — auto-commit
+          runs on a timer, not on successful processing. The team had unknowingly accepted at-least-once
+          delivery without building an idempotent consumer to handle it. The fix was not to prevent
+          replays (you cannot), but to make the consumer safe to replay.
+        </p>
+      </section>
+
+      <!-- ── Core Guarantees ───────────────────────────────────────── -->
+
+      <section class="content-card">
+        <h2>Kafka's Core Guarantees (and Limits)</h2>
+        <p class="lead">
+          Kafka makes strong guarantees — but only within specific scopes. Understanding where the
+          guarantees apply (and where they do not) is the foundation of every design decision below.
+        </p>
+
+        <h3>Within-partition ordering guarantee</h3>
+        <p>
+          Kafka guarantees that messages within a single partition are stored and delivered in the
+          order they were produced. This is the only ordering guarantee Kafka makes. There is no
+          ordering guarantee across partitions. A topic with 6 partitions has 6 independent,
+          ordered commit logs. A consumer reading from all 6 partitions sees events in an interleaved
+          sequence that respects per-partition order but not global order.
+        </p>
+        <div class="callout">
+          <p><strong>Mental model:</strong> Think of a topic as a set of N conveyor belts (partitions),
+          each moving in order. Messages placed on the same belt stay in order relative to each other.
+          Messages placed on different belts have no ordering relationship — the belts move at
+          independent speeds.</p>
+        </div>
+
+        <h3>At-least-once delivery by default</h3>
+        <p>
+          By default, a Kafka consumer with <code>enable.auto.commit=true</code> (the default)
+          commits offsets on a timer (<code>auto.commit.interval.ms</code>, default 5 seconds).
+          If the consumer processes a message and crashes before the timer fires, the offset is not
+          committed. On restart, the consumer group resumes from the last committed offset —
+          replaying messages that were already processed. This is <strong>at-least-once delivery</strong>:
+          every message is guaranteed to be processed at least once, but possibly more than once.
+        </p>
+
+        <h3>What an offset actually is</h3>
+        <p>
+          An offset is a monotonically increasing integer that identifies a message's position within
+          a partition. The first message in a partition has offset 0; the next has offset 1, and so
+          on. Offsets are per-partition — partition 0 has its own offset sequence, partition 1 has
+          its own, they are independent.
+        </p>
+        <p>
+          Consumer groups track their read progress using the internal topic
+          <code>__consumer_offsets</code>. When a consumer commits an offset, it writes
+          <code>(group-id, topic, partition) → committed-offset</code> into this topic. On restart
+          or rebalance, the group resumes each partition from the last committed offset.
+        </p>
+        <pre><code># Visualising the offset structure
+
+Topic: order-events   (6 partitions)
+
+Partition 0: [0: ORDER_PLACED] [1: ORDER_PLACED] [2: ORDER_CANCELLED]
+Partition 1: [0: ORDER_SHIPPED] [1: ORDER_SHIPPED] [2: ORDER_PLACED]
+Partition 2: [0: ORDER_DELIVERED] [1: ORDER_PLACED] ...
+
+__consumer_offsets (internal Kafka topic):
+  group=notifications, topic=order-events, partition=0 → 3  (next to read: offset 3)
+  group=notifications, topic=order-events, partition=1 → 2
+  group=notifications, topic=order-events, partition=2 → 1</code></pre>
+
+        <h3>Consumer groups and partition assignment</h3>
+        <p>
+          A consumer group is a set of consumer instances that together consume all partitions of a
+          topic. Kafka assigns each partition to exactly one consumer instance in the group at any
+          point in time. If there are 6 partitions and 3 consumer instances, each instance handles
+          2 partitions. If an instance dies, Kafka triggers a <strong>rebalance</strong> and
+          redistributes its partitions to surviving instances. Rebalances are a major source of
+          ordering and duplicate problems — covered in detail below.
+        </p>
+      </section>
+
+      <!-- ── The Ordering Problem ───────────────────────────────────── -->
+
+      <section class="content-card">
+        <h2>The Ordering Problem</h2>
+
+        <h3>Wrong partition key causes cross-partition ordering failures</h3>
+        <p>
+          Kafka routes messages to partitions using a hash of the message key:
+          <code>partition = hash(key) % numPartitions</code>. Messages with the same key always
+          land on the same partition and are therefore ordered relative to each other. Messages with
+          different keys may land on different partitions — and Kafka makes no ordering promise
+          between them.
+        </p>
+        <p>
+          The canonical mistake: using <code>userId</code> as the partition key for order lifecycle
+          events. A user may have multiple orders in flight simultaneously. Events for
+          <code>order-A</code> and <code>order-B</code> both hash to the same partition (same
+          <code>userId</code>), but the events for a single order are not guaranteed to be on the
+          same partition relative to each other if you accidentally use different keys.
+        </p>
+        <p>
+          Worse: if the producer sends events for the same order without a key (null key), Kafka
+          uses round-robin or sticky partitioning — the <code>ORDER_PLACED</code>,
+          <code>ORDER_SHIPPED</code>, and <code>ORDER_DELIVERED</code> events for order 123 end up
+          on partitions 0, 3, and 5 respectively. Each partition's consumer processes them
+          independently and at different speeds.
+        </p>
+
+        <h3>Rebalancing breaks ordering mid-stream</h3>
+        <p>
+          Even with a correct partition key, rebalances introduce a window of risk. When a
+          consumer instance is added, removed, or crashes, Kafka reassigns partitions. During the
+          rebalance, no consumer is actively polling. After the rebalance, a partition that was
+          being processed by Consumer A may now be handled by Consumer B, starting from the last
+          committed offset. If Consumer A had not committed an offset mid-batch, Consumer B replays
+          those messages — and if Consumer A had partially processed them, Consumer B processes the
+          same events again.
+        </p>
+        <div class="callout">
+          <p><strong>Incremental Cooperative Rebalancing</strong> (available since Kafka 2.4,
+          enabled via <code>CooperativeStickyAssignor</code>) mitigates this by only moving
+          partitions that need to move, instead of revoking all partitions. This drastically reduces
+          the rebalance window and associated replay risk.</p>
+        </div>
+      </section>
+
+      <!-- ── Partition Key Strategy ─────────────────────────────────── -->
+
+      <section class="content-card">
+        <h2>Partition Key Selection Strategy</h2>
+
+        <h3>Choose the key that defines your ordering domain</h3>
+        <p>
+          The partition key should be the entity whose events must be ordered relative to each
+          other. Ask: "For what unit does the order of events matter to my consumer?" That unit
+          is your partition key.
+        </p>
+        <ul>
+          <li><strong>E-commerce order lifecycle</strong> → <code>orderId</code>. All events for a single order land on the same partition, in production order.</li>
+          <li><strong>Chat messages in a conversation</strong> → <code>conversationId</code>. All messages in the same conversation are ordered; conversations are independent.</li>
+          <li><strong>User activity events</strong> → <code>userId</code> (if you need per-user ordering) or <code>sessionId</code> (if sessions are independent).</li>
+          <li><strong>Financial ledger entries for an account</strong> → <code>accountId</code>.</li>
+        </ul>
+
+        <h3>Hot partition trade-off</h3>
+        <p>
+          Choosing a good ordering key may create hot partitions. A highly active user, a viral
+          product, or a single merchant with millions of transactions all produce more events than
+          average for their key — concentrating traffic on one partition. Mitigation strategies:
+        </p>
+        <ul>
+          <li><strong>Sub-key salting</strong>: append a suffix <code>orderId + "-" + (random % N)</code> to spread load, but accept that you lose strict ordering within the spread (only works when strict ordering is not required).</li>
+          <li><strong>Partition count scaling</strong>: more partitions dilutes hot keys — but Kafka does not automatically rebalance existing data when you add partitions. New messages for a key hash to a new partition; old messages stay.</li>
+          <li><strong>Application-level sequencing</strong>: use sequence numbers inside the event payload (see below) and let the consumer enforce ordering even after a hot partition is split.</li>
+        </ul>
+
+        <h3>Sequence numbers as a secondary guarantee</h3>
+        <p>
+          Even with the correct partition key, producer retries can cause out-of-order delivery
+          within a partition if the idempotent producer is not enabled. Add a
+          <code>sequenceNumber</code> field to every event payload, scoped to the ordering domain
+          (e.g., per <code>orderId</code>). The consumer tracks the last-seen sequence number and
+          can detect gaps or out-of-order arrivals.
+        </p>
+        <pre><code>{
+  "eventId": "evt-8f3a2c",
+  "orderId": "ORD-12345",
+  "sequenceNumber": 3,         // 1=PLACED, 2=SHIPPED, 3=DELIVERED
+  "eventType": "ORDER_DELIVERED",
+  "timestamp": "2026-07-29T10:30:00Z"
+}</code></pre>
+
+        <h3>Event buffering with a sequence-aware consumer</h3>
+        <p>
+          When strict ordering is required and late arrivals are possible, implement a consumer-side
+          sequence buffer. The consumer holds events that arrive with a gap in the sequence, waiting
+          for the missing events before processing the buffered batch.
+        </p>
+        <span class="code-label">JavaScript Example — Sequence-Aware Consumer Buffer</span>
+        <pre><code>// sequence-buffer.js — Node.js
+class OrderEventBuffer {
+  constructor({ maxWaitMs = 5000, onProcess }) {
+    this.buffers = new Map();   // orderId → { nextExpected, pendingEvents, timeoutId }
+    this.maxWaitMs = maxWaitMs;
+    this.onProcess = onProcess; // callback for in-order events
+  }
+
+  receive(event) {
+    const { orderId, sequenceNumber } = event;
+
+    if (!this.buffers.has(orderId)) {
+      this.buffers.set(orderId, { nextExpected: 1, pending: new Map() });
+    }
+
+    const state = this.buffers.get(orderId);
+
+    if (sequenceNumber === state.nextExpected) {
+      // In-order arrival — process immediately, then drain any buffered successors
+      this._processAndDrain(orderId, event);
+    } else if (sequenceNumber > state.nextExpected) {
+      // Out-of-order — buffer and start a wait timer if not already running
+      state.pending.set(sequenceNumber, event);
+      if (!state.timeoutId) {
+        state.timeoutId = setTimeout(() => this._forceFlush(orderId), this.maxWaitMs);
+      }
+    }
+    // sequenceNumber < nextExpected → duplicate, discard
+  }
+
+  _processAndDrain(orderId, event) {
+    const state = this.buffers.get(orderId);
+    this.onProcess(event);
+    state.nextExpected++;
+
+    // Drain any buffered in-order successors
+    while (state.pending.has(state.nextExpected)) {
+      const next = state.pending.get(state.nextExpected);
+      state.pending.delete(state.nextExpected);
+      this.onProcess(next);
+      state.nextExpected++;
+    }
+
+    if (state.pending.size === 0 && state.timeoutId) {
+      clearTimeout(state.timeoutId);
+      state.timeoutId = null;
+    }
+  }
+
+  _forceFlush(orderId) {
+    // Gap in sequence — process buffered events in order despite the gap, alert monitoring
+    const state = this.buffers.get(orderId);
+    const sorted = [...state.pending.values()].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    console.warn(`[sequence-buffer] Gap detected for order ${orderId}. Force-flushing ${sorted.length} events.`);
+    for (const event of sorted) {
+      this.onProcess(event);
+    }
+    this.buffers.delete(orderId);
+  }
+}
+
+// Usage
+const buffer = new OrderEventBuffer({
+  maxWaitMs: 5000,
+  onProcess: (event) => notificationService.send(event),
+});
+
+kafkaConsumer.on('message', (msg) => {
+  const event = JSON.parse(msg.value);
+  buffer.receive(event);
+});</code></pre>
+
+        <span class="code-label">Java Example — Producer with Correct Partition Key</span>
+        <pre><code>// OrderEventProducer.java
+import org.apache.kafka.clients.producer.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@Service
+public class OrderEventProducer {
+
+    private final KafkaProducer&lt;String, String&gt; producer;
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    public OrderEventProducer() {
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka:9092");
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        // Enable idempotent producer — prevents duplicate messages due to producer retries
+        props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+        props.put(ProducerConfig.ACKS_CONFIG, "all");
+        props.put(ProducerConfig.RETRIES_CONFIG, Integer.MAX_VALUE);
+        this.producer = new KafkaProducer&lt;&gt;(props);
+    }
+
+    public void publishOrderEvent(OrderEvent event) throws Exception {
+        // KEY = orderId — ensures all events for the same order go to the same partition
+        // WRONG would be: key = userId (different orders of the same user could be on different partitions)
+        String key = event.getOrderId();
+        String value = mapper.writeValueAsString(event);
+
+        ProducerRecord&lt;String, String&gt; record = new ProducerRecord&lt;&gt;("order-events", key, value);
+        producer.send(record, (metadata, exception) -> {
+            if (exception != null) {
+                log.error("Failed to send event for order {}: {}", event.getOrderId(), exception.getMessage());
+            } else {
+                log.info("Event {} sent to partition {} offset {}",
+                    event.getEventType(), metadata.partition(), metadata.offset());
+            }
+        });
+    }
+}</code></pre>
+      </section>
+
+      <!-- ── The Duplicate Problem ──────────────────────────────────── -->
+
+      <section class="content-card">
+        <h2>The Duplicate Processing Problem</h2>
+
+        <h3>The exact failure sequence</h3>
+        <p>
+          Understanding duplicates requires tracing the precise sequence of operations between
+          poll, process, and commit:
+        </p>
+        <pre><code>1. Consumer calls poll() — Kafka returns messages [offset 100, 101, 102]
+2. Consumer processes offset 100 — writes to DB, calls payment API  ✓
+3. Consumer processes offset 101 — writes to DB, calls payment API  ✓
+4. Consumer processes offset 102 — writes to DB, calls payment API  ✓
+5. Consumer is about to call commitSync(offset=103)
+6. JVM crashes / OOM kill / network failure / deployment restart
+7. On restart, consumer resumes from last committed offset: 100
+8. Consumer processes offset 100 again — payment API called TWICE  ✗</code></pre>
+        <p>
+          This is not a bug — it is exactly what Kafka's at-least-once delivery guarantee means.
+          The responsibility for handling replay is always on the consumer.
+        </p>
+
+        <h3>Auto-commit timing issues</h3>
+        <p>
+          With <code>enable.auto.commit=true</code> (the default), Kafka commits the offset
+          automatically every <code>auto.commit.interval.ms</code> milliseconds (default: 5000ms).
+          Auto-commit happens at the start of the next <code>poll()</code> call if the interval has
+          elapsed — it commits whatever offset was returned by the <em>previous</em> poll. This
+          means auto-commit does not know whether your application has finished processing the batch.
+          A slow consumer that takes 10 seconds to process a batch will never see the auto-commit
+          fire mid-batch — commit only happens when <code>poll()</code> is called again.
+        </p>
+        <div class="callout">
+          <p><strong>Dangerous pattern:</strong> Handing messages to a thread pool and returning
+          from the <code>poll()</code> loop immediately. The auto-commit fires when the next
+          <code>poll()</code> is called, before the thread pool has finished processing the
+          previous batch. Messages can be committed before being processed, causing
+          <em>at-most-once</em> delivery (loss on crash), not at-least-once.</p>
+        </div>
+
+        <h3>commitSync vs commitAsync trade-offs</h3>
+        <p>
+          Manual commit gives you control over exactly when the offset is committed, but you must
+          choose between blocking and non-blocking behaviour:
+        </p>
+        <ul>
+          <li>
+            <strong>commitSync()</strong> — blocks until the broker acknowledges the commit.
+            Retries automatically on transient failures. Safest for correctness; throughput impact
+            depends on broker round-trip time. Use when losing the commit would cause downstream
+            harm (financial transactions, billing).
+          </li>
+          <li>
+            <strong>commitAsync()</strong> — non-blocking, fires and forgets. Faster throughput,
+            but does not retry on failure (retrying an async commit can commit a stale offset if a
+            later commit already succeeded). Use with a failure callback that logs or alerts. Suitable
+            for high-throughput analytics pipelines where occasional replay is acceptable.
+          </li>
+        </ul>
+        <span class="code-label">Java Example — Manual Commit with commitSync</span>
+        <pre><code>// ManualCommitConsumer.java
+import org.apache.kafka.clients.consumer.*;
+
+@Service
+public class PaymentEventConsumer {
+
+    public void run() {
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka:9092");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "payment-processor");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false); // CRITICAL: disable auto-commit
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+
+        try (KafkaConsumer&lt;String, String&gt; consumer = new KafkaConsumer&lt;&gt;(props)) {
+            consumer.subscribe(List.of("payment-events"));
+
+            while (true) {
+                ConsumerRecords&lt;String, String&gt; records = consumer.poll(Duration.ofMillis(1000));
+
+                for (ConsumerRecord&lt;String, String&gt; record : records) {
+                    try {
+                        processPaymentEvent(record.value());
+                    } catch (Exception e) {
+                        // Log and dead-letter — do NOT commit if processing failed
+                        deadLetterQueue.send(record, e);
+                        continue;
+                    }
+                }
+
+                // Commit AFTER successfully processing the entire batch
+                // commitSync() blocks and retries until the broker confirms
+                try {
+                    consumer.commitSync();
+                } catch (CommitFailedException e) {
+                    log.error("Commit failed — rebalance occurred: {}", e.getMessage());
+                    // The partition was reassigned. The new owner will re-process from last committed offset.
+                }
+            }
+        }
+    }
+
+    // commitAsync alternative — higher throughput, use for non-critical pipelines
+    private void commitAsync(KafkaConsumer&lt;String, String&gt; consumer) {
+        consumer.commitAsync((offsets, exception) -> {
+            if (exception != null) {
+                log.error("Async commit failed for offsets {}: {}", offsets, exception.getMessage());
+                metrics.increment("kafka.commit.failure");
+            }
+        });
+    }
+}</code></pre>
+      </section>
+
+      <!-- ── Delivery Semantics Table ────────────────────────────────── -->
+
+      <section class="content-card">
+        <h2>Delivery Semantics Comparison</h2>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Semantic</th>
+                <th>Mechanism</th>
+                <th>Failure Behaviour</th>
+                <th>Trade-off</th>
+                <th>When to Use</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>At-most-once</strong></td>
+                <td>Commit offset <em>before</em> processing (or fire-and-forget without waiting for ACK)</td>
+                <td>Messages can be lost on crash</td>
+                <td>Lowest latency, no duplicates, but data loss possible</td>
+                <td>Metrics, logs, analytics — where occasional loss is acceptable</td>
+              </tr>
+              <tr>
+                <td><strong>At-least-once</strong></td>
+                <td>Commit offset <em>after</em> successful processing; retry on failure</td>
+                <td>Messages replayed on crash — may be processed more than once</td>
+                <td>No data loss, but consumer must handle duplicates (idempotency required)</td>
+                <td>Most business events — notifications, order updates, audit logs</td>
+              </tr>
+              <tr>
+                <td><strong>Exactly-once</strong></td>
+                <td>Kafka transactions: atomic commit of consumed offset + produced output</td>
+                <td>Transactional — commit succeeds or entire transaction is rolled back</td>
+                <td>No loss, no duplicates; performance overhead (~20–30% throughput reduction); only works within Kafka ecosystem</td>
+                <td>Financial processing, billing, inventory deduction — zero tolerance for duplicates</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── Idempotent Consumer Patterns ───────────────────────────── -->
+
+      <section class="content-card">
+        <h2>Idempotent Consumer Patterns</h2>
+        <p>
+          An idempotent consumer produces the same outcome whether it processes an event once or
+          ten times. This is the practical solution to at-least-once delivery. There are three
+          main approaches:
+        </p>
+
+        <h3>Pattern 1: Redis Deduplication</h3>
+        <p>
+          Store processed event IDs in Redis with a TTL. Before processing any event, check if
+          it was already processed. The <code>SET NX</code> command is atomic — it sets the key
+          only if it does not exist, making the check-and-mark operation race-condition-free.
+        </p>
+        <span class="code-label">JavaScript Example — Redis Dedup</span>
+        <pre><code>// kafka-consumer-dedup.js — Node.js + ioredis
+import Redis from 'ioredis';
+const redis = new Redis(process.env.REDIS_URL);
+
+const DEDUP_TTL_SECONDS = 86400; // 24 hours — events older than this won't be replayed anyway
+
+async function processWithDedup(event) {
+  const dedupeKey = `seen:${event.eventId}`;
+
+  // SET key 1 EX 86400 NX — atomic: set only if not exists, with 24h TTL
+  const isNew = await redis.set(dedupeKey, '1', 'EX', DEDUP_TTL_SECONDS, 'NX');
+
+  if (!isNew) {
+    console.log(`[dedup] Skipping duplicate event: ${event.eventId}`);
+    return { skipped: true };
+  }
+
+  // Event is new — process it
+  await processPayment(event);
+  return { processed: true };
+}
+
+// Kafka consumer loop
+for await (const { message } of consumer.run()) {
+  const event = JSON.parse(message.value.toString());
+  await processWithDedup(event);
+  await consumer.commitOffsets([{ ...message.offset }]);
+}</code></pre>
+
+        <h3>Pattern 2: Database Unique Constraint</h3>
+        <p>
+          Use the event ID as a unique key in the target database table. Any attempt to insert a
+          duplicate event will fail with a unique constraint violation — handle it gracefully as
+          a skip.
+        </p>
+        <span class="code-label">Java Example — DB Unique Constraint Dedup</span>
+        <pre><code>// PaymentEventProcessor.java — PostgreSQL + JDBC
+@Transactional
+public void processPaymentEvent(PaymentEvent event) {
+    try {
+        // Insert into processed_events first — will throw on duplicate
+        jdbcTemplate.update(
+            "INSERT INTO processed_events (event_id, processed_at) VALUES (?, NOW())",
+            event.getEventId()
+        );
+
+        // Only reaches here if event_id was not already present
+        accountService.debitAccount(event.getAccountId(), event.getAmount());
+        ledgerService.record(event);
+
+    } catch (DuplicateKeyException e) {
+        // event_id already exists in processed_events → duplicate replay
+        log.warn("Duplicate event {} — skipping", event.getEventId());
+        // Do not rethrow — this is expected behaviour
+    }
+}
+
+// SQL: create the constraint
+// CREATE TABLE processed_events (
+//   event_id   VARCHAR(64) PRIMARY KEY,
+//   processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+// );
+// The PRIMARY KEY constraint provides both dedup and the unique guarantee.</code></pre>
+
+        <h3>Pattern 3: Natural Idempotency</h3>
+        <p>
+          Some operations are naturally safe to repeat. Design your business logic to be
+          idempotent without external dedup state:
+        </p>
+        <ul>
+          <li>
+            <strong>Upsert instead of insert</strong>: <code>INSERT ... ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status</code> — re-applying the same update is a no-op if the value is unchanged.
+          </li>
+          <li>
+            <strong>Set operations instead of increments</strong>: Instead of <code>UPDATE balance = balance - 100</code> (wrong on replay), store the final target state: <code>UPDATE balance = 900 WHERE event_id = ? AND balance != 900</code>.
+          </li>
+          <li>
+            <strong>Conditional transitions</strong>: <code>UPDATE orders SET status = 'shipped' WHERE id = ? AND status = 'placed'</code> — replaying a SHIPPED event on an already-shipped order is a safe no-op.
+          </li>
+        </ul>
+        <span class="code-label">JavaScript Example — Conditional State Transition (Natural Idempotency)</span>
+        <pre><code>// order-status-updater.js
+async function handleOrderShipped(event) {
+  const { orderId, trackingNumber } = event;
+
+  // Safe to replay: only transitions if still in 'placed' state
+  const result = await db.query(
+    `UPDATE orders
+     SET status = 'shipped', tracking_number = $1, shipped_at = NOW()
+     WHERE order_id = $2 AND status = 'placed'
+     RETURNING order_id`,
+    [trackingNumber, orderId]
+  );
+
+  if (result.rowCount === 0) {
+    // Either order doesn't exist, or status is already 'shipped' / 'delivered'
+    // Both cases are safe to ignore — idempotent no-op
+    console.log(`[idempotent] No update needed for order ${orderId} — already beyond 'placed' state`);
+    return;
+  }
+
+  await notificationService.sendShippedEmail(orderId);
+}</code></pre>
+      </section>
+
+      <!-- ── Exactly-Once with Transactions ─────────────────────────── -->
+
+      <section class="content-card">
+        <h2>Exactly-Once with Kafka Transactions</h2>
+        <p>
+          Kafka's transactional API provides exactly-once semantics within the Kafka ecosystem:
+          a consumer reads messages, transforms them, and produces output — all in an atomic
+          transaction. Either everything commits together or nothing does.
+        </p>
+        <p>
+          The key primitive is <code>sendOffsetsToTransaction()</code>, which atomically commits
+          the consumed offset alongside the produced messages in a single transaction. If the
+          producer crashes mid-transaction, the partially written data is invisible to consumers
+          with <code>isolation.level=read_committed</code>.
+        </p>
+        <span class="code-label">Java Example — Kafka Transactional Producer (Read-Process-Write)</span>
+        <pre><code>// TransactionalPaymentProcessor.java
+Properties producerProps = new Properties();
+producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka:9092");
+producerProps.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "payment-processor-txn-1"); // unique per instance
+producerProps.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+producerProps.put(ProducerConfig.ACKS_CONFIG, "all");
+
+KafkaProducer&lt;String, String&gt; producer = new KafkaProducer&lt;&gt;(producerProps);
+producer.initTransactions(); // registers this transactional.id with the broker
+
+Properties consumerProps = new Properties();
+consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka:9092");
+consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, "payment-txn-group");
+consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+consumerProps.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed"); // skip uncommitted messages
+
+KafkaConsumer&lt;String, String&gt; consumer = new KafkaConsumer&lt;&gt;(consumerProps);
+consumer.subscribe(List.of("payment-initiated"));
+
+while (true) {
+    ConsumerRecords&lt;String, String&gt; records = consumer.poll(Duration.ofMillis(500));
+
+    producer.beginTransaction();
+    try {
+        for (ConsumerRecord&lt;String, String&gt; record : records) {
+            PaymentEvent event = deserialize(record.value());
+            PaymentResult result = paymentGateway.charge(event);
+
+            // Produce the result to output topic — part of the same transaction
+            producer.send(new ProducerRecord&lt;&gt;("payment-completed", event.getOrderId(),
+                serialize(result)));
+        }
+
+        // Atomically commit: consumed offsets + produced messages in one transaction
+        // If this succeeds, offsets AND output are visible together.
+        // If this fails, NEITHER is committed — consumer replays from last committed offset.
+        Map&lt;TopicPartition, OffsetAndMetadata&gt; offsets = currentOffsets(consumer, records);
+        producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata());
+
+        producer.commitTransaction();
+
+    } catch (ProducerFencedException | OutOfOrderSequenceException e) {
+        // Fatal — another instance with the same transactional.id took over
+        producer.close();
+        throw e;
+    } catch (Exception e) {
+        producer.abortTransaction(); // rolls back produced messages + offset commit
+        log.error("Transaction aborted, will replay: {}", e.getMessage());
+    }
+}
+
+private Map&lt;TopicPartition, OffsetAndMetadata&gt; currentOffsets(
+        KafkaConsumer&lt;?,?&gt; consumer, ConsumerRecords&lt;?,?&gt; records) {
+    Map&lt;TopicPartition, OffsetAndMetadata&gt; offsets = new HashMap&lt;&gt;();
+    for (TopicPartition partition : records.partitions()) {
+        long lastOffset = records.records(partition).stream()
+            .mapToLong(ConsumerRecord::offset).max().orElseThrow();
+        offsets.put(partition, new OffsetAndMetadata(lastOffset + 1));
+    }
+    return offsets;
+}</code></pre>
+
+        <h3>Kafka Streams: exactly_once_v2</h3>
+        <p>
+          Kafka Streams applications can opt into exactly-once processing with a single
+          configuration change. The v2 variant (available since Kafka 2.5) uses a new epoch-based
+          fencing mechanism that eliminates the need for a dedicated transaction coordinator per
+          stream task and significantly reduces overhead compared to the original
+          <code>exactly_once</code> (now deprecated).
+        </p>
+        <pre><code>// Kafka Streams application.properties
+processing.guarantee=exactly_once_v2
+# Requires: Kafka broker >= 2.5, replication.factor >= 3 for internal topics
+
+// Java — StreamsConfig
+Properties streamsConfig = new Properties();
+streamsConfig.put(StreamsConfig.APPLICATION_ID_CONFIG, "order-processor");
+streamsConfig.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka:9092");
+streamsConfig.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG,
+    StreamsConfig.EXACTLY_ONCE_V2); // "exactly_once_v2"
+
+KafkaStreams streams = new KafkaStreams(topology, streamsConfig);
+streams.start();</code></pre>
+        <div class="callout">
+          <p><strong>Limitation:</strong> Kafka's exactly-once guarantee is scoped to
+          <em>Kafka-to-Kafka</em> operations. If your consumer calls an external HTTP API,
+          writes to a database, or sends an email — those side effects are outside the
+          transaction boundary. For those cases, you still need idempotent consumers (Patterns
+          1–3 above). Exactly-once only prevents duplicate Kafka messages, not duplicate
+          external effects.</p>
+        </div>
+      </section>
+
+      <!-- ── Best Practices Checklist ───────────────────────────────── -->
+
+      <section class="content-card">
+        <h2>Best Practices Checklist</h2>
+        <ol>
+          <li>
+            <strong>Choose partition key by ordering domain, not by convenience.</strong>
+            Use the entity ID whose events must be sequenced (orderId, conversationId, accountId).
+            Never use a null key for topics where order matters.
+          </li>
+          <li>
+            <strong>Enable idempotent producer.</strong>
+            Set <code>enable.idempotence=true</code> on all producers. This prevents duplicate
+            messages caused by producer retries at zero extra cost (Kafka 3.x enables this by default).
+          </li>
+          <li>
+            <strong>Disable auto-commit for any consumer with side effects.</strong>
+            Set <code>enable.auto.commit=false</code> and use <code>commitSync()</code> after
+            successfully processing each batch. Auto-commit's timer-based behaviour is incompatible
+            with safe at-least-once processing.
+          </li>
+          <li>
+            <strong>Make every consumer idempotent.</strong>
+            Choose one of the three patterns — Redis dedup, DB unique constraint, or natural
+            idempotency — and apply it consistently. At-least-once delivery is guaranteed; your
+            consumer must handle it.
+          </li>
+          <li>
+            <strong>Include eventId in every event payload.</strong>
+            A globally unique, stable event identifier is the prerequisite for all deduplication
+            strategies. Use UUIDs generated by the producer, not by the consumer.
+          </li>
+          <li>
+            <strong>Include sequenceNumber scoped to the ordering domain.</strong>
+            A monotonically increasing sequence number per entity (orderId, accountId) lets consumers
+            detect gaps and out-of-order arrivals even when the partition key is correct.
+          </li>
+          <li>
+            <strong>Use CooperativeStickyAssignor to minimize rebalance disruption.</strong>
+            Configure <code>partition.assignment.strategy=CooperativeStickyAssignor</code> to avoid
+            revoking all partitions during rebalances. This reduces the replay window and improves
+            consumer group stability.
+          </li>
+          <li>
+            <strong>Dead-letter queue for poison pills.</strong>
+            Never let a message that cannot be processed block the consumer indefinitely.
+            After N retries, route to a DLQ topic. Monitor the DLQ — a growing DLQ is a signal
+            of a schema change, data corruption, or a downstream service failure.
+          </li>
+          <li>
+            <strong>Use exactly-once (Kafka transactions) only when external idempotency is impossible.</strong>
+            Kafka transactions have overhead and complexity. Most applications are better served by
+            at-least-once + idempotent consumers. Reserve transactions for financial or inventory
+            systems where external idempotency is impractical.
+          </li>
+          <li>
+            <strong>Monitor consumer group lag, not just throughput.</strong>
+            Rising consumer lag is the first sign of a processing bottleneck, a poison pill loop,
+            or a rebalance storm. Set alerts on lag thresholds (e.g., lag &gt; 10,000 for more than
+            5 minutes) per consumer group and partition.
+          </li>
+        </ol>
+      </section>
+
+      <!-- ── Key Takeaway ────────────────────────────────────────────── -->
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Kafka does not deliver globally ordered, exactly-once messages out of the box — and
+          that is a deliberate design choice that enables its horizontal scalability. The
+          framework's contract is clear: within-partition ordering, at-least-once delivery by
+          default. Both the ordering and duplicate problems stem from not designing within these
+          constraints.
+        </p>
+        <p>
+          The ordering problem is solved at the producer: choose the partition key to be the
+          entity whose events must be sequenced. Add sequence numbers as a belt-and-suspenders
+          guarantee. The duplicate problem is solved at the consumer: disable auto-commit, commit
+          after processing, and make every consumer idempotent. Kafka transactions provide
+          exactly-once when you need it — but most systems do not, because a well-designed
+          idempotent consumer is simpler and nearly as safe.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

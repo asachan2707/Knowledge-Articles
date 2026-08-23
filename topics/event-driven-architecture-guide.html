@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Event-Driven Architecture: The Complete Guide to Building Loosely Coupled Distributed Systems | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header" data-order="200" data-added="2026-07-29">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Network of connected nodes representing event-driven architecture" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Architecture · System Design · Backend · 30 min</span>
+          </div>
+        </figure>
+        <h1>Event-Driven Architecture: The Complete Guide to Building Loosely Coupled Distributed Systems</h1>
+        <p class="summary">
+          When EDA is right, how it works, all the patterns you need to build resilient async systems.
+          Full deep dive: domain events vs integration events, Kafka vs RabbitMQ vs SQS, delivery guarantees,
+          dead letter queues, choreography vs orchestration, schema evolution, CQRS integration,
+          and a complete Node.js example wiring it all together.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Architecture · Distributed Systems · Async Messaging</span>
+          <span class="meta-item">Published: 2026-07-29</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Most distributed system failures are not caused by complex algorithms or bad data structures.
+          They are caused by one service calling another service synchronously — and that other service
+          being unavailable. Event-driven architecture breaks this chain. Services emit facts into a
+          broker; downstream systems react in their own time, at their own pace, with no direct
+          knowledge of who produced the event. The producer and consumer are decoupled in time, space,
+          and implementation.
+        </p>
+        <div class="callout">
+          <p><strong>When EDA is clearly the right choice:</strong> you have multiple services that
+          need to react to the same business event, you need to process high-throughput streams
+          asynchronously, or you want to add new consumers without modifying the producer. If you
+          have one caller and one callee and you need an immediate response, a synchronous REST call
+          is still the right tool.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The checkout service that brought down four teams</span>
+        <p>
+          The checkout service called Payment, then Inventory, then Notification, then Shipping —
+          all synchronously, one after the other. When the Payment service went down during a flash
+          sale, checkout returned 500 errors immediately. Three other services — Inventory, Notification,
+          and Shipping — were perfectly healthy but completely idle. Zero throughput. Every engineer
+          in those three teams was staring at dashboards with nothing to fix.
+        </p>
+        <p>
+          The on-call rotation escalated through four teams. Checkout was down not because checkout
+          had a bug, but because it depended synchronously on Payment, which had a deployment issue
+          in one of its own dependencies. The blast radius of a single service's failure extended
+          across the entire order flow. Recovery took 40 minutes of coordinated rollback. With EDA,
+          checkout would have published an <code>OrderPlaced</code> event and returned success to
+          the user. Payment would process that event when it recovered. The user experience degrades
+          gracefully; the other services are never affected.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>What Makes EDA Different</h2>
+        <p>
+          In synchronous request/response, the caller blocks until the callee responds. The caller
+          knows the callee's address, knows what it will do, and depends on it being available.
+          Coupling is bidirectional and temporal — both services must be up at the same time.
+        </p>
+        <p>
+          In event-driven architecture, the producer publishes an event to a broker and moves on.
+          The producer has no knowledge of who consumes the event, how many consumers there are,
+          or when they will process it. Adding a new consumer requires zero changes to the producer.
+          Removing a consumer requires zero changes to the producer. The coupling is unidirectional
+          and atemporal.
+        </p>
+        <p>
+          <strong>Events are immutable facts stated in the past tense.</strong> They describe
+          something that already happened: <code>OrderPlaced</code>, <code>PaymentProcessed</code>,
+          <code>InventoryReserved</code>. They are not instructions. This is the key conceptual
+          distinction from commands.
+        </p>
+        <div class="callout">
+          <p><strong>Commands vs Events:</strong> A command is an instruction directed at a specific
+          service — <code>PlaceOrder</code>, <code>ChargeCard</code>. It implies intent and expects
+          a response. An event is a broadcast fact — <code>OrderPlaced</code>, <code>CardCharged</code>.
+          It implies nothing about what should happen next; that is the consumer's concern. Commands
+          have one handler. Events can have zero, one, or many handlers.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Event Types</h2>
+        <p>
+          Not all events are the same. Understanding the four types prevents you from designing
+          systems that are technically event-driven but practically still tightly coupled.
+        </p>
+
+        <h3>1. Domain Events</h3>
+        <p>
+          Events that are meaningful within a single bounded context. <code>SeatHeld</code>,
+          <code>CartItemAdded</code>, <code>PasswordResetRequested</code>. These events drive
+          internal state transitions within one service or one team's domain. They are typically
+          not published outside the bounded context — they are internal choreography tools.
+        </p>
+
+        <h3>2. Integration Events</h3>
+        <p>
+          Events published across service or team boundaries. <code>OrderPlaced</code>,
+          <code>UserRegistered</code>, <code>PaymentProcessed</code>. These are the events that
+          flow through your message broker. Because they cross team boundaries, their schema is a
+          public API contract and must be versioned carefully. Schema changes require backward
+          compatibility or a migration plan.
+        </p>
+
+        <h3>3. Event Notifications</h3>
+        <p>
+          Lightweight events that carry minimal payload — just enough for the consumer to know
+          something happened and where to fetch the current state. Example:
+          <code>{ "type": "UserUpdated", "userId": "u-123" }</code>. The consumer calls back to
+          the User service to retrieve the full user record. Payload is tiny; network overhead is
+          low. The tradeoff: consumers need to make a follow-up read call, which reintroduces
+          some synchronous coupling.
+        </p>
+
+        <h3>4. Event-Carried State Transfer</h3>
+        <p>
+          Events that carry the full state snapshot, so consumers never need to call back.
+          Example: <code>{ "type": "UserUpdated", "userId": "u-123", "email": "...", "name": "...", "plan": "pro" }</code>.
+          Consumers are fully autonomous. The tradeoff: events are larger, and consumers may
+          hold stale data if they miss events or fall behind. Requires robust replay and reconciliation.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Message Brokers: Kafka vs RabbitMQ vs SQS</h2>
+        <p>
+          The broker is the backbone of any EDA system. The choice of broker shapes your delivery
+          guarantees, throughput ceiling, operational burden, and replay capabilities.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Apache Kafka</th>
+              <th>RabbitMQ</th>
+              <th>AWS SQS / SNS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Model</strong></td>
+              <td>Distributed log; consumers pull from offset</td>
+              <td>Message queue; broker pushes to consumers</td>
+              <td>Managed queue (SQS) + pub/sub (SNS)</td>
+            </tr>
+            <tr>
+              <td><strong>Throughput</strong></td>
+              <td>Millions of messages/sec per partition</td>
+              <td>Tens of thousands/sec per queue</td>
+              <td>Unlimited (managed); SQS scales automatically</td>
+            </tr>
+            <tr>
+              <td><strong>Replay</strong></td>
+              <td>Yes — re-read from any offset, indefinitely</td>
+              <td>No — messages deleted after ack</td>
+              <td>No — messages deleted after ack (14-day retention max)</td>
+            </tr>
+            <tr>
+              <td><strong>Routing</strong></td>
+              <td>Topic partitioning; consumer groups</td>
+              <td>Rich exchanges: direct, fanout, topic, headers</td>
+              <td>SNS topic fanout to multiple SQS queues</td>
+            </tr>
+            <tr>
+              <td><strong>Ordering</strong></td>
+              <td>Guaranteed within a partition</td>
+              <td>Per-queue with single consumer</td>
+              <td>FIFO queues guarantee ordering; standard queues do not</td>
+            </tr>
+            <tr>
+              <td><strong>Latency</strong></td>
+              <td>Low (5–15 ms) but higher than RabbitMQ</td>
+              <td>Very low (sub-millisecond)</td>
+              <td>Low (single-digit ms); FIFO queues slightly higher</td>
+            </tr>
+            <tr>
+              <td><strong>Operations</strong></td>
+              <td>Complex; requires ZooKeeper/KRaft, tuning</td>
+              <td>Moderate; single cluster, AMQP</td>
+              <td>Zero; fully managed by AWS</td>
+            </tr>
+            <tr>
+              <td><strong>Best for</strong></td>
+              <td>Event log, audit trail, stream processing, replay</td>
+              <td>Work queues, complex routing, low-latency tasks</td>
+              <td>AWS-native stacks, serverless, minimal ops burden</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p><strong>Rule of thumb:</strong> If you need to replay events (audit, backfill, reprocess after a bug fix), use Kafka. If you need complex routing logic with very low latency and do not need replay, use RabbitMQ. If you are on AWS and want zero operational overhead, use SQS/SNS. These are not mutually exclusive in large systems — many production architectures use all three for different purposes.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Delivery Guarantees</h2>
+        <p>
+          Every message broker makes one of three delivery promises. Understanding which guarantee
+          your broker provides — and what it means for your consumer — is critical before you
+          write a single handler.
+        </p>
+
+        <h3>At-Most-Once</h3>
+        <p>
+          The broker delivers the message once and does not retry if the consumer fails or
+          the message is lost. The message may be lost. Zero duplicates, but potential data loss.
+          Used only where loss is acceptable: metrics aggregation, ephemeral notifications, fire-and-forget logging.
+        </p>
+
+        <h3>At-Least-Once</h3>
+        <p>
+          The broker retries delivery until the consumer acknowledges. The message will be
+          delivered, but may be delivered more than once (network timeout after processing but
+          before ack, consumer restart mid-processing). <strong>This is the default for Kafka,
+          RabbitMQ, and SQS.</strong> Your consumer must be idempotent — processing the same
+          event twice must produce the same result as processing it once.
+        </p>
+
+        <h3>Exactly-Once</h3>
+        <p>
+          Kafka 0.11+ supports exactly-once semantics (EOS) within a Kafka-to-Kafka pipeline
+          using transactions. In practice, exactly-once across a Kafka consumer that writes to
+          an external database is very hard to guarantee — the Kafka offset commit and the
+          database write cannot participate in the same atomic transaction without significant
+          engineering overhead. Most teams do not implement true exactly-once end-to-end.
+        </p>
+
+        <div class="callout">
+          <p><strong>The pragmatic production choice: at-least-once + idempotent consumers.</strong>
+          Design every consumer so that receiving the same event twice has no side effects. Store
+          processed event IDs in a deduplication table; check before processing. This is simpler
+          to implement and reason about than true exactly-once, and it is what the vast majority
+          of production EDA systems use.</p>
+        </div>
+
+        <span class="code-label">JavaScript Example — Idempotent Consumer with Deduplication</span>
+        <pre><code>// idempotent-consumer.js
+async function handleOrderPlaced(event) {
+  const { eventId, orderId, userId, total } = event;
+
+  // Check if we've already processed this event
+  const alreadyProcessed = await db.query(
+    `SELECT 1 FROM processed_events WHERE event_id = $1`,
+    [eventId]
+  );
+  if (alreadyProcessed.rows.length > 0) {
+    console.log(`[dedup] Event ${eventId} already processed — skipping`);
+    return; // safe to ack and move on
+  }
+
+  // Process within a transaction that also records the event ID
+  await db.transaction(async (trx) => {
+    await chargeCard(userId, total, { trx });
+    await trx.query(
+      `INSERT INTO processed_events (event_id, processed_at) VALUES ($1, NOW())`,
+      [eventId]
+    );
+  });
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Dead Letter Queues</h2>
+        <p>
+          A dead letter queue (DLQ) is where messages go when they cannot be processed successfully
+          after a configured number of retries. Every production EDA system must have DLQs configured
+          for every consumer. Without them, failed messages silently vanish.
+        </p>
+
+        <h3>What ends up in a DLQ</h3>
+        <ul>
+          <li>Messages with malformed or unexpected schema (upstream deployed a breaking change)</li>
+          <li>Messages that cause unhandled exceptions in the consumer (bug in handler code)</li>
+          <li>Messages that depend on external state that does not exist (foreign key violation, referenced entity deleted)</li>
+          <li>Messages that exceed the max retry count due to transient downstream failures</li>
+        </ul>
+
+        <h3>Monitoring DLQ depth</h3>
+        <p>
+          DLQ depth is one of the most important operational metrics in an EDA system. A rising
+          DLQ depth means events are not being processed — business logic is silently not executing.
+          Set an alert at depth &gt; 0 for critical queues (payment events, order events). For
+          lower-priority queues, alert at depth &gt; threshold with a time window.
+        </p>
+
+        <h3>Replay strategies</h3>
+        <ul>
+          <li><strong>Manual replay:</strong> after fixing the consumer bug, replay all DLQ messages by re-publishing them to the original topic. Requires confirming idempotency first.</li>
+          <li><strong>Selective replay:</strong> if only a subset of messages failed (e.g. specific schema version), filter the DLQ and replay only those.</li>
+          <li><strong>Automated replay with backoff:</strong> some systems automatically attempt DLQ replay on a schedule (every 30 minutes, exponential backoff) after the consumer has been redeployed.</li>
+        </ul>
+
+        <div class="callout">
+          <p><strong>Never delete a DLQ message without understanding why it failed.</strong> DLQ messages are forensic evidence. They tell you exactly which events your system failed to process and when. Store DLQ messages with the failure reason and consumer stack trace. Treat a non-empty DLQ as a P2 incident requiring root cause analysis.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Choreography vs Orchestration</h2>
+        <p>
+          When multiple services need to collaborate on a business workflow, you have two
+          architectural options for coordinating them: choreography (each service reacts
+          independently to events) or orchestration (a central coordinator tells each
+          service what to do).
+        </p>
+
+        <h3>Choreography</h3>
+        <p>
+          Each service listens for events it cares about and emits new events when it completes
+          its work. There is no central coordinator. The workflow emerges from the chain of
+          event reactions. Services are maximally decoupled — they do not even know each other
+          exists.
+        </p>
+
+        <span class="code-label">JavaScript Example — Choreography (no central coordinator)</span>
+        <pre><code>// order-service.js — emits the first event
+async function placeOrder(userId, items) {
+  const order = await db.createOrder({ userId, items, status: 'pending' });
+  await kafka.produce('order.placed', {
+    eventId: uuid(),
+    orderId: order.id,
+    userId,
+    items,
+    total: order.total
+  });
+  return order;
+}
+
+// payment-service.js — reacts to order.placed
+kafka.consume('order.placed', async (event) => {
+  const result = await chargeCard(event.userId, event.total);
+  await kafka.produce('payment.processed', {
+    eventId: uuid(),
+    orderId: event.orderId,
+    status: result.status  // 'success' | 'failed'
+  });
+});
+
+// inventory-service.js — reacts to payment.processed
+kafka.consume('payment.processed', async (event) => {
+  if (event.status !== 'success') return;
+  await reserveStock(event.orderId);
+  await kafka.produce('inventory.reserved', {
+    eventId: uuid(),
+    orderId: event.orderId
+  });
+});
+
+// shipping-service.js — reacts to inventory.reserved
+kafka.consume('inventory.reserved', async (event) => {
+  await scheduleShipment(event.orderId);
+  await kafka.produce('shipment.scheduled', {
+    eventId: uuid(),
+    orderId: event.orderId
+  });
+});</code></pre>
+
+        <h3>Orchestration (Saga Pattern)</h3>
+        <p>
+          A central orchestrator (saga) explicitly calls each service in sequence, handles
+          failures, and executes compensating transactions when a step fails. The orchestrator
+          knows the full workflow. Individual services remain simple — they just execute the
+          command they receive.
+        </p>
+
+        <span class="code-label">JavaScript Example — Orchestration (central saga)</span>
+        <pre><code>// order-saga.js — central orchestrator
+async function runOrderSaga(orderId) {
+  const saga = await SagaLog.create(orderId);
+
+  try {
+    // Step 1: charge payment
+    const payment = await paymentService.charge(orderId);
+    await saga.recordStep('payment', payment.id);
+
+    // Step 2: reserve inventory
+    const reservation = await inventoryService.reserve(orderId);
+    await saga.recordStep('inventory', reservation.id);
+
+    // Step 3: schedule shipping
+    await shippingService.schedule(orderId);
+    await saga.recordStep('shipping', null);
+
+    await saga.complete();
+  } catch (err) {
+    // Compensate in reverse order
+    if (saga.hasStep('inventory')) {
+      await inventoryService.release(saga.getStepId('inventory'));
+    }
+    if (saga.hasStep('payment')) {
+      await paymentService.refund(saga.getStepId('payment'));
+    }
+    await saga.fail(err.message);
+    throw err;
+  }
+}</code></pre>
+
+        <h3>Comparison</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Dimension</th>
+              <th>Choreography</th>
+              <th>Orchestration</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Coupling</strong></td>
+              <td>Minimal — services only know the broker</td>
+              <td>Orchestrator is coupled to all services</td>
+            </tr>
+            <tr>
+              <td><strong>Visibility</strong></td>
+              <td>Hard — workflow is implicit, distributed across services</td>
+              <td>Easy — workflow is explicit in one place</td>
+            </tr>
+            <tr>
+              <td><strong>Failure handling</strong></td>
+              <td>Complex — compensating events must propagate through the chain</td>
+              <td>Straightforward — orchestrator handles compensation centrally</td>
+            </tr>
+            <tr>
+              <td><strong>Scalability</strong></td>
+              <td>Excellent — no central bottleneck</td>
+              <td>Orchestrator can become a bottleneck</td>
+            </tr>
+            <tr>
+              <td><strong>Best for</strong></td>
+              <td>Simple workflows, high throughput, many independent consumers</td>
+              <td>Complex multi-step workflows with rollback requirements</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p><strong>When to choose:</strong> Start with choreography for simple reactive flows
+          (A happens, B reacts, C reacts). Switch to orchestration when you need explicit
+          compensation logic (payment charged but inventory failed — refund the payment), or
+          when the choreography chain has grown to 5+ steps and is impossible to debug.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Event Schema Evolution</h2>
+        <p>
+          Event schemas are public contracts. Unlike internal data models, you cannot freely
+          change them without coordinating with every consumer. Schema evolution done wrong
+          causes silent data loss, deserialization failures, or downstream processing bugs.
+        </p>
+
+        <h3>Backward-compatible changes (safe — no coordination required)</h3>
+        <ul>
+          <li>Adding a new optional field with a default value</li>
+          <li>Adding a new event type to an existing topic</li>
+          <li>Widening a field type (int to long, string length increase)</li>
+        </ul>
+
+        <h3>Breaking changes (require coordination)</h3>
+        <ul>
+          <li>Renaming or removing a field that consumers depend on</li>
+          <li>Changing a field's type in an incompatible way (string to integer)</li>
+          <li>Changing a field from optional to required</li>
+          <li>Reordering fields in a format without named fields (CSV, positional binary)</li>
+        </ul>
+
+        <h3>Schema Registry</h3>
+        <p>
+          A schema registry (Confluent Schema Registry for Kafka, AWS Glue Schema Registry for
+          SQS/Kinesis) enforces schema compatibility at publish time. Producers register their
+          schema; the registry validates the new schema against the compatibility mode configured
+          for that topic (BACKWARD, FORWARD, FULL). A producer that tries to publish a breaking
+          change is rejected before the message reaches the broker.
+        </p>
+
+        <h3>Consumer-Driven Contract Testing</h3>
+        <p>
+          Pact and similar consumer-driven contract testing tools let each consumer define what
+          fields it needs from an event, and let the producer's CI pipeline verify it does not
+          break any registered consumer contract. This is the most reliable way to catch breaking
+          schema changes before they reach production.
+        </p>
+
+        <div class="callout">
+          <p><strong>Versioning strategy for breaking changes:</strong> publish both schemas in
+          parallel. Publish <code>order.placed.v1</code> and <code>order.placed.v2</code>
+          simultaneously. Migrate consumers to v2. Once all consumers have migrated (verify via
+          consumer group lag), deprecate and stop publishing v1. Never delete the topic until
+          you are certain no consumer is still reading from it.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>CQRS + EDA Integration</h2>
+        <p>
+          Command Query Responsibility Segregation (CQRS) pairs naturally with EDA. In CQRS,
+          commands mutate state; queries read from separate, optimised read models. Events are
+          the mechanism that keeps read models in sync with the write model.
+        </p>
+        <p>
+          When an order is placed (write model updated), the Order service publishes an
+          <code>OrderPlaced</code> event. A separate Projection service consumes that event and
+          updates the read model — a denormalised view optimised for the queries it serves
+          (e.g. a Redis hash for the "my orders" API, an Elasticsearch document for the
+          admin search interface). The write model and read models are eventually consistent;
+          read models are always behind by the consumer lag.
+        </p>
+
+        <span class="code-label">JavaScript Example — Read Model Projection via Events</span>
+        <pre><code>// order-projection.js — consumes events to maintain a read model
+kafka.consume('order.placed', async (event) => {
+  // Update Redis read model for "my orders" API
+  await redis.hset(
+    `user-orders:${event.userId}`,
+    event.orderId,
+    JSON.stringify({
+      orderId: event.orderId,
+      status: 'pending',
+      total: event.total,
+      placedAt: event.timestamp
+    })
+  );
+});
+
+kafka.consume('payment.processed', async (event) => {
+  const order = JSON.parse(
+    await redis.hget(`user-orders:${event.userId}`, event.orderId) || '{}'
+  );
+  if (!order.orderId) return; // projection not yet built — will retry
+  order.status = event.status === 'success' ? 'confirmed' : 'payment_failed';
+  await redis.hset(
+    `user-orders:${event.userId}`,
+    event.orderId,
+    JSON.stringify(order)
+  );
+});
+
+// Query handler — reads from the projection, never from the write DB
+async function getMyOrders(userId) {
+  const orders = await redis.hvals(`user-orders:${userId}`);
+  return orders.map(o => JSON.parse(o));
+}</code></pre>
+
+        <div class="callout">
+          <p><strong>Eventual consistency in CQRS+EDA:</strong> a user places an order and
+          immediately calls "my orders" — they may not see it yet (the projection consumer has
+          not processed the event). Handle this with optimistic UI updates (show the order
+          immediately on the client), a brief polling retry, or a short read-your-writes cache
+          keyed by the user's session. Do not try to make the read model synchronously consistent;
+          that negates the entire value of the pattern.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Full Node.js Example: Order Flow with Kafka</h2>
+        <p>
+          A complete event-driven order flow: order service publishes, payment service
+          consumes and publishes, inventory service consumes and publishes. Each service
+          is independent; adding a new service (e.g. fraud detection) requires zero changes
+          to existing services.
+        </p>
+
+        <span class="code-label">JavaScript Example — Full EDA Order Flow (Node.js + Kafka)</span>
+        <pre><code>// kafka-client.js — minimal wrapper around kafkajs
+import { Kafka } from 'kafkajs';
+const kafka = new Kafka({ brokers: [process.env.KAFKA_BROKER] });
+const producer = kafka.producer();
+const consumer = kafka.consumer({ groupId: process.env.SERVICE_NAME });
+
+await producer.connect();
+await consumer.connect();
+
+export const kafkaClient = {
+  async produce(topic, payload) {
+    await producer.send({
+      topic,
+      messages: [{ value: JSON.stringify({ ...payload, eventId: uuid(), timestamp: Date.now() }) }]
+    });
+  },
+
+  async consume(topic, handler) {
+    await consumer.subscribe({ topic, fromBeginning: false });
+    await consumer.run({
+      eachMessage: async ({ message }) => {
+        const event = JSON.parse(message.value.toString());
+        await handler(event);
+      }
+    });
+  }
+};
+
+// ── order-service.js ──────────────────────────────────────────
+async function placeOrder(userId, items) {
+  const order = await db.createOrder({ userId, items, status: 'pending' });
+  // Publish event — done. No waiting for payment, inventory, or anything else.
+  await kafkaClient.produce('order.placed', {
+    orderId: order.id,
+    userId,
+    items,
+    total: order.total
+  });
+  return { orderId: order.id, status: 'pending' };
+}
+
+// ── payment-service.js ────────────────────────────────────────
+kafkaClient.consume('order.placed', async (event) => {
+  const result = await chargeCard(event.userId, event.total);
+  await kafkaClient.produce('payment.processed', {
+    orderId: event.orderId,
+    status: result.status   // 'success' | 'failed'
+  });
+});
+
+// ── inventory-service.js ──────────────────────────────────────
+kafkaClient.consume('payment.processed', async (event) => {
+  if (event.status === 'success') {
+    await reserveStock(event.orderId);
+    await kafkaClient.produce('inventory.reserved', {
+      orderId: event.orderId
+    });
+  }
+  // If payment failed, emit nothing — downstream services stay idle
+});
+
+// ── notification-service.js ───────────────────────────────────
+// Added later — zero changes to any existing service
+kafkaClient.consume('inventory.reserved', async (event) => {
+  const order = await orderService.getOrder(event.orderId);
+  await emailService.send(order.userId, 'order_confirmed', { orderId: event.orderId });
+});
+
+// ── shipping-service.js ───────────────────────────────────────
+kafkaClient.consume('inventory.reserved', async (event) => {
+  await schedulePickup(event.orderId);
+  await kafkaClient.produce('shipment.scheduled', {
+    orderId: event.orderId
+  });
+});</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>EDA Anti-Patterns</h2>
+        <p>
+          EDA introduces its own class of failure modes. These are the patterns that look
+          reasonable in design documents but create serious operational problems in production.
+        </p>
+
+        <ul>
+          <li>
+            <strong>Event sourcing everywhere.</strong> Event sourcing (storing every state change as an event, deriving current state by replaying the log) is powerful but expensive. It requires immutable event logs, complex snapshot strategies, and event store infrastructure. Most services do not need event sourcing — they need EDA for decoupling, which is a different thing. Only apply event sourcing where you genuinely need full audit history or temporal queries.
+          </li>
+          <li>
+            <strong>Chatty events.</strong> Publishing an event for every field change (<code>UserNameUpdated</code>, <code>UserEmailUpdated</code>, <code>UserPhoneUpdated</code> as separate events) leads to consumers processing dozens of events per user action, complex ordering dependencies, and fragile consumer logic. Prefer coarser-grained events that represent meaningful business facts (<code>UserProfileUpdated</code> with the full updated state).
+          </li>
+          <li>
+            <strong>Tight coupling through a shared event library.</strong> Packaging all event schemas into a single shared library (npm package, Maven artifact) that every service imports recreates tight coupling at the dependency level. A schema change in the library requires all services to update their dependency simultaneously — the same coordination problem you were trying to avoid. Prefer schema registry + code generation per service.
+          </li>
+          <li>
+            <strong>No DLQ configured.</strong> Without a dead letter queue, failed messages are either silently dropped (at-most-once) or cause the consumer to retry forever, blocking all subsequent messages on that partition. Every production consumer must have a DLQ, a maximum retry count, and a monitored alert on DLQ depth.
+          </li>
+          <li>
+            <strong>Treating the event bus as a database.</strong> Expecting the broker to be the permanent system of record for business state. Brokers are transport; they have retention limits. If Kafka is configured with 7-day retention and a consumer is down for 8 days, the events are gone. Business state must be persisted in a database; the broker is for propagation.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Decision Framework: EDA vs Synchronous</h2>
+        <p>
+          EDA is not always the right choice. Use this table to guide the decision for each
+          integration point in your system.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Use Case</th>
+              <th>Traffic Pattern</th>
+              <th>Consistency Requirement</th>
+              <th>Recommendation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Real-time inventory check at checkout</td>
+              <td>Medium, bursty</td>
+              <td>Strong (show current stock)</td>
+              <td>Synchronous REST or gRPC</td>
+            </tr>
+            <tr>
+              <td>Send order confirmation email</td>
+              <td>High, spiky</td>
+              <td>Eventual (a few seconds delay is fine)</td>
+              <td>EDA — publish <code>OrderPlaced</code>, Notification service consumes</td>
+            </tr>
+            <tr>
+              <td>Update search index after product change</td>
+              <td>Low to medium, async</td>
+              <td>Eventual (search lag acceptable)</td>
+              <td>EDA — publish <code>ProductUpdated</code>, Search service consumes</td>
+            </tr>
+            <tr>
+              <td>Fraud check before payment</td>
+              <td>High</td>
+              <td>Strong (must block payment if fraud detected)</td>
+              <td>Synchronous — fraud result needed before proceeding</td>
+            </tr>
+            <tr>
+              <td>Sync data to analytics warehouse</td>
+              <td>Very high, continuous</td>
+              <td>Eventual (hourly lag acceptable)</td>
+              <td>EDA — Kafka consumer feeding the warehouse</td>
+            </tr>
+            <tr>
+              <td>Notify 10 downstream services of a user deletion (GDPR)</td>
+              <td>Low, triggered</td>
+              <td>Eventual but must reach all services</td>
+              <td>EDA — publish <code>UserDeleted</code>, guaranteed delivery to all consumers</td>
+            </tr>
+            <tr>
+              <td>Login authentication</td>
+              <td>High, latency-sensitive</td>
+              <td>Synchronous by nature</td>
+              <td>Synchronous — user is waiting for the response</td>
+            </tr>
+            <tr>
+              <td>Cascade updates across microservices after a config change</td>
+              <td>Low, infrequent</td>
+              <td>Eventual</td>
+              <td>EDA — single publish fans out to all consumers</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Event-driven architecture solves the right problem — temporal and spatial coupling
+          between services — but it introduces its own complexity: eventual consistency,
+          idempotency requirements, schema evolution discipline, and operational investment
+          in broker infrastructure and DLQ monitoring. The core principle is simple: producers
+          emit immutable facts; consumers react independently; the broker guarantees delivery.
+          Start with at-least-once delivery and idempotent consumers. Use choreography for
+          simple reactive flows; introduce an orchestrator only when compensation logic demands
+          it. Treat your event schemas as public APIs and version them accordingly. The systems
+          that do EDA well are not the ones that adopted it everywhere — they are the ones that
+          chose it deliberately for the integration points where decoupling genuinely mattered.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

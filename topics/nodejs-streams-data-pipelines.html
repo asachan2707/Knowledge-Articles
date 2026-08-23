@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Node.js Streams Explained: From Basics to Real-World Data Pipelines | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Data flowing through pipes and network connections" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Node.js · Backend · JavaScript · 20 min</span>
+          </div>
+        </figure>
+        <h1>Node.js Streams Explained: From Basics to Real-World Data Pipelines</h1>
+        <p class="summary">
+          Why Node.js Streams exist, what memory problems they solve, how all four stream types work,
+          and how to build production-grade data pipelines — with backpressure, error handling,
+          object mode, and real-world ETL examples using <code>pipeline()</code>.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Node.js · Streams · Backend · Performance</span>
+          <span class="meta-item" data-added="2026-07-29">Published: 2026-07-29</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every Node.js developer hits the wall eventually: a file too large to load into memory,
+          an HTTP response that must start arriving before it finishes, a database export that kills
+          the process at 4 AM. Streams are Node's answer — and they are simultaneously one of the
+          most powerful and most misunderstood parts of the platform.
+        </p>
+        <div class="callout">
+          <p><strong>Core insight:</strong> Streams do not wait for all data to arrive before
+          processing it. They work on one chunk at a time, keeping memory usage constant regardless
+          of total data size. A 100GB file processed with streams uses the same RAM as a 10KB file.</p>
+        </div>
+      </section>
+
+      <!-- ─── THE MEMORY PROBLEM ─────────────────────────────────────────── -->
+      <section class="story-card">
+        <span class="section-label">Story · The 2GB CSV that killed the production server</span>
+        <p>
+          A data team writes a Node.js export job. It works fine in staging on a 50MB sample file.
+          On the first production run, it reads a 2GB CSV:
+        </p>
+        <pre><code>// naive approach — DO NOT do this with large files
+const data = fs.readFileSync('export.csv');          // 2GB allocated in RAM
+const rows = data.toString().split('\n');            // another ~2GB for the string
+rows.forEach(row => processRow(row));                // processing on top
+// total: 4–6GB RAM for one job on one file</code></pre>
+        <p>
+          The process uses 2GB of RAM just to load the file. With 100 concurrent users running
+          similar export jobs, that is 200GB of RAM required — at which point the OS begins
+          swapping and the service collapses.
+        </p>
+        <p>
+          The stream-based rewrite processes the same 2GB file in under 20MB of RAM, because
+          it only ever holds one 16KB chunk in memory at a time.
+        </p>
+      </section>
+
+      <!-- ─── PERFORMANCE COMPARISON ────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Buffer vs Stream: Memory Usage</h2>
+        <div class="callout">
+          <p><strong>Processing a 2GB CSV — peak RAM usage</strong></p>
+          <ul>
+            <li><code>fs.readFile</code> (buffer) — ~4–6 GB (file + string copy + processing overhead)</li>
+            <li><code>fs.createReadStream</code> (stream) — ~20–50 MB (one chunk at a time, constant)</li>
+          </ul>
+          <p><strong>Time to first processed row:</strong></p>
+          <ul>
+            <li>Buffer approach — only after all 2GB are read and parsed (~30–60s)</li>
+            <li>Stream approach — milliseconds after the first 16KB chunk arrives</li>
+          </ul>
+        </div>
+        <p>
+          The stream also enables lower latency: an HTTP response can start being sent to the
+          client before the database query completes. The buffer approach forces the client
+          to wait for the full response before receiving byte one.
+        </p>
+      </section>
+
+      <!-- ─── THE 4 STREAM TYPES ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>The 4 Stream Types</h2>
+        <p>
+          Node.js has exactly four stream types. Each has a clear role. Understanding which
+          to use in which situation is the foundational skill.
+        </p>
+
+        <h3>1. Readable — source of data</h3>
+        <p>
+          A Readable stream produces data. You read from it. It can be paused and resumed.
+          Common examples: <code>fs.createReadStream()</code>, an HTTP response body,
+          <code>Readable.from()</code> wrapping an async iterable, a database cursor.
+        </p>
+        <span class="code-label">Readable stream — three usage patterns</span>
+        <pre><code>const { Readable } = require('stream');
+const fs = require('fs');
+
+// 1. File read stream — the most common
+const fileStream = fs.createReadStream('data.csv', { encoding: 'utf8' });
+fileStream.on('data', chunk => console.log('got chunk:', chunk.length, 'bytes'));
+fileStream.on('end', () => console.log('done'));
+
+// 2. Readable.from() — wrap any async iterable
+async function* generateNumbers() {
+  for (let i = 0; i < 1_000_000; i++) yield { id: i, value: Math.random() };
+}
+const numStream = Readable.from(generateNumbers(), { objectMode: true });
+
+// 3. HTTP response body is a Readable
+const https = require('https');
+https.get('https://example.com/data.json', (res) => {
+  // res is a Readable — pipe it directly to a writable
+  res.pipe(process.stdout);
+});</code></pre>
+
+        <h3>2. Writable — destination for data</h3>
+        <p>
+          A Writable stream consumes data. You write to it. It signals back-pressure
+          when its internal buffer is full. Common examples: <code>fs.createWriteStream()</code>,
+          an HTTP request body, <code>process.stdout</code>, a TCP socket.
+        </p>
+        <span class="code-label">Writable stream — write with back-pressure awareness</span>
+        <pre><code>const fs = require('fs');
+
+const writer = fs.createWriteStream('output.txt');
+
+function writeData(chunk) {
+  // write() returns false when the internal buffer is full
+  const canContinue = writer.write(chunk);
+  if (!canContinue) {
+    console.log('buffer full — waiting for drain');
+    // pause source / wait for drain event before writing more
+  }
+}
+
+writer.on('drain', () => {
+  console.log('buffer drained — safe to write again');
+});
+
+writer.on('finish', () => console.log('all data written and flushed'));
+writer.on('error', (err) => console.error('write error:', err));</code></pre>
+
+        <h3>3. Transform — readable + writable with transformation</h3>
+        <p>
+          A Transform stream is both readable and writable. Data goes in one end,
+          is transformed, and comes out the other. Common examples:
+          <code>zlib.createGzip()</code> (compression), a CSV parser, an encryption stream,
+          a JSON serialiser.
+        </p>
+        <span class="code-label">Custom Transform stream — uppercase transformer</span>
+        <pre><code>const { Transform } = require('stream');
+
+// Transform that uppercases every chunk of text
+const uppercaser = new Transform({
+  transform(chunk, encoding, callback) {
+    // chunk is a Buffer by default; convert to string, transform, push
+    const upper = chunk.toString().toUpperCase();
+    this.push(upper);       // push to the readable side
+    callback();             // signal ready for the next chunk
+  },
+  flush(callback) {
+    // called once after all input has been processed
+    // use this for any final output (e.g. a footer, a closing tag)
+    this.push('\n--- END ---\n');
+    callback();
+  }
+});
+
+// Use it in a pipeline
+process.stdin.pipe(uppercaser).pipe(process.stdout);</code></pre>
+
+        <h3>4. Duplex — bidirectional without transformation coupling</h3>
+        <p>
+          A Duplex stream is both readable and writable, but unlike Transform, the two sides
+          are independent — what goes in does not determine what comes out. The readable
+          and writable halves can be driven by completely different logic. Common examples:
+          TCP sockets (<code>net.Socket</code>), WebSocket connections, SSH tunnels.
+        </p>
+        <pre><code>const net = require('net');
+
+// A TCP socket is a Duplex stream
+const socket = net.createConnection({ port: 3000, host: 'localhost' });
+
+// Write to it (the writable side)
+socket.write('HELLO SERVER\n');
+
+// Read from it (the readable side — response from server)
+socket.on('data', (data) => {
+  console.log('Server says:', data.toString());
+});
+
+// The two sides are independent — what you write has no direct
+// relationship to what you read back (the server decides that)</code></pre>
+      </section>
+
+      <!-- ─── STREAM EVENTS ──────────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Stream Events Reference</h2>
+        <p>
+          Streams communicate through events. Knowing when each fires — and what to do in
+          the handler — is the difference between a correct stream consumer and a leaky one.
+        </p>
+
+        <h3>Readable events</h3>
+        <ul>
+          <li><strong><code>data</code></strong> — a chunk of data is available. Attaching this listener puts the stream in <em>flowing mode</em> (data flows automatically). Fires repeatedly until the stream ends.</li>
+          <li><strong><code>end</code></strong> — no more data will be emitted. The entire source has been consumed. Fires once.</li>
+          <li><strong><code>error</code></strong> — an error occurred. Stream is now in an error state; no further <code>data</code> events will fire. Always attach this handler or the error becomes an uncaught exception.</li>
+          <li><strong><code>close</code></strong> — the underlying resource (file descriptor, socket) has been closed. Fires after <code>end</code>. Not all streams emit this.</li>
+          <li><strong><code>readable</code></strong> — the stream has data ready to be read manually via <code>read()</code>. This is the <em>paused mode</em> API; less common but gives more control.</li>
+          <li><strong><code>pipe</code></strong> / <strong><code>unpipe</code></strong> — fires on the readable when a writable is piped to or unpiped from it.</li>
+        </ul>
+
+        <h3>Writable events</h3>
+        <ul>
+          <li><strong><code>drain</code></strong> — the internal write buffer has been flushed below the <code>highWaterMark</code>. Safe to resume writing. This is the back-pressure resume signal.</li>
+          <li><strong><code>finish</code></strong> — <code>end()</code> has been called and all data has been flushed. No more writing is possible.</li>
+          <li><strong><code>error</code></strong> — same as readable: always attach this or face uncaught exceptions.</li>
+          <li><strong><code>close</code></strong> — underlying resource closed.</li>
+        </ul>
+
+        <span class="code-label">Idiomatic event handling for a readable stream</span>
+        <pre><code>const stream = fs.createReadStream('large-file.csv');
+
+stream.on('data', (chunk) => {
+  // process chunk (Buffer or string depending on encoding option)
+});
+
+stream.on('end', () => {
+  // all chunks processed — safe to finalise and report
+  console.log('file fully processed');
+});
+
+stream.on('error', (err) => {
+  // ALWAYS handle errors — no handler = process crash
+  console.error('stream error:', err.message);
+  // clean up any partial state
+});
+
+stream.on('close', () => {
+  // file descriptor is now released
+});</code></pre>
+      </section>
+
+      <!-- ─── BACKPRESSURE ───────────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Backpressure — The Most Misunderstood Concept</h2>
+        <p>
+          Backpressure is what happens when the consumer (writable) is slower than the
+          producer (readable). Without backpressure handling, the readable floods the
+          writable's internal buffer. The buffer grows without bound, consuming all available
+          RAM — defeating the entire purpose of using streams.
+        </p>
+        <p>
+          Node.js signals backpressure through <code>writable.write()</code> returning
+          <code>false</code>. When this happens, the writable's internal buffer has reached
+          its <code>highWaterMark</code>. The producer should stop writing and wait for the
+          <code>drain</code> event before resuming.
+        </p>
+        <p>
+          <strong><code>highWaterMark</code></strong> is the buffer size threshold:
+          16,384 bytes (16KB) for byte streams by default,
+          16 objects for object-mode streams. It is a soft limit — a signal, not a hard cap.
+          Node will not refuse writes beyond it; it simply returns <code>false</code> to
+          indicate the buffer is filling up.
+        </p>
+
+        <span class="code-label">Naive streaming — ignores backpressure (memory leak)</span>
+        <pre><code>// BAD: this ignores write() return value
+// if the writable is slow, the buffer grows unboundedly
+const readable = fs.createReadStream('huge.csv');
+const writable = fs.createWriteStream('output.csv');
+
+readable.on('data', (chunk) => {
+  writable.write(chunk);   // return value ignored — buffer fills up silently
+});
+
+readable.on('end', () => writable.end());</code></pre>
+
+        <span class="code-label">Backpressure-aware streaming — manual implementation</span>
+        <pre><code>// GOOD: respect writable.write() return value and drain event
+const readable = fs.createReadStream('huge.csv');
+const writable = fs.createWriteStream('output.csv');
+
+readable.on('data', (chunk) => {
+  const canContinue = writable.write(chunk);
+  if (!canContinue) {
+    readable.pause();    // stop reading until the writable catches up
+  }
+});
+
+writable.on('drain', () => {
+  readable.resume();     // writable buffer drained — safe to read again
+});
+
+readable.on('end', () => writable.end());
+readable.on('error', (err) => writable.destroy(err));
+writable.on('error', (err) => console.error('write error', err));</code></pre>
+
+        <p>
+          This manual approach is verbose and error-prone. The solution is
+          <code>pipe()</code> and <code>pipeline()</code>, which handle backpressure
+          automatically.
+        </p>
+      </section>
+
+      <!-- ─── PIPE AND PIPELINE ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>pipe() and pipeline()</h2>
+
+        <h3>pipe() — simple but silent on errors</h3>
+        <p>
+          <code>readable.pipe(writable)</code> wires up data flow, handles backpressure
+          automatically, and pauses/resumes the readable as needed. It is convenient for
+          simple cases. The critical limitation: <strong>pipe() does not propagate errors.</strong>
+          If the writable throws, the readable is not destroyed — you get a memory leak and
+          a half-open stream.
+        </p>
+        <pre><code>// pipe() — handles backpressure, but errors can leak
+const fs = require('fs');
+const zlib = require('zlib');
+
+fs.createReadStream('data.csv')
+  .pipe(zlib.createGzip())
+  .pipe(fs.createWriteStream('data.csv.gz'));
+// If zlib throws, the read stream is NOT cleaned up automatically
+// You must attach error handlers on every stream in the chain</code></pre>
+
+        <h3>pipeline() — production-grade stream composition</h3>
+        <p>
+          <code>stream.pipeline()</code> (Node.js 10+) addresses every limitation of
+          <code>pipe()</code>: it propagates errors, destroys all streams in the chain
+          on any error, and accepts a callback (or a Promise via <code>stream/promises</code>).
+          <strong>Always use <code>pipeline()</code> in production code.</strong>
+        </p>
+        <span class="code-label">pipeline() — error-safe stream composition</span>
+        <pre><code>const { pipeline } = require('stream/promises'); // Node.js 15+ promisified
+const fs = require('fs');
+const zlib = require('zlib');
+const { Transform } = require('stream');
+
+// A transform that counts rows as they pass through
+const rowCounter = new Transform({
+  transform(chunk, enc, cb) {
+    // just count newlines and pass data through unchanged
+    this._count = (this._count || 0) + chunk.toString().split('\n').length - 1;
+    cb(null, chunk);
+  },
+  flush(cb) {
+    console.log(`Total rows: ${this._count}`);
+    cb();
+  }
+});
+
+async function compressAndCount() {
+  try {
+    await pipeline(
+      fs.createReadStream('data.csv'),
+      rowCounter,               // count rows as they stream through
+      zlib.createGzip(),        // compress
+      fs.createWriteStream('data.csv.gz')
+    );
+    console.log('Pipeline completed successfully');
+  } catch (err) {
+    // All streams in the pipeline are destroyed automatically on error
+    console.error('Pipeline failed:', err.message);
+  }
+}
+
+compressAndCount();</code></pre>
+      </section>
+
+      <!-- ─── OBJECT MODE ────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Object Mode</h2>
+        <p>
+          By default, streams work with Buffers and strings. <strong>Object mode</strong>
+          (<code>objectMode: true</code>) allows a stream to work with any JavaScript value —
+          objects, arrays, numbers. This is essential for database streaming, API response
+          parsing, and ETL pipelines that pass structured records between stages.
+        </p>
+        <p>
+          In object mode, <code>highWaterMark</code> counts <em>objects</em>, not bytes.
+          The default is 16 objects. Set it higher if your transforms are CPU-heavy and
+          you want more buffering, or lower to reduce memory under back-pressure.
+        </p>
+        <span class="code-label">Object mode — streaming Mongoose cursor</span>
+        <pre><code>const { Transform, Writable } = require('stream');
+const { pipeline } = require('stream/promises');
+
+// Mongoose cursor is a Readable in object mode
+const cursor = User.find({ active: true }).cursor();
+// cursor already works as a stream — each 'data' event emits a Mongoose document
+
+// Transform: enrich each user object
+const enrichUser = new Transform({
+  objectMode: true,
+  highWaterMark: 50,           // buffer up to 50 objects
+  async transform(user, enc, cb) {
+    try {
+      const profile = await fetchExternalProfile(user.id);
+      cb(null, { ...user.toObject(), profile });
+    } catch (err) {
+      cb(err);
+    }
+  }
+});
+
+// Writable: batch insert into another collection
+const batcher = new Writable({
+  objectMode: true,
+  highWaterMark: 100,
+  async write(user, enc, cb) {
+    try {
+      await EnrichedUser.create(user);
+      cb();
+    } catch (err) {
+      cb(err);
+    }
+  }
+});
+
+// Run the pipeline
+await pipeline(cursor, enrichUser, batcher);
+console.log('All users enriched and saved');</code></pre>
+      </section>
+
+      <!-- ─── REAL WORLD 1: CSV ──────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Real-World Pipeline 1: Large CSV Processing</h2>
+        <p>
+          This is the most common stream use case: reading a multi-gigabyte CSV,
+          transforming each row, and writing results to a database or output file —
+          all with constant memory usage.
+        </p>
+        <span class="code-label">Full CSV pipeline — read, parse, transform, write</span>
+        <pre><code>const { pipeline } = require('stream/promises');
+const fs = require('fs');
+const csvParse = require('csv-parse');
+const { Transform } = require('stream');
+
+// ── Transform 1: filter rows ──────────────────────────────────────────────
+const filterActive = new Transform({
+  objectMode: true,
+  transform(row, enc, cb) {
+    if (row.status === 'active') {
+      cb(null, row);   // pass through
+    } else {
+      cb();            // discard: call callback with no data argument
+    }
+  }
+});
+
+// ── Transform 2: normalize and compute fields ─────────────────────────────
+const normalize = new Transform({
+  objectMode: true,
+  transform(row, enc, cb) {
+    const normalized = {
+      id: row.user_id.trim(),
+      email: row.email.toLowerCase().trim(),
+      revenue: parseFloat(row.revenue) || 0,
+      tier: parseFloat(row.revenue) > 1000 ? 'premium' : 'standard',
+      processedAt: new Date().toISOString()
+    };
+    cb(null, normalized);
+  }
+});
+
+// ── Transform 3: serialize to JSON lines for the output file ──────────────
+const toJsonLines = new Transform({
+  objectMode: true,   // reads objects, writes strings
+  readableObjectMode: false,
+  transform(row, enc, cb) {
+    cb(null, JSON.stringify(row) + '\n');
+  }
+});
+
+// ── Main pipeline ─────────────────────────────────────────────────────────
+async function processCsv(inputPath, outputPath) {
+  const inputStream = fs.createReadStream(inputPath, { encoding: 'utf8' });
+  const csvParser = csvParse.parse({ columns: true, skip_empty_lines: true });
+  const outputStream = fs.createWriteStream(outputPath);
+
+  let rowCount = 0;
+  normalize.on('data', () => rowCount++);  // count output rows
+
+  await pipeline(
+    inputStream,   // read the CSV file
+    csvParser,     // parse CSV text → JS objects
+    filterActive,  // drop inactive rows
+    normalize,     // compute derived fields
+    toJsonLines,   // serialize objects → JSON lines
+    outputStream   // write to disk
+  );
+
+  console.log(`Done. ${rowCount} active rows written to ${outputPath}`);
+}
+
+processCsv('users-export.csv', 'active-users.jsonl').catch(console.error);</code></pre>
+      </section>
+
+      <!-- ─── REAL WORLD 2: HTTP STREAMING ──────────────────────────────── -->
+      <section class="content-card">
+        <h2>Real-World Pipeline 2: HTTP Streaming Response</h2>
+        <p>
+          Streams shine in HTTP servers. Instead of reading an entire file into memory before
+          sending a response, stream the file directly to the client. The client starts
+          receiving bytes immediately, and the server never holds more than one chunk in memory.
+        </p>
+        <span class="code-label">Express — stream a large file with gzip compression</span>
+        <pre><code>const express = require('express');
+const fs = require('fs');
+const zlib = require('zlib');
+const { pipeline } = require('stream');  // callback-style (safer with res)
+const { promisify } = require('util');
+const pipelineAsync = promisify(pipeline);
+
+const app = express();
+
+app.get('/download/:filename', async (req, res) => {
+  const filePath = `/data/exports/${req.params.filename}`;
+
+  // Check file exists first
+  try {
+    await fs.promises.access(filePath);
+  } catch {
+    return res.status(404).send('File not found');
+  }
+
+  // Set headers — client sees a compressed file download
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${req.params.filename}.gz"`);
+  res.setHeader('Content-Encoding', 'gzip');
+
+  try {
+    await pipelineAsync(
+      fs.createReadStream(filePath),
+      zlib.createGzip(),
+      res                           // res is a Writable stream
+    );
+    // pipeline() calls res.end() automatically when the file stream ends
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(500).send('Streaming error');
+    }
+    console.error('Download stream error:', err.message);
+  }
+});</code></pre>
+
+        <span class="code-label">Streaming a large JSON API response — NDJSON pattern</span>
+        <pre><code>// Instead of: res.json(await getLargeDataset())  — loads all into memory
+// Use NDJSON (newline-delimited JSON) to stream rows as they come from the DB
+
+app.get('/api/users/export', async (req, res) => {
+  res.setHeader('Content-Type', 'application/x-ndjson');
+
+  const cursor = User.find({}).lean().cursor();   // Mongoose streaming cursor
+
+  const serializeToNdjson = new Transform({
+    objectMode: true,
+    transform(doc, enc, cb) {
+      cb(null, JSON.stringify(doc) + '\n');
+    }
+  });
+
+  try {
+    await pipelineAsync(cursor, serializeToNdjson, res);
+  } catch (err) {
+    // Headers may already be sent — can't send a 500 at this point
+    console.error('Export stream error:', err.message);
+    res.destroy();
+  }
+});</code></pre>
+      </section>
+
+      <!-- ─── REAL WORLD 3: ETL ──────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Real-World Pipeline 3: ETL with Multiple Transforms</h2>
+        <p>
+          An Extract-Transform-Load pipeline is the canonical stream use case. Read from
+          a source, apply multiple transformations, write to a destination — with proper
+          error handling at each stage so a bad row does not kill the entire job.
+        </p>
+        <span class="code-label">ETL pipeline — read from API, transform, write to DB</span>
+        <pre><code>const { Readable, Transform, Writable } = require('stream');
+const { pipeline } = require('stream/promises');
+
+// ── Extract: generate records from a paginated API ────────────────────────
+async function* fetchRecords(apiUrl) {
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const res = await fetch(`${apiUrl}?page=${page}&pageSize=100`);
+    const { data, nextPage } = await res.json();
+
+    for (const record of data) yield record;
+
+    hasMore = Boolean(nextPage);
+    page++;
+  }
+}
+
+// ── Transform 1: validate schema, drop invalid rows ───────────────────────
+const validate = new Transform({
+  objectMode: true,
+  transform(record, enc, cb) {
+    const { id, email, amount } = record;
+    if (!id || !email || typeof amount !== 'number') {
+      console.warn(`Skipping invalid record: ${JSON.stringify(record)}`);
+      return cb();   // drop the row — no error, just skip
+    }
+    cb(null, record);
+  }
+});
+
+// ── Transform 2: enrich with external data ────────────────────────────────
+const enrich = new Transform({
+  objectMode: true,
+  async transform(record, enc, cb) {
+    try {
+      const geo = await geoLookup(record.ip);
+      cb(null, { ...record, country: geo.country, region: geo.region });
+    } catch {
+      // enrichment failure is non-fatal — pass record through without geo data
+      cb(null, { ...record, country: null, region: null });
+    }
+  }
+});
+
+// ── Load: batch insert into PostgreSQL ────────────────────────────────────
+class BatchInserter extends Writable {
+  constructor(db, batchSize = 500) {
+    super({ objectMode: true, highWaterMark: batchSize });
+    this.db = db;
+    this.batchSize = batchSize;
+    this.batch = [];
+    this.totalInserted = 0;
+  }
+
+  async _write(record, enc, cb) {
+    this.batch.push(record);
+
+    if (this.batch.length >= this.batchSize) {
+      await this._flush_batch();
+    }
+    cb();
+  }
+
+  async _final(cb) {
+    // called when the writable side is ending — flush any remaining records
+    if (this.batch.length > 0) await this._flush_batch();
+    console.log(`ETL complete. Total inserted: ${this.totalInserted}`);
+    cb();
+  }
+
+  async _flush_batch() {
+    await this.db.batchInsert('events', this.batch);
+    this.totalInserted += this.batch.length;
+    this.batch = [];
+  }
+}
+
+// ── Wire it all together ───────────────────────────────────────────────────
+async function runEtl() {
+  const source = Readable.from(fetchRecords('https://api.example.com/events'), {
+    objectMode: true
+  });
+
+  await pipeline(
+    source,
+    validate,
+    enrich,
+    new BatchInserter(db, 500)
+  );
+}
+
+runEtl().catch((err) => {
+  console.error('ETL pipeline failed:', err.message);
+  process.exit(1);
+});</code></pre>
+      </section>
+
+      <!-- ─── COMMON PITFALLS ────────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Common Pitfalls and Production Gotchas</h2>
+        <ul>
+          <li>
+            <strong>Not handling the <code>error</code> event</strong> — every stream in a chain
+            must have an <code>error</code> listener, or unhandled errors crash the process.
+            <code>pipeline()</code> handles this for you; <code>pipe()</code> does not.
+          </li>
+          <li>
+            <strong>Ignoring <code>write()</code> return value</strong> — the single most common
+            stream bug. Ignoring <code>false</code> causes unbounded buffer growth. Use
+            <code>pipeline()</code> which manages this automatically.
+          </li>
+          <li>
+            <strong>Mixing object mode and byte mode without <code>readableObjectMode</code> /
+            <code>writableObjectMode</code></strong> — a Transform that accepts objects and emits
+            strings must set <code>readableObjectMode: false, writableObjectMode: true</code> to
+            avoid <code>Invalid non-string/buffer chunk</code> errors.
+          </li>
+          <li>
+            <strong>Forgetting to call <code>callback()</code> in <code>transform()</code></strong>
+            — the stream will stall silently. Every path through the <code>transform</code>
+            function must call <code>cb()</code> exactly once.
+          </li>
+          <li>
+            <strong>Using async functions in <code>transform()</code> without try/catch</strong>
+            — an unhandled rejection inside a transform does not automatically surface as a stream
+            error. Wrap <code>await</code> calls in try/catch and call <code>cb(err)</code> on failure.
+          </li>
+          <li>
+            <strong>Not calling <code>stream.destroy()</code> on early termination</strong> —
+            if a downstream consumer decides to stop early (e.g. user cancels a download), call
+            <code>destroy()</code> on the pipeline source. Otherwise the file descriptor stays open
+            and the source keeps reading data no one will consume.
+          </li>
+        </ul>
+      </section>
+
+      <!-- ─── TAKEAWAYS ─────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaways</h2>
+        <p>
+          Streams are not a niche optimisation — they are the correct default for any data
+          that is too large to fit comfortably in memory, any response that benefits from
+          early delivery, or any pipeline where multiple transformations compose cleanly.
+          The mental shift is from "load everything, then process" to "process as it arrives."
+        </p>
+        <ul>
+          <li>Use <code>pipeline()</code> from <code>stream/promises</code> in all production code — it handles backpressure, error propagation, and stream cleanup automatically.</li>
+          <li>Enable <code>objectMode: true</code> whenever streaming structured records instead of raw bytes — database cursors, API responses, parsed CSV rows.</li>
+          <li>Backpressure is automatic inside <code>pipeline()</code> but must be managed manually if you use the raw <code>data</code> event or <code>pipe()</code>.</li>
+          <li>Always attach <code>error</code> handlers or use <code>pipeline()</code> — unhandled stream errors crash the process.</li>
+          <li>A well-built stream pipeline has constant memory usage regardless of input size. If memory grows linearly with input, something is accumulating data that should be flowing through.</li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube Video Processing Pipeline: Distributed Encoding and Async Workflows | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Video streaming and processing" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Backend · Distributed Systems · 26 min</span>
+          </div>
+        </figure>
+        <h1>YouTube Video Processing Pipeline: System Design Deep Dive on Distributed Encoding and Async Workflows</h1>
+        <p class="summary">
+          How YouTube processes 500 hours of video uploaded every minute — full architecture from
+          chunked upload to CDN delivery. Covers GOP-aligned segmentation, distributed encoding
+          workers, codec and format strategy (H.264, VP9, AV1), adaptive bitrate manifests, CDN
+          prewarming, content ID fingerprinting, and failure handling with idempotent job queues.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Distributed Encoding · Video Streaming</span>
+          <span class="meta-item">Published: 2026-07-29</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Every minute, 500 hours of video land on YouTube's servers. If each video were encoded
+          sequentially on a single machine, the queue would grow faster than it could ever be
+          drained. The solution is not a faster machine — it is a distributed pipeline that splits
+          each video into independent segments, fans them out across thousands of workers, and
+          reassembles the output into adaptive bitrate streams that reach a viewer anywhere in the
+          world within minutes of upload.
+        </p>
+        <div class="callout">
+          <p><strong>Scale context:</strong> 500 hours/minute = 720,000 hours of video per day.
+          Each video requires 6–8 resolution variants × 3 codecs = 18–24 encoding jobs minimum,
+          plus thumbnails, auto-captions, audio tracks, metadata extraction, and content ID
+          fingerprinting. That is hundreds of millions of encoding tasks executed daily across
+          a globally distributed worker fleet.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · A 4K documentary, from upload to live in 15 minutes</span>
+        <p>
+          A filmmaker uploads a 2-hour, 4K documentary — 80 GB of raw H.264 footage — to YouTube.
+          A naive, sequential encoding pipeline would process this in roughly 6 hours: ingest the
+          file, encode to 480p, wait, encode to 720p, wait, encode to 1080p, wait, encode to 4K,
+          upload to CDN, publish. The video would be unavailable for the entire duration.
+        </p>
+        <p>
+          With YouTube's actual distributed pipeline, the video is available to viewers in 15–20
+          minutes, with the 360p and 480p versions live first and the 4K version following as
+          encoding completes. The key architectural insight is that a 2-hour video is not one
+          indivisible encoding task — it is 720 independent 10-second segments, each of which
+          can be encoded in parallel across a fleet of workers. The total wall-clock time drops
+          from hours to minutes because the work is distributed, not because any single machine
+          got faster.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Scale Context: What the Numbers Mean for the Architecture</h2>
+        <p>
+          500 hours uploaded per minute sounds like an aggregate statistic, but it has direct
+          architectural implications for every subsystem in the pipeline.
+        </p>
+        <ul>
+          <li><strong>Storage ingestion rate:</strong> At ~1 GB/minute of raw video per upload,
+          500 concurrent uploads = roughly 500 GB/minute hitting blob storage (GCS). Upload
+          service must be horizontally scalable and stateless.</li>
+          <li><strong>Encoding job fanout:</strong> Each video spawns 18–24 encoding jobs
+          (6–8 resolutions × 3 codecs). 500 hours/minute × 24 jobs = 12,000 new encoding
+          jobs per minute entering the queue at sustained load.</li>
+          <li><strong>Parallel async pipelines:</strong> Thumbnail generation, auto-caption
+          (speech-to-text), audio normalisation, content ID fingerprinting, and metadata
+          extraction all run in parallel with encoding. A single upload triggers 5–10 distinct
+          async workflows simultaneously.</li>
+          <li><strong>CDN write amplification:</strong> Each encoded segment is replicated
+          to multiple CDN edge nodes. For a popular video, a single encoded file may be
+          written to 100+ edge PoPs (Points of Presence).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 1 — Upload and Ingestion</h2>
+        <p>
+          The first challenge is getting the raw video from the creator's machine into YouTube's
+          infrastructure reliably. A 2-hour 4K file can be 50–100 GB. A plain HTTP POST would
+          fail on any network interruption. YouTube uses a <strong>resumable chunked upload
+          protocol</strong> (similar to GCS Resumable Uploads).
+        </p>
+        <h3>Resumable upload protocol</h3>
+        <p>
+          The client splits the file into 8–16 MB chunks and uploads them sequentially with a
+          unique upload session ID. Each chunk receives an acknowledgement. If the connection
+          drops, the client requests the last acknowledged byte offset and resumes from there.
+          The upload service writes chunks directly to GCS (Google Cloud Storage) as they arrive.
+        </p>
+        <h3>Upload service design</h3>
+        <ul>
+          <li>The upload service is <strong>stateless</strong>. Any instance can handle any
+          chunk from any session.</li>
+          <li>Upload progress (last acknowledged byte, session state) is stored in Redis,
+          keyed by session ID. This allows any upload-service replica to resume a session
+          started by a different replica.</li>
+          <li>Once all chunks are received and verified (checksum), the upload service
+          writes a <strong>completion event</strong> to the pipeline message queue. This
+          event is the trigger for all downstream processing — the upload service itself
+          does nothing more.</li>
+          <li>The raw video in GCS is the single source of truth. All downstream services
+          read from GCS; they do not receive the video bytes directly from the uploader.</li>
+        </ul>
+        <div class="callout">
+          <p><strong>Design principle:</strong> Decouple receipt from processing. The upload
+          service's only job is to get the raw bytes into durable storage and emit one event.
+          All encoding, analysis, and distribution logic is downstream of that event. This
+          means the upload path can be scaled, deployed, and failed independently of the
+          encoding pipeline.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 2 — Video Splitting (GOP-Aligned Segmentation)</h2>
+        <p>
+          Before any encoding can be parallelised, the raw video must be split into segments
+          that can be independently encoded. This is not a simple byte-range split — it requires
+          understanding the video's internal structure.
+        </p>
+        <h3>What is a GOP?</h3>
+        <p>
+          Video codecs do not encode every frame independently. They use temporal compression:
+          a <strong>keyframe (I-frame)</strong> contains a complete picture, while
+          <strong>P-frames and B-frames</strong> encode only the differences from adjacent frames.
+          A <strong>Group of Pictures (GOP)</strong> is one keyframe plus all the dependent frames
+          that follow it until the next keyframe — typically 2–4 seconds of video at standard
+          settings.
+        </p>
+        <p>
+          The critical constraint: <strong>you must split on keyframe boundaries.</strong> If you
+          split mid-GOP, the P-frames in the second segment reference frames from the first
+          segment — they cannot be decoded independently, and encoding them independently
+          produces corrupted output. Every segment boundary must land exactly on an I-frame.
+        </p>
+        <h3>Segmentation in practice</h3>
+        <ul>
+          <li>The splitter scans the raw video to identify all keyframe timestamps.</li>
+          <li>It groups keyframes into segments of approximately 10 seconds each (the exact
+          duration varies to match the nearest keyframe boundary).</li>
+          <li>Each segment is written to GCS as an independent file, along with a
+          <strong>manifest file</strong> that lists all segment IDs, their durations, byte
+          offsets, and expected output file names.</li>
+          <li>If the raw video has a low keyframe rate (e.g. every 30 seconds — common in
+          screen recordings), the splitter forces a keyframe insertion into the raw stream
+          before segmenting. This is a fast, lossless operation on most codecs.</li>
+        </ul>
+        <pre><code>raw-video.mp4 (2 hours, 4K)
+  ↓ GOP-aligned split (keyframe detection)
+segment-000.mp4  [0:00 – 0:10]
+segment-001.mp4  [0:10 – 0:20]
+segment-002.mp4  [0:20 – 0:30]
+...
+segment-719.mp4  [1:59:50 – 2:00:00]
+
+manifest.json: {
+  videoId: "abc123",
+  totalSegments: 720,
+  segments: [
+    { id: "segment-000", start: 0, duration: 10.04, gcsPath: "..." },
+    { id: "segment-001", start: 10.04, duration: 9.98, gcsPath: "..." },
+    ...
+  ]
+}</code></pre>
+        <p>
+          720 independent segments, each 10 seconds. Each can now be dispatched to a
+          different encoding worker with no inter-worker dependency.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 3 — Distributed Encoding Workers</h2>
+        <p>
+          The manifest file drives the entire encoding phase. For each segment × resolution ×
+          codec combination, one encoding job is created and placed on the message queue. Each
+          job is a self-contained, idempotent unit of work.
+        </p>
+        <h3>Job structure</h3>
+        <p>
+          A single encoding job contains: segment ID, source GCS path, target resolution,
+          target codec, target bitrate, output GCS path, and a job ID. Workers are completely
+          stateless — they read the input from GCS, run the encoder (FFmpeg or a custom
+          encoder), and write the output back to GCS.
+        </p>
+        <h3>Worker fleet design</h3>
+        <ul>
+          <li><strong>Stateless and horizontally scalable:</strong> Workers have no local
+          state. Any worker can pick up any job. Adding more workers linearly increases
+          throughput.</li>
+          <li><strong>Spot/preemptible instances:</strong> Encoding is CPU-intensive but
+          not latency-sensitive (10 seconds of a long queue is acceptable). Google Cloud
+          Spot instances cost 60–80% less than on-demand. Worker failure is handled by
+          re-queuing (see failure handling below).</li>
+          <li><strong>Job visibility timeout:</strong> When a worker picks up a job, the
+          job becomes invisible to other workers for a visibility window (e.g. 5 minutes).
+          If the worker completes the job, it deletes the message. If the worker fails
+          (instance preempted, OOM kill), the visibility window expires and the job
+          becomes visible again for another worker to pick up.</li>
+          <li><strong>Idempotency:</strong> If a segment is already encoded at the target
+          resolution (output file exists in GCS), the worker skips re-encoding and
+          acknowledges the job. This makes re-queuing safe.</li>
+        </ul>
+        <h3>Encoding job dispatch (JavaScript pseudocode)</h3>
+        <span class="code-label">JavaScript Example — Manifest to Queue: Dispatching Encoding Jobs</span>
+        <pre><code>// encoding-dispatcher.js — triggered by upload-complete event
+import { PubSub } from '@google-cloud/pubsub';
+import { Storage } from '@google-cloud/storage';
+
+const pubsub = new PubSub();
+const storage = new Storage();
+
+const RESOLUTIONS = [
+  { label: '360p',  width: 640,  height: 360,  bitrateKbps: 500  },
+  { label: '480p',  width: 854,  height: 480,  bitrateKbps: 1000 },
+  { label: '720p',  width: 1280, height: 720,  bitrateKbps: 2500 },
+  { label: '1080p', width: 1920, height: 1080, bitrateKbps: 5000 },
+  { label: '1440p', width: 2560, height: 1440, bitrateKbps: 9000 },
+  { label: '4K',    width: 3840, height: 2160, bitrateKbps: 18000 },
+];
+
+const CODECS = ['h264', 'vp9', 'av1'];
+
+async function dispatchEncodingJobs(videoId, manifestGcsPath) {
+  // 1. Read the segment manifest from GCS
+  const [manifestContent] = await storage
+    .bucket('raw-videos')
+    .file(manifestGcsPath)
+    .download();
+  const manifest = JSON.parse(manifestContent.toString());
+
+  const topic = pubsub.topic('encoding-jobs');
+  const jobs = [];
+
+  // 2. For each segment × resolution × codec → one job
+  for (const segment of manifest.segments) {
+    for (const resolution of RESOLUTIONS) {
+      for (const codec of CODECS) {
+        // Skip AV1 for resolutions below 720p — not worth the encode cost
+        if (codec === 'av1' && resolution.height < 720) continue;
+
+        const job = {
+          jobId: `${videoId}-${segment.id}-${resolution.label}-${codec}`,
+          videoId,
+          segmentId: segment.id,
+          sourceGcsPath: segment.gcsPath,
+          targetResolution: resolution,
+          targetCodec: codec,
+          outputGcsPath: `encoded/${videoId}/${resolution.label}/${codec}/${segment.id}.mp4`,
+          priority: resolution.label === '360p' ? 'HIGH' : 'NORMAL',  // 360p fast-tracked
+          enqueuedAt: new Date().toISOString(),
+        };
+
+        jobs.push(
+          topic.publishMessage({ json: job })
+        );
+      }
+    }
+  }
+
+  // 3. Publish all jobs (batched by Pub/Sub client)
+  const messageIds = await Promise.all(jobs);
+  console.log(`[dispatcher] Enqueued ${messageIds.length} encoding jobs for video ${videoId}`);
+
+  // 4. Record expected job count in metadata store (for completion tracking)
+  await updateVideoMetadata(videoId, {
+    totalEncodingJobs: messageIds.length,
+    completedJobs: 0,
+    status: 'ENCODING',
+  });
+}
+
+// Worker: pull and execute one encoding job
+async function runEncodingWorker() {
+  const subscription = pubsub.subscription('encoding-jobs-sub');
+
+  subscription.on('message', async (message) => {
+    const job = JSON.parse(message.data.toString());
+    console.log(`[worker] Starting job ${job.jobId}`);
+
+    try {
+      // Check idempotency: output already exists?
+      const outputExists = await storage
+        .bucket('encoded-videos')
+        .file(job.outputGcsPath)
+        .exists();
+
+      if (outputExists[0]) {
+        console.log(`[worker] Job ${job.jobId} already done — skipping`);
+        message.ack();
+        return;
+      }
+
+      // Download source segment from GCS
+      const tmpInput = `/tmp/${job.segmentId}-source.mp4`;
+      const tmpOutput = `/tmp/${job.segmentId}-${job.targetResolution.label}-${job.targetCodec}.mp4`;
+
+      await storage.bucket('raw-videos').file(job.sourceGcsPath).download({ destination: tmpInput });
+
+      // Run encoder (FFmpeg wrapper — actual encoding is CPU-bound)
+      await encodeSegment({
+        input: tmpInput,
+        output: tmpOutput,
+        codec: job.targetCodec,
+        width: job.targetResolution.width,
+        height: job.targetResolution.height,
+        bitrateKbps: job.targetResolution.bitrateKbps,
+      });
+
+      // Upload encoded segment to GCS
+      await storage.bucket('encoded-videos').upload(tmpOutput, {
+        destination: job.outputGcsPath,
+        metadata: { jobId: job.jobId, videoId: job.videoId },
+      });
+
+      // Notify metadata service of completion
+      await notifyJobComplete(job.jobId, job.videoId, job.outputGcsPath);
+
+      message.ack();
+      console.log(`[worker] Completed job ${job.jobId}`);
+    } catch (err) {
+      console.error(`[worker] Job ${job.jobId} failed: ${err.message}`);
+      message.nack();  // returns to queue after visibility timeout
+    }
+  });
+}
+
+async function encodeSegment({ input, output, codec, width, height, bitrateKbps }) {
+  const codecArgs = {
+    h264: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23'],
+    vp9:  ['-c:v', 'libvpx-vp9', '-b:v', `${bitrateKbps}k`, '-deadline', 'good'],
+    av1:  ['-c:v', 'libaom-av1', '-crf', '30', '-b:v', '0', '-cpu-used', '4'],
+  };
+
+  const { execa } = await import('execa');
+  await execa('ffmpeg', [
+    '-i', input,
+    '-vf', `scale=${width}:${height}`,
+    ...codecArgs[codec],
+    '-b:v', `${bitrateKbps}k`,
+    '-an',        // audio handled separately
+    '-movflags', '+faststart',
+    output,
+  ]);
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Codec and Format Strategy</h2>
+        <p>
+          YouTube encodes every video into multiple codecs. This is not redundancy — each codec
+          serves a different device population, and the player selects the best available codec
+          for the current device at playback time.
+        </p>
+        <h3>Codec comparison</h3>
+        <div class="callout">
+          <p><strong>H.264 (AVC)</strong> — The universal codec. Every device, browser, and
+          smart TV from the past 15 years supports hardware-accelerated H.264 decoding. File
+          size is the largest. Encode time is fastest. Used as the guaranteed fallback for
+          all resolutions.</p>
+          <p><strong>VP9</strong> — YouTube's open-source codec. Same visual quality as H.265
+          (HEVC) at 50% the file size of H.264. Supported by all modern browsers (Chrome,
+          Firefox, Edge) and newer Android devices. YouTube serves VP9 for the majority of
+          desktop and Android traffic.</p>
+          <p><strong>H.265 (HEVC)</strong> — 50% smaller than H.264 at equivalent quality.
+          Good hardware support on Apple devices (iPhone, Mac) but patent licensing costs
+          complicate adoption. YouTube uses VP9 instead of HEVC for most cases.</p>
+          <p><strong>AV1</strong> — Newest and best compression: 30% better than VP9,
+          50% better than H.264. Open-source, royalty-free. Encode is 10–50× slower than
+          H.264, which makes it expensive at scale. YouTube uses AV1 for 720p and above
+          for users on supported devices (Chrome 70+, Android 10+, newer TVs).</p>
+        </div>
+        <h3>Resolution × Codec encoding matrix</h3>
+        <pre><code>Resolution │ H.264 │ VP9  │ AV1
+───────────┼───────┼──────┼─────
+360p       │  ✓    │  ✓   │  —   (AV1 encode cost not justified at low res)
+480p       │  ✓    │  ✓   │  —
+720p       │  ✓    │  ✓   │  ✓
+1080p      │  ✓    │  ✓   │  ✓
+1440p      │  ✓    │  ✓   │  ✓
+4K (2160p) │  ✓    │  ✓   │  ✓
+
+Priority queue: 360p H.264 → 480p H.264 → 720p H.264/VP9 → … → 4K AV1
+(360p H.264 is the "video available" signal — everything else finishes async)</code></pre>
+        <h3>Audio encoding</h3>
+        <p>
+          Audio is encoded separately from video segments: AAC (128/192/320 kbps) for
+          broad compatibility, Opus for VP9 and AV1 streams (better quality at lower
+          bitrate). Multiple audio tracks (original language, dubbed tracks, audio
+          descriptions) are each encoded independently.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 4 — Manifest Assembly and Adaptive Bitrate</h2>
+        <p>
+          As encoding workers complete jobs, a metadata service tracks completion state per
+          video. When all segments for a given resolution and codec are done, the manifest
+          assembler generates the streaming manifests.
+        </p>
+        <h3>Two manifest formats</h3>
+        <ul>
+          <li><strong>DASH (Dynamic Adaptive Streaming over HTTP) — MPD file:</strong>
+          XML manifest listing all available representations (resolution + codec), their
+          bitrates, and URLs to segment files. Used by the YouTube web player and most
+          Android clients.</li>
+          <li><strong>HLS (HTTP Live Streaming) — M3U8 file:</strong> Playlist-based
+          manifest. Required for iOS/Safari, which does not support DASH natively. YouTube
+          generates HLS manifests alongside DASH manifests.</li>
+        </ul>
+        <h3>Adaptive Bitrate (ABR) playback</h3>
+        <p>
+          The player does not download the whole video — it downloads 10-second segments
+          one at a time. Before each segment, the player checks the current available
+          bandwidth and buffer state, then selects the highest quality representation that
+          can be downloaded in time. This is why YouTube smoothly degrades from 1080p to
+          480p during congestion without buffering: it switches quality at the next segment
+          boundary, not mid-segment.
+        </p>
+        <h3>Progressive availability: the "360p fast path"</h3>
+        <p>
+          YouTube marks a video as <strong>available to viewers</strong> as soon as the
+          360p H.264 version is fully encoded — not when all formats are complete. The
+          creator sees "Processing complete" when the video is watchable, even if 4K
+          encoding is still running. This is a deliberate product decision that dramatically
+          reduces the perceived upload-to-live latency for most content.
+        </p>
+        <pre><code>UPLOADED          — raw bytes in GCS, upload confirmed
+SEGMENTING        — splitter running, segments being written
+ENCODING          — workers running, some resolutions complete
+TRANSCODING_360P  — 360p + H.264 complete: video is watchable
+TRANSCODING_HIGH  — 720p–4K completing in background
+LIVE              — all requested formats complete, 4K available</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Phase 5 — CDN Distribution</h2>
+        <p>
+          Once encoded segments land in GCS, the CDN distribution layer is responsible for
+          ensuring they can be served to viewers with low latency from anywhere in the world.
+        </p>
+        <h3>YouTube's CDN architecture</h3>
+        <p>
+          YouTube operates its own CDN (Google Global Cache / Google Cloud CDN), with Points
+          of Presence (PoPs) collocated in or adjacent to ISP networks in major cities.
+          When a user in Mumbai requests a video, they are served from the Mumbai PoP,
+          not from a US data centre.
+        </p>
+        <h3>Popularity-based prewarming</h3>
+        <p>
+          Not all videos get the same CDN treatment. YouTube uses predicted popularity
+          (based on channel size, initial view velocity, topic trends) to decide how
+          aggressively to push content to edge nodes:
+        </p>
+        <ul>
+          <li><strong>Top 1% of videos</strong> (viral content, major creator uploads):
+          preloaded to 100% of edge PoPs immediately after encoding. When the first viewer
+          requests from any region, the content is already there.</li>
+          <li><strong>Mainstream content</strong>: pushed to regional PoPs (e.g. the
+          5 closest PoPs to the upload origin). Fills out to more PoPs as view count grows.</li>
+          <li><strong>Long-tail content</strong> (most uploads): not preloaded. Pulled
+          from origin to the nearest PoP on the first request from that region, then
+          cached at that edge for subsequent viewers.</li>
+        </ul>
+        <h3>Cache eviction</h3>
+        <p>
+          Edge PoPs have finite storage. Videos that have not been accessed recently are
+          evicted (LRU or a variant weighted by file size and last-access time). A request
+          for an evicted video triggers a fresh pull from the origin GCS bucket.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Metadata and Content ID Pipeline (Async, Parallel)</h2>
+        <p>
+          In parallel with the encoding pipeline — from the moment the upload completes —
+          multiple async workflows run independently. None of them block video availability.
+        </p>
+        <h3>Thumbnail generation</h3>
+        <p>
+          The raw video is analysed by a thumbnail selection model that picks 3 candidate
+          frames (high visual quality, faces visible, representative of content). These are
+          encoded as WebP + JPEG at multiple sizes and uploaded to the CDN immediately —
+          the thumbnail is usually available before the video itself.
+        </p>
+        <h3>Auto-captions</h3>
+        <p>
+          YouTube's speech recognition model runs against the audio track. Output: timed
+          text segments in VTT format, indexed for both display and full-text search. This
+          pipeline is lower priority than encoding but runs within minutes for most videos.
+        </p>
+        <h3>Content ID fingerprinting</h3>
+        <p>
+          The most computationally expensive async pipeline. YouTube's Content ID system
+          extracts an audio fingerprint (a compact waveform signature) and a visual
+          fingerprint (perceptual hashes of keyframes) from the new video. These fingerprints
+          are matched against a reference database of over 800 million copyrighted tracks
+          and scenes. A match triggers the rights holder's chosen policy: block, monetise,
+          or track.
+        </p>
+        <div class="callout">
+          <p><strong>Why async?</strong> Content ID matching on 800M reference tracks takes
+          seconds to minutes per video even with efficient indexing. If it were synchronous
+          (blocking video availability), creators would wait 5–10 extra minutes for every
+          upload. Instead, the video goes live immediately and Content ID runs in the background.
+          If a match is found after the video is live, the policy is applied at that point.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>Status Tracking and Creator Notifications</h2>
+        <p>
+          The creator's dashboard shows real-time processing status. This requires a status
+          tracking subsystem that aggregates completion events from all the async pipelines
+          and surfaces them through a WebSocket connection to the creator's browser.
+        </p>
+        <h3>Status state machine</h3>
+        <pre><code>UPLOADED
+  ↓ (upload service: all chunks received, GCS write confirmed)
+SEGMENTING
+  ↓ (splitter: manifest written, segment count known)
+ENCODING
+  ↓ (first encoding job dispatched)
+TRANSCODING_360P    ← video becomes watchable at this point
+  ↓ (all 360p H.264 segments encoded, manifest assembled)
+TRANSCODING_HIGH    ← 720p, 1080p, 4K encoding in progress
+  ↓ (all requested resolutions complete)
+LIVE
+  ↓ (CDN distribution confirmed for primary regions)
+PUBLISHED           ← appears in search, recommendations</code></pre>
+        <h3>WebSocket status delivery</h3>
+        <p>
+          Each encoding job completion triggers a Pub/Sub event. A status aggregator
+          service consumes these events, updates a Redis counter (completed jobs / total jobs),
+          and pushes status updates to the creator's active WebSocket connection. If the
+          connection drops, the creator can reconnect and pull the current state from the
+          Redis snapshot.
+        </p>
+        <h3>Failure visibility</h3>
+        <p>
+          If an encoding job fails after all retries are exhausted, the status service shows
+          the creator: which segment failed, which resolution/codec combination, the error
+          class (codec error, out of memory, source file corrupt), and the retry count. This
+          is surfaced as a warning rather than an error if lower-quality versions are
+          available — e.g. "4K unavailable: encoding error. Your video is live at up to
+          1080p. YouTube is investigating."
+        </p>
+      </section>
+
+      <section class="content-card">
+        <h2>Failure Handling and Resilience</h2>
+        <p>
+          A pipeline that encodes hundreds of millions of jobs per day will have failures.
+          The architecture is designed to tolerate them without manual intervention.
+        </p>
+        <h3>Idempotent jobs</h3>
+        <p>
+          Every encoding job is idempotent: given the same input segment and the same
+          encoding parameters, the output is deterministic (or close enough for video —
+          the visual quality is identical even if not byte-identical across encoders).
+          This means any job can be safely re-queued and re-executed without risk of
+          corrupting the output. The worker checks for output existence before encoding
+          (see the dispatcher code above).
+        </p>
+        <h3>Visibility timeout and re-queuing</h3>
+        <p>
+          When a worker picks up a job, the message becomes invisible in Pub/Sub for the
+          duration of the visibility timeout (configurable; typically 5 minutes for a
+          10-second segment — very conservative). If the worker crashes, is preempted,
+          or runs out of memory, the message reappears and another worker picks it up.
+          No explicit failure detection or orchestration is needed for the common case.
+        </p>
+        <h3>Dead letter queue</h3>
+        <p>
+          Jobs that fail more than N times (e.g. 5 retries) are moved to a dead letter
+          queue (DLQ). An ops team reviews DLQ jobs periodically. Common causes: corrupt
+          source segment, unsupported codec in the raw file, extreme input characteristics
+          (10-hour static shot with unusual GOP structure). DLQ jobs trigger a creator
+          notification explaining the issue.
+        </p>
+        <h3>Partial failure: progressive quality degradation</h3>
+        <p>
+          If 4K encoding fails but 1080p and below succeed, the video is published at
+          1080p. The DASH/HLS manifests only include representations that are fully
+          complete. YouTube may retry the 4K encode later (off-peak hours, different
+          worker pool). The creator sees the video as "Live" with a warning about 4K
+          availability.
+        </p>
+        <h3>Source video corruption</h3>
+        <p>
+          If the raw upload is corrupt (incomplete file, broken container headers), the
+          splitter fails at Phase 2. The entire video is moved to a "failed ingestion"
+          state, and the creator is notified to re-upload. The corrupt file is retained
+          in GCS for 7 days for debugging, then deleted.
+        </p>
+        <span class="code-label">JavaScript Example — Dead Letter Queue Handler</span>
+        <pre><code>// dlq-handler.js — processes jobs that exhausted all retries
+import { PubSub } from '@google-cloud/pubsub';
+
+const MAX_RETRIES = 5;
+
+async function processDlqMessage(message) {
+  const job = JSON.parse(message.data.toString());
+  const retryCount = parseInt(message.attributes.retryCount || '0', 10);
+
+  if (retryCount < MAX_RETRIES) {
+    // Re-queue with incremented retry count and exponential backoff delay
+    const delayMs = Math.pow(2, retryCount) * 30_000; // 30s, 60s, 120s, 240s, 480s
+    console.log(`[dlq] Re-queuing job ${job.jobId}, retry ${retryCount + 1}, delay ${delayMs}ms`);
+
+    await pubsub.topic('encoding-jobs').publishMessage({
+      json: job,
+      attributes: { retryCount: String(retryCount + 1) },
+      // Note: Pub/Sub doesn't support native delay; use Cloud Tasks or a delay topic in practice
+    });
+
+    message.ack();
+  } else {
+    // Exhausted retries — move to permanent failure store and alert
+    console.error(`[dlq] Job ${job.jobId} permanently failed after ${MAX_RETRIES} retries`);
+
+    await recordPermanentFailure({
+      jobId: job.jobId,
+      videoId: job.videoId,
+      segmentId: job.segmentId,
+      resolution: job.targetResolution.label,
+      codec: job.targetCodec,
+      failedAt: new Date().toISOString(),
+    });
+
+    // Update video status: mark this variant as unavailable
+    await markVariantFailed(job.videoId, job.targetResolution.label, job.targetCodec);
+
+    // Notify creator if this affects video availability
+    await notifyCreatorOfPartialFailure(job.videoId, {
+      resolution: job.targetResolution.label,
+      codec: job.targetCodec,
+      reason: 'Encoding failed after maximum retries. Your video is available at lower qualities.',
+    });
+
+    message.ack();
+  }
+}
+
+async function recordPermanentFailure(failure) {
+  // Write to a monitoring/ops table for manual review
+  await db.query(
+    `INSERT INTO encoding_permanent_failures
+     (job_id, video_id, segment_id, resolution, codec, failed_at)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    Object.values(failure)
+  );
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Architecture Overview</h2>
+        <p>
+          The full pipeline, from upload to CDN, consists of five sequential phases and
+          three parallel async pipelines that run from the moment the upload completes.
+        </p>
+        <pre><code>┌─────────────────────────────────────────────────────────────┐
+│                    CREATOR UPLOAD                           │
+│  Client → Resumable Chunked Upload Service (stateless)      │
+│           ↓ progress tracked in Redis (session state)       │
+│  Raw video written to GCS  ←→  Upload progress acked        │
+│           ↓ upload-complete event → Pub/Sub                 │
+└─────────────────────────────────────────────────────────────┘
+                            │
+              ┌─────────────▼──────────────┐
+              │   PHASE 1: INGESTION        │
+              │   Validate + store raw      │
+              │   Emit pipeline-start event │
+              └─────────────┬──────────────┘
+                            │
+         ┌──────────────────┼──────────────────────────────┐
+         │                  │                              │
+         ▼                  ▼                              ▼
+┌─────────────┐   ┌──────────────────┐        ┌──────────────────────┐
+│  THUMBNAIL  │   │ PHASE 2: SPLIT   │        │  CONTENT ID          │
+│  GENERATION │   │ GOP-aligned      │        │  FINGERPRINTING      │
+│  (async)    │   │ ~10s segments    │        │  Audio + visual hash │
+│             │   │ written to GCS   │        │  vs. 800M refs       │
+└─────────────┘   └────────┬─────────┘        └──────────────────────┘
+         │                  │                              │
+         ▼                  ▼                              ▼
+┌─────────────┐   ┌──────────────────┐        ┌──────────────────────┐
+│  AUTO       │   │ PHASE 3: ENCODE  │        │  STATUS TRACKER      │
+│  CAPTIONS   │   │ Pub/Sub queue    │        │  Redis counters      │
+│  (async)    │   │ Worker fleet     │        │  WebSocket push      │
+│             │   │ (stateless,      │        │  → creator dashboard │
+└─────────────┘   │  spot instances) │        └──────────────────────┘
+                  │ 720 segs × 18    │
+                  │ jobs = 12,960    │
+                  │ parallel tasks   │
+                  └────────┬─────────┘
+                            │
+              ┌─────────────▼──────────────┐
+              │   PHASE 4: MANIFEST        │
+              │   Completion tracking      │
+              │   DASH MPD + HLS M3U8      │
+              │   360p ready → LIVE signal │
+              └─────────────┬──────────────┘
+                            │
+              ┌─────────────▼──────────────┐
+              │   PHASE 5: CDN DIST        │
+              │   GCS → CDN edge nodes     │
+              │   Popularity-based prewarm │
+              │   Long-tail: pull on req   │
+              │   Geographic routing       │
+              └────────────────────────────┘
+
+Failure path:
+  Worker fails → message nack → visibility timeout → re-queued
+  5 retries exhausted → DLQ → ops alert + creator notification
+  Partial failure → video live at lower quality</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Key Design Decisions and Trade-offs</h2>
+        <ul>
+          <li>
+            <strong>GOP-aligned segments vs. fixed byte ranges:</strong> Fixed byte ranges
+            would be simpler but produce undecodable segments. GOP alignment is required
+            for independent decodability. The 10-second target is a balance — shorter
+            segments increase parallelism but also increase GCS I/O overhead and manifest
+            complexity.
+          </li>
+          <li>
+            <strong>Multiple codecs vs. one codec:</strong> Serving only H.264 would
+            be simpler, but VP9 and AV1 reduce bandwidth cost by 30–50%. At YouTube's
+            scale (exabytes/day of egress), codec efficiency directly translates to
+            hundreds of millions of dollars in CDN cost savings annually.
+          </li>
+          <li>
+            <strong>360p-first availability vs. waiting for all resolutions:</strong>
+            From the creator's perspective, getting the video live in 15 minutes at
+            360p is better than waiting 2 hours for 4K. From a viewer's perspective,
+            360p is watchable on mobile; they can wait the extra few minutes for
+            1080p. The fast path optimises for creator experience and initial
+            viewer engagement.
+          </li>
+          <li>
+            <strong>Spot instances for workers:</strong> Encoding is embarrassingly
+            parallel and each job is fully idempotent. This makes it a perfect workload
+            for spot instances — the cost saving is 60–80% with essentially zero risk
+            of data loss or user impact from a preemption.
+          </li>
+          <li>
+            <strong>Content ID async vs. synchronous:</strong> Holding a video behind a
+            Content ID check would add 5–30 minutes to every upload and degrade creator
+            experience. The async approach means a video is occasionally live for a brief
+            period before a copyright match is found and a policy is applied — this is an
+            accepted trade-off given YouTube's takedown speed.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          YouTube's video processing pipeline is a masterclass in distributed systems design
+          patterns: decouple receipt from processing, split indivisible work into independent
+          parallelisable units (GOP-aligned segments), use idempotent stateless workers so
+          failures are free (just re-queue), fan out asynchronously (encoding, thumbnails,
+          captions, content ID all in parallel), and publish progressively (360p first, 4K
+          async). The 15-minute upload-to-live time on a 2-hour 4K video is not achieved by
+          any single fast component — it is a consequence of the architecture's shape: a
+          single large sequential task decomposed into thousands of small independent parallel
+          tasks, each of which takes seconds.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
