@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Expose Local Spring Boot API to the Internet with ngrok | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .step-flow { counter-reset: steps; }
+      .step-item { display: flex; gap: 1rem; align-items: flex-start; padding: .85rem 0; border-bottom: 1px solid #f1f5f9; }
+      .step-item:last-child { border-bottom: none; }
+      .step-num { min-width: 2rem; height: 2rem; background: #0f766e; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .85rem; flex-shrink: 0; }
+      .step-body h4 { margin: 0 0 .25rem; font-family: Arial, Helvetica, sans-serif; font-size: .95rem; }
+      .step-body p  { margin: 0; font-size: .88rem; color: var(--muted); }
+      .use-case-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .75rem; margin: 1rem 0; }
+      .use-case-item { background: #f8fafc; border-radius: 8px; padding: .75rem 1rem; }
+      .use-case-item h4 { margin: 0 0 .25rem; font-family: Arial, Helvetica, sans-serif; font-size: .9rem; color: #0f766e; }
+      .use-case-item p  { margin: 0; font-size: .84rem; color: var(--muted); }
+      .warn-box { background: #fff7ed; border-left: 4px solid #f97316; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+      .insight-box { background: #fdf4ff; border-left: 4px solid #a855f7; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server and networking connectivity"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Backend · Spring Boot · Java · DevTools · 12 min</span>
+          </div>
+        </figure>
+
+        <h1>Expose Your Local Spring Boot API to the Internet with ngrok</h1>
+        <p class="summary">
+          When your API runs at localhost:8080, it's invisible to the internet — webhooks, mobile
+          testing, and teammate demos all need a public URL. ngrok creates a secure tunnel that
+          solves this in under two minutes, without cloud deployment.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">CodeFarm · Medium · 2026</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Spring Boot · Java · ngrok · Webhooks</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ ngrok Node.js SDK, webhook handler, signature validation</span></div>
+        </div>
+      </header>
+
+      <!-- ─── SECTION 1: THE PROBLEM ────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Why localhost Isn't Enough</h2>
+        <p class="lead">
+          Local development works great until your application needs to receive data from the
+          internet. Payment webhooks, OAuth callbacks, mobile app testing, and live demos all
+          require a URL that external services can reach — and <code>localhost:8080</code> is
+          not one.
+        </p>
+
+        <div class="use-case-grid">
+          <div class="use-case-item">
+            <h4>Payment Webhooks</h4>
+            <p>Stripe, Razorpay, PayPal all need to POST to your endpoint to confirm payment status.</p>
+          </div>
+          <div class="use-case-item">
+            <h4>OAuth Callbacks</h4>
+            <p>OAuth providers redirect to a callback URL — it must be publicly reachable.</p>
+          </div>
+          <div class="use-case-item">
+            <h4>Mobile App Testing</h4>
+            <p>Test your API from a real phone on a different network without cloud deployment.</p>
+          </div>
+          <div class="use-case-item">
+            <h4>Teammate Demos</h4>
+            <p>Share work in progress with a remote colleague instantly — no staging environment needed.</p>
+          </div>
+          <div class="use-case-item">
+            <h4>Third-Party Integrations</h4>
+            <p>Slack apps, GitHub webhooks, CI/CD integrations all need a reachable endpoint.</p>
+          </div>
+          <div class="use-case-item">
+            <h4>API Testing Tools</h4>
+            <p>Some hosted testing tools need to call your API from their cloud — not your laptop.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── SECTION 2: HOW NGROK WORKS ────────────────────────────────── -->
+      <section class="content-card">
+        <h2>How ngrok Works</h2>
+        <p>ngrok creates a secure tunnel from a public endpoint to your local machine. The traffic flows:</p>
+
+        <div class="callout">
+          <strong>Flow:</strong> External Service → ngrok Public URL → ngrok Secure Tunnel → localhost:8080 → Your Spring Boot App
+        </div>
+
+        <p>Your app never exposes itself directly — ngrok's infrastructure handles TLS termination,
+        authentication, and the connection relay. Your local firewall settings don't need to change.</p>
+      </section>
+
+      <!-- ─── SECTION 3: SPRING BOOT SETUP ──────────────────────────────── -->
+      <section class="content-card">
+        <h2>Step-by-Step Setup</h2>
+
+        <div class="step-flow">
+          <div class="step-item">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <h4>Build a minimal Spring Boot REST endpoint</h4>
+              <p>Start with a working local API. Port 8080 is the Spring Boot default.</p>
+            </div>
+          </div>
+          <div class="step-item">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <h4>Install ngrok</h4>
+              <p>Download from ngrok.com or via package manager: <code>brew install ngrok</code> (macOS) or <code>choco install ngrok</code> (Windows).</p>
+            </div>
+          </div>
+          <div class="step-item">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <h4>Authenticate ngrok</h4>
+              <p>Sign up at ngrok.com, get your auth token, run: <code>ngrok authtoken YOUR_TOKEN</code></p>
+            </div>
+          </div>
+          <div class="step-item">
+            <div class="step-num">4</div>
+            <div class="step-body">
+              <h4>Start the tunnel</h4>
+              <p>With your Spring Boot app running: <code>ngrok http 8080</code>. You'll see a public URL like <code>https://abc123.ngrok-free.app</code></p>
+            </div>
+          </div>
+          <div class="step-item">
+            <div class="step-num">5</div>
+            <div class="step-body">
+              <h4>Configure your webhook provider</h4>
+              <p>Paste the ngrok URL as the webhook endpoint in your payment provider, OAuth app, or Slack app settings.</p>
+            </div>
+          </div>
+        </div>
+
+        <pre><code class="language-java">// Minimal Spring Boot webhook receiver (Java)
+@RestController
+@RequestMapping("/webhooks")
+public class WebhookController {
+
+    @PostMapping("/stripe")
+    public ResponseEntity&lt;String&gt; handleStripeEvent(
+            @RequestBody String payload,
+            @RequestHeader("Stripe-Signature") String sigHeader) {
+
+        // Validate webhook signature first (security!)
+        if (!validateStripeSignature(payload, sigHeader)) {
+            return ResponseEntity.status(400).body("Invalid signature");
+        }
+
+        // Parse and process the event
+        try {
+            JsonNode event = objectMapper.readTree(payload);
+            String eventType = event.get("type").asText();
+
+            switch (eventType) {
+                case "payment_intent.succeeded":
+                    handlePaymentSuccess(event);
+                    break;
+                case "payment_intent.failed":
+                    handlePaymentFailure(event);
+                    break;
+            }
+
+            return ResponseEntity.ok("Received");
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("Processing error");
+        }
+    }
+
+    private boolean validateStripeSignature(String payload, String sigHeader) {
+        // Always validate webhook signatures — ngrok doesn't protect you from
+        // forged requests once your URL is public
+        String secret = System.getenv("STRIPE_WEBHOOK_SECRET");
+        try {
+            Event event = Webhook.constructEvent(payload, sigHeader, secret);
+            return event != null;
+        } catch (SignatureVerificationException e) {
+            return false;
+        }
+    }
+}</code></pre>
+      </section>
+
+      <!-- ─── SECTION 4: NGROK NODE.JS SDK ──────────────────────────────── -->
+      <section class="content-card">
+        <h2>Programmatic Tunnels with ngrok SDK (Node.js)</h2>
+        <p>
+          For Node.js projects, the ngrok SDK lets you create tunnels programmatically —
+          useful for test setups, CI environments, and development scripts.
+        </p>
+
+        <pre><code class="language-javascript">import ngrok from "@ngrok/ngrok";
+import express from "express";
+
+const app = express();
+app.use(express.json());
+
+// Webhook handler
+app.post("/webhook", (req, res) => {
+  console.log("Webhook received:", req.body);
+
+  // Validate signature before processing
+  const signature = req.headers["x-hub-signature-256"];
+  if (!validateSignature(req.rawBody, signature, process.env.WEBHOOK_SECRET)) {
+    return res.status(401).json({ error: "Invalid signature" });
+  }
+
+  // Process the event
+  processWebhookEvent(req.body);
+  res.json({ received: true });
+});
+
+// Health check — useful to verify tunnel is working
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+async function startWithTunnel() {
+  const PORT = 3000;
+  app.listen(PORT);
+
+  // Create ngrok tunnel programmatically
+  const tunnel = await ngrok.forward({
+    addr:     PORT,
+    authtoken: process.env.NGROK_AUTHTOKEN,
+    // Optional: custom domain (paid plan)
+    // domain: "my-api.ngrok.io"
+  });
+
+  const publicUrl = tunnel.url();
+  console.log(`Local server: http://localhost:${PORT}`);
+  console.log(`Public URL:   ${publicUrl}`);
+  console.log(`Webhook URL:  ${publicUrl}/webhook`);
+
+  // Print tunnel info for easy copy-paste into webhook settings
+  console.log("\nCopy this URL to your webhook provider:");
+  console.log(`  ${publicUrl}/webhook`);
+
+  return tunnel;
+}
+
+function validateSignature(payload, signature, secret) {
+  if (!signature || !secret) return false;
+  const crypto = require("crypto");
+  const expected = "sha256=" + crypto
+    .createHmac("sha256", secret)
+    .update(payload)
+    .digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
+function processWebhookEvent(event) {
+  console.log(`Processing event type: ${event.type || event.event}`);
+  // Your business logic here
+}
+
+startWithTunnel().catch(console.error);</code></pre>
+      </section>
+
+      <!-- ─── SECTION 5: NGROK INSPECT ──────────────────────────────────── -->
+      <section class="content-card">
+        <h2>ngrok's Built-in Request Inspector</h2>
+        <p>
+          One of ngrok's most useful features for development: the web inspector at
+          <code>http://localhost:4040</code> shows every request that comes through the tunnel
+          — headers, body, response, and timing.
+        </p>
+
+        <pre><code class="language-javascript">// Programmatically access ngrok's inspection API
+async function getRecentRequests() {
+  const response = await fetch("http://localhost:4040/api/requests/http");
+  const data = await response.json();
+
+  data.requests.forEach(req => {
+    console.log(`${req.request.method} ${req.request.uri}`);
+    console.log(`Status: ${req.response?.status_code ?? "pending"}`);
+    console.log(`Duration: ${req.duration}ms`);
+    if (req.request.raw) {
+      const body = Buffer.from(req.request.raw, "base64").toString();
+      console.log("Body:", body.substring(0, 200));
+    }
+    console.log("---");
+  });
+}
+
+// Also useful: replay failed requests during debugging
+async function replayRequest(requestId) {
+  const response = await fetch(`http://localhost:4040/api/requests/http/${requestId}/replay`, {
+    method: "POST"
+  });
+  return response.ok;
+}
+
+// Call during development to inspect last 10 webhook calls
+setInterval(getRecentRequests, 5000);</code></pre>
+
+        <div class="insight-box">
+          <strong>Replay-on-failure:</strong> The ngrok web UI lets you replay any failed webhook
+          request. This is invaluable when debugging webhook processing logic — you can trigger
+          the exact same payload repeatedly without re-generating a payment or OAuth event.
+        </div>
+      </section>
+
+      <!-- ─── SECTION 6: LIMITATIONS & SECURITY ────────────────────────── -->
+      <section class="content-card">
+        <h2>Limitations and Security Notes</h2>
+
+        <div class="warn-box">
+          <strong>Free tier limitations:</strong>
+          <ul style="margin: .5rem 0 0; padding-left: 1.2rem;">
+            <li>Random URL changes every session (no persistent domain)</li>
+            <li>40 connections/min rate limit</li>
+            <li>1 concurrent tunnel</li>
+            <li>Not suitable for production traffic</li>
+          </ul>
+        </div>
+
+        <ul class="takeaways">
+          <li><strong>Always validate webhook signatures.</strong> ngrok makes your endpoint public — without signature validation, anyone can POST to your webhook URL. Every reputable webhook provider (Stripe, GitHub, Slack) provides a signature mechanism.</li>
+          <li><strong>Don't commit your ngrok auth token.</strong> Store it in environment variables: <code>NGROK_AUTHTOKEN</code>.</li>
+          <li><strong>ngrok is for development only.</strong> For staging/production: deploy to a real server, use a load balancer, or use serverless functions for webhook handlers.</li>
+          <li><strong>The URL changes on every restart</strong> (free plan). Update your webhook URL configuration every development session. Paid plans offer stable custom domains.</li>
+          <li><strong>Monitor the inspector.</strong> The <code>localhost:4040</code> inspector reveals your request/response details — don't leave it exposed if working in a shared network.</li>
+        </ul>
+      </section>
+
+      <!-- ─── KEY TAKEAWAY ─────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          ngrok solves a real development friction point: you need a public HTTPS URL to test
+          webhooks, OAuth flows, or mobile integrations, but you're in the middle of development
+          and not ready to deploy. The two-minute setup (<code>ngrok http 8080</code>) gets you
+          a working public URL immediately. The built-in inspector and request replay make
+          webhook debugging significantly faster than print-debugging alone. Always validate
+          webhook signatures — the public URL means anyone can POST to it, and the signature
+          is your only protection against forged events.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

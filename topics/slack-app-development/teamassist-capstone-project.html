@@ -1,0 +1,1808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TeamAssist – Project Plan</title>
+  <script src="../../read-state.js" defer></script>
+  <script src="../../highlight.js" defer></script>
+  <script src="../../chat-widget.js" defer></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f4f5f7;
+      color: #172b4d;
+      padding: 32px 16px;
+    }
+
+    .container { max-width: 960px; margin: 0 auto; }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #4a154b 0%, #7c3085 100%);
+      color: white;
+      border-radius: 12px;
+      padding: 36px 40px;
+      margin-bottom: 24px;
+    }
+    .header .badge {
+      display: inline-block;
+      background: rgba(255,255,255,0.2);
+      color: white;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      padding: 4px 12px;
+      border-radius: 20px;
+      margin-bottom: 12px;
+    }
+    .header h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+    .header p { font-size: 15px; opacity: 0.85; line-height: 1.5; }
+    .header .meta { display: flex; gap: 24px; margin-top: 20px; flex-wrap: wrap; }
+    .header .meta span { font-size: 13px; opacity: 0.9; display: flex; align-items: center; gap: 6px; }
+    .progress-bar-wrap { background: rgba(255,255,255,0.25); border-radius: 8px; height: 8px; margin-top: 16px; overflow: hidden; }
+    .progress-bar-fill { height: 100%; width: 0%; background: #61dafb; border-radius: 8px; transition: width 0.4s ease; }
+    .progress-label { font-size: 12px; margin-top: 6px; opacity: 0.8; }
+
+    /* ── View toggle ── */
+    .view-toggle {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+    .view-btn {
+      padding: 8px 20px;
+      border-radius: 6px;
+      border: 2px solid #4a154b;
+      background: white;
+      color: #4a154b;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .view-btn.active { background: #4a154b; color: white; }
+    .view-btn:hover:not(.active) { background: #f0e6f0; }
+
+    /* ── Eval grid ── */
+    .eval-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 28px; }
+    .eval-card { background: white; border-radius: 10px; padding: 16px 12px; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    .eval-card .score { font-size: 22px; font-weight: 700; color: #4a154b; }
+    .eval-card .label { font-size: 11px; color: #5e6c84; margin-top: 4px; line-height: 1.4; }
+
+    /* ── Phase ── */
+    .phase { background: white; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow: hidden; }
+    .phase-header { display: flex; align-items: center; gap: 14px; padding: 18px 24px; cursor: pointer; user-select: none; }
+    .phase-header:hover { background: #fafbfc; }
+    .phase-number { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px; color: white; flex-shrink: 0; }
+    .phase-title { flex: 1; }
+    .phase-title h2 { font-size: 16px; font-weight: 700; }
+    .phase-title span { font-size: 12px; color: #5e6c84; }
+    .phase-days { font-size: 12px; font-weight: 600; background: #f4f5f7; padding: 4px 12px; border-radius: 20px; color: #5e6c84; }
+    .chevron { font-size: 12px; color: #5e6c84; transition: transform 0.25s; }
+    .phase.open .chevron { transform: rotate(180deg); }
+    .phase-body { display: none; padding: 0 24px 20px; }
+    .phase.open .phase-body { display: block; }
+
+    /* ── HLD Task card ── */
+    .task { border: 1px solid #e8eaed; border-radius: 8px; padding: 16px; margin-bottom: 12px; transition: border-color 0.2s; }
+    .task:hover { border-color: #c1c7d0; }
+    .task.done { background: #f3f9f3; border-color: #b3d9b3; }
+    .task-top { display: flex; align-items: flex-start; gap: 10px; }
+    .task-checkbox { width: 18px; height: 18px; accent-color: #4a154b; cursor: pointer; flex-shrink: 0; margin-top: 2px; }
+    .task-content { flex: 1; }
+    .task-id { font-size: 10px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #5e6c84; margin-bottom: 3px; }
+    .task-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+    .task.done .task-title { text-decoration: line-through; color: #8993a4; }
+    .task-desc { font-size: 13px; color: #5e6c84; line-height: 1.5; margin-bottom: 8px; }
+    .task-desc ul { padding-left: 18px; }
+    .task-desc li { margin-bottom: 3px; }
+    .task-concept { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; background: #fffae6; color: #974f00; padding: 3px 10px; border-radius: 4px; border: 1px solid #ffe380; }
+
+    /* Task collapse */
+    .task-title { cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
+    .task-chevron { font-size: 10px; color: #8993a4; margin-left: 8px; transition: transform 0.2s; flex-shrink: 0; }
+    .task.task-collapsed .task-chevron { transform: rotate(-90deg); }
+    .task-body { margin-top: 6px; }
+    .task.task-collapsed .task-body { display: none; }
+
+    /* Completed date label */
+    .task-date-label {
+      display: none;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #00875a;
+      background: #e3fcef;
+      border: 1px solid #abf5d1;
+      border-radius: 4px;
+      padding: 2px 8px;
+      margin-top: 4px;
+    }
+    .task.done .task-date-label { display: inline-flex; }
+    .task-code { background: #1e1e2e; color: #cdd6f4; border-radius: 6px; padding: 12px 14px; font-size: 12px; font-family: "SFMono-Regular", Consolas, monospace; margin-top: 8px; overflow-x: auto; white-space: pre; line-height: 1.5; }
+
+    /* ── LLD toggle button ── */
+    .lld-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #0052cc;
+      background: #e6f0ff;
+      border: 1px solid #b3d0ff;
+      border-radius: 4px;
+      padding: 4px 10px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .lld-toggle-btn:hover { background: #cce0ff; }
+    .lld-toggle-btn .arr { font-size: 9px; transition: transform 0.2s; }
+    .lld-toggle-btn.open .arr { transform: rotate(90deg); }
+
+    /* ── LLD section ── */
+    .lld-section { display: none; margin-top: 12px; border-top: 2px dashed #b3d0ff; padding-top: 14px; }
+    .lld-section.open { display: block; }
+    .lld-section h4 { font-size: 12px; font-weight: 700; color: #0052cc; text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 10px; }
+    .lld-step { display: flex; gap: 10px; margin-bottom: 10px; font-size: 13px; color: #172b4d; line-height: 1.5; }
+    .lld-step-num { width: 22px; height: 22px; background: #0052cc; color: white; border-radius: 50%; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+    .lld-code { background: #0d1117; color: #e6edf3; border-radius: 6px; padding: 14px 16px; font-size: 11.5px; font-family: "SFMono-Regular", Consolas, monospace; margin: 8px 0; overflow-x: auto; white-space: pre; line-height: 1.6; border-left: 3px solid #0052cc; }
+    .lld-file { display: inline-block; font-size: 11px; font-weight: 700; background: #172b4d; color: #79ffe1; padding: 2px 8px; border-radius: 4px; margin-bottom: 4px; font-family: monospace; }
+    .lld-note { background: #fff8e1; border-left: 3px solid #f9a825; border-radius: 4px; padding: 10px 12px; font-size: 12px; color: #5d4037; margin: 8px 0; line-height: 1.5; }
+    .lld-checklist { list-style: none; padding: 0; margin: 8px 0; }
+    .lld-checklist li { font-size: 13px; padding: 3px 0; color: #172b4d; display: flex; align-items: flex-start; gap: 6px; }
+    .lld-checklist li::before { content: "☐"; color: #0052cc; flex-shrink: 0; }
+    .lld-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+    .lld-table th { background: #172b4d; color: white; padding: 8px 10px; text-align: left; }
+    .lld-table td { padding: 7px 10px; border-bottom: 1px solid #e8eaed; }
+    .lld-table tr:nth-child(even) td { background: #f8f9fa; }
+
+    /* Mode tabs inside LLD */
+    .mode-tabs { display: flex; gap: 6px; margin: 12px 0 14px; }
+    .mode-tab-btn { padding: 5px 16px; border-radius: 6px; border: 1.5px solid #0052cc; background: white; color: #0052cc; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+    .mode-tab-btn.active { background: #0052cc; color: white; }
+    .mode-tab-btn:hover:not(.active) { background: #e6f0ff; }
+    .mode-panel { display: none; }
+    .mode-panel.active { display: block; }
+    .mode-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; font-size: 12px; }
+    .mode-compare-col { background: #f8fafc; border-radius: 6px; padding: 10px 12px; border: 1px solid #e2e8f0; }
+    .mode-compare-col h5 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; color: #0052cc; }
+    .mode-compare-col ul { padding-left: 14px; }
+    .mode-compare-col li { margin-bottom: 4px; color: #334155; }
+
+    .scope-tag { display: inline-block; background: #e3f2fd; color: #0d47a1; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 3px; font-family: monospace; }
+
+    /* ── Concept map ── */
+    .concept-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .concept-table th { background: #4a154b; color: white; text-align: left; padding: 10px 14px; font-weight: 600; }
+    .concept-table td { padding: 10px 14px; border-bottom: 1px solid #e8eaed; }
+    .concept-table tr:nth-child(even) td { background: #f4f5f7; }
+    .concept-tag { display: inline-block; background: #e3d7f7; color: #4a154b; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; margin: 1px; }
+
+    /* Phase accent colours */
+    .p1 .phase-number { background: #0052cc; }
+    .p2 .phase-number { background: #00875a; }
+    .p3 .phase-number { background: #de350b; }
+    .p4 .phase-number { background: #ff8b00; }
+    .p5 .phase-number { background: #6554c0; }
+    .p1 .phase-header { border-left: 4px solid #0052cc; }
+    .p2 .phase-header { border-left: 4px solid #00875a; }
+    .p3 .phase-header { border-left: 4px solid #de350b; }
+    .p4 .phase-header { border-left: 4px solid #ff8b00; }
+    .p5 .phase-header { border-left: 4px solid #6554c0; }
+
+    footer { text-align: center; font-size: 12px; color: #8993a4; margin-top: 40px; padding-bottom: 16px; }
+
+    @media (max-width: 600px) {
+      .eval-grid { grid-template-columns: repeat(2, 1fr); }
+      .header { padding: 24px 20px; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="badge">Slack Capstone Project</div>
+    <h1>TeamAssist – Project Plan</h1>
+    <p>A Productivity &amp; Task Management Slack Application built with Bolt SDK, Express.js, and SQLite.</p>
+    <div class="meta">
+      <span>📅 10–14 days (part-time)</span>
+      <span>⚡ Node.js + Slack Bolt</span>
+      <span>🗄️ SQLite</span>
+      <span>🚀 5 Phases · 22 Tasks</span>
+    </div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progressFill"></div>
+    </div>
+    <div class="progress-label" id="progressLabel">0 of 22 tasks completed</div>
+  </div>
+
+  <!-- View toggle -->
+  <div class="view-toggle">
+    <button class="view-btn active" onclick="setView('hld', this)">High-Level Plan</button>
+    <button class="view-btn" onclick="setView('lld', this)">Low-Level Details</button>
+    <button class="view-btn" onclick="setView('both', this)">Show Both</button>
+  </div>
+
+  <!-- Eval criteria -->
+  <div class="eval-grid">
+    <div class="eval-card"><div class="score">30%</div><div class="label">Slack API Usage</div></div>
+    <div class="eval-card"><div class="score">25%</div><div class="label">UX – Modals &amp; Messages</div></div>
+    <div class="eval-card"><div class="score">20%</div><div class="label">Backend Implementation</div></div>
+    <div class="eval-card"><div class="score">15%</div><div class="label">Error Handling</div></div>
+    <div class="eval-card"><div class="score">10%</div><div class="label">Documentation</div></div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════ PHASE 1 ══ -->
+  <div class="phase p1 open">
+    <div class="phase-header" onclick="togglePhase(this)">
+      <div class="phase-number">1</div>
+      <div class="phase-title"><h2>Design &amp; Setup</h2><span>Foundation, project structure, database schema</span></div>
+      <div class="phase-days">Day 1–2</div>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="phase-body">
+
+      <!-- 1.1 -->
+      <div class="task" data-id="1.1">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 1.1</div>
+            <div class="task-title">Create Slack App in API Portal</div>
+            <div class="task-desc hld-content">
+              <ul>
+                <li>Go to <code>api.slack.com/apps</code> → Create New App → "From scratch"</li>
+                <li>Enable: Slash Commands, Interactivity &amp; Shortcuts, Event Subscriptions, App Home</li>
+                <li>Copy Bot Token and Signing Secret to <code>.env</code></li>
+              </ul>
+            </div>
+            <div class="task-concept">💡 Concept: Slack app manifest, bot token vs app token</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Step-by-Step Implementation</h4>
+
+              <div class="mode-compare">
+                <div class="mode-compare-col">
+                  <h5>HTTP Mode (ngrok)</h5>
+                  <ul>
+                    <li>Slack pushes events to a public URL</li>
+                    <li>Needs ngrok running to receive events locally</li>
+                    <li>Re-paste URL in portal on every ngrok restart</li>
+                    <li>Best for production / cloud deployments</li>
+                  </ul>
+                </div>
+                <div class="mode-compare-col">
+                  <h5>Socket Mode</h5>
+                  <ul>
+                    <li>Your app opens a WebSocket to Slack</li>
+                    <li>No public URL, no ngrok, works behind firewalls</li>
+                    <li>Needs one extra App-Level Token (<code>xapp-</code>)</li>
+                    <li>Best for local development &amp; testing</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="lld-note" style="margin-bottom:10px">📋 <strong>Before you start:</strong> You need a Slack workspace where you can install apps (free workspace is fine — create one at <code>slack.com/create</code> if needed).</div>
+
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Open <strong>api.slack.com/apps</strong> → click the <em>"Create New App"</em> button (top-right)</div></div>
+              <div class="lld-step"><div class="lld-step-num">2</div><div>Select <strong>"From scratch"</strong> → App Name: <code>TeamAssist</code> → pick your workspace from the dropdown → click <em>"Create App"</em></div></div>
+              <div class="lld-step"><div class="lld-step-num">3</div><div>Left sidebar → <strong>OAuth &amp; Permissions</strong> → scroll to <em>"Bot Token Scopes"</em> → click <em>"Add an OAuth Scope"</em> and add each of these one by one:</div></div>
+              <div class="lld-code">chat:write         ← post messages to channels
+commands           ← respond to slash commands
+channels:history   ← read messages (for pin-to-task feature)
+users:read         ← resolve user display names
+im:write           ← open DM conversations with users
+app_mentions:read  ← receive @TeamAssist mention events
+reactions:read     ← receive emoji reaction events</div>
+
+              <div class="lld-step"><div class="lld-step-num">4</div><div>Now choose your connection mode and follow the matching tab below. Come back to steps 5–6 after the tab.</div></div>
+
+              <div class="mode-tabs">
+                <button class="mode-tab-btn active" data-mode="http" onclick="switchMode(this,'t11')">HTTP Mode (ngrok)</button>
+                <button class="mode-tab-btn" data-mode="socket" onclick="switchMode(this,'t11')">Socket Mode</button>
+              </div>
+
+              <!-- ── HTTP MODE TAB ── -->
+              <div class="mode-panel active" data-mode="http" data-mode-group="t11">
+                <div class="lld-note" style="margin-bottom:8px">⚠️ In HTTP mode, Slack needs a live public URL before it will save your settings. <strong>Complete Task 1.2 first to get your ngrok URL</strong>, then come back and fill in the three Request URL fields below.</div>
+                <div class="lld-step"><div class="lld-step-num">4a</div><div>Left sidebar → <strong>Interactivity &amp; Shortcuts</strong> → toggle <em>Interactivity</em> to <strong>ON</strong> → paste your ngrok URL in <em>Request URL</em>: <code>https://&lt;ngrok-id&gt;.ngrok-free.app/slack/events</code> → click <em>Save Changes</em></div></div>
+                <div class="lld-step"><div class="lld-step-num">4b</div><div>Left sidebar → <strong>Slash Commands</strong> → click <em>"Create New Command"</em><br>
+                  Command: <code>/teamassist</code><br>
+                  Request URL: <code>https://&lt;ngrok-id&gt;.ngrok-free.app/slack/events</code><br>
+                  Short Description: <code>Manage tasks and approvals</code><br>
+                  Usage Hint: <code>[task | mytasks | remind | approve | help]</code><br>
+                  → click <em>Save</em></div></div>
+                <div class="lld-step"><div class="lld-step-num">4c</div><div>Left sidebar → <strong>Event Subscriptions</strong> → toggle <em>Enable Events</em> to <strong>ON</strong> → paste same ngrok URL in <em>Request URL</em> → wait for <em>"Verified ✓"</em> to appear → expand <em>"Subscribe to bot events"</em> → click <em>"Add Bot User Event"</em> and add these three:</div></div>
+                <div class="lld-code">app_home_opened   ← fires when a user opens the App Home tab
+app_mention       ← fires when someone @mentions TeamAssist
+reaction_added    ← fires when someone adds an emoji reaction</div>
+                <div class="lld-step"><div class="lld-step-num">4d</div><div>Click <em>"Save Changes"</em> at the bottom of the Event Subscriptions page</div></div>
+                <div class="lld-note">⚠️ ngrok free tier generates a new random URL on every restart. Each time you restart ngrok you must re-paste the new URL in all three Request URL fields (Interactivity, Slash Commands, Event Subscriptions).</div>
+              </div>
+
+              <!-- ── SOCKET MODE TAB ── -->
+              <div class="mode-panel" data-mode="socket" data-mode-group="t11">
+                <div class="lld-note" style="margin-bottom:8px">✅ In Socket Mode there are <strong>no Request URL fields</strong> — Slack delivers everything over a WebSocket your app opens outbound. No ngrok needed at any step.</div>
+                <div class="lld-step"><div class="lld-step-num">4a</div><div>Left sidebar → <strong>Basic Information</strong> → scroll to <em>"App-Level Tokens"</em> → click <em>"Generate Token and Scopes"</em><br>
+                  Token Name: <code>teamassist-socket</code><br>
+                  → click <em>"Add Scope"</em> → select <code>connections:write</code><br>
+                  → click <em>"Generate"</em> → copy the token (starts with <code>xapp-</code>) — this is your <code>SLACK_APP_TOKEN</code></div></div>
+                <div class="lld-step"><div class="lld-step-num">4b</div><div>Left sidebar → <strong>Socket Mode</strong> → toggle <em>"Enable Socket Mode"</em> to <strong>ON</strong></div></div>
+                <div class="lld-step"><div class="lld-step-num">4c</div><div>Left sidebar → <strong>Event Subscriptions</strong> → toggle <em>Enable Events</em> to <strong>ON</strong> → (no Request URL field appears — that's expected in Socket Mode) → expand <em>"Subscribe to bot events"</em> → add these three:</div></div>
+                <div class="lld-code">app_home_opened
+app_mention
+reaction_added</div>
+                <div class="lld-step"><div class="lld-step-num">4d</div><div>Click <em>"Save Changes"</em> at the bottom of Event Subscriptions</div></div>
+                <div class="lld-step"><div class="lld-step-num">4e</div><div>Left sidebar → <strong>Interactivity &amp; Shortcuts</strong> → toggle <em>Interactivity</em> to <strong>ON</strong> → (no Request URL field in Socket Mode) → click <em>"Save Changes"</em></div></div>
+                <div class="lld-step"><div class="lld-step-num">4f</div><div>Left sidebar → <strong>Slash Commands</strong> → click <em>"Create New Command"</em><br>
+                  Command: <code>/teamassist</code><br>
+                  Short Description: <code>Manage tasks and approvals</code><br>
+                  Usage Hint: <code>[task | mytasks | remind | approve | help]</code><br>
+                  → click <em>Save</em> (no Request URL field)</div></div>
+              </div>
+
+              <!-- ── COMMON STEPS AFTER TAB ── -->
+              <div class="lld-step"><div class="lld-step-num">5</div><div>Left sidebar → <strong>App Home</strong> → <em>Home Tab</em>: toggle <strong>ON</strong> → <em>Messages Tab</em>: toggle <strong>ON</strong></div></div>
+              <div class="lld-step"><div class="lld-step-num">6</div><div>Left sidebar → <strong>Install App</strong> → click <em>"Install to &lt;Your Workspace&gt;"</em> → click <em>Allow</em> → copy the <strong>Bot User OAuth Token</strong> (starts with <code>xoxb-</code>) — this is your <code>SLACK_BOT_TOKEN</code></div></div>
+              <div class="lld-step"><div class="lld-step-num">7</div><div>Left sidebar → <strong>Basic Information</strong> → <em>App Credentials</em> section → copy <strong>Signing Secret</strong> — this is your <code>SLACK_SIGNING_SECRET</code></div></div>
+              <div class="lld-note">💡 You now have all your tokens. Keep them safe:<br>
+                &nbsp;&nbsp;<code>xoxb-...</code> = Bot Token (SLACK_BOT_TOKEN)<br>
+                &nbsp;&nbsp;Signing Secret = SLACK_SIGNING_SECRET<br>
+                &nbsp;&nbsp;<code>xapp-...</code> = App-Level Token (SLACK_APP_TOKEN — Socket Mode only)
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.2 -->
+      <div class="task" data-id="1.2">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 1.2</div>
+            <div class="task-title">Set Up Local Dev Environment (HTTP Mode or Socket Mode)</div>
+            <div class="task-desc hld-content">
+              <ul>
+                <li>Install Node.js + <code>@slack/bolt</code> + dependencies</li>
+                <li><strong>HTTP Mode:</strong> install ngrok, start it, paste URL back in Slack portal</li>
+                <li><strong>Socket Mode:</strong> just run <code>node app.js</code> — no ngrok, no URL changes</li>
+              </ul>
+            </div>
+            <div class="task-concept">💡 Concept: How Slack delivers events — outbound webhook (HTTP) vs persistent WebSocket (Socket Mode)</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Prerequisites Check</h4>
+              <div class="lld-step"><div class="lld-step-num">✓</div><div>Check Node.js is installed (need v16+): run <code>node --version</code>. If missing, download from <strong>nodejs.org</strong> and install.</div></div>
+              <div class="lld-step"><div class="lld-step-num">✓</div><div>Check npm is installed: run <code>npm --version</code>. npm ships with Node.js so this should pass automatically.</div></div>
+
+              <h4 style="margin-top:14px">Create the Project</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Open a terminal and run:</div></div>
+              <div class="lld-code">mkdir teamassist &amp;&amp; cd teamassist
+npm init -y
+npm install @slack/bolt dotenv better-sqlite3 uuid</div>
+              <div class="lld-step"><div class="lld-step-num">2</div><div>Create a <code>.gitignore</code> file now so secrets are never committed:</div></div>
+              <div class="lld-code">node_modules/
+.env
+teamassist.db</div>
+
+              <h4 style="margin-top:14px">Mode-Specific Setup</h4>
+              <div class="mode-tabs">
+                <button class="mode-tab-btn active" data-mode="http" onclick="switchMode(this,'t12')">HTTP Mode (ngrok)</button>
+                <button class="mode-tab-btn" data-mode="socket" onclick="switchMode(this,'t12')">Socket Mode</button>
+              </div>
+
+              <!-- ── HTTP MODE TAB ── -->
+              <div class="mode-panel active" data-mode="http" data-mode-group="t12">
+                <div class="lld-step"><div class="lld-step-num">3</div><div><strong>Install ngrok</strong> — choose one method:<br>
+                  Mac (Homebrew): <code>brew install ngrok/ngrok/ngrok</code><br>
+                  Any OS: download the zip from <strong>ngrok.com/download</strong>, unzip, move binary to your PATH<br>
+                  Optional but recommended: create a free account at ngrok.com → run <code>ngrok config add-authtoken &lt;your-token&gt;</code> to avoid connection limits</div></div>
+                <div class="lld-step"><div class="lld-step-num">4</div><div>Create <code>.env</code> in the project root — paste the tokens from Task 1.1 steps 6–7:</div></div>
+                <div class="lld-file">.env</div>
+                <div class="lld-code">SLACK_BOT_TOKEN=xoxb-your-bot-token-here
+SLACK_SIGNING_SECRET=your-signing-secret-here
+PORT=3000</div>
+                <div class="lld-step"><div class="lld-step-num">5</div><div>Create <code>app.js</code> in the project root:</div></div>
+                <div class="lld-file">app.js</div>
+                <div class="lld-code">require('dotenv').config();
+const { App } = require('@slack/bolt');
+
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+});
+
+// handlers wired in later tasks — placeholder for now
+app.command('/teamassist', async ({ command, ack, say }) => {
+  await ack();
+  await say(`Hello &lt;@${command.user_id}&gt;! TeamAssist is alive.`);
+});
+
+(async () => {
+  await app.start(process.env.PORT || 3000);
+  console.log('⚡️ TeamAssist running on port 3000');
+})();</div>
+                <div class="lld-step"><div class="lld-step-num">6</div><div>Start the app: <code>node app.js</code> → you should see <em>"⚡️ TeamAssist running on port 3000"</em></div></div>
+                <div class="lld-step"><div class="lld-step-num">7</div><div>Open a <strong>second terminal</strong> and run: <code>ngrok http 3000</code><br>
+                  Look for the <em>Forwarding</em> line — copy the <code>https://</code> URL (e.g. <code>https://abc123.ngrok-free.app</code>)</div></div>
+                <div class="lld-step"><div class="lld-step-num">8</div><div>Go back to the Slack portal and paste the ngrok URL (with <code>/slack/events</code>) in all three places:<br>
+                  • <strong>Interactivity &amp; Shortcuts</strong> → Request URL → Save Changes<br>
+                  • <strong>Slash Commands</strong> → /teamassist → Edit → Request URL → Save<br>
+                  • <strong>Event Subscriptions</strong> → Request URL → wait for <em>"Verified ✓"</em> → Save Changes</div></div>
+                <div class="lld-step"><div class="lld-step-num">9</div><div><strong>Test it:</strong> open Slack → type <code>/teamassist</code> in any channel → you should see the "TeamAssist is alive" reply</div></div>
+                <div class="lld-note">⚠️ Every time you restart ngrok, a new random URL is generated. Repeat step 8 after each restart. To avoid this, use <code>ngrok authtoken</code> + a paid plan or a free static domain from your ngrok dashboard.</div>
+              </div>
+
+              <!-- ── SOCKET MODE TAB ── -->
+              <div class="mode-panel" data-mode="socket" data-mode-group="t12">
+                <div class="lld-note" style="margin-bottom:8px">✅ No ngrok needed. Your app opens the WebSocket connection to Slack — nothing needs to be exposed publicly.</div>
+                <div class="lld-step"><div class="lld-step-num">3</div><div>Create <code>.env</code> in the project root — paste all three tokens (bot token and signing secret from Task 1.1 steps 6–7, app-level token from Task 1.1 step 4a):</div></div>
+                <div class="lld-file">.env</div>
+                <div class="lld-code">SLACK_BOT_TOKEN=xoxb-your-bot-token-here
+SLACK_SIGNING_SECRET=your-signing-secret-here
+SLACK_APP_TOKEN=xapp-your-app-level-token-here</div>
+                <div class="lld-step"><div class="lld-step-num">4</div><div>Create <code>app.js</code> in the project root — note <code>socketMode: true</code> and <code>appToken</code>:</div></div>
+                <div class="lld-file">app.js</div>
+                <div class="lld-code">require('dotenv').config();
+const { App } = require('@slack/bolt');
+
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  socketMode: true,                              // ← enables Socket Mode
+  appToken: process.env.SLACK_APP_TOKEN,         // ← xapp- token
+});
+
+// handlers wired in later tasks — placeholder for now
+app.command('/teamassist', async ({ command, ack, say }) => {
+  await ack();
+  await say(`Hello &lt;@${command.user_id}&gt;! TeamAssist is alive.`);
+});
+
+(async () => {
+  await app.start();                             // ← no port argument needed
+  console.log('⚡️ TeamAssist running in Socket Mode');
+})();</div>
+                <div class="lld-step"><div class="lld-step-num">5</div><div>Start the app: <code>node app.js</code> → you should see <em>"⚡️ TeamAssist running in Socket Mode"</em></div></div>
+                <div class="lld-step"><div class="lld-step-num">6</div><div><strong>Test it:</strong> open Slack → type <code>/teamassist</code> in any channel → you should see the "TeamAssist is alive" reply — with zero ngrok setup</div></div>
+                <div class="lld-note">✅ You can restart <code>node app.js</code> as many times as you want — no URL changes in the Slack portal ever. The <code>@slack/bolt</code> SDK reconnects the WebSocket automatically.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.3 -->
+      <div class="task" data-id="1.3">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 1.3</div>
+            <div class="task-title">Initialize Project Structure</div>
+            <div class="task-desc hld-content">Create the folder layout for a clean, maintainable codebase.</div>
+            <div class="task-concept">💡 Concept: Separation of concerns for Slack apps</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Exact File &amp; Folder Layout</h4>
+              <div class="lld-code">teamassist/
+  app.js                ← Bolt entry point, registers all handlers
+  .env                  ← secrets (never commit)
+  .gitignore            ← node_modules/, .env, teamassist.db
+  routes/
+    commands.js         ← all /teamassist subcommand routing
+  handlers/
+    actions.js          ← all app.action() — button clicks
+    views.js            ← all app.view() — modal submissions
+    events.js           ← all app.event() — Slack events
+  db/
+    database.js         ← better-sqlite3 singleton connection
+    init.js             ← CREATE TABLE IF NOT EXISTS migrations
+    tasks.js            ← CRUD: createTask, getTasksByAssignee, updateTaskStatus
+    approvals.js        ← CRUD: createApproval, getPendingByApprover, updateStatus
+  utils/
+    blocks.js           ← all Block Kit JSON builder functions
+    homeTab.js          ← refreshHomeTab() helper
+    errorHandler.js     ← safeCall() wrapper + friendly messages
+  package.json</div>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Create all folders: <code>mkdir routes handlers db utils</code></div></div>
+              <div class="lld-step"><div class="lld-step-num">2</div><div>Create empty files in each folder — this forces you to think about responsibility boundaries before writing code</div></div>
+              <div class="lld-file">.gitignore</div>
+              <div class="lld-code">node_modules/
+.env
+teamassist.db</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.4 -->
+      <div class="task" data-id="1.4">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 1.4</div>
+            <div class="task-title">Design Database Schema</div>
+            <div class="task-desc hld-content">
+              <ul>
+                <li><strong>tasks:</strong> id, title, assignee_id, status, priority, due_date, created_by</li>
+                <li><strong>approvals:</strong> id, description, requested_by, approver_id, status</li>
+                <li>SQLite — one file, zero server setup</li>
+              </ul>
+            </div>
+            <div class="task-concept">💡 Concept: Relational data modeling for Slack user IDs</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Database Files</h4>
+              <div class="lld-file">db/database.js</div>
+              <div class="lld-code">const Database = require('better-sqlite3');
+const db = new Database('teamassist.db');
+module.exports = db;</div>
+              <div class="lld-file">db/init.js</div>
+              <div class="lld-code">const db = require('./database');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    assignee_id TEXT NOT NULL,
+    created_by  TEXT NOT NULL,
+    status      TEXT DEFAULT 'OPEN',     -- OPEN | COMPLETE | ON_HOLD
+    priority    TEXT DEFAULT 'MEDIUM',   -- LOW | MEDIUM | HIGH
+    due_date    TEXT,
+    channel_id  TEXT,
+    created_at  TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS approvals (
+    id            TEXT PRIMARY KEY,
+    description   TEXT NOT NULL,
+    requested_by  TEXT NOT NULL,
+    approver_id   TEXT NOT NULL,
+    status        TEXT DEFAULT 'PENDING', -- PENDING | APPROVED | REJECTED
+    dm_channel_id TEXT,
+    dm_ts         TEXT,
+    created_at    TEXT DEFAULT (datetime('now'))
+  );
+`);</div>
+              <div class="lld-file">db/tasks.js — function signatures to implement</div>
+              <div class="lld-code">createTask({ id, title, assigneeId, createdBy, priority, dueDate, channelId })
+  → db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?)').run(...)
+
+getTasksByAssignee(userId)
+  → db.prepare('SELECT * FROM tasks WHERE assignee_id = ?').all(userId)
+
+updateTaskStatus(taskId, status)
+  → db.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, taskId)
+
+getTaskById(taskId)
+  → db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId)</div>
+              <div class="lld-file">db/approvals.js — function signatures to implement</div>
+              <div class="lld-code">createApproval({ id, description, requestedBy, approverId, dmChannelId })
+getPendingApprovalsByApprover(userId)
+  → SELECT * FROM approvals WHERE approver_id = ? AND status = 'PENDING'
+updateApprovalStatus(approvalId, status)   ← returns full row
+updateApprovalDmTs(approvalId, dmTs)</div>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Call <code>require('./db/init')</code> at the top of <code>app.js</code> so tables are created on every startup (idempotent with IF NOT EXISTS)</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════ PHASE 2 ══ -->
+  <div class="phase p2">
+    <div class="phase-header" onclick="togglePhase(this)">
+      <div class="phase-number">2</div>
+      <div class="phase-title"><h2>Slash Commands</h2><span>All 5 commands wired to handlers and modals</span></div>
+      <div class="phase-days">Day 3–4</div>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="phase-body">
+
+      <!-- 2.1 -->
+      <div class="task" data-id="2.1">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 2.1</div>
+            <div class="task-title">/teamassist help — Command Response</div>
+            <div class="task-desc hld-content">Register command in Slack portal. Return a formatted Block Kit message listing all available commands.</div>
+            <div class="task-concept">💡 Concept: app.command() handler, ack() must be called within 3 seconds</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Implementation</h4>
+              <div class="lld-file">routes/commands.js</div>
+              <div class="lld-code">const { buildHelpBlocks } = require('../utils/blocks');
+
+module.exports = (app) => {
+  app.command('/teamassist', async ({ command, ack, respond, client }) => {
+    await ack();                              // MUST be first — Slack times out in 3s
+    const sub = command.text.trim().split(' ')[0].toLowerCase();
+
+    if (sub === 'help' || sub === '') {
+      await respond({ blocks: buildHelpBlocks() });
+      return;
+    }
+    // other sub-commands added in 2.2, 2.4, 3.2, 3.4 below this line
+  });
+};</div>
+              <div class="lld-file">utils/blocks.js — buildHelpBlocks()</div>
+              <div class="lld-code">function buildHelpBlocks() {
+  return [
+    { type: 'header', text: { type: 'plain_text', text: 'TeamAssist Commands' } },
+    { type: 'section', text: { type: 'mrkdwn', text: '*/teamassist task* – Create a new task' } },
+    { type: 'section', text: { type: 'mrkdwn', text: '*/teamassist mytasks* – View your assigned tasks' } },
+    { type: 'section', text: { type: 'mrkdwn', text: '*/teamassist remind* – Set a reminder' } },
+    { type: 'section', text: { type: 'mrkdwn', text: '*/teamassist approve* – Request an approval' } },
+  ];
+}</div>
+              <div class="lld-note">💡 <code>respond()</code> sends an ephemeral message back only to the user who typed the command. Use <code>client.chat.postMessage()</code> if you want the whole channel to see it.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2.2 -->
+      <div class="task" data-id="2.2">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 2.2</div>
+            <div class="task-title">/teamassist task — Open Task Creation Modal</div>
+            <div class="task-desc hld-content">Opens a modal with: title, assignee (user select), due date (datepicker), priority (Low/Medium/High).</div>
+            <div class="task-concept">💡 Concept: views.open(), Block Kit modal structure with input blocks</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Handler + Modal JSON</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>In <code>routes/commands.js</code>, add case for <code>task</code> inside the existing command handler:</div></div>
+              <div class="lld-code">if (sub === 'task') {
+  await client.views.open({
+    trigger_id: command.trigger_id,        // required — from Slack's payload
+    view: buildCreateTaskModal(command.channel_id),
+  });
+  return;
+}</div>
+              <div class="lld-file">utils/blocks.js — buildCreateTaskModal(channelId)</div>
+              <div class="lld-code">function buildCreateTaskModal(channelId) {
+  return {
+    type: 'modal',
+    callback_id: 'create_task_modal',
+    private_metadata: channelId,           // store so we can post to channel on submit
+    title: { type: 'plain_text', text: 'Create Task' },
+    submit: { type: 'plain_text', text: 'Create' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        block_id: 'task_title_block', type: 'input',
+        label: { type: 'plain_text', text: 'Task Title' },
+        element: { type: 'plain_text_input', action_id: 'task_title_input' }
+      },
+      {
+        block_id: 'assignee_block', type: 'input',
+        label: { type: 'plain_text', text: 'Assign To' },
+        element: {
+          type: 'users_select', action_id: 'assignee_input',
+          placeholder: { type: 'plain_text', text: 'Select a user' }
+        }
+      },
+      {
+        block_id: 'due_date_block', type: 'input',
+        label: { type: 'plain_text', text: 'Due Date' },
+        element: { type: 'datepicker', action_id: 'due_date_input' },
+        optional: true
+      },
+      {
+        block_id: 'priority_block', type: 'input',
+        label: { type: 'plain_text', text: 'Priority' },
+        element: {
+          type: 'static_select', action_id: 'priority_input',
+          initial_option: { text: { type: 'plain_text', text: 'Medium' }, value: 'MEDIUM' },
+          options: [
+            { text: { type: 'plain_text', text: 'Low' },    value: 'LOW' },
+            { text: { type: 'plain_text', text: 'Medium' }, value: 'MEDIUM' },
+            { text: { type: 'plain_text', text: 'High' },   value: 'HIGH' },
+          ]
+        }
+      }
+    ]
+  };
+}</div>
+              <div class="lld-note">⚠️ <code>trigger_id</code> expires in 3 seconds. You must call <code>views.open()</code> before any slow DB operations. Call <code>ack()</code> first, then <code>views.open()</code> immediately.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2.3 -->
+      <div class="task" data-id="2.3">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 2.3</div>
+            <div class="task-title">Handle Modal Submission → Save to DB</div>
+            <div class="task-desc hld-content">Listen for view_submission, extract values, insert into tasks table, post confirmation to channel.</div>
+            <div class="task-concept">💡 Concept: app.view() handler, extracting values from Block Kit state</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Modal Submission Handler</h4>
+              <div class="lld-file">handlers/views.js</div>
+              <div class="lld-code">const { v4: uuidv4 } = require('uuid');
+const { createTask } = require('../db/tasks');
+const { refreshHomeTab } = require('../utils/homeTab');
+const { buildTaskCard } = require('../utils/blocks');
+
+module.exports = (app) => {
+  app.view('create_task_modal', async ({ ack, view, body, client }) => {
+    await ack();
+
+    // Extract values — path: state.values[block_id][action_id]
+    const vals     = view.state.values;
+    const title    = vals.task_title_block.task_title_input.value;
+    const assignee = vals.assignee_block.assignee_input.selected_user;
+    const dueDate  = vals.due_date_block.due_date_input.selected_date;   // null if skipped
+    const priority = vals.priority_block.priority_input.selected_option.value;
+    const channelId = view.private_metadata;
+    const createdBy = body.user.id;
+
+    const task = {
+      id: uuidv4(), title, assigneeId: assignee,
+      createdBy, priority, dueDate, channelId
+    };
+    createTask(task);
+
+    // Post confirmation to channel
+    await client.chat.postMessage({
+      channel: channelId,
+      text: `Task created: *${title}*`,
+      blocks: buildTaskCard(task),
+    });
+
+    // Refresh Home tab for both users
+    await refreshHomeTab(createdBy, client);
+    if (assignee !== createdBy) await refreshHomeTab(assignee, client);
+  });
+};</div>
+              <div class="lld-note">💡 The exact path to extract a value is always: <code>view.state.values[block_id][action_id].value</code> for text inputs, <code>.selected_user</code> for user selects, <code>.selected_date</code> for datepickers, <code>.selected_option.value</code> for static selects.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2.4 -->
+      <div class="task" data-id="2.4">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 2.4</div>
+            <div class="task-title">/teamassist mytasks — List User's Tasks</div>
+            <div class="task-desc hld-content">Query DB for tasks where assignee_id matches user. Return Block Kit sections with task info + action buttons.</div>
+            <div class="task-concept">💡 Concept: Building dynamic Block Kit messages from DB rows</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Command Handler + Task Card Builder</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add <code>mytasks</code> case inside <code>routes/commands.js</code>:</div></div>
+              <div class="lld-code">if (sub === 'mytasks') {
+  const tasks = getTasksByAssignee(command.user_id);
+  if (tasks.length === 0) {
+    await respond({ text: 'You have no assigned tasks.' });
+    return;
+  }
+  const blocks = tasks.flatMap(t => buildTaskCard(t));
+  await respond({ blocks });
+  return;
+}</div>
+              <div class="lld-file">utils/blocks.js — buildTaskCard(task)</div>
+              <div class="lld-code">function buildTaskCard(task) {
+  const statusEmoji = { OPEN: '🔵', COMPLETE: '✅', ON_HOLD: '⏸️' };
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${task.title}*\n` +
+              `${statusEmoji[task.status] || '🔵'} ${task.status}  |  ` +
+              `Priority: *${task.priority}*  |  ` +
+              `Due: ${task.due_date || 'No date'}  |  ` +
+              `Assigned to: &lt;@${task.assignee_id}&gt;`
+      }
+    },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Mark Complete' },
+          action_id: 'mark_complete', value: task.id, style: 'primary' },
+        { type: 'button', text: { type: 'plain_text', text: 'Put on Hold' },
+          action_id: 'mark_on_hold', value: task.id },
+      ]
+    },
+    { type: 'divider' }
+  ];
+}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════ PHASE 3 ══ -->
+  <div class="phase p3">
+    <div class="phase-header" onclick="togglePhase(this)">
+      <div class="phase-number">3</div>
+      <div class="phase-title"><h2>Interactive Messages &amp; Events</h2><span>Buttons, approvals, reminders, reactions</span></div>
+      <div class="phase-days">Day 5–7</div>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="phase-body">
+
+      <!-- 3.1 -->
+      <div class="task" data-id="3.1">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 3.1</div>
+            <div class="task-title">Task Status Buttons (Complete / On Hold)</div>
+            <div class="task-desc hld-content">Handle Mark Complete and Put on Hold button clicks, update DB, refresh message and Home tab.</div>
+            <div class="task-concept">💡 Concept: app.action(), updating messages with respond({ replace_original: true })</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Action Handlers</h4>
+              <div class="lld-file">handlers/actions.js</div>
+              <div class="lld-code">const { updateTaskStatus } = require('../db/tasks');
+const { refreshHomeTab } = require('../utils/homeTab');
+
+module.exports = (app) => {
+
+  app.action('mark_complete', async ({ ack, action, respond, body, client }) => {
+    await ack();
+    updateTaskStatus(action.value, 'COMPLETE');
+    await respond({ replace_original: true, text: '✅ Task marked complete.' });
+    await refreshHomeTab(body.user.id, client);
+  });
+
+  app.action('mark_on_hold', async ({ ack, action, respond, body, client }) => {
+    await ack();
+    updateTaskStatus(action.value, 'ON_HOLD');
+    await respond({ replace_original: true, text: '⏸️ Task put on hold.' });
+    await refreshHomeTab(body.user.id, client);
+  });
+
+};</div>
+              <div class="lld-note">💡 <code>respond({ replace_original: true })</code> replaces the entire message that contained the button. This is how you "update" an interactive message — you can't edit it in place without storing the message <code>ts</code>.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3.2 -->
+      <div class="task" data-id="3.2">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 3.2</div>
+            <div class="task-title">/teamassist approve — Approval Request Modal</div>
+            <div class="task-desc hld-content">Open modal with description and approver user select. Store channel + user in private_metadata.</div>
+            <div class="task-concept">💡 Concept: Sending DMs with client.conversations.open(), multi-step modal flows</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Command Handler + Approval Modal</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add <code>approve</code> case in <code>routes/commands.js</code>:</div></div>
+              <div class="lld-code">if (sub === 'approve') {
+  await client.views.open({
+    trigger_id: command.trigger_id,
+    view: buildApprovalModal(command.channel_id, command.user_id),
+  });
+  return;
+}</div>
+              <div class="lld-file">utils/blocks.js — buildApprovalModal(channelId, userId)</div>
+              <div class="lld-code">function buildApprovalModal(channelId, userId) {
+  return {
+    type: 'modal',
+    callback_id: 'approval_request_modal',
+    private_metadata: JSON.stringify({ channelId, userId }),
+    title: { type: 'plain_text', text: 'Request Approval' },
+    submit: { type: 'plain_text', text: 'Send Request' },
+    blocks: [
+      {
+        block_id: 'description_block', type: 'input',
+        label: { type: 'plain_text', text: 'What needs approval?' },
+        element: {
+          type: 'plain_text_input', action_id: 'description_input',
+          multiline: true,
+          placeholder: { type: 'plain_text', text: 'Describe what you need approved...' }
+        }
+      },
+      {
+        block_id: 'approver_block', type: 'input',
+        label: { type: 'plain_text', text: 'Who should approve?' },
+        element: {
+          type: 'users_select', action_id: 'approver_input',
+          placeholder: { type: 'plain_text', text: 'Select approver' }
+        }
+      }
+    ]
+  };
+}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3.3 -->
+      <div class="task" data-id="3.3">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 3.3</div>
+            <div class="task-title">Handle Approval Submission + Approve/Reject Buttons</div>
+            <div class="task-desc hld-content">Save approval, DM the approver with buttons. Handle approve/reject actions and notify the requester.</div>
+            <div class="task-concept">💡 Concept: Multi-user interaction flows, notification patterns across users</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Approval View Handler + Action Handlers</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add to <code>handlers/views.js</code>:</div></div>
+              <div class="lld-code">const { createApproval, updateApprovalStatus } = require('../db/approvals');
+const { buildApprovalCard } = require('../utils/blocks');
+
+app.view('approval_request_modal', async ({ ack, view, body, client }) => {
+  await ack();
+
+  const vals        = view.state.values;
+  const description = vals.description_block.description_input.value;
+  const approverId  = vals.approver_block.approver_input.selected_user;
+  const { userId }  = JSON.parse(view.private_metadata);
+
+  // Open a DM channel with the approver
+  const dm = await client.conversations.open({ users: approverId });
+  const dmChannelId = dm.channel.id;
+
+  const approval = {
+    id: uuidv4(), description,
+    requestedBy: userId, approverId, dmChannelId
+  };
+  createApproval(approval);
+
+  // Send DM to approver with Approve/Reject buttons
+  const msg = await client.chat.postMessage({
+    channel: dmChannelId,
+    text: `Approval request from &lt;@${userId}&gt;`,
+    blocks: buildApprovalCard(approval),
+  });
+
+  // Store message ts so we can update it on approve/reject
+  updateApprovalDmTs(approval.id, msg.ts);
+  await refreshHomeTab(approverId, client);
+});</div>
+              <div class="lld-step"><div class="lld-step-num">2</div><div>Add to <code>handlers/actions.js</code>:</div></div>
+              <div class="lld-code">app.action('approve_request', async ({ ack, action, respond, client }) => {
+  await ack();
+  const approval = updateApprovalStatus(action.value, 'APPROVED');
+  await respond({ replace_original: true, text: '✅ You approved this request.' });
+  const dm = await client.conversations.open({ users: approval.requested_by });
+  await client.chat.postMessage({
+    channel: dm.channel.id,
+    text: `✅ Your request was *approved* by &lt;@${approval.approver_id}&gt;.\n&gt; ${approval.description}`
+  });
+  await refreshHomeTab(approval.approver_id, client);
+});
+
+app.action('reject_request', async ({ ack, action, respond, client }) => {
+  await ack();
+  const approval = updateApprovalStatus(action.value, 'REJECTED');
+  await respond({ replace_original: true, text: '❌ You rejected this request.' });
+  const dm = await client.conversations.open({ users: approval.requested_by });
+  await client.chat.postMessage({
+    channel: dm.channel.id,
+    text: `❌ Your request was *rejected* by &lt;@${approval.approver_id}&gt;.\n&gt; ${approval.description}`
+  });
+  await refreshHomeTab(approval.approver_id, client);
+});</div>
+              <div class="lld-file">utils/blocks.js — buildApprovalCard(approval)</div>
+              <div class="lld-code">function buildApprovalCard(approval) {
+  return [
+    { type: 'section', text: { type: 'mrkdwn',
+      text: `*Approval Request from &lt;@${approval.requestedBy}&gt;*\n${approval.description}` } },
+    { type: 'actions', elements: [
+      { type: 'button', text: { type: 'plain_text', text: 'Approve' },
+        style: 'primary', action_id: 'approve_request', value: approval.id },
+      { type: 'button', text: { type: 'plain_text', text: 'Reject' },
+        style: 'danger', action_id: 'reject_request', value: approval.id },
+    ]}
+  ];
+}</div>
+              <div class="lld-note">💡 <code>updateApprovalStatus</code> in <code>db/approvals.js</code> must return the full row (use <code>db.prepare(...).get()</code> after the UPDATE) so we have <code>requested_by</code> for the DM.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3.4 -->
+      <div class="task" data-id="3.4">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 3.4</div>
+            <div class="task-title">/teamassist remind — Reminder Scheduling</div>
+            <div class="task-desc hld-content">Modal with message text + datetime picker. Use Slack's native chat.scheduleMessage API.</div>
+            <div class="task-concept">💡 Concept: Scheduled messaging with chat.scheduleMessage API</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Reminder Modal + Submission Handler</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add <code>remind</code> case in <code>routes/commands.js</code>:</div></div>
+              <div class="lld-code">if (sub === 'remind') {
+  await client.views.open({
+    trigger_id: command.trigger_id,
+    view: buildReminderModal(),
+  });
+  return;
+}</div>
+              <div class="lld-file">utils/blocks.js — buildReminderModal()</div>
+              <div class="lld-code">function buildReminderModal() {
+  return {
+    type: 'modal',
+    callback_id: 'reminder_modal',
+    title: { type: 'plain_text', text: 'Set Reminder' },
+    submit: { type: 'plain_text', text: 'Set Reminder' },
+    blocks: [
+      {
+        block_id: 'reminder_text_block', type: 'input',
+        label: { type: 'plain_text', text: 'Reminder Message' },
+        element: { type: 'plain_text_input', action_id: 'reminder_text_input' }
+      },
+      {
+        block_id: 'reminder_time_block', type: 'input',
+        label: { type: 'plain_text', text: 'When?' },
+        element: { type: 'datetimepicker', action_id: 'reminder_time_input' }
+      }
+    ]
+  };
+}</div>
+              <div class="lld-step"><div class="lld-step-num">2</div><div>Add to <code>handlers/views.js</code>:</div></div>
+              <div class="lld-code">app.view('reminder_modal', async ({ ack, view, body, client }) => {
+  await ack();
+  const text   = view.state.values.reminder_text_block.reminder_text_input.value;
+  const postAt = view.state.values.reminder_time_block.reminder_time_input.selected_date_time;
+  // postAt is a Unix timestamp (seconds since epoch)
+
+  const dm = await client.conversations.open({ users: body.user.id });
+  await client.chat.scheduleMessage({
+    channel: dm.channel.id,
+    post_at: postAt,              // must be at least 60 seconds in the future
+    text: `⏰ Reminder: ${text}`,
+  });
+});</div>
+              <div class="lld-note">⚠️ <code>chat.scheduleMessage</code> requires <code>post_at</code> to be at least 60 seconds in the future. If the user picks a past time, catch the <code>time_in_past</code> error and return a friendly message.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3.5 -->
+      <div class="task" data-id="3.5">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 3.5</div>
+            <div class="task-title">reaction_added Event (📌 pin → task)</div>
+            <div class="task-desc hld-content">When a user reacts with 📌, prompt them via DM to convert that message into a task.</div>
+            <div class="task-concept">💡 Concept: app.event() subscriptions, reading message context from payload</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Reaction Event Handler — Workaround Explained</h4>
+              <div class="lld-note">⚠️ <strong>Key constraint:</strong> <code>reaction_added</code> events do NOT include a <code>trigger_id</code>, so you cannot open a modal directly. Workaround: DM the user a message with a "Create Task" button — clicking that button provides a <code>trigger_id</code> to open the modal.</div>
+              <div class="lld-file">handlers/events.js</div>
+              <div class="lld-code">app.event('reaction_added', async ({ event, client }) => {
+  if (event.reaction !== 'pushpin') return;
+
+  // Fetch the original message text
+  const history = await client.conversations.history({
+    channel: event.item.channel,
+    latest: event.item.ts,
+    limit: 1,
+    inclusive: true,
+  });
+  const messageText = history.messages[0]?.text || '';
+
+  // Open DM with the user who pinned
+  const dm = await client.conversations.open({ users: event.user });
+
+  // Send a prompt with a button — button value carries message context
+  await client.chat.postMessage({
+    channel: dm.channel.id,
+    text: 'Create a task from a pinned message?',
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn',
+        text: `📌 You pinned a message. Create a task from it?\n&gt; ${messageText.slice(0, 100)}` } },
+      { type: 'actions', elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Create Task' },
+          action_id: 'pin_create_task',
+          // Encode channel + ts + text into value (parse in action handler)
+          value: JSON.stringify({ channelId: event.item.channel, text: messageText.slice(0, 200) }),
+          style: 'primary' },
+        { type: 'button', text: { type: 'plain_text', text: 'Dismiss' },
+          action_id: 'dismiss_pin' }
+      ]}
+    ]
+  });
+});</div>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add to <code>handlers/actions.js</code> — the button click has a <code>trigger_id</code>:</div></div>
+              <div class="lld-code">app.action('pin_create_task', async ({ ack, action, client }) => {
+  await ack();
+  const { channelId, text } = JSON.parse(action.value);
+  await client.views.open({
+    trigger_id: action.trigger_id,
+    view: buildCreateTaskModal(channelId, text),  // pass text as initial_value
+  });
+});
+
+app.action('dismiss_pin', async ({ ack, respond }) => {
+  await ack();
+  await respond({ replace_original: true, text: 'Dismissed.' });
+});</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3.6 -->
+      <div class="task" data-id="3.6">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 3.6</div>
+            <div class="task-title">app_mention Event — Contextual Help</div>
+            <div class="task-desc hld-content">When the bot is @mentioned in any channel, reply in the thread with help text.</div>
+            <div class="task-concept">💡 Concept: app.event('app_mention'), replying in threads with thread_ts</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Mention Handler</h4>
+              <div class="lld-file">handlers/events.js</div>
+              <div class="lld-code">app.event('app_mention', async ({ event, client }) => {
+  await client.chat.postMessage({
+    channel: event.channel,
+    thread_ts: event.ts,    // reply in-thread so we don't spam the channel
+    blocks: buildHelpBlocks(),
+    text: 'Here are the available TeamAssist commands.',
+  });
+});</div>
+              <div class="lld-note">💡 <code>thread_ts: event.ts</code> anchors the reply to the mention message's thread. Without it, the response posts as a new top-level message in the channel.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════ PHASE 4 ══ -->
+  <div class="phase p4">
+    <div class="phase-header" onclick="togglePhase(this)">
+      <div class="phase-number">4</div>
+      <div class="phase-title"><h2>App Home Tab</h2><span>Personalized dashboard with tasks &amp; approvals</span></div>
+      <div class="phase-days">Day 8–9</div>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="phase-body">
+
+      <!-- 4.1 -->
+      <div class="task" data-id="4.1">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 4.1</div>
+            <div class="task-title">Build Home Tab — "Your Tasks" Section</div>
+            <div class="task-desc hld-content">Listen for app_home_opened, query user's tasks, publish Block Kit view with task list and action buttons.</div>
+            <div class="task-concept">💡 Concept: views.publish() for App Home is different from views.open() for modals</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>refreshHomeTab Helper + Event Handler</h4>
+              <div class="lld-file">utils/homeTab.js</div>
+              <div class="lld-code">const { getTasksByAssignee } = require('../db/tasks');
+const { getPendingApprovalsByApprover } = require('../db/approvals');
+
+async function refreshHomeTab(userId, client) {
+  const tasks     = getTasksByAssignee(userId);
+  const approvals = getPendingApprovalsByApprover(userId);
+
+  await client.views.publish({
+    user_id: userId,
+    view: {
+      type: 'home',                       // MUST be 'home' — not 'modal'
+      blocks: buildHomeBlocks(tasks, approvals, userId),
+    },
+  });
+}
+
+module.exports = { refreshHomeTab };</div>
+              <div class="lld-file">utils/homeTab.js — buildHomeBlocks(tasks, approvals, userId)</div>
+              <div class="lld-code">function buildHomeBlocks(tasks, approvals, userId) {
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: 'TeamAssist Dashboard' } },
+    { type: 'divider' },
+    { type: 'section', text: { type: 'mrkdwn', text: '*Your Tasks*' } },
+  ];
+
+  if (tasks.length === 0) {
+    blocks.push({ type: 'section',
+      text: { type: 'mrkdwn', text: '_No tasks assigned to you yet._' } });
+  } else {
+    tasks.forEach(t => blocks.push(...buildTaskCard(t)));
+  }
+
+  // Approval section added in Task 4.2
+  return blocks;
+}</div>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add to <code>handlers/events.js</code>:</div></div>
+              <div class="lld-code">app.event('app_home_opened', async ({ event, client }) => {
+  await refreshHomeTab(event.user, client);
+});</div>
+              <div class="lld-note">💡 The difference: <code>views.open()</code> shows a floating modal. <code>views.publish()</code> sets the persistent content of a user's App Home tab — it's always visible when they click the app in the sidebar.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4.2 -->
+      <div class="task" data-id="4.2">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 4.2</div>
+            <div class="task-title">Add Admin Approval Section on Home Tab</div>
+            <div class="task-desc hld-content">Add "Tasks Pending Your Approval" section — only shown when the user has pending approvals. Approve/Reject buttons wire to the same action handlers from Task 3.3.</div>
+            <div class="task-concept">💡 Concept: Conditional rendering in Block Kit, role-based UI sections</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Update buildHomeBlocks to Add Approval Section</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Extend <code>buildHomeBlocks</code> in <code>utils/homeTab.js</code> after the tasks section:</div></div>
+              <div class="lld-code">// Only show approval section if there are pending approvals
+if (approvals.length > 0) {
+  blocks.push(
+    { type: 'divider' },
+    { type: 'section', text: { type: 'mrkdwn', text: '*Tasks Pending Your Approval*' } }
+  );
+  approvals.forEach(a => {
+    blocks.push(
+      { type: 'section', text: { type: 'mrkdwn',
+        text: `*&lt;@${a.requested_by}&gt;* requests approval:\n${a.description}` } },
+      { type: 'actions', elements: [
+        { type: 'button', text: { type: 'plain_text', text: 'Approve' },
+          style: 'primary', action_id: 'approve_request', value: a.id },
+        { type: 'button', text: { type: 'plain_text', text: 'Reject' },
+          style: 'danger', action_id: 'reject_request', value: a.id },
+      ]},
+      { type: 'divider' }
+    );
+  });
+}</div>
+              <div class="lld-note">💡 The same <code>approve_request</code> and <code>reject_request</code> action handlers from Task 3.3 handle these buttons automatically — no duplication needed. Slack routes by <code>action_id</code> regardless of where the button appears.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4.3 -->
+      <div class="task" data-id="4.3">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 4.3</div>
+            <div class="task-title">Auto-refresh Home Tab After Every State Change</div>
+            <div class="task-desc hld-content">Call refreshHomeTab() after any task or approval change so the Home tab stays in sync.</div>
+            <div class="task-concept">💡 Concept: Keeping persistent views in sync with state changes</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Refresh Trigger Points — Checklist</h4>
+              <table class="lld-table">
+                <thead><tr><th>Event</th><th>Who to refresh</th><th>Location in code</th></tr></thead>
+                <tbody>
+                  <tr><td>Task created (view submission)</td><td>creator + assignee</td><td>handlers/views.js — create_task_modal</td></tr>
+                  <tr><td>mark_complete button</td><td>user who clicked</td><td>handlers/actions.js — mark_complete</td></tr>
+                  <tr><td>mark_on_hold button</td><td>user who clicked</td><td>handlers/actions.js — mark_on_hold</td></tr>
+                  <tr><td>Approval request submitted</td><td>approver</td><td>handlers/views.js — approval_request_modal</td></tr>
+                  <tr><td>approve_request action</td><td>approver</td><td>handlers/actions.js — approve_request</td></tr>
+                  <tr><td>reject_request action</td><td>approver</td><td>handlers/actions.js — reject_request</td></tr>
+                  <tr><td>app_home_opened</td><td>that user (always)</td><td>handlers/events.js</td></tr>
+                </tbody>
+              </table>
+              <div class="lld-code">// Already done if you followed Tasks 3.1–3.3 and 2.3
+// Verify by grepping: grep -r "refreshHomeTab" handlers/</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════ PHASE 5 ══ -->
+  <div class="phase p5">
+    <div class="phase-header" onclick="togglePhase(this)">
+      <div class="phase-number">5</div>
+      <div class="phase-title"><h2>Polish, Testing &amp; Delivery</h2><span>Error handling, security, tests, README, demo</span></div>
+      <div class="phase-days">Day 10–14</div>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="phase-body">
+
+      <!-- 5.1 -->
+      <div class="task" data-id="5.1">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 5.1</div>
+            <div class="task-title">Error Handling &amp; Retry Logic</div>
+            <div class="task-desc hld-content">Wrap all Slack API calls in try/catch. Return user-friendly messages. Add basic retry for transient failures.</div>
+            <div class="task-concept">💡 Concept: Resilient API usage, Slack error code reference</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Error Handler Utility</h4>
+              <div class="lld-file">utils/errorHandler.js</div>
+              <div class="lld-code">const FRIENDLY = {
+  'channel_not_found':    'That channel no longer exists.',
+  'not_in_channel':       'Invite @TeamAssist to this channel first.',
+  'user_not_found':       'That user could not be found.',
+  'time_in_past':         'Please choose a future time for your reminder.',
+  'cant_invite_self':     'You cannot assign yourself as approver.',
+  'ratelimited':          'Too many requests. Please wait a moment and try again.',
+};
+
+async function safeCall(fn, respond) {
+  try {
+    return await fn();
+  } catch (err) {
+    const code = err.data?.error;
+    const msg  = FRIENDLY[code] || 'Something went wrong. Please try again.';
+    console.error('[TeamAssist]', code || err.message);
+    if (respond) await respond({ text: msg, response_type: 'ephemeral' });
+    return null;
+  }
+}
+
+module.exports = { safeCall };</div>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Wrap every <code>client.*</code> call: <code>await safeCall(() =&gt; client.chat.postMessage(...), respond)</code></div></div>
+              <div class="lld-step"><div class="lld-step-num">2</div><div>Add Bolt's global error handler in <code>app.js</code>:</div></div>
+              <div class="lld-code">app.error(async (error) => {
+  console.error('[Bolt global error]', error);
+});</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5.2 -->
+      <div class="task" data-id="5.2">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 5.2</div>
+            <div class="task-title">Security Checklist</div>
+            <div class="task-desc hld-content">Signing secret verification, token storage, ownership validation.</div>
+            <div class="task-concept">💡 Concept: Slack request verification, OAuth token security</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Security Items — Each Must Pass Before Ship</h4>
+              <ul class="lld-checklist">
+                <li><code>.gitignore</code> contains <code>.env</code> and <code>teamassist.db</code></li>
+                <li>Bolt's signing secret verification is active — never pass <code>signingSecret: undefined</code> or disable it</li>
+                <li>No hardcoded tokens anywhere in source files</li>
+                <li>Task ownership check before status update: verify <code>task.created_by === userId OR task.assignee_id === userId</code></li>
+                <li>Approval ownership check: verify <code>approval.approver_id === userId</code> before processing approve/reject</li>
+                <li>Run <code>git log --all -p | grep "xoxb-"</code> before first push to ensure no token leaked in history</li>
+              </ul>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add ownership guard in <code>handlers/actions.js</code>:</div></div>
+              <div class="lld-code">app.action('mark_complete', async ({ ack, action, respond, body }) => {
+  await ack();
+  const task = getTaskById(action.value);
+  const userId = body.user.id;
+  if (task.assignee_id !== userId &amp;&amp; task.created_by !== userId) {
+    await respond({ text: 'You can only update tasks assigned to or created by you.', response_type: 'ephemeral' });
+    return;
+  }
+  updateTaskStatus(action.value, 'COMPLETE');
+  // ...
+});</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5.3 -->
+      <div class="task" data-id="5.3">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 5.3</div>
+            <div class="task-title">Unit Tests for Backend Logic</div>
+            <div class="task-desc hld-content">Test task creation, approval state transitions, DB queries. Mock the DB layer, not the Slack API.</div>
+            <div class="task-concept">💡 Concept: Testing business logic independently of external APIs</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Jest Setup + Test Examples</h4>
+              <div class="lld-code">npm install --save-dev jest</div>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>Add to <code>package.json</code>: <code>"test": "jest"</code></div></div>
+              <div class="lld-file">tests/tasks.test.js</div>
+              <div class="lld-code">// Mock the DB module before requiring anything that uses it
+jest.mock('../db/database', () => {
+  const mockRun = jest.fn();
+  const mockAll = jest.fn(() => []);
+  const mockGet = jest.fn(() => null);
+  return { prepare: jest.fn(() => ({ run: mockRun, all: mockAll, get: mockGet })), exec: jest.fn() };
+});
+
+const { createTask, getTasksByAssignee, updateTaskStatus } = require('../db/tasks');
+
+test('createTask inserts row with correct fields', () => {
+  const task = { id: 'abc', title: 'Test', assigneeId: 'U1', createdBy: 'U2', priority: 'HIGH', dueDate: '2026-10-01', channelId: 'C1' };
+  expect(() =&gt; createTask(task)).not.toThrow();
+});
+
+test('getTasksByAssignee returns empty array when no tasks', () => {
+  const result = getTasksByAssignee('U999');
+  expect(Array.isArray(result)).toBe(true);
+});
+
+test('updateTaskStatus calls prepare with correct SQL', () => {
+  expect(() =&gt; updateTaskStatus('abc', 'COMPLETE')).not.toThrow();
+});</div>
+              <div class="lld-file">tests/approvals.test.js — same pattern for approval CRUD functions</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5.4 -->
+      <div class="task" data-id="5.4">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 5.4</div>
+            <div class="task-title">Manual End-to-End Test Checklist</div>
+            <div class="task-desc hld-content">Run all scenarios in a real Slack workspace before marking the project complete.</div>
+            <div class="task-concept">💡 Concept: End-to-end Slack workflow validation</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Test Scenarios (run in order)</h4>
+              <ul class="lld-checklist">
+                <li><code>/teamassist help</code> → shows all 4 commands as formatted list</li>
+                <li><code>/teamassist task</code> → modal opens with all 4 fields visible</li>
+                <li>Fill modal → submit → confirmation appears in channel with task card</li>
+                <li><code>/teamassist mytasks</code> → shows the created task with buttons</li>
+                <li>Click "Mark Complete" → message updates, status shows ✅ in App Home</li>
+                <li>Click "Put on Hold" → message updates, status shows ⏸️</li>
+                <li><code>/teamassist approve</code> → modal opens, select a different user as approver</li>
+                <li>Submit approval → approver receives DM with Approve/Reject buttons</li>
+                <li>As approver, click "Approve" → requester gets DM notification</li>
+                <li>As approver, try "Reject" on a second request → requester gets rejection DM</li>
+                <li><code>/teamassist remind</code> → set reminder 2 minutes from now → receive DM on time</li>
+                <li>Add 📌 reaction to any message → receive DM with "Create Task" button</li>
+                <li>Click "Create Task" in DM → task creation modal opens</li>
+                <li>@mention the bot in a channel → help reply appears in thread (not as new message)</li>
+                <li>Open App Home → "Your Tasks" section visible with correct data</li>
+                <li>Open App Home as approver → "Pending Your Approval" section visible</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5.5 -->
+      <div class="task" data-id="5.5">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 5.5</div>
+            <div class="task-title">README + Architecture Diagram</div>
+            <div class="task-desc hld-content">Setup instructions, env vars table, ASCII architecture diagram.</div>
+            <div class="task-concept">💡 Concept: Developer documentation for Slack apps</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>README Sections + Architecture Diagram</h4>
+              <div class="lld-step"><div class="lld-step-num">1</div><div>README must cover: Overview, Prerequisites (Node 18+, ngrok, Slack admin), Setup steps, Env vars table, Running tests, Architecture</div></div>
+              <div class="lld-file">Architecture Diagram (ASCII — paste into README)</div>
+              <div class="lld-code">User in Slack Workspace
+      │
+      │  /teamassist task  |  button click  |  @mention  |  📌 reaction
+      ▼
+Slack Platform (api.slack.com)
+      │
+      │  HTTPS POST  →  X-Slack-Signature verified by Bolt
+      ▼
+ngrok (dev) / hosting (prod) :3000
+      │
+      ▼
+app.js  ──  Bolt SDK (signingSecret, botToken)
+      │
+      ├── routes/commands.js     ← /teamassist subcommands
+      ├── handlers/actions.js    ← button clicks
+      ├── handlers/views.js      ← modal submissions
+      └── handlers/events.js     ← Slack events
+                │
+                ├── utils/blocks.js       ← Block Kit JSON builders
+                ├── utils/homeTab.js      ← views.publish() helper
+                └── utils/errorHandler.js ← safeCall wrapper
+                │
+                └── db/
+                      database.js   ← better-sqlite3 singleton
+                      tasks.js      ← tasks CRUD
+                      approvals.js  ← approvals CRUD
+                      [teamassist.db — SQLite file on disk]</div>
+              <table class="lld-table">
+                <thead><tr><th>Env Variable</th><th>Where to get it</th><th>Example</th></tr></thead>
+                <tbody>
+                  <tr><td>SLACK_BOT_TOKEN</td><td>api.slack.com → OAuth &amp; Permissions</td><td>xoxb-111-222-abc</td></tr>
+                  <tr><td>SLACK_SIGNING_SECRET</td><td>api.slack.com → Basic Information</td><td>a1b2c3d4e5f6...</td></tr>
+                  <tr><td>PORT</td><td>Set manually</td><td>3000</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5.6 -->
+      <div class="task" data-id="5.6">
+        <div class="task-top">
+          <input type="checkbox" class="task-checkbox" onchange="updateProgress(this)">
+          <div class="task-content">
+            <div class="task-id">Task 5.6</div>
+            <div class="task-title">Record Demo Video (3–5 min)</div>
+            <div class="task-desc hld-content">Show each command, full approval flow, and App Home tab live in Slack.</div>
+            <div class="task-concept">💡 Concept: Communicating a Slack app's value through demonstration</div>
+            <button class="lld-toggle-btn" onclick="toggleLLD(this)"><span class="arr">▶</span> Low-Level Details</button>
+            <div class="lld-section">
+              <h4>Demo Script (3–5 min)</h4>
+              <table class="lld-table">
+                <thead><tr><th>Timestamp</th><th>What to show</th></tr></thead>
+                <tbody>
+                  <tr><td>0:00 – 0:30</td><td>Open App Home tab — explain "Your Tasks" and "Pending Approval" sections</td></tr>
+                  <tr><td>0:30 – 1:30</td><td>Type <code>/teamassist task</code> — fill modal — submit — show confirmation card in channel</td></tr>
+                  <tr><td>1:30 – 2:00</td><td>Type <code>/teamassist mytasks</code> — click "Mark Complete" — show message update</td></tr>
+                  <tr><td>2:00 – 3:00</td><td>Full approval flow: <code>/teamassist approve</code> → DM to approver → click Approve → requester notification</td></tr>
+                  <tr><td>3:00 – 3:30</td><td><code>/teamassist remind</code> — set 2 min from now — wait — DM arrives</td></tr>
+                  <tr><td>3:30 – 4:00</td><td>📌 pin reaction on a message → DM button → open task modal from message</td></tr>
+                  <tr><td>4:00 – 4:30</td><td>Refresh App Home — show updated tasks and cleared approval</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════ CONCEPT MAP ══ -->
+  <div class="phase" style="margin-top:8px;">
+    <div class="phase-header" onclick="togglePhase(this)" style="border-left: 4px solid #4a154b;">
+      <div class="phase-number" style="background:#4a154b;">K</div>
+      <div class="phase-title"><h2>Key Concepts Map</h2><span>What you learn and where you learn it</span></div>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="phase-body">
+      <table class="concept-table">
+        <thead><tr><th>Concept</th><th>Tasks</th></tr></thead>
+        <tbody>
+          <tr><td>ack() pattern — 3 second Slack rule</td><td><span class="concept-tag">2.1–2.4</span></td></tr>
+          <tr><td>Block Kit modals (views.open)</td><td><span class="concept-tag">2.2</span> <span class="concept-tag">3.2</span></td></tr>
+          <tr><td>Extracting Block Kit state values</td><td><span class="concept-tag">2.3</span></td></tr>
+          <tr><td>app.action() — button click handlers</td><td><span class="concept-tag">3.1</span> <span class="concept-tag">3.3</span></td></tr>
+          <tr><td>app.event() — Slack event subscriptions</td><td><span class="concept-tag">3.5</span> <span class="concept-tag">3.6</span></td></tr>
+          <tr><td>trigger_id constraint + workaround</td><td><span class="concept-tag">3.5</span></td></tr>
+          <tr><td>views.publish() — App Home tab</td><td><span class="concept-tag">4.1–4.3</span></td></tr>
+          <tr><td>Scheduled messaging (chat.scheduleMessage)</td><td><span class="concept-tag">3.4</span></td></tr>
+          <tr><td>Opening DMs (conversations.open)</td><td><span class="concept-tag">3.2</span> <span class="concept-tag">3.3</span></td></tr>
+          <tr><td>OAuth scopes &amp; token security</td><td><span class="concept-tag">5.2</span></td></tr>
+          <tr><td>Slack signing secret verification</td><td><span class="concept-tag">5.2</span></td></tr>
+          <tr><td>SQLite schema design for Slack user IDs</td><td><span class="concept-tag">1.4</span></td></tr>
+          <tr><td>Thread replies (thread_ts)</td><td><span class="concept-tag">3.6</span></td></tr>
+          <tr><td>replace_original for message updates</td><td><span class="concept-tag">3.1</span></td></tr>
+          <tr><td>private_metadata to pass context through modals</td><td><span class="concept-tag">2.2</span> <span class="concept-tag">3.2</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<footer>TeamAssist Capstone Project Plan &mdash; 22 tasks · 5 phases · HLD + LLD</footer>
+
+<script>
+  const TOTAL = 22;
+
+  function togglePhase(header) {
+    header.parentElement.classList.toggle('open');
+  }
+
+  function switchMode(btn, group) {
+    btn.closest('.mode-tabs').querySelectorAll('.mode-tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    var mode = btn.dataset.mode;
+    document.querySelectorAll('[data-mode-group="' + group + '"]').forEach(function(p) {
+      p.classList.toggle('active', p.dataset.mode === mode);
+    });
+  }
+
+  function toggleLLD(btn) {
+    btn.classList.toggle('open');
+    btn.nextElementSibling.classList.toggle('open');
+  }
+
+  function setView(mode, clicked) {
+    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+    clicked.classList.add('active');
+    document.querySelectorAll('.hld-content').forEach(el => { el.style.display = (mode === 'lld') ? 'none' : ''; });
+    document.querySelectorAll('.task-concept').forEach(el => { el.style.display = (mode === 'lld') ? 'none' : ''; });
+    document.querySelectorAll('.lld-toggle-btn').forEach(btn => { btn.style.display = (mode === 'hld') ? 'none' : ''; });
+    if (mode === 'both') {
+      document.querySelectorAll('.lld-section').forEach(s => { s.classList.add('open'); s.previousElementSibling.classList.add('open'); });
+    } else if (mode === 'lld') {
+      document.querySelectorAll('.lld-section').forEach(s => { s.classList.add('open'); });
+    } else {
+      document.querySelectorAll('.lld-section').forEach(s => {
+        s.classList.remove('open');
+        const btn = s.previousElementSibling;
+        if (btn) btn.classList.remove('open');
+      });
+    }
+  }
+
+  /* ── Smart open/close logic ─────────────────────────────────
+     Rule: find the first incomplete task → open it, collapse rest.
+     If all complete → collapse all.
+     Also ensures the phase containing the open task is expanded.
+  ──────────────────────────────────────────────────────────── */
+  function applySmartOpen() {
+    const allTasks = Array.from(document.querySelectorAll('.task[data-id]'));
+    const target   = allTasks.find(t => !t.querySelector('.task-checkbox').checked) || null;
+
+    allTasks.forEach(t => {
+      if (t === target) {
+        t.classList.remove('task-collapsed');
+        // make sure its parent phase is open
+        const phase = t.closest('.phase');
+        if (phase) phase.classList.add('open');
+      } else {
+        t.classList.add('task-collapsed');
+      }
+    });
+  }
+
+  /* ── Completed-date helpers ─────────────────────────────── */
+  function saveDates(dates) {
+    localStorage.setItem('teamassist_dates', JSON.stringify(dates));
+  }
+  function loadDates() {
+    return JSON.parse(localStorage.getItem('teamassist_dates') || '{}');
+  }
+  function formatDate(iso) {
+    return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  /* ── Main progress update ─────────────────────────────────── */
+  function updateProgress(changedTask, isNowChecked) {
+    const dates = loadDates();
+
+    // Update done class + date label for every task
+    document.querySelectorAll('.task[data-id]').forEach(t => {
+      const cb    = t.querySelector('.task-checkbox');
+      const label = t.querySelector('.task-date-label');
+      t.classList.toggle('done', cb.checked);
+
+      if (changedTask && t === changedTask) {
+        if (isNowChecked) {
+          // Record completion date
+          const now = new Date().toISOString();
+          dates[t.dataset.id] = now;
+          if (label) { label.textContent = '✓ Completed: ' + formatDate(now); }
+        } else {
+          // Remove date when unchecked
+          delete dates[t.dataset.id];
+          if (label) label.textContent = '';
+        }
+      } else if (label && dates[t.dataset.id]) {
+        label.textContent = '✓ Completed: ' + formatDate(dates[t.dataset.id]);
+      }
+    });
+
+    saveDates(dates);
+
+    // Save checkbox state
+    const state = {};
+    document.querySelectorAll('.task[data-id]').forEach(t => {
+      state[t.dataset.id] = t.querySelector('.task-checkbox').checked;
+    });
+    localStorage.setItem('teamassist_progress', JSON.stringify(state));
+
+    // Update progress bar
+    const checked = document.querySelectorAll('.task-checkbox:checked').length;
+    document.getElementById('progressFill').style.width = (checked / TOTAL * 100) + '%';
+    document.getElementById('progressLabel').textContent = checked + ' of ' + TOTAL + ' tasks completed';
+
+    // Apply smart open after state changes
+    applySmartOpen();
+  }
+
+  /* ── Init task collapse structure ───────────────────────── */
+  function initTaskCollapse() {
+    document.querySelectorAll('.task').forEach((task, idx) => {
+      const content = task.querySelector('.task-content');
+      const taskId  = content.querySelector('.task-id');
+      const title   = content.querySelector('.task-title');
+
+      // Insert date label between task-id and task-title
+      const dateLabel = document.createElement('div');
+      dateLabel.className = 'task-date-label';
+      content.insertBefore(dateLabel, title);
+
+      // Wrap everything after task-title into collapsible body
+      const body = document.createElement('div');
+      body.className = 'task-body';
+      const children = Array.from(content.children);
+      children.slice(children.indexOf(title) + 1).forEach(child => body.appendChild(child));
+      content.appendChild(body);
+
+      // Add chevron to title
+      const chevron = document.createElement('span');
+      chevron.className = 'task-chevron';
+      chevron.innerHTML = '&#9660;';
+      title.appendChild(chevron);
+
+      // Collapse all tasks except the first on initial render
+      if (idx !== 0) task.classList.add('task-collapsed');
+
+      // Toggle on title click
+      title.addEventListener('click', () => task.classList.toggle('task-collapsed'));
+    });
+  }
+
+  /* ── Checkbox change handler (called from inline onchange) ── */
+  function onCheckboxChange(cb) {
+    updateProgress(cb.closest('.task'), cb.checked);
+  }
+
+  /* ── Boot ─────────────────────────────────────────────────── */
+  window.addEventListener('DOMContentLoaded', () => {
+    initTaskCollapse();
+
+    // Restore saved state
+    const state = JSON.parse(localStorage.getItem('teamassist_progress') || '{}');
+    const dates = loadDates();
+
+    document.querySelectorAll('.task[data-id]').forEach(t => {
+      const cb    = t.querySelector('.task-checkbox');
+      const label = t.querySelector('.task-date-label');
+
+      if (state[t.dataset.id]) {
+        cb.checked = true;
+        t.classList.add('done');
+      }
+      if (dates[t.dataset.id] && label) {
+        label.textContent = '✓ Completed: ' + formatDate(dates[t.dataset.id]);
+      }
+    });
+
+    // Wire checkboxes to the new handler
+    document.querySelectorAll('.task-checkbox').forEach(cb => {
+      cb.removeAttribute('onchange');
+      cb.addEventListener('change', () => onCheckboxChange(cb));
+    });
+
+    updateProgress(); // sets progress bar + applies smart open
+  });
+</script>
+</body>
+</html>

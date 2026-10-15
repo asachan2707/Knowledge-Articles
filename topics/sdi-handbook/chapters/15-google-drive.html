@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design Google Drive (File Sync) | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 15 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.15. Covers a Google Drive / Dropbox style sync service: sizing (500 PB allocated, 10 TB/day new data, about 240 upload QPS), single-server to distributed evolution, 4 MB block servers, metadata schema, upload/download/sync flows, delta sync, content-defined chunking, dedup, conflict resolution, notification via long polling, cold storage and failure handling. Includes an executed Node.js example (content-defined chunker, block dedup, delta upload, compare-and-set conflict handling). About 18 min read. Related: ch14 YouTube, ch24 S3-like storage, consistency-models, websockets.</div>
+        <h1>Design Google Drive (File Sync)</h1>
+        <p class="summary">A sync service is a metadata database with a very large, very dumb blob store behind it. The interesting engineering is in cutting files into blocks so that uploads are resumable, edits are cheap, duplicates cost nothing and conflicts are detectable.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">15 of 28 · Part 3 Product Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">18 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Block-level storage, delta sync, dedup, optimistic concurrency, change notification</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Dropbox, Google Drive, S3, Glacier, rsync, Git</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Everyone's first answer is "S3 plus a database". That is correct and not yet an answer. The questions that separate designs are: what happens when someone changes one line in a 2 GB file, when two laptops edit the same document offline, when the upload dies at 97 percent, and when a million users upload the same installer.</p>
+        <div class="callout"><p><strong>Core idea:</strong> never treat a file as the unit of storage or transfer. Treat it as an ordered list of immutable, content-addressed blocks. A file version is then just a row pointing at a list of hashes, and almost every feature (resume, delta sync, dedup, cheap history, integrity checks) falls out of that one choice.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design to anchor on</span>
+        <h2>Dropbox's block-and-metadata split</h2>
+        <p>Dropbox has described its architecture in public talks: the desktop client chunks files into blocks of up to 4 MB, hashes each with SHA-256, asks the server which hashes it already has, and uploads only the missing ones. A separate metadata service tracks namespaces, file lists and which blocks make up each revision, and a notification channel (long-lived HTTP polling) tells devices that something changed. Block storage began on S3 and was later moved to an in-house system Dropbox calls Magic Pocket. The block/metadata separation is the part to copy; the storage back end is a swappable implementation detail.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and numbers</span>
+        <h2>Scope and sizing</h2>
+        <p>Functional: upload and download files, sync across devices, share with permissions, keep revision history, notify on edit/delete/share. Out of scope here: collaborative real-time editing as in Google Docs, which uses operational transforms or CRDTs on top of a different pipeline. Non-functional priorities, in order: <strong>reliability</strong> (losing a customer's file is the one unforgivable failure), <strong>sync speed</strong>, <strong>bandwidth efficiency</strong> (mobile data costs the user), scalability and availability.</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Assumption / arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Users</td><td>50 M signed up, 10 M daily active</td><td></td></tr>
+            <tr><td>Allocated capacity</td><td>50 M × 10 GB free tier</td><td>500 PB (an upper bound; real use is far lower, and we thin-provision)</td></tr>
+            <tr><td>New data per day</td><td>10 M × 2 files × 500 KB</td><td>10 TB/day</td></tr>
+            <tr><td>Upload QPS</td><td>10 M × 2 ÷ 86,400</td><td>about 240 avg, about 480 peak (2x)</td></tr>
+            <tr><td>Max file</td><td>10 GB</td><td>about 2,500 blocks of 4 MB</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Important correction to a common misreading:</strong> 500 PB is the product of 50 M signed-up users and the 10 GB quota, not of daily actives. If you multiply the 10 M DAU by 10 GB you get 100 PB; people lose marks on exactly this. The write rate (240 QPS) is tiny; capacity and the metadata path are the real problems, so the design optimises bytes and consistency rather than raw request throughput.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>From one box to a sync platform</h2>
+        <p class="mini-heading">Day one: one server</p>
+        <p>A web server, a database for users and file metadata, and a directory tree with one folder per namespace (a namespace is the root of a user's or shared-folder's tree). A file is identified by namespace plus relative path. It works, and it fails on three axes: disk fills, the box is a single point of failure, and no one can resume a broken upload.</p>
+        <p class="mini-heading">API surface</p>
+        <table class="data-table">
+          <thead><tr><th>Endpoint</th><th>Purpose</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>POST /files/upload?uploadType=simple</code></td><td>Small files in one request</td><td>Cheap path for the majority of files</td></tr>
+            <tr><td><code>POST /files/upload?uploadType=resumable</code></td><td>Large files</td><td>1) initiate, receive a session URL; 2) send bytes/blocks; 3) on failure ask the session how much it holds and continue</td></tr>
+            <tr><td><code>GET /files/download?path=…</code></td><td>Fetch a file</td><td>In the block design this is: get metadata, then get blocks</td></tr>
+            <tr><td><code>GET /files/list_revisions</code></td><td>History</td><td>Paginated; limit and offset or cursor</td></tr>
+          </tbody>
+        </table>
+        <p>All of these require auth and run over TLS. A resumable session is just state: <code>(upload_id, expected_size, received_ranges)</code>. Keep the session record in the metadata store or cache with a TTL so abandoned uploads expire.</p>
+        <p class="mini-heading">Scaling the single box</p>
+        <ul class="check-list">
+          <li><strong>Object storage</strong> (S3-class) for the bytes, replicated across zones and optionally regions. You get eleven nines of designed durability for nothing you have to operate.</li>
+          <li><strong>Load balancer plus stateless web/API servers</strong> so failure of any one is invisible.</li>
+          <li><strong>Metadata DB sharded and replicated</strong>, ideally by namespace/user, with a cache in front.</li>
+        </ul>
+        <div class="diagram-box" style="white-space:pre">
+   Desktop / mobile client  (watcher + chunker + local block cache)
+     │ metadata calls                         │ block put/get
+     ▼                                        ▼
+   <span class="hi">Load balancer</span> ──▶ <span class="hi">API servers</span>               <span class="hi">Block servers</span>
+                      │      ▲                   │ split · compress · encrypt
+                      ▼      │ cache             ▼
+                 <span class="step">Metadata DB</span>  +  cache      <span class="step">Cloud object storage</span> ──▶ cold tier
+                      │                                  (4 MB blocks, key = SHA-256)
+                      ▼
+            <span class="ok">Notification service</span>  (long poll / pub-sub)
+                      │
+                      ▼  offline? ──▶ <span class="warn">offline backup queue</span> ──▶ pulled when device returns
+        </div>
+        <p class="mini-heading">Why block servers exist</p>
+        <p>You could let the client write whole files to object storage. Block servers (or an equivalent client library) add the logic that makes this a sync product: split into blocks, compress each (text compresses well, JPEG and video do not, so choose per type or skip), encrypt, hash, and store by hash. Block size is a trade-off. Small blocks (say 256 KB) give finer deltas and better dedup but multiply metadata rows and request overhead. Large blocks (4 to 8 MB) amortise per-request cost but retransmit more on a small edit. A fixed 4 MB maximum is a defensible default; content-defined chunking (below) lets you hit an average size while still resynchronising after inserts.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 1</span>
+        <h2>The metadata database</h2>
+        <p>Metadata is small, relational and must be consistent: a path must resolve to exactly one current version, and a rename or move must be atomic. That argues for an ACID store (MySQL or Postgres, or a globally consistent system such as Spanner) rather than an eventually consistent NoSQL store. Reads dominate, so replicas plus a cache take pressure off the primary; the cache must be invalidated on commit, and clients that just wrote should read from the primary to avoid seeing their own change vanish.</p>
+        <table class="data-table">
+          <thead><tr><th>Table</th><th>Key columns</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>user</td><td>user_id, name, email, quota, created_at</td><td>Account and quota</td></tr>
+            <tr><td>device</td><td>device_id, user_id, last_seen_cursor</td><td>Per-device sync position so a returning device knows what it missed</td></tr>
+            <tr><td>namespace</td><td>ns_id, owner_id, shared_with[]</td><td>Root of a tree; unit of sharding and sharing</td></tr>
+            <tr><td>file</td><td>file_id, ns_id, path, name, is_folder, latest_version, checksum, created_at</td><td>The logical file. Rename = update path, no data moves.</td></tr>
+            <tr><td>file_version</td><td>file_id, version, block_list, size, modified_by, created_at</td><td>Immutable history row. Never UPDATE a version, only INSERT.</td></tr>
+            <tr><td>block</td><td>block_hash, size, storage_key, refcount</td><td>Content-addressed store index with reference counts for garbage collection</td></tr>
+          </tbody>
+        </table>
+        <p>Sharding by <code>namespace_id</code> keeps a user's whole tree on one shard, so listing a folder and renaming inside it are single-shard transactions. Shared folders complicate this (a namespace has many members), which is why namespaces rather than users are the sharding key. Cross-namespace moves need a short two-phase operation, usually done as copy-then-delete under a saga. See <a href="../../system-design/sharding.html">Sharding</a>.</p>
+        <p>A <em>change log</em> is the other essential structure: an append-only per-namespace sequence of events <code>(cursor, file_id, op, version)</code>. A device stores the last cursor it processed and asks "give me everything after cursor N". This turns sync from a diff of two trees (expensive) into reading a log tail (cheap), and it is what the offline queue really is.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 2</span>
+        <h2>Upload, download and sync flows</h2>
+        <h3>Upload</h3>
+        <div class="diagram-box" style="white-space:pre">
+ client                       API server              block server           object store
+   │ ── (A) add-file metadata ─▶│  INSERT file_version (status=PENDING)
+   │ ── (B) which blocks do you lack? hashes[] ──────▶│ answer: [h7, h9]
+   │ ── (B) PUT block h7, h9 (compressed+encrypted) ─▶│ ───────────────▶ put (idempotent by hash)
+   │                            │◀──── commit (all blocks present) ─────│
+   │                            │  status = UPLOADED ; append change-log entry
+   │                            │  ──▶ notification service ──▶ other devices
+   │◀── ack(version=N) ─────────│
+        </div>
+        <p>The metadata and block uploads run in parallel for latency, but the version only becomes visible when every referenced block exists. A <code>PENDING</code> row is invisible to readers; a janitor aborts and cleans stale pending rows. Because block keys are hashes, retries are idempotent by construction: re-uploading a block that already exists is a no-op. S3-style event callbacks (or the block server's own acknowledgement) flip the status, which in turn publishes the change event.</p>
+        <h3>Download and sync</h3>
+        <p>A device learns about a change in one of two ways. If it is online, the notification service tells it. If it is offline, the change-log entries wait, and on reconnect the device reads the log from its last cursor. Either way the next steps are identical: fetch the new metadata from the API tier, diff the block list against the blocks it already holds, download only the missing ones from the block servers (ideally via a CDN or signed URLs), and reassemble in order. Verify each block's hash on arrival; a mismatch is a corrupted download, not a conflict.</p>
+        <h3>Delta sync and chunking</h3>
+        <p>With fixed-size blocks, editing the middle of a file leaves most blocks unchanged and only the touched ones are re-uploaded, which is great for in-place edits (databases, disk images, big spreadsheets). Inserting bytes shifts every later block boundary and defeats dedup. The fix, used by rsync (rolling checksum), backup tools and Dropbox-style systems, is <strong>content-defined chunking</strong>: slide a rolling hash over the bytes and cut wherever the hash satisfies a rule such as "low 13 bits are zero". Boundaries now depend on local content, so inserting 100 bytes disturbs one or two chunks and the rest realign. The example below does exactly this and shows a 600 KB file edited near the front re-uploading under 2 percent of its bytes.</p>
+        <p>Archives such as zip, and many office formats, are themselves compressed containers where a tiny edit changes everything after it. Mature clients special-case these by chunking inside the container or accepting the cost. Mention it, because it shows you have met real files.</p>
+        <h3>Conflicts</h3>
+        <p>Two devices edit version 5 independently. The first commit that reaches the server creates version 6. The second commit carries <code>base_version = 5</code>, which no longer equals the latest, so the server rejects it (this is optimistic concurrency, a compare-and-set on the version). The server does not guess. It keeps the winner as the canonical file and stores the loser as a sibling, such as "report (conflicted copy from tablet)", and tells the user. For plain files this is the honest behaviour; for structured documents a merge is possible but requires format knowledge, and for live collaborative text you leave this layer entirely and use OT/CRDTs. Neil Fraser's differential synchronization, listed in the references, is a third model: continuously diff and patch a shared text between client and server shadow copies.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 3</span>
+        <h2>Notification service, storage economics, security</h2>
+        <h3>Telling devices something changed</h3>
+        <p>The need is one-way and low frequency per device: "namespace X has a new cursor". Long polling does that well. The client holds an HTTP request open; the server answers when there is a change or after roughly a minute with "nothing", and the client immediately re-issues it. That works through corporate proxies, needs no special protocol and is simple to scale. WebSockets give bidirectional, lower-overhead messaging, which matters more in chat than here. Either way, treat the notification as a <em>hint</em> containing the namespace and cursor, never as the data; the log is the source of truth, and a missed hint costs only latency because devices also poll on a timer. At scale each notification server holds many thousands of idle connections, so use epoll-based servers, tune file-descriptor limits, and shard subscribers by namespace through a pub/sub layer. See <a href="../../system-design/websockets.html">WebSockets</a> and <a href="../../system-design/pub-sub.html">Pub/Sub</a>.</p>
+        <h3>Storage optimisation</h3>
+        <ul class="check-list">
+          <li><strong>Deduplication.</strong> Identical hashes are stored once. Do it per account, not globally: global dedup lets an attacker probe whether someone else holds a particular file by seeing whether the upload "completes instantly", a real attack on early cloud storage services. Per-account dedup still wins the common case of repeated copies and versions.</li>
+          <li><strong>Version retention.</strong> Unbounded history is unbounded cost. Cap the number of versions or the age, and thin older ones (keep daily, then weekly) while keeping recent edits dense. Versions share blocks, so ten versions of a large file with small edits cost far less than ten copies.</li>
+          <li><strong>Cold storage.</strong> Blocks not referenced by any current version, or belonging to files untouched for months, migrate to infrequent-access or archive tiers (S3 Glacier class). Retrieval is slower and costs money, so keep a small hot cache and have the UI set expectations.</li>
+          <li><strong>Garbage collection.</strong> With refcounts, deleting a version decrements its blocks and a sweeper reclaims zeros after a grace period. Mark-and-sweep is safer against refcount drift; run it offline and never delete a block newer than the longest upload session.</li>
+        </ul>
+        <h3>Security</h3>
+        <p>Encrypt in transit and at rest. Server-side keys per block or per namespace via a KMS is standard; client-side end-to-end encryption is stronger but breaks server-side dedup across users, preview generation and search, so it is a product decision. Sharing is a metadata operation (an ACL row), never a data copy, so revocation is instant. Signed, short-lived block URLs prevent hot-linking.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decisions and their costs</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Choice A</th><th>Choice B</th><th>Lean</th></tr></thead>
+          <tbody>
+            <tr><td>Block size</td><td>Small: fine deltas, more metadata</td><td>Large: fewer requests, coarser deltas</td><td>Content-defined, 1 to 4 MB average</td></tr>
+            <tr><td>Chunking</td><td>Fixed: trivial, breaks on insert</td><td>Content-defined: more CPU, resilient</td><td>CDC for desktop; fixed OK on mobile</td></tr>
+            <tr><td>Metadata store</td><td>SQL: transactions, joins</td><td>NoSQL: scale, weaker atomicity</td><td>SQL sharded by namespace</td></tr>
+            <tr><td>Notification</td><td>Long poll: ubiquitous, simple</td><td>WebSocket/SSE: efficient, stateful</td><td>Long poll to start</td></tr>
+            <tr><td>Conflict policy</td><td>Conflicted copies</td><td>Auto-merge or last-writer-wins</td><td>Copies; LWW silently loses data</td></tr>
+            <tr><td>Dedup scope</td><td>Per account: safe</td><td>Global: bigger savings, side channel</td><td>Per account</td></tr>
+            <tr><td>Encryption</td><td>Server-managed keys: features</td><td>Client-side E2EE: privacy</td><td>Product-driven</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Block-based design wins</h4><ul><li>Resumable by default</li><li>Edits cost kilobytes, not gigabytes</li><li>Cheap history and dedup</li><li>Integrity via hashes</li></ul></div>
+          <div class="trade-col cons"><h4>It costs</h4><ul><li>Reassembly latency on first open</li><li>More metadata to keep consistent</li><li>Garbage collection complexity</li><li>CPU for hashing/chunking on the client</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>Content-defined chunking, dedup, delta upload, and conflicts</h2>
+        <p>The example implements a gear-hash content-defined chunker, a content-addressed block store with dedup, a metadata service whose commit is a compare-and-set on the base version, and a client that uploads only blocks the store lacks. It then demonstrates a 100-byte insert, a concurrent two-device conflict producing a conflicted copy, and dedup of an identical file.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Content-defined chunking + block dedup + delta sync + optimistic-concurrency conflicts.
+import { createHash, randomBytes } from 'node:crypto';
+import assert from 'node:assert/strict';
+
+// --- gear table (deterministic so runs are reproducible) ---
+let seed = 0x9e3779b9;
+const rnd32 = () =&gt; (seed = (Math.imul(seed ^ (seed &gt;&gt;&gt; 15), 0x2c1b3c6d) + 0x297a2d39) &gt;&gt;&gt; 0);
+const GEAR = Array.from({ length: 256 }, () =&gt; rnd32());
+
+// Content-defined chunking: boundary where the rolling gear hash has `bits` low zero bits.
+function chunk(buf, { minSize = 2048, maxSize = 65536, bits = 13 } = {}) {
+  const mask = (1 &lt;&lt; bits) - 1, out = [];
+  let start = 0, h = 0;
+  for (let i = 0; i &lt; buf.length; i++) {
+    h = ((h &lt;&lt; 1) + GEAR[buf[i]]) &gt;&gt;&gt; 0;
+    const len = i - start + 1;
+    if ((len &gt;= minSize &amp;&amp; (h &amp; mask) === 0) || len &gt;= maxSize) {
+      out.push(buf.subarray(start, i + 1)); start = i + 1; h = 0;
+    }
+  }
+  if (start &lt; buf.length) out.push(buf.subarray(start));
+  return out;
+}
+const sha = b =&gt; createHash('sha256').update(b).digest('hex');
+
+// --- block server: account-level dedup store ---
+class BlockStore {
+  blocks = new Map(); bytesStored = 0; bytesUploaded = 0;
+  has(h) { return this.blocks.has(h); }
+  put(h, data) { this.bytesUploaded += data.length; if (!this.blocks.has(h)) { this.blocks.set(h, data); this.bytesStored += data.length; } }
+}
+
+// --- metadata service: versions with compare-and-set on base version ---
+class Metadata {
+  files = new Map(); // path -&gt; { version, blocks:[hash], history:[] }
+  commit(path, baseVersion, blockList, client) {
+    const f = this.files.get(path) ?? { version: 0, blocks: [], history: [] };
+    if (f.version !== baseVersion) return { ok: false, conflict: `${path} (conflicted copy from ${client})`, serverVersion: f.version };
+    f.version++; f.blocks = blockList; f.history.push(blockList); this.files.set(path, f);
+    return { ok: true, version: f.version };
+  }
+}
+
+// --- client: delta upload = only blocks the server lacks ---
+function push(client, store, meta, path, data, baseVersion) {
+  const chunks = chunk(data), list = [];
+  let sent = 0;
+  for (const c of chunks) {
+    const h = sha(c); list.push(h);
+    if (!store.has(h)) { store.put(h, c); sent += c.length; }   // delta: skip known blocks
+  }
+  const res = meta.commit(path, baseVersion, list, client);
+  if (!res.ok) { // keep both copies: save the loser under a conflicted name
+    const r2 = meta.commit(res.conflict, 0, list, client);
+    return { ...res, sent, savedAs: res.conflict, r2 };
+  }
+  return { ...res, sent, blocks: chunks.length };
+}
+const pull = (store, meta, path) =&gt; Buffer.concat(meta.files.get(path).blocks.map(h =&gt; store.blocks.get(h)));
+
+// ---------------- demo + self test ----------------
+const store = new BlockStore(), meta = new Metadata();
+const v1 = randomBytes(600_000);
+const r1 = push('laptop', store, meta, '/docs/big.bin', v1, 0);
+console.log(`v1: ${r1.blocks} blocks, uploaded ${r1.sent} bytes, version ${r1.version}`);
+assert.ok(r1.blocks &gt; 20 &amp;&amp; r1.blocks &lt; 400);
+assert.deepEqual(pull(store, meta, '/docs/big.bin'), v1);
+
+// insert 100 bytes near the front: fixed-size blocks would shift everything, CDC resyncs after one or two blocks.
+const v2 = Buffer.concat([v1.subarray(0, 1000), randomBytes(100), v1.subarray(1000)]);
+const r2 = push('laptop', store, meta, '/docs/big.bin', v2, 1);
+console.log(`v2 (insert 100B): uploaded ${r2.sent} bytes of ${v2.length} (${(100 * r2.sent / v2.length).toFixed(2)}%)`);
+assert.ok(r2.sent &lt; v2.length * 0.1, 'delta must be tiny');
+assert.deepEqual(pull(store, meta, '/docs/big.bin'), v2);
+
+// two devices edit from version 2 concurrently; first commit wins, second gets a conflicted copy
+const a = Buffer.concat([v2, Buffer.from('phone edit')]);
+const b = Buffer.concat([v2, Buffer.from('tablet edit')]);
+const ra = push('phone', store, meta, '/docs/big.bin', a, 2);
+const rb = push('tablet', store, meta, '/docs/big.bin', b, 2);
+console.log('phone:', ra.ok, '| tablet:', rb.ok, '-&gt;', rb.savedAs);
+assert.ok(ra.ok &amp;&amp; !rb.ok &amp;&amp; rb.r2.ok);
+assert.deepEqual(pull(store, meta, rb.savedAs), b);
+
+// dedup: another user (same account namespace) uploads the same bytes -&gt; zero new storage
+const before = store.bytesStored;
+push('desktop', store, meta, '/copy/big.bin', v2, 0);
+console.log('extra bytes stored for identical copy:', store.bytesStored - before);
+assert.equal(store.bytesStored, before);
+console.log('versions kept for big.bin:', meta.files.get('/docs/big.bin').history.length);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the block count of v1, the tiny percentage re-uploaded after a 100-byte insert (about 2 percent, a few kilobytes of 600 KB), the phone commit succeeding and the tablet commit becoming a "(conflicted copy from tablet)", 0 extra bytes for an identical copy, and "all assertions passed". Executed with Node 20+.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks and what you do</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Effect</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Load balancer dies</td><td>No traffic</td><td>Active/passive pair or anycast with health checks; clients retry with backoff.</td></tr>
+            <tr><td>Block server dies mid-upload</td><td>Partial upload</td><td>Session state lives outside the server; client resumes at another block server; hashes make replays idempotent.</td></tr>
+            <tr><td>Metadata primary fails</td><td>Writes blocked</td><td>Automatic promotion of a synchronous or semi-synchronous replica, fencing the old primary; reads continue from replicas.</td></tr>
+            <tr><td>Region or object-store outage</td><td>Blocks unavailable</td><td>Cross-region replication; read from the secondary; metadata points to logical keys, not buckets.</td></tr>
+            <tr><td>Notification node dies</td><td>Devices miss hints</td><td>Clients reconnect to another node and also poll with their cursor.</td></tr>
+            <tr><td>Silent corruption</td><td>Bad bytes</td><td>Hash verification on every read; background scrubbing; erasure coding or replica repair.</td></tr>
+            <tr><td>Rogue client deletes thousands of files</td><td>Mass loss</td><td>Soft delete with trash retention, rate limits on destructive batches, restore-by-timestamp from change log.</td></tr>
+            <tr><td>Clock skew between devices</td><td>Wrong "latest wins"</td><td>Use server-assigned versions and cursors, never client timestamps.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Knees and gotchas</h2>
+        <ul class="check-list">
+          <li><strong>Many small files break the model.</strong> A node_modules folder with 50,000 tiny files makes metadata, not bytes, the bottleneck. Batch metadata commits, pack small files into one block, and let clients ignore patterns.</li>
+          <li><strong>Hot shared namespaces.</strong> A company-wide shared folder concentrates writes and notifications in one shard. Shard its change log separately or fan out notifications through pub/sub.</li>
+          <li><strong>Initial sync stampede.</strong> New devices pull a whole tree. Rate-limit and prioritise recently modified files so the user sees something useful fast.</li>
+          <li><strong>File-watcher races.</strong> OS file events fire before a program finishes writing, and "save" is often write-temp, rename. Debounce, hash after quiesce, handle atomic renames as moves, not delete plus create.</li>
+          <li><strong>Case-insensitive file systems.</strong> "Report.doc" and "report.doc" are the same on macOS and Windows, different on Linux. Your path uniqueness rule has to pick one and detect collisions.</li>
+          <li><strong>Per-request billing.</strong> Object stores charge per PUT/GET; very small blocks can cost more in requests than in bytes. Another reason to pick 1 to 4 MB over 64 KB.</li>
+          <li><strong>Quota accounting</strong> should count unique referenced bytes per account, updated asynchronously, with a soft grace so a failed counter never blocks a save.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>State the sizing correctly: 500 PB allocated from 50 M users × 10 GB; about 240 upload QPS.</li>
+          <li>Separate metadata (consistent, relational) from blocks (immutable, content-addressed).</li>
+          <li>Block servers: split, compress, encrypt, hash; 4 MB max; deduplicate per account.</li>
+          <li>Resumable upload sessions; pending versus uploaded state; change log with cursors.</li>
+          <li>Delta sync via block diff; mention content-defined chunking for insert robustness.</li>
+          <li>Conflict handling: version compare-and-set, keep both copies.</li>
+          <li>Notification by long poll as a hint, with polling as the safety net.</li>
+          <li>Cold tier, version limits, garbage collection.</li>
+          <li>Failure matrix: LB, block server, metadata, storage, notifications.</li>
+          <li>Security: TLS, encryption at rest, ACL-based sharing, side channel in global dedup.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not use the object store directly with whole files?</summary><p>You lose resumability past a certain size, pay full-file transfer for tiny edits, store every version in full, and cannot dedup. Block granularity solves all four with one mechanism. For tiny files it degenerates to one block, so the cost is nil.</p></details>
+        <details><summary>How do you ensure the client never sees a half-written file?</summary><p>Versions are immutable and become visible only after every referenced block is durable. Clients download into a temp file, verify hashes, then atomically rename into place.</p></details>
+        <details><summary>What if two users edit a shared document at once?</summary><p>For ordinary files, the second writer receives a conflicted copy. For real-time co-editing, route to a collaborative editing service using OT or CRDTs and snapshot the result back into the file store periodically.</p></details>
+        <details><summary>How would you reduce sync latency for large files?</summary><p>Parallel block transfers, block-level delta, a nearby upload endpoint, LAN sync between devices on the same network, and starting downloads on other devices as soon as the first blocks commit rather than at file completion.</p></details>
+        <details><summary>How do you support version history without exploding storage?</summary><p>Versions share blocks, so cost is the changed blocks only. Add retention rules, thin older versions, and move unreferenced or old blocks to cold storage. Keep the metadata rows forever; they are tiny.</p></details>
+        <details><summary>Where does consistency matter and where not?</summary><p>Strongly consistent for path-to-version resolution, rename and permission changes. Eventual is fine for notifications, replicas of block data (since content-addressed blocks are immutable, a replica either has the block or does not), and quota counters. See <a href="../../system-design/consistency-models.html">Consistency Models</a>.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./14-youtube-video-streaming.html">Chapter 14: YouTube</a> — previous chapter; same pre-signed upload and blob-store split.</li>
+          <li><a href="./16-proximity-service.html">Chapter 16: Proximity Service</a> — next chapter; starts the geo systems part.</li>
+          <li><a href="../../system-design/consistency-models.html">Consistency Models</a> — why metadata is strong and notifications are eventual.</li>
+          <li><a href="../../system-design/websockets.html">WebSockets</a> — the alternative to long polling for change hints.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — namespace-based partitioning of metadata.</li>
+          <li><a href="../../system-design/concurrency-control.html">Concurrency Control</a> — optimistic versioning and compare-and-set.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. Additional resources listed by the repo for this chapter:</p>
+        <ul>
+          <li><a href="https://neil.fraser.name/writing/sync/">Differential Synchronization</a> — https://neil.fraser.name/writing/sync/</li>
+          <li><a href="https://www.youtube.com/watch?v=S2Hp_1jqpY8">Differential Synchronization Video</a> — https://www.youtube.com/watch?v=S2Hp_1jqpY8</li>
+          <li><a href="https://www.youtube.com/watch?v=PE4gwstWhmc&amp;feature=youtu.be">How We’ve Scaled Dropbox</a> — https://www.youtube.com/watch?v=PE4gwstWhmc&amp;feature=youtu.be</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Model a file as an ordered list of immutable content-hashed blocks plus a strongly consistent metadata row per version. Resume, delta sync, dedup, history and integrity all follow, conflicts become a simple compare-and-set on the base version, and change notification is just a hint over an append-only log.</p>
+      </section>
+    </main>
+  </body>
+</html>

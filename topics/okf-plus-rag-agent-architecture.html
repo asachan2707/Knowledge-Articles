@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OKF + RAG: The Agent Architecture That Reads First and Searches Second | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Created 2026-10-13. Thesis: agents invent company-specific facts (metric formulas, API schemas, runbooks); RAG returns similar-not-authoritative text. OKF (Open Knowledge Format, reported as a Google Cloud spec from June 2026 — not independently confirmed) = Git-stored Markdown 'knowledge bundles', one concept per file, YAML frontmatter (type, title, description, owner, tags, timestamp). Architecture: deterministic router — OKF entity/alias match first, then classifier, then RAG fallback; OKF wins on conflict and is cited; log which path answered. Failure modes: stale bundles, sprawl/merge conflicts, router misclassification, prompt injection via RAG docs, permission mixing. Includes honest critique (reader pushback: 'ultimate' is premature; RAG failures just move to retrieval quality). Code: Node 20 ESM router, runs as-is (3 demo paths verified). Sources: Medium (Ravish Khullar, fully read); Towards AI 'RAG vs OKF' (paywalled — framing only: 'RAG retrieves, OKF remembers'). 'aliases' frontmatter field is this page's own addition. Related: rag-production-complete-guide, agentic-knowledge-graph-40m-docs, second-brain-markdown-git-ai-agent.</div>
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1481627834876-b7833e8f5570?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Rows of library shelves with neatly organised books"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Agents · RAG · Architecture · 18 min read</span>
+          </div>
+        </figure>
+
+        <h1>OKF + RAG: The Agent Architecture That Reads First and Searches Second</h1>
+        <p class="summary">
+          Agents confidently invent company-specific facts: metric formulas, internal API shapes, runbook steps.
+          RAG returns text that is similar to the question, not text that is authoritative. This page covers the
+          Open Knowledge Format (OKF) idea, a Git-backed set of Markdown files an agent reads directly, and a
+          router design that sends authoritative questions to OKF and exploratory ones to RAG, with working code,
+          failure modes and an honest critique.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Sources</span><span class="meta-value">Medium (Ravish Khullar), "OKF + RAG: The Ultimate AI Agent Architecture"; Towards AI, "RAG vs OKF: Stop Choosing One" (framing only, member-only article)</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Node.js 20+ · Markdown + YAML frontmatter · Git · any RAG backend</span></div>
+          <div><span class="meta-label">Level</span><span class="meta-value">Intermediate → Advanced</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Ask an agent "what is our churn rate?" and you will get a fluent, plausible formula. It may not be
+          yours. Does your company exclude trials? Does a downgrade count as a loss? That answer lives in a
+          few people's heads and in a long tail of chat threads, and a model that never saw the rule will
+          happily improvise one. The usual fix is RAG, but RAG answers "what looks like this question?", while
+          a metric definition needs "what is the one blessed answer?". Those are different questions, and they
+          deserve different machinery.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> RAG retrieves, OKF remembers. Use RAG to go find an answer somewhere in a
+            large messy corpus; use OKF to go read knowledge that someone already wrote down clearly and owns. Put a
+            deterministic router in front so the agent reads first and searches second.
+          </p>
+        </div>
+        <div class="callout">
+          <p>
+            <strong>Sourcing note:</strong> the OKF details here (its origin, the bundle layout, the frontmatter
+            fields) are as reported by the two articles above. I could not independently confirm the specification,
+            and the second article is member-only, so I used only its headline framing. Treat the format as
+            "an idea worth adopting in spirit" and check the official spec before building tooling that depends
+            on exact field names. The router, failure modes and scaling commentary are my own architecture
+            opinions, not claims from either article.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · Hypothetical, for illustration only</span>
+        <p>
+          Imagine an analytics agent at a mid-sized SaaS company. A new product manager asks it, "What is churn
+          this quarter?" The agent searches the company Slack export. Three threads come back. One says churn is
+          cancellations over active customers. A second, from the finance channel, counts downgrades as churn. A
+          third, two years old, says trials are included because "we want the honest number".
+        </p>
+        <p>
+          All three are semantically close to the question, and all three score well. The model picks the most
+          fluent one, writes a confident paragraph, and the number goes into a board deck. Nothing here is a model
+          bug. Retrieval did its job: it found related text. What was missing was a single owned page that says
+          "this is the definition, these are the exclusions, this is the source table".
+        </p>
+        <p>
+          With a knowledge bundle in the loop, the same question hits a file titled "Monthly Churn Rate" before
+          any search runs. The agent quotes the formula, cites the file, and shows who owns it. The Slack threads
+          are still useful, but now as background, not as the authority. (This scenario is invented to make the
+          failure concrete; it is not a report about any real company.)
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">What OKF is</span>
+        <h2>A wiki the agent can read, kept in Git</h2>
+        <p>
+          According to the article, OKF (Open Knowledge Format) was introduced by Google Cloud in June 2026 as an
+          open, vendor-neutral specification. The mental model is a company wiki, not a search engine: you do not
+          query it for "similar" pages, you open the page for the thing you mean.
+        </p>
+        <h3>Bundle layout</h3>
+        <p>
+          A <strong>knowledge bundle</strong> is a directory of Markdown files stored in Git. The rule that makes
+          it work is <strong>one concept per file</strong>: one table, one metric, one endpoint, one runbook. Small
+          single-topic files mean the agent loads exactly the thing asked about and nothing else, and humans can
+          review a change in a few lines.
+        </p>
+        <h3>Frontmatter</h3>
+        <p>
+          Each file starts with YAML frontmatter that describes it: a <code>type</code> (metric, table, endpoint,
+          runbook), a <code>title</code>, a <code>description</code>, an <code>owner</code>, some
+          <code>tags</code>, and a <code>timestamp</code>. The body holds the actual content: the formula, the rules,
+          the source table, and links to related files. Links matter: they let an agent walk from "churn" to
+          "net revenue retention" deliberately instead of by embedding distance.
+        </p>
+        <span class="code-label">Example bundle file: metrics/monthly-churn-rate.md</span>
+        <pre><code class="language-markdown">---
+type: metric
+title: Monthly Churn Rate
+description: Share of customers lost during a calendar month.
+owner: analytics-platform
+aliases: [churn, churn rate]
+tags: [retention, saas]
+timestamp: 2026-09-01
+---
+# Monthly Churn Rate
+Formula: customers lost during the month / customers at the start of the month * 100
+Rules: exclude trial accounts; do not count downgrades as churn.
+Source table: warehouse.subscriptions_monthly
+Related: ./metrics/net-revenue-retention.md</code></pre>
+        <p>
+          I added <code>aliases</code> to the sample frontmatter because lookup by name needs synonyms
+          ("churn", "churn rate"). That field is my addition, not necessarily part of the spec.
+        </p>
+        <h3>Why Git</h3>
+        <ul class="check-list">
+          <li><strong>Review:</strong> a definition change is a pull request with a reviewer, not a silent edit in a wiki.</li>
+          <li><strong>Audit trail:</strong> <code>git blame</code> answers "who changed the churn rule and why" for free.</li>
+          <li><strong>No retrieval infrastructure:</strong> no embeddings, no chunking, no vector database, no re-indexing job when a file changes. The agent just reads the file.</li>
+          <li><strong>Ownership by construction:</strong> CODEOWNERS can route a metric file to the team that owns the metric.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Where RAG fails</span>
+        <h2>Strong reach, weak authority</h2>
+        <p>
+          The RAG loop is ingest, chunk, embed, store vectors, search, then augment the prompt. It is excellent
+          at <em>reach</em>: it can surface a relevant paragraph from millions of pages nobody could hand-curate.
+          It is weak at <em>precision about truth</em>, because similarity is not correctness.
+        </p>
+        <ul class="check-list">
+          <li><strong>Conflicting sources look identical.</strong> Two contradictory definitions embed almost the same. The ranker has no concept of "official".</li>
+          <li><strong>Stale beats right on wording.</strong> An old thread phrased exactly like the question can outrank the current doc.</li>
+          <li><strong>Chunking cuts rules in half.</strong> "Exclude trials" can land in the next chunk after the formula, and the formula alone is returned.</li>
+          <li><strong>Probabilistic by design.</strong> The same question can return different top-k after a re-index or a model change, so answers drift without anyone editing a doc.</li>
+        </ul>
+        <p>
+          For depth on making RAG itself better (hybrid search, re-ranking, evals), see
+          <a href="./rag-production-complete-guide.html">RAG from Scratch to Production</a>. The point here is
+          different: some questions should never go through similarity search at all.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The router</span>
+        <h2>Deterministic precedence, not vibes</h2>
+        <p>
+          The article describes an "intelligent router" that classifies each query. I would not let an LLM
+          classifier make the first decision. A model deciding which source to trust is itself a probabilistic
+          component in the one place you wanted determinism. My design is a precedence chain where the cheap,
+          explainable checks run first:
+        </p>
+        <ol>
+          <li><strong>Exact or entity match against the bundle.</strong> If the question names a title or alias ("churn", "orders API"), answer from that file. No model involved in the decision.</li>
+          <li><strong>Classifier.</strong> If nothing matched strongly, a small model labels the query "authoritative" (definition, schema, procedure) or "exploratory" (find discussions, summarise a topic). Authoritative plus a weak bundle hit still goes to OKF.</li>
+          <li><strong>RAG fallback.</strong> Everything else is searched. The answer is labelled as unverified.</li>
+        </ol>
+        <h3>Policies that make it trustworthy</h3>
+        <ul class="check-list">
+          <li><strong>Conflict policy: OKF wins, and says so.</strong> If both sources speak and disagree, the answer uses the OKF file and cites it. The disagreeing RAG snippet can be mentioned as "an older thread says otherwise", and the mismatch should be logged as a prompt to fix or retire the thread.</li>
+          <li><strong>Log which path answered.</strong> Every response records the path (entity match, classifier to OKF, classifier to RAG), the cited files, and warnings. Without this you cannot measure misrouting.</li>
+          <li><strong>Staleness and ownership checks.</strong> A file with no owner, or whose timestamp is older than your threshold, still answers but carries a warning. Silent staleness is the worst failure of this design.</li>
+          <li><strong>Return a structured result.</strong> <code>{ source, answer, citations, warnings }</code>, so the UI can show "from the Monthly Churn Rate page, owned by analytics-platform".</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>A small OKF-plus-RAG router in plain Node</h2>
+        <p>
+          This file has no dependencies. It parses simple frontmatter (<code>key: value</code> and
+          <code>[a, b]</code> lists only; real YAML needs a real parser), loads a bundle, scores lookups by
+          title, alias and tag, and routes with an injected <code>ragSearch</code> and <code>llm</code>. The fakes
+          are deterministic so you can run it immediately; the comments mark where a real model and real vector
+          search plug in. It writes the example bundle file to a temp directory and runs three queries, one per path.
+        </p>
+        <span class="code-label">JavaScript · okf-router.mjs · run with: node okf-router.mjs</span>
+        <pre><code class="language-javascript">// okf-router.mjs  (Node 20+, ES modules, zero dependencies)
+import { readdir, readFile, writeFile, mkdir, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+// ---------- 1. Tiny frontmatter parser: "key: value" and "key: [a, b]" ----------
+function parseScalar(raw) {
+  const v = raw.trim().replace(/^["']|["']$/g, '');
+  return v;
+}
+export function parseFrontmatter(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!m) return { meta: {}, body: text };
+  const meta = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+    if (!kv) continue; // ignore comments / unsupported YAML
+    const [, key, val] = kv;
+    meta[key] = val.startsWith('[') &amp;&amp; val.endsWith(']')
+      ? val.slice(1, -1).split(',').map(parseScalar).filter(Boolean)
+      : parseScalar(val);
+  }
+  return { meta, body: m[2].trim() };
+}
+
+// ---------- 2. loadBundle(dir): walk the tree, parse every .md ----------
+export async function loadBundle(dir) {
+  const docs = [];
+  async function walk(d) {
+    for (const entry of await readdir(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name.endsWith('.md')) {
+        const { meta, body } = parseFrontmatter(await readFile(full, 'utf8'));
+        if (!meta.title) continue; // a file without a title is not addressable
+        docs.push({
+          id: path.relative(dir, full),
+          meta: { ...meta, aliases: meta.aliases ?? [], tags: meta.tags ?? [] },
+          body,
+        });
+      }
+    }
+  }
+  await walk(dir);
+  return docs;
+}
+
+// ---------- 3. lookup(query): score by title / alias / tag ----------
+const norm = (s) =&gt; s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const STOP = new Set(['what','is','the','a','an','of','how','do','we','our','does','are','define','calculate','calculated']);
+const tokens = (s) =&gt; norm(s).split(' ').filter((t) =&gt; t &amp;&amp; !STOP.has(t));
+
+export function lookup(bundle, query, limit = 3) {
+  const q = norm(query);
+  const qTokens = new Set(tokens(query));
+  const scored = bundle.map((doc) =&gt; {
+    const title = norm(doc.meta.title);
+    const aliases = doc.meta.aliases.map(norm);
+    let score = 0;
+    if (q === title || aliases.includes(q)) score = 100;           // exact name
+    else if (q.includes(title) || aliases.some((a) =&gt; q.includes(a))) score = 80; // entity named in question
+    for (const t of tokens(doc.meta.title)) if (qTokens.has(t)) score += 15;
+    for (const tag of doc.meta.tags.map(norm)) if (qTokens.has(tag)) score += 10;
+    return { doc, score };
+  });
+  return scored.filter((s) =&gt; s.score &gt; 0).sort((a, b) =&gt; b.score - a.score).slice(0, limit);
+}
+
+// ---------- 4. The router ----------
+const daysOld = (iso, now) =&gt; (now - Date.parse(iso)) / 86_400_000;
+
+export async function route(query, { bundle, ragSearch, llm, now = Date.now(), maxAgeDays = 180, log = console.log }) {
+  const hits = lookup(bundle, query);
+  const top = hits[0];
+  let path_, source;
+
+  if (top &amp;&amp; top.score &gt;= 80) { path_ = 'okf-entity-match'; source = 'okf'; }
+  else {
+    const intent = await llm.classify(query);            // 'authoritative' | 'exploratory'
+    if (intent === 'authoritative' &amp;&amp; top &amp;&amp; top.score &gt;= 25) { path_ = 'classifier-&gt;okf'; source = 'okf'; }
+    else { path_ = 'classifier-&gt;rag'; source = 'rag'; }
+  }
+
+  let context, citations, warnings = [];
+  if (source === 'okf') {
+    const d = top.doc;
+    context = d.body;
+    citations = [{ kind: 'okf', id: d.id, owner: d.meta.owner, timestamp: d.meta.timestamp }];
+    if (d.meta.timestamp &amp;&amp; daysOld(d.meta.timestamp, now) &gt; maxAgeDays) warnings.push(`stale: ${d.id} not updated in ${maxAgeDays}+ days`);
+    if (!d.meta.owner) warnings.push(`no owner: ${d.id}`);
+  } else {
+    const chunks = await ragSearch(query);               // your vector / hybrid search goes here
+    context = chunks.map((c) =&gt; c.text).join('\n---\n');
+    citations = chunks.map((c) =&gt; ({ kind: 'rag', id: c.id, score: c.score }));
+    warnings.push('unverified: answer is based on retrieved documents, not an owned source');
+  }
+
+  // Swap point: llm.answer is the only call that should talk to a real model.
+  const answer = await llm.answer({ question: query, context, trusted: source === 'okf' });
+  log(JSON.stringify({ query, path: path_, source, citations: citations.map((c) =&gt; c.id), warnings }));
+  return { source, answer, citations, warnings };
+}
+
+// ---------- 5. Deterministic fakes so this file runs as-is ----------
+export const fakeLlm = {
+  async classify(q) {
+    return /\b(what is|define|formula|calculated|endpoint|schema|runbook|owner)\b/i.test(q) ? 'authoritative' : 'exploratory';
+  },
+  async answer({ question, context, trusted }) {
+    return `${trusted ? '[authoritative]' : '[best-effort]'} ${context.split('\n').find((l) =&gt; l.trim() &amp;&amp; !l.startsWith('#')) ?? ''}`;
+  },
+};
+// REAL LLM: keep the same two methods. classify() -&gt; small/cheap model returning one label;
+// answer() -&gt; your chat call, with `context` in the prompt, wrapped as DATA when trusted === false.
+
+export const fakeRag = async () =&gt; [
+  { id: 'slack#C123/1699.2', score: 0.81, text: 'Churn is cancellations divided by all active customers this quarter.' },
+  { id: 'slack#C456/1702.9', score: 0.79, text: 'We count downgrades as churn in the finance dashboard.' },
+];
+
+// ---------- 6. Demo ----------
+const EXAMPLE = `---
+type: metric
+title: Monthly Churn Rate
+description: Share of customers lost during a calendar month.
+owner: analytics-platform
+aliases: [churn, churn rate]
+tags: [retention, saas]
+timestamp: 2026-09-01
+---
+# Monthly Churn Rate
+Formula: customers lost during the month / customers at the start of the month * 100
+Rules: exclude trial accounts; do not count downgrades as churn.
+Source table: warehouse.subscriptions_monthly
+Related: ./metrics/net-revenue-retention.md
+`;
+
+const dir = await mkdtemp(path.join(tmpdir(), 'okf-'));
+await mkdir(path.join(dir, 'metrics'));
+await writeFile(path.join(dir, 'metrics', 'monthly-churn-rate.md'), EXAMPLE);
+const bundle = await loadBundle(dir);
+const deps = { bundle, ragSearch: fakeRag, llm: fakeLlm, now: Date.parse('2026-10-13') };
+
+for (const q of ['What is churn?', 'Give me the formula for the monthly rate', 'Any past discussions about onboarding drop-off?']) {
+  console.log((await route(q, deps)).answer, '\n');
+}</code></pre>
+        <p>
+          Two deliberate simplifications: scoring is a hand-tuned heuristic with thresholds (80 and 25) you should
+          calibrate against logged queries, and the "answer" step of the fake model just echoes the first content
+          line. In production, <code>llm.answer</code> calls your model with the OKF body as trusted context or the
+          RAG chunks as untrusted data.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>How this architecture breaks</h2>
+        <ol>
+          <li><strong>Stale bundle.</strong> OKF shifts the risk from "wrong retrieval" to "wrong but official". A confident, cited, outdated formula is more dangerous than a hedged RAG answer, because people trust citations. Mitigate with owners, review-by dates, a CI job that fails on files past their timestamp threshold, and surfacing the age in every answer.</li>
+          <li><strong>Bundle sprawl and merge conflicts.</strong> If every team commits to one repo, you get rename churn, duplicate concepts ("churn", "customer churn", "logo churn") and conflicting PRs. Enforce one concept per file, a naming convention, a lint for duplicate titles and aliases, and CODEOWNERS per directory.</li>
+          <li><strong>Router misclassification.</strong> A definition question phrased casually ("how many people left last month?") bypasses the entity match and goes to RAG. Track the path in logs, sample the RAG-routed "authoritative-looking" queries weekly, and add aliases rather than reaching for a smarter classifier first.</li>
+          <li><strong>Prompt injection through RAG, trust asymmetry with OKF.</strong> Retrieved Slack messages and wikis can contain instructions an attacker planted. OKF files pass through review and are far safer, but only if you keep them separate. Never splice RAG text into the same trusted block as OKF content; wrap it as quoted data, and give it no tool-calling authority.</li>
+          <li><strong>Permission mixing.</strong> A bundle in Git is readable by anyone with repo access, while the Slack corpus has per-channel permissions. If the router merges both into one prompt, a user may see HR or finance content via a "helpful" answer. Enforce ACLs at retrieval time, and split bundles by audience instead of filtering after the fact.</li>
+          <li><strong>Concept drift between files.</strong> Two correct pages can still contradict each other (a metric file and a dashboard runbook). Links help; a nightly check that follows links and flags dead targets helps more.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling constraints</span>
+        <h2>When a bundle outgrows grep</h2>
+        <p>
+          A few hundred small files is comfortable: the router above can scan them in memory in milliseconds.
+          Somewhere in the thousands-of-files range, or when many agent processes need it, a linear scan and
+          title matching stop being enough. But the next step is not automatically embeddings.
+        </p>
+        <ul class="check-list">
+          <li><strong>First, a plain index.</strong> Build a title/alias/tag map and an inverted index at CI time, cache it, and rebuild on merge. This keeps lookups exact, explainable and cheap.</li>
+          <li><strong>Then, link and type structure.</strong> Use <code>type</code> and the links between files for scoped lookups ("all endpoints owned by payments"). This is the territory of knowledge graphs, discussed in <a href="./agentic-knowledge-graph-40m-docs.html">Structuring 40 Million Documents Into an Agentic Knowledge Graph</a>.</li>
+          <li><strong>Only then, semantic search over the bundle.</strong> If you do add embeddings, use them to <em>find the right file</em>, then read the whole file. You keep the property that the answer comes from an owned page, not from a stitched chunk.</li>
+          <li><strong>Context budget.</strong> A bundle is only useful if the agent loads the relevant few files. Cap how many files and tokens one answer may read, and keep files short.</li>
+          <li><strong>The human limit.</strong> The scarce resource is not storage but curation. A bundle only scales as far as owners keep it accurate; the long tail of "nobody wrote this down" stays in RAG territory permanently.</li>
+        </ul>
+        <p>
+          If you want a gentle on-ramp to Markdown-in-Git as a knowledge base for an agent, read
+          <a href="./second-brain-markdown-git-ai-agent.html">Build a Second Brain in 15 Minutes</a>; the same
+          mechanics apply at team scale with reviews and owners added.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Honest critique</span>
+        <h2>Is "ultimate" earned? Not yet.</h2>
+        <p>
+          Readers pushed back on the article in two fair ways, and I agree with both in part.
+        </p>
+        <ul class="check-list">
+          <li><strong>"The router could just use the curated sources you already have."</strong> True. If your company already has a good metrics catalogue, a data dictionary or an API portal, the real work is exposing those through a lookup tool, not adopting a new format. OKF's value is the discipline (one concept per file, owner, Git review), and that discipline can be applied to existing systems. A new spec earns its place only if it gives you interoperability across tools, which I cannot verify.</li>
+          <li><strong>"Calling it ultimate is premature."</strong> Hybrid does not remove RAG's problems; it confines them to the exploratory path. Retrieval quality, ranking and stale documents are still there, and now you also own a router, a bundle and a curation process. The hybrid is better for questions with a single right answer, and strictly more to run.</li>
+        </ul>
+        <p>
+          My position: the architecture is sound for a specific class of knowledge (definitions, schemas,
+          procedures) and oversold as a universal fix. Measure it. Take 50 real questions, label the right
+          source, and compare answer accuracy for RAG alone, OKF alone and the hybrid before committing a team to
+          maintaining a bundle.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical learning</span>
+        <h2>Checklist for adopting this</h2>
+        <ul class="check-list">
+          <li>List the 20 questions where a wrong answer is costly (metrics, schemas, runbooks). Start the bundle with those only.</li>
+          <li>One concept per file; required frontmatter: type, title, owner, timestamp; add aliases for how people actually phrase things.</li>
+          <li>Put the bundle in Git with CODEOWNERS and a CI lint (missing owner, duplicate titles or aliases, dead links, stale timestamp).</li>
+          <li>Route with precedence: entity match, then classifier, then RAG. Keep the first step model-free.</li>
+          <li>On conflict, OKF wins and is cited; log the conflict as a cleanup task.</li>
+          <li>Log the path, citations and warnings on every answer; review RAG-routed definition-style queries weekly.</li>
+          <li>Treat RAG text as untrusted data and OKF as reviewed instructions; never mix them in one trusted block.</li>
+          <li>Apply permissions at retrieval time and split bundles by audience.</li>
+          <li>Build an index before you think about embeddings.</li>
+          <li>Run an A/B on real questions to prove the hybrid beats what you have.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+        <p><strong>Does OKF replace RAG?</strong> No. The framing from the Towards AI piece is "RAG retrieves, OKF remembers": RAG is "go find it" in a large corpus, OKF is "go read it" for established knowledge. You need both.</p>
+        <p><strong>Is this just a wiki with extra steps?</strong> Largely, yes, and that is the appeal. The new part is that structure (one concept per file, typed frontmatter, links) is designed for an agent to read reliably, and Git gives review and history.</p>
+        <p><strong>Why not put everything in the prompt?</strong> Cost, latency and attention. Loading only the matching file keeps context small and answers traceable.</p>
+        <p><strong>Can the router be an LLM agent that chooses tools itself?</strong> It can, and for exploratory work that is fine. For authoritative facts I prefer a deterministic first step because it is testable and cannot be talked out of the right source.</p>
+        <p><strong>What if the OKF file is wrong?</strong> Then the agent is wrong with a citation. That is why ownership, review dates and age warnings are part of the design, not extras.</p>
+        <p><strong>Do I need the official spec to start?</strong> No. The practice (Markdown, frontmatter, Git, one concept per file) works today. Align with the official spec once you have confirmed it and need tool interoperability.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Topics</span>
+        <h2>Keep reading</h2>
+        <ul class="check-list">
+          <li><a href="./rag-production-complete-guide.html">RAG from Scratch to Production: Build, Scale, and Harden</a></li>
+          <li><a href="./agentic-knowledge-graph-40m-docs.html">Structuring 40 Million Documents Into an Agentic Knowledge Graph</a></li>
+          <li><a href="./second-brain-markdown-git-ai-agent.html">Build a Second Brain in 15 Minutes: Markdown, Git, and an AI Agent</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Similarity is not authority. Give your agent a small, owned, Git-reviewed set of Markdown pages for the
+          facts that must be right, and let RAG handle the rest of the world. Put a deterministic, logged router in
+          front, make OKF win on conflict with a citation, and spend your effort on ownership, freshness and
+          permissions, because those, not the retrieval method, decide whether the system stays trustworthy.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

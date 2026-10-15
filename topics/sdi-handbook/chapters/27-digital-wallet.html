@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Digital Wallet | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Created 2026-10-15 from liquidslr/system-design-notes ch.27. Covers 1M TPS estimate (2M balance updates, nodes per per-node TPS), in-memory sharded design, 2PC, TC/C incl. phase status table, deduct-first rule and out-of-order cancel flag, Saga choreography vs orchestration, event sourcing (command/event/state/state machine), CQRS, mmap/RocksDB/snapshots, Raft replication of events only, multiple Raft groups with reverse proxy and push. Executed Node example (event-sourced wallet with replay, snapshots, TC/C). Related: ch26 payment, ch28 stock exchange.</div>
+        <h1>Design a Digital Wallet</h1>
+        <p class="summary">Scaling balance transfers to a million per second: sharded state, 2PC vs TC/C vs Saga, event sourcing with replay and snapshots, Raft-replicated logs, and CQRS with push.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">Chapter 27 of 28 · Part 6 Transactional Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">22 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">2PC vs TC/C vs Saga, event sourcing, CQRS, Raft, snapshots, deterministic state machine</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">LMAX, Raft (etcd), RocksDB, Kafka, ZooKeeper, Redis, Spanner, TigerBeetle</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">A digital wallet lets users hold a balance inside a platform and move it to other users instantly and cheaply, without touching card networks or bank rails for every transfer. The specification sounds trivial, subtract here and add there, until you demand one million transfers per second, four nines of availability, strict correctness, and the ability to prove after the fact that every balance is right.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Scale comes from raising per-node throughput (local append-only logs, in-memory state, a single-threaded deterministic state machine) and from sharding; correctness comes from an immutable event log you can replay; cross-shard atomicity comes from compensation (TC/C or Saga) rather than lock-holding two-phase commit.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known public design</span>
+        <h2>LMAX and the single-threaded business logic processor</h2>
+        <p>Martin Fowler's well-known write-up of the LMAX Architecture describes a retail financial exchange that processed on the order of six million orders per second on one thread. The recipe is the one this chapter converges on: journal every input event to disk, keep all state in memory, run the business logic on a single thread so there are no locks, and recover by replaying the journal over a snapshot. Replicas apply the same input sequence and therefore reach the same state. Wallets are not exchanges, but the lesson transfers directly: a deterministic state machine fed by an ordered log is dramatically faster and easier to reason about than a pile of row locks.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scope &amp; Requirements</span>
+        <h2>Problem statement and the estimate that drives everything</h2>
+        <p>Scope is deliberately narrow: balance transfer between two wallets in the same currency (no foreign exchange). The service must support 1M TPS, 99.99% availability (about 52 minutes of downtime a year, or 8.6 seconds a day), transactional guarantees, and <em>reproducibility</em>. The last one is the interesting requirement. Reconciliation can tell you that numbers disagree; reproducibility lets you replay history from the first event to find out why.</p>
+        <p class="mini-heading">Back-of-envelope</p>
+        <ul>
+          <li>A cloud-hosted relational database node handles roughly 1,000 simple transactional TPS (a rough planning number; tuned hardware does better, contended rows do worse).</li>
+          <li>1,000,000 transfers/s / 1,000 per node = 1,000 nodes. But a transfer has two legs (debit and credit), each a write, so the real load is 2,000,000 balance updates/s, i.e. 2,000 nodes.</li>
+          <li>Per-node throughput is the lever that dominates cost:</li>
+        </ul>
+        <table class="data-table">
+          <thead><tr><th>Per-node TPS</th><th>Nodes for 2M updates/s</th><th>Implication</th></tr></thead>
+          <tbody>
+            <tr><td>100</td><td>20,000</td><td>Absurd to operate</td></tr>
+            <tr><td>1,000</td><td>2,000</td><td>Conventional SQL; huge cross-shard transaction surface</td></tr>
+            <tr><td>10,000</td><td>200</td><td>Achievable with an in-memory state machine and append-only log</td></tr>
+          </tbody>
+        </table>
+        <p>So the design goal is stated for us: make one node fast enough that you need hundreds of nodes, not thousands. A hundred-fold more per node is also a hundred-fold fewer network hops and cross-shard transactions.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-Level Design · Attempt 1</span>
+        <h2>API and the in-memory sharded key-value store</h2>
+        <p>One endpoint is enough: <code>POST /v1/wallet/balance_transfer</code> with <code>from_account</code>, <code>to_account</code>, <code>amount</code> (string or integer minor units, never float), <code>currency</code>, and <code>transaction_id</code>, which is the idempotency key. The response returns a status and the transaction id.</p>
+        <p>The first instinct is a <code>map&lt;user_id, balance&gt;</code> held in Redis, partitioned across nodes because one node cannot take 1M TPS. Pick the partition with <code>hash(account_id) mod N</code>. Store N and the node addresses in ZooKeeper (or etcd), which gives the stateless wallet-service fleet a consistent, highly available view of the topology. Wallet servers are interchangeable and scale horizontally.</p>
+        <div class="diagram-box"><span class="hi">ATTEMPT 1: SHARDED IN-MEMORY BALANCES</span>
+  client ──▶ [ wallet service ] x many (stateless)
+                  │  partition = hash(account) mod N        N + node list from <span class="note">ZooKeeper / etcd</span>
+        ┌─────────┼─────────┐
+        ▼         ▼         ▼
+     redis-0   redis-1   redis-2 ...   <span class="dim">balances: A→100, B→50 ...</span>
+
+  transfer A→C where A on redis-0, C on redis-2:
+     DECRBY A 1   ✔
+     <span class="warn">process dies here</span>
+     INCRBY C 1   ✘     <span class="warn">=&gt; $1 destroyed</span></div>
+        <p>This scales but fails two requirements. The two updates land on different nodes and nothing makes them atomic. And an in-memory store with asynchronous persistence is not a system of record. Also, plain modulo hashing remaps most keys when N changes; real deployments use a fixed large number of logical partitions mapped to nodes, or <a href="../../system-design/sharding.html">consistent hashing</a>.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Distributed Transactions</span>
+        <h2>Three ways to make a cross-shard transfer atomic</h2>
+        <p class="mini-heading">Option A: Two-phase commit over relational shards</p>
+        <p>Replace Redis with sharded relational databases. A coordinator (the wallet service) reads and writes on each database as in normal transactions. When ready to commit it asks every participant to <strong>prepare</strong>, meaning "durably promise you can commit and hold your locks". If all vote yes, the coordinator tells everyone to commit; any no, or a timeout, means abort.</p>
+        <div class="diagram-box"><span class="hi">2PC</span>
+  coordinator            DB-A (A-1)           DB-C (C+1)
+      │──prepare──────────▶│                    │
+      │──prepare───────────────────────────────▶│
+      │◀──yes──────────────│                    │      <span class="note">both now hold row locks, in doubt</span>
+      │◀──yes───────────────────────────────────│
+      │──commit───────────▶│                    │
+      │──commit────────────────────────────────▶│
+  <span class="warn">If the coordinator dies between prepare and commit, participants block holding locks.</span></div>
+        <p>Downsides: locks are held across network round trips, so contention collapses throughput on hot accounts; and the coordinator is a blocking single point of failure. 2PC is also tied to databases that implement XA-style prepare, which many NoSQL and microservice stores do not.</p>
+
+        <p class="mini-heading">Option B: Try-Confirm/Cancel (TC/C)</p>
+        <p>TC/C turns one distributed transaction into two <em>independent, local</em> transactions per participant. Nothing is held open between them; the "lock" is a business-level reservation.</p>
+        <table class="data-table">
+          <thead><tr><th>Phase</th><th>Operation</th><th>Account A (debit)</th><th>Account C (credit)</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>Try</td><td>Balance -$1 (committed locally)</td><td>NOP</td></tr>
+            <tr><td>2a</td><td>Confirm (all tries said yes)</td><td>NOP</td><td>Balance +$1</td></tr>
+            <tr><td>2b</td><td>Cancel (any try failed)</td><td>Balance +$1 (undo)</td><td>NOP</td></tr>
+          </tbody>
+        </table>
+        <div class="diagram-box"><span class="hi">TC/C TIMELINE</span>
+  coordinator        DB-A                 DB-C
+      │──try: A-1────▶ txn{ bal-=1 }✔
+      │──try: NOP─────────────────────────▶ ✔
+      │            <span class="note">--- all yes ---&gt;</span>
+      │──confirm: NOP─▶ ✔
+      │──confirm: C+1─────────────────────▶ txn{ bal+=1 }✔           <span class="ok">CONFIRMED</span>
+
+      try fails (e.g. A has insufficient funds) ──▶ cancel both:
+      │──cancel: A+1─▶ (only if try had applied)     cancel: NOP                 <span class="warn">CANCELLED</span></div>
+        <p>The sharp difference from 2PC: after phase one every local transaction is <em>already committed</em>, and phase two either executes a further transaction (confirm) or reverses the committed one (cancel). 2PC's first phase leaves work uncommitted and locked.</p>
+        <table class="data-table">
+          <thead><tr><th></th><th>Phase 1</th><th>Phase 2 success</th><th>Phase 2 failure</th></tr></thead>
+          <tbody>
+            <tr><td>2PC</td><td>Transactions prepared but not committed</td><td>Commit all</td><td>Abort all</td></tr>
+            <tr><td>TC/C</td><td>Transactions committed or cancelled locally</td><td>Run the confirm transactions</td><td>Run compensating transactions</td></tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">TC/C failure handling</p>
+        <ul class="check-list">
+          <li><strong>Coordinator crash.</strong> Persist a <em>phase status table</em> alongside the shards: transaction id and content, try status per participant (not sent / sent / response received), the chosen second phase (confirm or cancel) and its status, plus the out-of-order flag. The status row is written atomically with each step so a restarted coordinator resumes rather than guesses.</li>
+          <li><strong>Visible intermediate state.</strong> Between try and confirm, A has lost $1 and C has not gained it, so the system's total looks short. That is tolerable provided it is always repaired and nobody can spend the in-flight amount. The rule: the try phase <em>deducts</em> and the confirm phase <em>adds</em>. Deduct-first means the worst case is temporary under-count, never money from nowhere. Adding in try (choice 2) lets C spend funds that may be cancelled; doing both in try (choice 3) needs cross-database atomicity, which is exactly what we lack.</li>
+          <li><strong>Out-of-order delivery.</strong> A cancel can overtake a try (the try was delayed by the network and the coordinator timed out and cancelled). If the shard then processes the late try, it deducts for a transaction already declared dead. Defence: on cancel with no matching try, record a tombstone (the out-of-order flag); a later try consults the flag and refuses.</li>
+          <li><strong>Idempotency.</strong> Try, confirm and cancel can each be redelivered. Key every phase by transaction id and ignore repeats.</li>
+        </ul>
+
+        <p class="mini-heading">Option C: Saga</p>
+        <p>A saga (originally from Garcia-Molina and Salem, 1987, for long-lived database transactions, later popularised for microservices) is a linear sequence of local transactions, each in its own database. If step k fails, run compensating actions for steps k-1 down to 1. For a transfer: step 1 debit A; step 2 credit C; if step 2 fails, compensate by crediting A back.</p>
+        <p>Two ways to coordinate: <strong>choreography</strong>, where each service reacts to events and emits the next, so the workflow is implicit and scattered across services; and <strong>orchestration</strong>, where a central coordinator tells each participant what to do and tracks progress. For money, prefer orchestration: the workflow is in one place, one status record per saga, easy to inspect and to resume.</p>
+        <table class="data-table">
+          <thead><tr><th>Dimension</th><th>TC/C</th><th>Saga</th></tr></thead>
+          <tbody>
+            <tr><td>Compensation</td><td>In the cancel phase</td><td>In the rollback sequence</td></tr>
+            <tr><td>Central coordinator</td><td>Yes</td><td>Yes when orchestrated</td></tr>
+            <tr><td>Execution order</td><td>Any</td><td>Linear</td></tr>
+            <tr><td>Parallelism</td><td>Yes: tries run concurrently</td><td>No: step by step</td></tr>
+            <tr><td>Partial inconsistency visible</td><td>Yes</td><td>Yes</td></tr>
+            <tr><td>Where the logic lives</td><td>Application</td><td>Application</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Choosing:</strong> if latency is the constraint, use TC/C because tries can fan out in parallel and you wait for the slowest rather than the sum. If you have long multi-step business flows across many services, Saga's linear, readable orchestration is easier to build. Neither removes the need for an audit trail, which brings us to event sourcing.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Event Sourcing</span>
+        <h2>From "what is the balance" to "what happened"</h2>
+        <p>An audited wallet must answer three questions: what was any account's balance at a past instant; how do we know current and historical balances are correct; and after a code change, how do we prove the new logic still computes the same results? A table that stores only current balances cannot answer any of them. Event sourcing can, because it stores the <em>transitions</em>, not the result.</p>
+        <table class="data-table">
+          <thead><tr><th>Concept</th><th>Meaning</th><th>Properties</th></tr></thead>
+          <tbody>
+            <tr><td>Command</td><td>Intent from the outside world: "transfer $1 from A to B"</td><td>Globally ordered in a FIFO queue; may be rejected; may involve I/O or randomness; yields zero or more events</td></tr>
+            <tr><td>Event</td><td>A fact that already happened: "A debited $1, B credited $1"</td><td>Immutable, ordered, cannot fail</td></tr>
+            <tr><td>State</td><td>What the events add up to, e.g. map account → balance</td><td>Derived; can always be rebuilt</td></tr>
+            <tr><td>State machine</td><td>Validates a command against state, emits events, applies events to state</td><td>Must be deterministic: no clock reads, randomness, or external I/O</td></tr>
+          </tbody>
+        </table>
+        <div class="diagram-box"><span class="hi">EVENT-SOURCED WALLET</span>
+  clients ──▶ [ command queue (FIFO) ] ──▶ <span class="hi">state machine</span> ──validate(cmd, state)──▶ events
+                                                │  ▲                              │
+                                                │  └────── read balances ─────────┘
+                                                ▼
+                                    [ event log (immutable, ordered) ]
+                                                │ apply
+                                                ▼
+                                          [ state: balances ]
+
+  one command A→B $1 produces two events: DEBITED(A,1), CREDITED(B,1)</div>
+        <p>Since commands may have side effects but events are facts, the non-determinism is confined to the step that turns a command into events (which is also where you capture any externally obtained value, such as an exchange rate or a fraud score, <em>into the event</em>). Replaying events then needs no I/O and always yields the same state.</p>
+        <p class="mini-heading">How it answers the audit questions</p>
+        <ul class="check-list">
+          <li><strong>Balance at time T:</strong> replay events up to T.</li>
+          <li><strong>Correctness:</strong> replay everything from event zero and compare with live state; any divergence is a bug or tampering, and you know the first event where it appears.</li>
+          <li><strong>Code change safety:</strong> run old and new state-machine versions against the same event history and diff the results (a regression test using production data).</li>
+        </ul>
+        <p class="mini-heading">CQRS for reads</p>
+        <p>The write path (commands to events) is optimised for ordering and durability. Read queries ("what is my balance? show my history") go to separate <em>read-only state machines</em> that consume the same event stream and maintain query-friendly views. This is CQRS: Command Query Responsibility Segregation. It lets reads scale independently and be shaped differently (balances, statements, per-merchant aggregates) at the price of staleness: a read model lags the write model by some milliseconds.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Performance</span>
+        <h2>High-performance event sourcing on one node</h2>
+        <p>If commands and events live in an external Kafka and state lives in an external database, every transfer pays several network round trips. The deep dive peels those off one by one.</p>
+        <ol>
+          <li><strong>Local append-only files for commands and events.</strong> Sequential appends are the fastest thing a disk does, even a spinning one, and there is no network hop.</li>
+          <li><strong>Recent entries cached in memory with <code>mmap</code>.</strong> Mapping the file into the process address space makes appends and reads of the hot tail memory operations, with the OS page cache flushing to disk. Reads of recent events never hit the disk path at all.</li>
+          <li><strong>State in a local embedded store.</strong> SQLite is a file-backed relational option; RocksDB, an LSM-tree engine, turns random updates into sequential writes (memtable then SST files, compacted in the background) and serves reads from block cache and bloom filters. For a write-heavy balance map RocksDB is the better fit.</li>
+          <li><strong>Snapshots.</strong> Replaying from event zero gets slower forever. Periodically dump the state at a known event offset to durable storage (a large binary blob in HDFS or S3). Recovery becomes: load latest snapshot, replay only events after its offset.</li>
+        </ol>
+        <div class="diagram-box"><span class="hi">ONE WALLET NODE (after optimisation)</span>
+   cmd ──▶ [mmap command log] ──▶ state machine (single thread) ──▶ [mmap event log] ──▶ apply
+                                        │                                                  │
+                                    reads from                                       writes to
+                                        └─────────────▶ [ RocksDB state ] ◀───────────────┘
+   every N events / T minutes ──▶ snapshot(state, offset) ──▶ <span class="dim">HDFS / object storage</span></div>
+        <div class="warn-box"><strong>Caution on durability:</strong> mmap'd data in the page cache is not durable until flushed. Whether you <code>msync</code> / <code>fsync</code> per batch or rely on replication for durability (next section) is a core latency-versus-safety decision. Batching many commands per fsync (group commit) is how single nodes reach tens of thousands of durable ops per second.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Reliability</span>
+        <h2>Replicating only what must survive</h2>
+        <p>Local files and in-memory state make the node stateful: lose the machine, lose the wallet. Rather than replicating everything, reason about what is <em>irreplaceable</em>.</p>
+        <table class="data-table">
+          <thead><tr><th>Data</th><th>Rebuildable?</th><th>Reliability need</th></tr></thead>
+          <tbody>
+            <tr><td>State (balances)</td><td>Yes, replay events</td><td>Low: a cache of the log</td></tr>
+            <tr><td>Snapshots</td><td>Yes, replay events</td><td>Low: an optimisation</td></tr>
+            <tr><td>Commands</td><td>No, if command handling had non-deterministic parts you cannot regenerate the events from commands alone</td><td>Moderate: they are inputs, but events are the truth</td></tr>
+            <tr><td>Events</td><td>No: they are the source of truth</td><td><strong>Highest</strong></td></tr>
+          </tbody>
+        </table>
+        <p>So the event log is what we replicate, and we need two properties: no acknowledged event is lost, and every replica holds the same events in the same order. That is precisely state-machine replication via a consensus protocol. Raft is the pragmatic choice: a leader accepts appends and replicates them to followers; an entry is committed once a majority has persisted it; if the leader fails, followers elect a new one among those with the most up-to-date log. With 2f+1 nodes the group tolerates f failures, so a three-node group survives one, five survive two. Followers apply the same events to build identical state, so any follower is a hot standby.</p>
+        <div class="diagram-box"><span class="hi">RAFT GROUP (3 nodes)</span>
+            ┌────────── append(event 42) ──────────┐
+   client ─▶│ <span class="ok">LEADER</span>  log: …,41,42                    │
+            └───┬───────────────────────────┬──────┘
+          replicate                    replicate
+                ▼                           ▼
+        FOLLOWER-1 log: …,41,42     FOLLOWER-2 log: …,41   <span class="dim">(lagging, catches up)</span>
+   commit index advances when 2 of 3 have persisted 42  →  ack to client; leader dies → follower with log through 42 can win election</div>
+        <p>Cost: one network round trip (to the nearest majority) per commit, amortised by batching entries per round trip. Production implementations include etcd's raft library, HashiCorp Raft, and TiKV's Raft groups.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Scale-out</span>
+        <h2>Many Raft groups, a reverse proxy, and push instead of poll</h2>
+        <p>Two limits remain. One Raft group's capacity is bounded by its leader, so we must shard into many groups, and transfers between accounts in different groups need distributed transactions again (now over fast, replicated, deterministic participants rather than slow SQL). And the CQRS read path is asynchronous: a client that submitted a transfer does not know when the read model has caught up, so naive clients poll, which is both slow to notice and a load multiplier.</p>
+        <ol>
+          <li><strong>Polling</strong>: client repeatedly queries the read side. Simple, laggy, and heavy under load.</li>
+          <li><strong>Reverse proxy</strong>: a gateway submits the command on the user's behalf and does the polling itself, batching lookups for many users into fewer queries. Lower load, still not real time.</li>
+          <li><strong>Push</strong>: the read-only state machines push completion to the proxy once they apply the relevant event; the proxy answers the waiting client (long-poll, WebSocket, or SSE; see <a href="../../system-design/websockets.html">WebSockets</a>). Users perceive the system as synchronous even though it is not.</li>
+        </ol>
+        <div class="diagram-box"><span class="hi">FINAL ARCHITECTURE</span>
+  user ──▶ [ reverse proxy ] ──▶ [ Saga / TC-C coordinator + phase status table ]
+                ▲                      │ 1. A-1 → partition P1      2. C+1 → partition P2
+                │ push result          ▼                               ▼
+                │               ┌─ Raft group P1 ─┐            ┌─ Raft group P2 ─┐
+                │               │ leader+2 follow │            │ leader+2 follow │
+                │               │ cmd→event→state │            │ cmd→event→state │
+                │               └───────┬─────────┘            └───────┬─────────┘
+                └──── read-only state machines (CQRS) notice applied events ─────┘</div>
+        <p class="mini-heading">Lifecycle of one transfer in the final system</p>
+        <ol>
+          <li>User A submits a distributed transaction with two operations, <code>A-1</code> and <code>C+1</code>, to the coordinator.</li>
+          <li>The coordinator writes a phase-status record for the transaction.</li>
+          <li>It resolves which partition owns each account.</li>
+          <li>Partition 1's Raft leader receives <code>A-1</code>, validates it against state, produces an event, replicates it to a majority.</li>
+          <li>The read state machine applies the event and pushes the outcome to the coordinator.</li>
+          <li>The coordinator records success for step 1 and proceeds to <code>C+1</code> in partition 2, the same way.</li>
+          <li>After step 2 is recorded the coordinator tells the client. On any failure it runs the compensations instead.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Idempotency &amp; Invariants</span>
+        <h2>The details that keep it honest</h2>
+        <ul class="check-list">
+          <li><strong>Dedup in the state machine.</strong> The transaction id is checked inside the deterministic apply path, so redelivered commands (client retry, coordinator resume, Raft re-proposal after leader change) produce no second effect. The dedup set is part of replayed state; bound it by retaining ids for the retry horizon plus snapshot it.</li>
+          <li><strong>No negative balances.</strong> Validation happens in the shard that owns the account, on the single writer, so check-then-debit has no race. Reservation-style debits (try) must be visible to subsequent validations.</li>
+          <li><strong>Conservation.</strong> The sum of all balances plus in-flight reservations is constant. Run it as a continuous invariant check and as part of snapshot verification.</li>
+          <li><strong>Hot accounts.</strong> A single merchant receiving most transfers makes one partition's single thread the bottleneck. Split the account into sub-accounts (sharded counters) that are summed on read, or aggregate credits in batches.</li>
+          <li><strong>Resharding.</strong> Moving an account between groups is itself a distributed transaction plus an event-log handoff. Use many more logical partitions than nodes so rebalancing moves whole partitions.</li>
+          <li><strong>Event schema evolution.</strong> Events live forever. Version them, and keep old-version handlers in the replay path, otherwise replay breaks when code changes. Upcasters that translate old events on read are a common approach.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>The evolution, and what each step bought</h2>
+        <table class="data-table">
+          <thead><tr><th>Step</th><th>Gains</th><th>Loses</th></tr></thead>
+          <tbody>
+            <tr><td>Redis shards</td><td>Speed and simple scaling</td><td>Durability, cross-shard atomicity</td></tr>
+            <tr><td>SQL shards + 2PC</td><td>Real transactions</td><td>Throughput (locks), coordinator is a blocker</td></tr>
+            <tr><td>TC/C or Saga</td><td>No long-held locks, database-agnostic</td><td>Transient inconsistency, business-logic complexity</td></tr>
+            <tr><td>Event sourcing</td><td>Audit, replay, testability</td><td>Storage growth, read model lag, schema discipline</td></tr>
+            <tr><td>Local log + mmap + RocksDB</td><td>Throughput, no network hops</td><td>Node becomes stateful</td></tr>
+            <tr><td>Raft replication</td><td>Durability and failover</td><td>One round trip per commit, operational complexity</td></tr>
+            <tr><td>CQRS + proxy + push</td><td>Read scale, real-time feel</td><td>More moving parts, eventual reads</td></tr>
+            <tr><td>Multiple Raft groups</td><td>Horizontal scale</td><td>Distributed transactions return</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Event-sourced core</h4><ul><li>Complete, tamper-evident history</li><li>Deterministic replay for debugging and regression testing</li><li>Natural fit for single-threaded high throughput</li></ul></div>
+          <div class="trade-col cons"><h4>Event-sourced core</h4><ul><li>Unfamiliar model; needs discipline</li><li>Log and snapshot management are your job</li><li>Hard to delete data (privacy law): crypto-shredding or tombstone events needed</li></ul></div>
+        </div>
+        <p>It is worth saying aloud in an interview that a mature alternative exists: just use a distributed SQL database (Spanner, CockroachDB, YugabyteDB) with serializable transactions and accept the lower ceiling. Purpose-built ledger databases such as TigerBeetle target exactly this debit-credit workload at very high throughput. The chapter's route is the do-it-yourself version of the same ideas.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Deterministic wallet state machine, replay, snapshots, and TC/C</h2>
+        <p>The program implements the core mechanics: a pure <code>decide</code> / <code>apply</code> pair, an event log with idempotent command handling and periodic snapshots, time-travel replay, and a TC/C coordinator over two shards with the out-of-order-cancel tombstone. Executed; assertions pass.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Event-sourced wallet: deterministic state machine + replay + snapshot, and a TC/C coordinator over two shards.
+import assert from 'node:assert/strict';
+
+// ---------- 1. Event sourcing: commands -&gt; events -&gt; state ----------
+// The state machine is PURE: same event list =&gt; same state. No clock, no randomness, no I/O.
+function decide(state, cmd) {                    // validate a command, return events (or a rejection)
+  if (cmd.type !== 'TRANSFER') return { error: 'UNKNOWN' };
+  const { from, to, amount, id } = cmd;
+  if (amount &lt;= 0n) return { error: 'BAD_AMOUNT' };
+  if ((state.get(from) ?? 0n) &lt; amount) return { error: 'INSUFFICIENT_FUNDS' };
+  return { events: [{ id, type: 'DEBITED', acct: from, amount }, { id, type: 'CREDITED', acct: to, amount }] };
+}
+function apply(state, ev) {                      // fold one event into state
+  const d = ev.type === 'DEBITED' ? -ev.amount : ev.amount;
+  state.set(ev.acct, (state.get(ev.acct) ?? 0n) + d);
+}
+class WalletLog {
+  commands = []; events = []; state = new Map(); snapshots = []; seenIds = new Set();
+  constructor(opening = {}) { for (const [k, v] of Object.entries(opening)) { this.events.push({ id: `open:${k}`, type: 'CREDITED', acct: k, amount: v }); apply(this.state, this.events.at(-1)); } }
+  submit(cmd) {
+    this.commands.push(cmd);
+    if (this.seenIds.has(cmd.id)) return { duplicate: true };       // idempotency by transaction_id
+    const r = decide(this.state, cmd);
+    if (r.error) return r;
+    this.seenIds.add(cmd.id);
+    for (const ev of r.events) { this.events.push(ev); apply(this.state, ev); }
+    if (this.events.length - (this.snapshots.at(-1)?.upto ?? 0) &gt;= 8) this.snapshots.push({ upto: this.events.length, state: new Map(this.state) });
+    return { ok: true };
+  }
+  static replay(events, upto = events.length, snap = null) { // rebuild any historical state
+    const s = snap ? new Map(snap.state) : new Map();
+    for (let i = snap ? snap.upto : 0; i &lt; upto; i++) apply(s, events[i]);
+    return s;
+  }
+}
+
+const log = new WalletLog({ A: 100n, B: 50n, C: 0n });
+assert.deepEqual(log.submit({ id: 't1', type: 'TRANSFER', from: 'A', to: 'C', amount: 30n }), { ok: true });
+assert.deepEqual(log.submit({ id: 't1', type: 'TRANSFER', from: 'A', to: 'C', amount: 30n }), { duplicate: true });
+assert.equal(log.submit({ id: 't2', type: 'TRANSFER', from: 'B', to: 'A', amount: 80n }).error, 'INSUFFICIENT_FUNDS');
+for (let i = 0; i &lt; 10; i++) log.submit({ id: `x${i}`, type: 'TRANSFER', from: 'A', to: 'B', amount: 1n });
+
+const rebuilt = WalletLog.replay(log.events);
+assert.deepEqual([...rebuilt], [...log.state]);                       // full replay == live state
+const snap = log.snapshots[1]; // a mid-history snapshot; replay only the tail
+assert.deepEqual([...WalletLog.replay(log.events, log.events.length, snap)], [...log.state]); // snapshot + tail
+const afterT1 = WalletLog.replay(log.events, 5);                       // time travel: balances after 5 events
+console.log('live state     :', [...log.state].map(([k, v]) =&gt; `${k}=${v}`).join(' '));
+console.log('state @event 5 :', [...afterT1].map(([k, v]) =&gt; `${k}=${v}`).join(' '));
+console.log('snapshot used  : upto', snap.upto, 'of', log.events.length, 'events');
+let sum = 0n; for (const v of log.state.values()) sum += v; assert.equal(sum, 150n); // money conserved
+
+// ---------- 2. TC/C across two shards, with out-of-order cancel protection ----------
+class Shard {
+  balances = new Map(); phase = new Map(); // txId -&gt; 'TRIED' | 'CONFIRMED' | 'CANCELLED' | 'CANCEL_FIRST'
+  constructor(name, init) { this.name = name; for (const [k, v] of Object.entries(init)) this.balances.set(k, v); }
+  try_(tx, acct, delta) {               // local ACID txn #1: reserve (deduct) now; credits are NOP in try
+    if (this.phase.get(tx) === 'CANCEL_FIRST') return false;      // cancel overtook try -&gt; refuse
+    if (this.phase.has(tx)) return true;                           // idempotent
+    if (delta &lt; 0n &amp;&amp; (this.balances.get(acct) ?? 0n) + delta &lt; 0n) return false;
+    if (delta &lt; 0n) this.balances.set(acct, this.balances.get(acct) + delta);
+    this.phase.set(tx, 'TRIED'); return true;
+  }
+  confirm(tx, acct, delta) {            // local ACID txn #2 (success path)
+    if (this.phase.get(tx) === 'CONFIRMED') return;
+    if (delta &gt; 0n) this.balances.set(acct, (this.balances.get(acct) ?? 0n) + delta);
+    this.phase.set(tx, 'CONFIRMED');
+  }
+  cancel(tx, acct, delta) {             // compensating txn: undo the try, or leave a tombstone if try never arrived
+    const p = this.phase.get(tx);
+    if (p === undefined) { this.phase.set(tx, 'CANCEL_FIRST'); return; }
+    if (p === 'TRIED' &amp;&amp; delta &lt; 0n) this.balances.set(acct, this.balances.get(acct) - delta);
+    if (p === 'TRIED') this.phase.set(tx, 'CANCELLED');
+  }
+}
+function tcc(tx, legs) {                // legs = [{shard, acct, delta}], deductions first
+  const ordered = [...legs].sort((a, b) =&gt; Number(a.delta - b.delta));
+  const tried = [];
+  for (const l of ordered) { if (l.shard.try_(tx, l.acct, l.delta)) tried.push(l); else { for (const t of legs) t.shard.cancel(tx, t.acct, t.delta); return 'CANCELLED'; } }
+  for (const l of legs) l.shard.confirm(tx, l.acct, l.delta);
+  return 'CONFIRMED';
+}
+const s1 = new Shard('s1', { A: 100n }), s2 = new Shard('s2', { C: 5n });
+assert.equal(tcc('T1', [{ shard: s1, acct: 'A', delta: -40n }, { shard: s2, acct: 'C', delta: 40n }]), 'CONFIRMED');
+assert.equal(tcc('T2', [{ shard: s1, acct: 'A', delta: -500n }, { shard: s2, acct: 'C', delta: 500n }]), 'CANCELLED');
+assert.equal(s1.balances.get('A'), 60n); assert.equal(s2.balances.get('C'), 45n);
+s2.cancel('T3', 'C', 10n);              // cancel arrives BEFORE try (network reordering)
+assert.equal(s2.try_('T3', 'C', 10n), false);
+console.log('TC/C result    : A=' + s1.balances.get('A') + ' C=' + s2.balances.get('C') + ', late try after cancel rejected');
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the live balances (A=60 B=60 C=30), the balances after the first 5 events (A=70 B=50 C=30), the snapshot offset used for a partial replay (17 of 25 events), the TC/C outcome (A=60 C=45, late try after cancel rejected), then "all assertions passed".</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What breaks and the recovery path</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Effect</th><th>Recovery</th></tr></thead>
+          <tbody>
+            <tr><td>Raft leader crash</td><td>Brief write unavailability (election timeout, typically hundreds of ms to seconds)</td><td>Follower elected; clients and coordinator retry with same transaction id</td></tr>
+            <tr><td>Majority of a group lost</td><td>That partition unavailable</td><td>Restore from replicas/snapshots plus log; transfers touching it stall or compensate</td></tr>
+            <tr><td>Coordinator crash mid-TC/C</td><td>Funds deducted but not confirmed</td><td>New coordinator reads phase status table, drives to confirm or cancel</td></tr>
+            <tr><td>Late try after cancel</td><td>Phantom deduction</td><td>Out-of-order flag rejects it</td></tr>
+            <tr><td>Confirm fails repeatedly</td><td>Money stuck in limbo</td><td>Confirm must be retried indefinitely (it is idempotent and cannot logically fail); alert on age</td></tr>
+            <tr><td>Bug in state machine</td><td>Wrong balances</td><td>Replay on corrected code, diff old vs new, issue corrective events (never edit history)</td></tr>
+            <tr><td>Corrupt snapshot</td><td>Replica starts with wrong state</td><td>Checksums; verify by replaying from an older snapshot</td></tr>
+            <tr><td>Split brain / stale leader</td><td>Two writers</td><td>Raft terms and fencing tokens; stale leaders cannot reach a majority</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling &amp; Production Gotchas</span>
+        <h2>Knees in the curve</h2>
+        <ul class="check-list">
+          <li><strong>Raft round trip bounds latency.</strong> Put replicas in the same region (or at least metro), batch entries per round trip, and use pipelining. Cross-region synchronous replication makes every transfer cost tens of milliseconds.</li>
+          <li><strong>Single-threaded does not mean single-core wasteful.</strong> Run many partitions per machine, one pinned thread each. The unit of parallelism is the partition.</li>
+          <li><strong>Cross-partition ratio is the hidden cost.</strong> If 30% of transfers cross partitions, the effective TPS is dominated by coordinator work. Partition so that likely counterparties colocate where the domain allows.</li>
+          <li><strong>Snapshot cadence trades recovery time against write amplification.</strong> Choose it from your recovery-time objective: replay speed (events/s) times allowed seconds gives the maximum tail length.</li>
+          <li><strong>Log retention.</strong> Events are forever in principle; in practice archive cold segments to object storage and keep a verifiable hash chain (each batch includes the hash of the previous) so archived history remains tamper-evident.</li>
+          <li><strong>Back-pressure.</strong> The command queue must be bounded; shed load at the proxy with explicit errors rather than letting queues grow until latency is useless.</li>
+          <li><strong>Observability.</strong> Per-partition queue depth, apply lag of read models, Raft commit latency, election count, coordinator in-flight ages, invariant checker output. See <a href="../../system-design/observability.html">observability</a>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Design-review checklist</h2>
+        <ul class="check-list">
+          <li>Transfer API is idempotent via transaction id, enforced inside the state machine</li>
+          <li>State machine is deterministic; external values are captured in events</li>
+          <li>Event log is replicated by consensus; state and snapshots are rebuildable</li>
+          <li>Cross-partition transfers use TC/C or orchestrated Saga with a persisted status table</li>
+          <li>Deduct first, add later; confirm and cancel are idempotent and retried until done</li>
+          <li>Out-of-order cancel handled with a tombstone/flag</li>
+          <li>CQRS read models with push notification to the waiting client</li>
+          <li>Periodic snapshots, tested restores, replay-based regression tests in CI</li>
+          <li>Hot account strategy and resharding plan</li>
+          <li>Continuous conservation check and nightly full replay verification</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not just use 2PC across sharded SQL databases?</summary><p>It works and is the simplest correct answer, but locks are held across network round trips and the coordinator is a blocking point of failure, so throughput per node stays near the 1,000 TPS class and you would need thousands of nodes. TC/C and event sourcing trade simplicity for much higher per-node throughput.</p></details>
+        <details><summary>TC/C leaves a window where money has left A but not arrived in C. Is that acceptable?</summary><p>Yes, if three conditions hold: the in-flight amount cannot be spent by anyone, the transaction always completes or compensates (persisted coordinator state, indefinite retry of confirm), and the window is visible in monitoring. Deducting in the try phase guarantees the system never over-credits.</p></details>
+        <details><summary>Why are events replicated but not commands?</summary><p>State is derivable from events. Events are derivable from commands only if processing is deterministic, but command handling may involve I/O and randomness, so events are the true record. Commands are inputs worth keeping for debugging, but events are what must never be lost.</p></details>
+        <details><summary>How do you prove correctness after a code change?</summary><p>Replay the entire production event history through both the old and new state machine versions and compare every resulting balance (and every emitted event for commands re-run). Because the machine is deterministic, any difference is attributable to the code change.</p></details>
+        <details><summary>Saga or TC/C for a wallet?</summary><p>A two-leg transfer is a natural TC/C case: both tries run in parallel for lower latency. Saga fits longer flows (debit, fee, rewards, notification) where sequential steps with compensations read naturally. Both need an orchestrator and persisted status.</p></details>
+        <details><summary>What if a user's account is on a partition whose Raft group has lost quorum?</summary><p>That slice is unavailable by design (CP behaviour). Transfers touching it are rejected or cancelled via compensation; other partitions continue. This is why the 99.99% target is reasoned per partition and why replica placement across failure domains matters. See <a href="../../system-design/cap-theorem.html">CAP</a>.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./26-payment-system.html">Previous: Chapter 26, Payment System</a> — the wallet there is one component; here it is the whole system.</li>
+          <li><a href="./28-stock-exchange.html">Next: Chapter 28, Stock Exchange</a> — reuses the event-sourced, single-writer design for matching.</li>
+          <li><a href="../../system-design/consistency-models.html">Consistency models</a> — linearizability versus the eventual reads of CQRS.</li>
+          <li><a href="../../system-design/concurrency-control.html">Concurrency control</a> — locks, MVCC and why 2PC contention hurts.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — partitioning accounts across Raft groups.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — transaction-id dedup.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repository lists no additional resources for this chapter.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Do not scale a wallet by making a database do distributed locking faster; scale it by making each node a deterministic, single-writer state machine over a replicated append-only log, then glue partitions together with compensating transactions. You get throughput, an audit trail, and replayable proof of correctness from the same decision.</p>
+      </section>
+
+    </main>
+  </body>
+</html>

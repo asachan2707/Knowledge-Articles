@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Hotel Reservation System | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+            <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Created 2026-10-15 from liquidslr/system-design-notes ch.22 (Alex Xu, SDI Vol 2). Deep chapter on a hotel reservation system (5,000 hotels, 1M rooms, 10% overbooking): QPS funnel maths (about 3 TPS reservations, 30 and 300 QPS upstream), REST API, relational schema, improved room_type_inventory model with 73M rows, microservice layout, double-booking prevention via idempotency key, pessimistic locking, optimistic locking and DB constraints (with a corrected overbooking-aware constraint and conditional-UPDATE variant), sharding by hotel_id, Redis inventory cache with CDC, and 2PC vs Saga across services. Includes a runnable Node.js example (versioned-row CAS, multi-night atomic booking, 110% cap, idempotent reservation ids, 150-user stampede) that was executed and asserted. Read time about 30 min. Related: bookmyshow seat race, idempotency, concurrency-control, payment chapter 26.</div>
+        <h1>Design a Hotel Reservation System</h1>
+        <p class="summary">A booking engine for a chain with 5,000 hotels and a million rooms, where the throughput is tiny and the whole difficulty is never selling the same night twice (except on purpose, thanks to overbooking). The chapter is a masterclass in choosing boring, transactional tools.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">22 of 28 · Part 6 Transactional Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">28 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Room-type inventory per date, idempotency key, optimistic vs pessimistic locking, DB constraints, overbooking, shard by hotel_id, cache with CDC, Saga vs 2PC</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">MySQL/InnoDB, PostgreSQL, Redis, Debezium, gRPC, Kafka, Marriott/Booking.com/Airbnb-style booking</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Selling a hotel night looks like e-commerce, but the product is perishable, the stock is a count per date rather than a pile of unique items, customers book ranges of nights atomically, and the business deliberately sells more than it owns. A correct system must keep a numeric invariant true under concurrency: for every (hotel, room type, date), reserved never exceeds the sellable limit.</p>
+        <div class="callout"><p><strong>Core idea:</strong> model availability as a row per (hotel, room type, date) holding two integers, and protect the invariant <code>reserved &lt;= floor(1.10 x inventory)</code> with a database transaction that either updates every night in the stay or none. Add an idempotency key so retries are harmless, and scale the database by sharding on hotel_id only when you must.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design this echoes</span>
+        <h2>Airlines have overbooked since forever, and so does every OTA</h2>
+        <p>Overbooking is not a software quirk, it is a revenue-management practice with a long history in airlines and hotels: because a predictable fraction of reservations cancel or no-show, selling slightly beyond physical capacity maximises revenue, and operations handle the occasional collision with upgrades or "walking" a guest to another property. Large online travel agencies and PMS vendors expose it as a configurable per-property parameter, and the engineering consequence is exactly what this chapter encodes: capacity is a policy number, not a physical constant, so it must live in data and be enforced atomically at write time.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Why it exists</span>
+        <h2>Why this chapter is different from the others</h2>
+        <p>Most chapters in this book fight volume. This one fights contention and correctness. Peak load is a few hundred requests per second, a size a single PostgreSQL or MySQL primary handles without effort, so the right answer is deliberately unfashionable: a relational database with ACID transactions, a few stateless services, and careful concurrency control. The skill being tested is knowing when <em>not</em> to reach for NoSQL, queues and sagas, and being able to defend the few places where complexity is warranted. The same design transfers to flights, concert and movie seats (see <a href="../../bookmyshow-seat-race-condition-distributed-locking.html">BookMyShow seat race condition</a>), car rentals and restaurant tables.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · Scope and requirements</span>
+        <h2>Requirements and the numbers</h2>
+        <p class="mini-heading">Scope agreed with the interviewer</p>
+        <ul class="check-list">
+          <li>5,000 hotels, 1 million rooms in total.</li>
+          <li>Payment in full at booking time; bookings only via web or app (no phone desk).</li>
+          <li>Cancellation allowed. Overbooking up to 10%.</li>
+          <li>Features: hotel page, room-type detail page, make a reservation, admin panel (add/update hotels, rooms, refund/cancel), overbooking support.</li>
+          <li>Room prices vary daily, so a stay's price is the sum of per-night rates.</li>
+        </ul>
+        <p class="mini-heading">Non-functional</p>
+        <ul class="check-list">
+          <li>High concurrency in peak seasons: many users racing for the last rooms of one property.</li>
+          <li>Moderate latency: a few seconds to confirm is acceptable; correctness matters more.</li>
+          <li>Strong consistency for inventory; availability can bend slightly, since a rejected request can retry while a double sale cannot be undone for free.</li>
+        </ul>
+        <p class="mini-heading">Back-of-the-envelope</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Derivation</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Room-nights booked per day</td><td>1,000,000 rooms x 70% occupancy</td><td>700,000 occupied nights</td></tr>
+            <tr><td>New reservations per day</td><td>700,000 / 3 nights average stay (each reservation creates 3 occupied nights)</td><td>about 233,000, call it 240K</td></tr>
+            <tr><td>Reservation TPS</td><td>240,000 / 10<sup>5</sup> (86,400 rounded) </td><td>about 3 per second (2.8)</td></tr>
+            <tr><td>Funnel: reservation page</td><td>3 / 10% conversion</td><td>30 QPS</td></tr>
+            <tr><td>Funnel: room-detail page</td><td>30 / 10% conversion</td><td>300 QPS</td></tr>
+            <tr><td>Inventory rows</td><td>5,000 hotels x 20 room types x 365 days x 2 years</td><td>73 million rows</td></tr>
+            <tr><td>Inventory table size</td><td>73M x ~40 bytes (3 ids, date, two ints, version)</td><td>about 3 GB plus indexes</td></tr>
+            <tr><td>Reservations over 5 years</td><td>240K/day x 365 x 5</td><td>about 440M rows</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Read the numbers:</strong> three writes per second and 300 reads per second are tiny; even a 10x seasonal spike or 100x promotion barely registers. The 73M-row table fits in memory of one database host. This is the evidence that justifies a single relational primary with replicas, and a deliberate refusal to over-engineer. Note the average hides the real hazard: reservation writes cluster on a few rows (the last rooms of a popular hotel on a holiday weekend), so <em>contention per row</em>, not total QPS, is the stress metric.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · API design</span>
+        <h2>REST endpoints</h2>
+        <table class="data-table">
+          <thead><tr><th>Area</th><th>Endpoint</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Hotel</td><td><code>GET /v1/hotels/{id}</code></td><td>Public; static, cache hard</td></tr>
+            <tr><td>Hotel</td><td><code>POST /v1/hotels</code>, <code>PUT /v1/hotels/{id}</code>, <code>DELETE /v1/hotels/{id}</code></td><td>Ops only, internal API behind VPN/authz</td></tr>
+            <tr><td>Room</td><td><code>GET /v1/hotels/{id}/rooms/{id}</code></td><td>Public detail with nightly rates</td></tr>
+            <tr><td>Room</td><td><code>POST/PUT/DELETE /v1/hotels/{id}/rooms[/{id}]</code></td><td>Ops only</td></tr>
+            <tr><td>Reservation</td><td><code>GET /v1/reservations</code></td><td>History for the signed-in user</td></tr>
+            <tr><td>Reservation</td><td><code>GET /v1/reservations/{id}</code></td><td>One reservation</td></tr>
+            <tr><td>Reservation</td><td><code>POST /v1/reservations</code></td><td>Create; body carries the client-generated <code>reservationID</code></td></tr>
+            <tr><td>Reservation</td><td><code>DELETE /v1/reservations/{id}</code></td><td>Cancel (releases inventory)</td></tr>
+          </tbody>
+        </table>
+        <p>Search by city, dates, price, amenities is real but deliberately out of scope: it is a read problem solved with a search index (see <a href="../../elasticsearch.html">Elasticsearch</a>) and does not exercise the interesting constraints. First-draft request body (reserve a specific room):</p>
+        <pre><code class="language-json">{ "startDate": "2021-04-28", "endDate": "2021-04-30", "hotelID": "245", "roomID": "U12354673389", "reservationID": "13422445" }</code></pre>
+        <p>Three details worth saying aloud. <code>reservationID</code> is generated <em>before</em> the click and acts as an idempotency key. Dates are a half-open interval: <code>[startDate, endDate)</code>, so a 28th-to-30th booking consumes the nights of the 28th and 29th and checkout day is not billed. And a cancel is a DELETE of intent but should be implemented as a state transition (status = canceled) so history, refunds and audits survive.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · Data model</span>
+        <h2>From "reserve a room" to "reserve a room type"</h2>
+        <p>Access patterns: view a hotel, list room types available over a date range, record a reservation, look up reservations. Structured, relational, needs multi-row transactions: choose a relational database. Reasoning: read-heavy with few writes (NoSQL's write advantages are irrelevant), ACID needed to avoid double charges and phantom stock, and the schema is plainly relational. Pick PostgreSQL or MySQL/InnoDB; the choice between them is minor here.</p>
+        <p class="mini-heading">First draft schema (Airbnb-like: you book a specific unit)</p>
+        <div class="diagram-box"> hotel(<span class="hi">hotel_id</span>, name, address, location)
+ room(<span class="hi">room_id</span>, room_type_id, floor, number, <span class="hi">hotel_id</span>, name, is_available)
+ guest(<span class="hi">guest_id</span>, first_name, last_name, email)
+ reservation(<span class="hi">reservation_id</span>, hotel_id, room_id, start_date, end_date,
+             status, guest_id)
+ status: <span class="step">pending</span> ─► <span class="ok">paid</span> ─► <span class="warn">refunded</span>
+            │          └──► canceled ... or ─► rejected</div>
+        <p>The <code>status</code> column is a small state machine: a reservation starts <em>pending</em> (inventory held, payment not confirmed), becomes <em>paid</em>, and may end <em>canceled</em>, <em>refunded</em> or <em>rejected</em>. Model it explicitly and enforce legal transitions in one place; "paid to pending" must be impossible.</p>
+        <p>This schema suits Airbnb, where a listing is one unit, but not a hotel chain: guests buy a <em>type</em> ("king, ocean view") for a date range and the property assigns a physical room at check-in. Reserving a concrete <code>room_id</code> at booking time over-constrains the system and wrecks overbooking (you cannot assign room 214 to two guests). So the unit of sale becomes the room type.</p>
+        <p class="mini-heading">Improved schema</p>
+        <table class="data-table">
+          <thead><tr><th>Table</th><th>Purpose / key columns</th></tr></thead>
+          <tbody>
+            <tr><td><code>room</code></td><td>Physical rooms: room_id, room_type_id, hotel_id, floor, number. Used for housekeeping and check-in assignment.</td></tr>
+            <tr><td><code>room_type_rate</code></td><td>hotel_id, room_type_id, date, rate. One price per night per type (daily-changing prices).</td></tr>
+            <tr><td><code>room_type_inventory</code></td><td><strong>hotel_id, room_type_id, date, total_inventory, total_reserved</strong>. Primary key on the triple. The heart of the system.</td></tr>
+            <tr><td><code>reservation</code></td><td>reservation_id (<strong>UNIQUE</strong>), hotel_id, room_type_id, start_date, end_date, status, guest_id, number_of_rooms, total_price</td></tr>
+          </tbody>
+        </table>
+        <p><code>total_inventory</code> is the number of rooms of that type minus any taken out of service (maintenance), so closing a room for repairs is just decrementing a number for the affected dates. <code>total_reserved</code> is the count currently held or sold. One row per night keeps both availability checks and updates simple: a three-night stay is three row updates, and any date range query is a range scan on the primary key. A daily cron pre-creates rows for the new far-future day (here, two years ahead) so the booking path never has to insert.</p>
+        <table class="data-table">
+          <thead><tr><th>hotel_id</th><th>room_type_id</th><th>date</th><th>total_inventory</th><th>total_reserved</th></tr></thead>
+          <tbody>
+            <tr><td>211</td><td>1001</td><td>2021-06-01</td><td>100</td><td>80</td></tr>
+            <tr><td>211</td><td>1001</td><td>2021-06-02</td><td>100</td><td>82</td></tr>
+            <tr><td>211</td><td>1001</td><td>2021-06-03</td><td>100</td><td>86</td></tr>
+            <tr><td>2210</td><td>101</td><td>2021-06-01</td><td>30</td><td>23</td></tr>
+          </tbody>
+        </table>
+        <p>Availability check for a stay of <code>n</code> rooms: select the rows for every night in range and require, for each, <code>total_reserved + n &lt;= 1.10 x total_inventory</code>. Use integer arithmetic (<code>FLOOR(1.1 * total_inventory)</code>) so 105 inventory gives a limit of 115, not 115.5, and store the overbooking factor per hotel (or per room type) rather than hard-coding 1.10.</p>
+        <p class="mini-heading">Alternatives for the inventory table</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Row per (hotel, type, date) [chosen]</h4><ul><li>Trivial range queries and atomic multi-night updates.</li><li>Lock granularity matches the contention unit.</li><li>73M rows is nothing.</li></ul></div>
+          <div class="trade-col cons"><h4>Row per room per night, or intervals</h4><ul><li>Per-room rows: 20x to 100x more rows and no benefit once room assignment is deferred.</li><li>Interval/range types (e.g. PostgreSQL exclusion constraints on daterange) are elegant for unit-level bookings but cannot express "N of M identical rooms".</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Services and the one deliberate shortcut</h2>
+        <div class="diagram-box"> Users (web / app) ──► <span class="hi">CDN</span> (static JS, images)
+        │
+        ▼
+ <span class="hi">Public API Gateway</span>  auth · rate limit · routing          Admin ──► (VPN) ──► <span class="warn">Internal API</span>
+        │                                                                          │
+        ├──► <span class="ok">Hotel service</span>   (static hotel/room data, heavy cache)             ▼
+        ├──► <span class="ok">Rate service</span>    (price per type per night; depends on occupancy)  <span class="warn">Hotel mgmt service</span>
+        ├──► <span class="ok">Reservation service</span> ── owns reservation + inventory ──► <span class="hi">Relational DB (primary + replicas)</span>
+        └──► <span class="ok">Payment service</span> ◄── gRPC ──► Reservation service         </div>
+        <ul class="check-list">
+          <li><strong>CDN</strong>: caches JS bundles, images and videos.</li>
+          <li><strong>Public API gateway</strong>: managed gateway doing authentication, TLS, rate limiting and routing (see <a href="../../system-design/api-gateway.html">API Gateway</a>).</li>
+          <li><strong>Internal APIs</strong>: for authorised staff only, reachable over VPN or zero-trust proxy.</li>
+          <li><strong>Hotel service</strong>: hotel and room metadata. Rarely changes, so cache aggressively.</li>
+          <li><strong>Rate service</strong>: returns nightly rates for future dates. Prices usually depend on projected occupancy (revenue management), so it reads inventory fill levels.</li>
+          <li><strong>Reservation service</strong>: takes reservation requests, checks and decrements inventory, tracks cancellations.</li>
+          <li><strong>Payment service</strong>: charges the card and flips the reservation status; see <a href="./26-payment-system.html">Payment System</a>.</li>
+          <li><strong>Hotel management service</strong>: back-office view and actions (cancel, refund, edit).</li>
+        </ul>
+        <p>Services talk over a typed RPC framework such as gRPC for internal calls and REST at the edge. Notice the shortcut already baked in: the reservation service owns <em>both</em> reservation records and inventory, in the same database. That is a conscious departure from pure microservices, explained in the data-consistency section below.</p>
+        <p class="mini-heading">The booking flow end to end</p>
+        <div class="diagram-box"> <span class="step">1</span> user opens booking page  ─► server returns a fresh <span class="hi">reservationID</span> (UUID/ULID) with the form
+ <span class="step">2</span> user clicks "Complete booking" ─► POST /v1/reservations {reservationID, hotel, roomType, dates, count}
+ <span class="step">3</span> Reservation service  BEGIN
+        INSERT reservation (status=<span class="step">pending</span>, id UNIQUE)   <span class="dim">-- duplicate id ⇒ return the existing row</span>
+        UPDATE inventory ... for each night, guarded    <span class="dim">-- fails ⇒ ROLLBACK, "sold out"</span>
+        COMMIT
+ <span class="step">4</span> call Payment service (idempotent, keyed by reservationID)
+ <span class="step">5</span> success ─► status = <span class="ok">paid</span> + confirmation email;  failure/timeout ─► status = <span class="warn">rejected</span> + release inventory
+ <span class="step">6</span> a sweeper expires pending rows older than N minutes and releases their rooms</div>
+        <p>Step 3 places a short hold on inventory <em>before</em> payment, so the customer cannot pay for a room that vanished. The hold has a TTL, enforced by the sweeper in step 6; otherwise abandoned checkouts leak inventory. Keep the transaction small: do not call the payment gateway while holding row locks.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Concurrency</span>
+        <h2>Two ways to double-book, two different cures</h2>
+        <p class="mini-heading">Problem A: the same user submits twice</p>
+        <div class="diagram-box"> click 1 ─► POST /reservations ─► create reservation #1, reserve rooms
+ click 2 ─► POST /reservations ─► create reservation #2, reserve rooms   <span class="warn">(user now holds 2, pays 2)</span></div>
+        <p>Disabling the button in JavaScript helps but is not a defence (JS can be off, tabs can be duplicated, mobile clients retry on timeouts, proxies retry on 502). The real fix is an <strong>idempotent API</strong>. The server hands out a globally unique <code>reservation_id</code> when the booking form is rendered; the id travels with the submit; the <code>reservation</code> table has a <strong>unique constraint</strong> on that column. Second submit: the insert violates the constraint, the service catches it and returns the <em>original</em> reservation outcome with a 200 or 409, charging nothing and consuming nothing more. The key must be generated server-side per intent (or client-side as a UUID the server validates), never derived from time alone. See <a href="../../system-design/idempotency.html">Idempotency</a> for the general pattern, including storing the first response for replay.</p>
+        <p>Make the idempotency check and the inventory update the <em>same</em> transaction: if the insert of the reservation row fails on the unique key, the surrounding transaction has not touched inventory yet (or is rolled back), so there is no window where a duplicate decrements stock.</p>
+
+        <p class="mini-heading">Problem B: two different users race for the last room</p>
+        <div class="diagram-box"> total_inventory = 100, total_reserved = 99, 10% overbooking ignored for clarity, limit 100
+
+ T1: SELECT reserved ─► 99  (1 left)             T2: SELECT reserved ─► 99  (1 left)
+ T1: 99 + 1 &lt;= 100 ✓                              T2: 99 + 1 &lt;= 100 ✓
+ T1: UPDATE reserved = 100; COMMIT               T2: UPDATE reserved = 100; COMMIT   <span class="warn">(or = 99+1 again)</span>
+ 
+ <span class="warn">two guests, one room: the classic lost update / write skew</span></div>
+        <p>Under READ COMMITTED or REPEATABLE READ (InnoDB's default) the check and the write are separate steps, and both transactions passed the check on stale data. Running at SERIALIZABLE would fix it (PostgreSQL uses serializable snapshot isolation and aborts one transaction with a serialization failure; InnoDB turns plain SELECTs into shared locks and deadlocks easily), but blanket serializability is blunt. Better to apply the minimum mechanism that makes this one invariant safe. The naive two-step logic is:</p>
+        <pre><code class="language-sql">-- step 1: read all nights of the stay
+SELECT date, total_inventory, total_reserved
+FROM room_type_inventory
+WHERE hotel_id = :h AND room_type_id = :t AND date &gt;= :start AND date &lt; :end;
+-- app: for every row, if total_reserved + :n &gt; 1.10 * total_inventory THEN ROLLBACK
+
+-- step 2: reserve
+UPDATE room_type_inventory
+SET total_reserved = total_reserved + :n
+WHERE hotel_id = :h AND room_type_id = :t AND date &gt;= :start AND date &lt; :end;
+COMMIT;</code></pre>
+        <p>(Production note: include <code>hotel_id</code> in the UPDATE's WHERE as well, since the primary key is the triple. The chapter's version omits it for brevity.) Three ways to close the gap:</p>
+
+        <p class="mini-heading">Option 1: Pessimistic locking</p>
+        <p>Take an exclusive lock on the rows you read so nobody else can read-for-update or modify them until you commit: <code>SELECT ... FOR UPDATE</code> (InnoDB row and gap locks; PostgreSQL <code>FOR UPDATE</code>). The second transaction blocks at its own SELECT, then sees the first one's committed count and correctly rejects.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Simple mental model; serialises conflicting writers.</li><li>No failed-retry loop in the app.</li><li>Best when contention is genuinely high (everyone wants the same last room).</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Locks held across the whole transaction; long transactions starve everyone.</li><li>Deadlocks: T1 locks night 1 then 2, T2 locks night 2 then 1. Fix by always locking in date order.</li><li>Locking many rows (long stays, many room types) amplifies blocking.</li><li>Does not scale well as concurrency grows; the chapter's author disfavours it.</li></ul></div>
+        </div>
+
+        <p class="mini-heading">Option 2: Optimistic locking</p>
+        <p>Let everyone read without locks, and detect conflicts at write. Add a <code>version</code> integer to the row. The writer remembers the version it read and issues a compare-and-set: <code>UPDATE ... SET total_reserved = :new, version = version + 1 WHERE hotel_id = :h AND room_type_id = :t AND date = :d AND version = :read_version</code>. If the affected-row count is not 1 for every night, someone else changed the row; roll back and retry from the read. (Clarification: the version check lives in the UPDATE's WHERE clause; a timestamp can substitute for the integer but clock resolution and skew make versions the safer choice.)</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>No locks held while thinking, so high read concurrency.</li><li>Cannot overwrite stale data.</li><li>Ideal when conflicts are rare, as they are for most hotels most of the time.</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Under heavy contention on one row, most attempts fail and retry; throughput collapses and work is wasted (the runnable example shows this).</li><li>Needs a retry loop with jitter and a cap.</li><li>Does not stop a writer who ignores the version column.</li></ul></div>
+        </div>
+        <div class="insight-box"><strong>A sharper variant with no version column:</strong> fold the invariant into the UPDATE itself. <code>UPDATE room_type_inventory SET total_reserved = total_reserved + :n WHERE hotel_id=:h AND room_type_id=:t AND date=:d AND total_reserved + :n &lt;= FLOOR(1.1 * total_inventory)</code>, executed for each night inside one transaction, then verify <code>rows_affected = number_of_nights</code>, else ROLLBACK. The database evaluates the guard and applies the write atomically under the row lock, so the read-check-write race disappears without a separate SELECT, without a version column and with the lock held only for the instant of the UPDATE. For a table with a single hot counter this is usually the best-performing and simplest correct answer.</div>
+
+        <p class="mini-heading">Option 3: Database constraints</p>
+        <p>Let the database itself refuse to enter an invalid state. The chapter's constraint is <code>CHECK (total_inventory - total_reserved &gt;= 0)</code>. If two transactions race, the second UPDATE pushes the row beyond the limit and aborts with a constraint violation. Note an issue the notes gloss over: with 10% overbooking that constraint would block overbooking entirely, so write it against the policy, for example <code>CHECK (total_reserved &lt;= FLOOR(total_inventory * 1.10))</code> (or reference a per-hotel factor column; CHECK constraints cannot reference other tables). Also check your engine: MySQL enforces CHECK only from 8.0.16 (earlier versions parsed and ignored it), PostgreSQL always has.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Trivial to implement; enforced for every writer, including ad-hoc scripts and future services.</li><li>Defence in depth: a last line even if app logic has a bug.</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Like optimistic locking, failures under heavy contention are retried work.</li><li>Constraints live in migrations, easy to forget in reviews; business policy (overbooking factor) hidden in DDL.</li><li>Some databases lack real CHECK support; error handling is engine-specific.</li></ul></div>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Approach</th><th>When to use</th><th>Failure under contention</th><th>My take</th></tr></thead>
+          <tbody>
+            <tr><td>SELECT ... FOR UPDATE</td><td>Hot rows, short transactions, few nights</td><td>Queueing and deadlocks (ordered locking helps)</td><td>Acceptable for small systems; keep transactions tiny</td></tr>
+            <tr><td>Version CAS</td><td>Low conflict, many readers</td><td>Retry storms</td><td>Good default; cap retries, add jitter</td></tr>
+            <tr><td>Guarded UPDATE</td><td>Counter-style invariants</td><td>Short row-lock waits, no retries needed for conflicts</td><td>Best fit for this table</td></tr>
+            <tr><td>CHECK constraint</td><td>Always, as backstop</td><td>Aborts a transaction</td><td>Use together with one of the above</td></tr>
+          </tbody>
+        </table>
+        <p>The chapter's conclusion: with low reservation QPS, optimistic locking or a constraint are both fine and avoid lock-hold problems. I would go one step further: guarded UPDATE for the write, CHECK constraint as the backstop, UNIQUE on reservation_id for idempotency, and pessimistic locking only for rare administrative operations (bulk repricing, moving a reservation).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Scalability</span>
+        <h2>If this were Booking.com: 1000x the traffic</h2>
+        <p>The interviewer's favourite pivot: "now it is a big OTA, QPS is 1000x". Start with where state lives. API gateway, hotel service, rate service and reservation service instances are stateless, so scale them behind a load balancer. The database is the stateful bottleneck.</p>
+        <p class="mini-heading">Step 0: reduce the data</p>
+        <p>Only current and future inventory and reservations need to be hot. Archive completed stays to cold storage or a warehouse; this keeps indexes small and the buffer pool effective. Add read replicas (cross-AZ) for high availability and for read-only traffic such as history pages, with the caveat that replica lag makes them unsuitable for the booking transaction itself.</p>
+        <p class="mini-heading">Step 1: shard by hotel_id</p>
+        <p>Every booking query includes a hotel id, and no transaction needs two hotels, so <code>hotel_id</code> is a perfect shard key: <code>shard = hash(hotel_id) mod N</code> (or a consistent-hash ring / lookup directory for easy rebalancing; plain modulo reshuffles everything when N changes). Each shard holds its hotels' inventory <em>and</em> reservations, so the transaction stays single-shard and ACID. The arithmetic from the chapter: at 30,000 QPS and 16 shards, each shard sees about 1,875 QPS, comfortable for one MySQL cluster. Gotchas: a mega-hotel (a Las Vegas resort) is a hot shard that hashing cannot split, so consider a directory-based mapping that lets you pin or move big properties; cross-hotel queries (search, reports) must scatter-gather or read from a denormalised search/analytics store. Read the <a href="../../system-design/sharding.html">Sharding</a> page for the broader menu.</p>
+        <div class="diagram-box"> hotel_id ──► shard map ─┬─► <span class="hi">DB shard 0</span> (hotels 0,16,32..)  primary + replicas
+                           ├─► <span class="hi">DB shard 1</span>
+                           ├─► ...
+                           └─► <span class="hi">DB shard 15</span>      each: ~1,875 QPS at 30K total</div>
+        <p class="mini-heading">Step 2: cache availability in Redis</p>
+        <p>Most traffic is browsing, not booking (300:3 in our funnel). Serve availability reads from Redis with keys like <code>hotelID_roomTypeID_date</code> holding the number of rooms left, with a TTL so past dates expire. The reservation service still decides against the database; the cache only powers the "X rooms left" display and search filtering.</p>
+        <div class="diagram-box"> Browse ─► Inventory API ─► <span class="hi">Redis</span> {hotel_type_date: remaining}  <span class="dim">(stale-tolerant)</span>
+ Book   ─► Reservation svc ─► <span class="ok">DB (source of truth)</span> ──► binlog/WAL ──► <span class="hi">CDC (Debezium)</span> ──► Kafka ──► cache updater ──► Redis</div>
+        <p>Keeping Redis in step is done via change-data-capture: Debezium tails the MySQL binlog or PostgreSQL WAL, emits row changes to Kafka and a consumer writes them into Redis. This is asynchronous, so the cache can briefly be wrong. That is acceptable <em>because</em> the DB check is authoritative: the worst case is a user seeing "2 left", clicking, and being told it is gone. The alternative, write-through from the application, has dual-write hazards (crash between DB commit and cache write). Do not read the cache inside the booking transaction, and never let a cache miss storm the database on a viral date; see <a href="../../system-design/caching.html">Caching</a> and request coalescing.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Cache pros</h4><ul><li>Absorbs the 100:1 browse-to-book read ratio.</li><li>Millisecond responses.</li></ul></div>
+          <div class="trade-col cons"><h4>Cache cons</h4><ul><li>Staleness shows up as UX friction ("sold out" after click).</li><li>Another moving part; CDC lag must be monitored.</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Microservice consistency</span>
+        <h2>One database, or sagas?</h2>
+        <p>Purist microservices give each service its own datastore. If Reservation and Inventory were separate services with separate databases, "create reservation and decrement inventory" becomes a distributed operation: a crash between the two calls leaves a reservation with no hold (oversell) or a hold with no reservation (phantom stock loss). In a monolith, or a service sharing one relational database, that is just a local transaction.</p>
+        <div class="diagram-box"> <span class="ok">Local transaction (one DB)</span>                 <span class="warn">Across services</span>
+ BEGIN                                       Reservation svc ──INSERT──► DB-R
+   INSERT reservation                              │
+   UPDATE inventory                                ├──decrement──► Inventory svc ──► DB-I   <span class="warn">✗ may fail after DB-R committed</span>
+ COMMIT   (all or nothing)                         └──charge────► Payment svc   ──► DB-P</div>
+        <p>Two classic remedies if you do split the data:</p>
+        <table class="data-table">
+          <thead><tr><th>Technique</th><th>Mechanics</th><th>Strengths</th><th>Weaknesses</th></tr></thead>
+          <tbody>
+            <tr><td>Two-phase commit (2PC)</td><td>A coordinator asks all participants to PREPARE (durably promise to commit) and, if all vote yes, tells them to COMMIT</td><td>Atomic across nodes, strong consistency</td><td>Blocking if the coordinator dies after PREPARE, held locks across network round trips, slow, rarely supported across heterogeneous services</td></tr>
+            <tr><td>Saga</td><td>A chain of local transactions; each step has a compensating action (release rooms, refund) run in reverse order if a later step fails. Orchestrated by a coordinator or choreographed with events</td><td>No distributed locks; scales; tolerates long steps like payments</td><td>Only eventually consistent, intermediate states are visible, compensations must be idempotent and always possible, harder to reason about and test</td></tr>
+          </tbody>
+        </table>
+        <p>The chapter's pragmatic stance, which I endorse: keep reservation and inventory in the same service and database, because they share a strong invariant, and reserve distributed coordination for the genuinely separate boundary, payment. For payments use a saga-like flow (pending hold, charge, confirm or compensate) with idempotency keys at every hop, which is the pattern developed in <a href="./26-payment-system.html">Chapter 26</a>. Every boundary you add costs reasoning time; spend it only where the business invariant demands it. For the broader pattern language see <a href="../../event-driven-architecture-guide.html">Event-Driven Architecture</a>.</p>
+        <div class="warn-box"><strong>Dual-write trap:</strong> "commit to DB, then publish an event to Kafka" can lose the event if the process dies between the two. Use a transactional outbox (write the event row in the same transaction, relay it with CDC) so the notification, email and analytics side effects are exactly as reliable as the booking itself.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Beyond the notes</span>
+        <h2>Lifecycle details a senior engineer raises</h2>
+        <ul class="check-list">
+          <li><strong>Cancellation:</strong> inside one transaction set status = canceled and decrement <code>total_reserved</code> for each night by the reservation's room count; make it idempotent by checking the current status. Refunds are a separate saga step.</li>
+          <li><strong>Modifications</strong> (change dates): model as cancel-and-rebook inside one transaction, locking nights in sorted order to avoid deadlocks.</li>
+          <li><strong>Pricing consistency:</strong> snapshot the nightly rates on the reservation at booking time. Later repricing must not alter confirmed bookings.</li>
+          <li><strong>Overbooking policy:</strong> factor per hotel and per room type, tuned from historical cancellation and no-show rates; ops needs a "walk-guest" workflow when everyone shows up.</li>
+          <li><strong>Check-in assignment:</strong> pick a physical room at check-in from the <code>room</code> table; keeps inventory logic independent from housekeeping.</li>
+          <li><strong>Time zones:</strong> dates are the hotel's local calendar days. Store dates, not UTC timestamps, for the stay.</li>
+          <li><strong>Sold-out thundering herd:</strong> when a promo opens, put a lightweight queue or waiting room in front of the booking endpoint rather than letting thousands of retries hammer one row.</li>
+          <li><strong>Search consistency:</strong> availability in search results may lag; always re-verify at booking.</li>
+          <li><strong>Audit:</strong> append-only reservation events table; essential for disputes with guests and hotels.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decision table</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Chosen</th><th>Alternative</th><th>Reasoning</th></tr></thead>
+          <tbody>
+            <tr><td>Database</td><td>Relational, ACID</td><td>NoSQL (Dynamo-style)</td><td>Tiny write rate, strong invariants, multi-row atomicity</td></tr>
+            <tr><td>Unit of sale</td><td>Room type per date</td><td>Specific room</td><td>Matches hotel business; enables overbooking</td></tr>
+            <tr><td>Duplicate click</td><td>Idempotency key + UNIQUE</td><td>Disable button only</td><td>Server-side guarantee; survives retries</td></tr>
+            <tr><td>Race on last room</td><td>Optimistic / guarded UPDATE / CHECK</td><td>Pessimistic lock</td><td>No long locks; contention is low</td></tr>
+            <tr><td>Service boundaries</td><td>Reservation + inventory together</td><td>Pure microservices + saga</td><td>Keep ACID where the invariant lives</td></tr>
+            <tr><td>Scale-out</td><td>Shard by hotel_id, Redis for reads</td><td>Cross-shard transactions</td><td>Single-shard transactions stay simple</td></tr>
+            <tr><td>Cache sync</td><td>CDC, asynchronous</td><td>Write-through</td><td>No dual-write bug; staleness tolerated</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks and what you do about it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Double submit / client retry</td><td>Duplicate reservations and charges</td><td>reservation_id UNIQUE; replay stored response; idempotency key to payment provider</td></tr>
+            <tr><td>Concurrent last-room race</td><td>Oversell beyond 110%</td><td>Guarded UPDATE or CAS plus CHECK constraint; test with concurrent load</td></tr>
+            <tr><td>Deadlock between multi-night bookings</td><td>Random aborts</td><td>Always touch nights in ascending date order; retry on deadlock error</td></tr>
+            <tr><td>Crash after hold, before payment</td><td>Rooms stuck pending</td><td>Pending TTL sweeper releases; reconcile with payment provider</td></tr>
+            <tr><td>Payment succeeded, response lost</td><td>Customer charged, reservation not confirmed</td><td>Idempotent charge retried by the same id; periodic payment-to-reservation reconciliation</td></tr>
+            <tr><td>Primary DB failure</td><td>Writes blocked</td><td>Synchronous or semi-sync replica with automated failover; accept a short booking outage over split-brain</td></tr>
+            <tr><td>Stale cache</td><td>"Available" shown for sold-out room</td><td>Authoritative DB check; friendly error; CDC lag alerts</td></tr>
+            <tr><td>Hot hotel on a shard</td><td>One shard saturated</td><td>Directory mapping to move/pin; queue/waiting room; larger instance for that shard</td></tr>
+            <tr><td>Retry storm on optimistic conflicts</td><td>Latency and CPU spike</td><td>Jittered backoff, retry cap, switch hot paths to guarded UPDATE</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production gotchas</span>
+        <h2>The knees of the curve</h2>
+        <ul class="check-list">
+          <li><strong>First knee: row contention, not QPS.</strong> One row per (hotel, type, date) means a flash sale on one property funnels thousands of writers into a handful of rows. Throughput on a single hot row is bounded by how fast the DB can serialise updates, typically in the low thousands per second at best, and lower with an application round trip inside the lock.</li>
+          <li><strong>Second knee: database size</strong> only becomes real after you retain years of reservations; archive early.</li>
+          <li><strong>Isolation level surprises.</strong> InnoDB's REPEATABLE READ gap locks can block inserts into date ranges; PostgreSQL's READ COMMITTED re-evaluates the WHERE clause after a lock wait (which makes the guarded UPDATE correct), but the same pattern under snapshot isolation needs care. Know your engine.</li>
+          <li><strong>Pending hold length</strong> is a business knob: too short and payment pages time out, too long and inventory looks artificially scarce.</li>
+          <li><strong>Overselling on cancel races.</strong> Cancellation and booking on the same row are just two writers; the same guard applies, but double-cancel must not double-decrement.</li>
+          <li><strong>Backfill and the cron.</strong> If the daily cron that creates future inventory rows fails, bookings for that date fail. Alert on it, and make the job idempotent (INSERT ... ON CONFLICT DO NOTHING).</li>
+          <li><strong>Testing.</strong> Concurrency bugs do not show in unit tests. Run a load test where N clients fight for K rooms and assert reserved never exceeds the limit, as in the example below.</li>
+          <li><strong>Observability.</strong> Track conflict/retry rate, deadlock count, pending age, cache hit ratio, CDC lag, and the invariant itself via a periodic query that finds any row with reserved over the limit.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>Optimistic inventory with idempotent multi-night booking</h2>
+        <p>This program models one database shard: inventory rows with version numbers, a UNIQUE reservation table, and a transaction primitive that applies a multi-night write only if every row's version still matches (the compare-and-set that an <code>UPDATE ... WHERE version = ?</code> per row inside one transaction gives you). Client code reads, yields to the event loop to simulate network and think time so other bookings interleave, then commits and retries on conflict. It runs three scenarios: a double click, a 150-user stampede on 107 sellable rooms, and a multi-night booking that must be all-or-nothing.</p>
+        <span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Hotel inventory: room_type_inventory rows with optimistic locking (version CAS),
+// 110% overbooking, multi-night atomic reservation, idempotent reservation_id.
+import assert from 'node:assert/strict';
+
+class Db {                                    // tiny stand-in for one relational shard
+  inventory = new Map();                      // "hotel|type|date" -&gt; {total, reserved, version}
+  reservations = new Map();                   // reservation_id (UNIQUE) -&gt; row
+  casFailures = 0;
+  seed(hotel, type, dates, total) { for (const d of dates) this.inventory.set(`${hotel}|${type}|${d}`, { total, reserved: 0, version: 0 }); }
+  read(key) { return structuredClone(this.inventory.get(key)); }
+  // one atomic DB transaction: UPDATE ... SET reserved=?, version=version+1 WHERE key=? AND version=? (for every night),
+  // plus INSERT reservation (UNIQUE id). All-or-nothing.
+  commit(rid, writes, row) {
+    if (this.reservations.has(rid)) return 'DUPLICATE';
+    for (const w of writes) if (this.inventory.get(w.key).version !== w.expectVersion) { this.casFailures++; return 'CONFLICT'; }
+    for (const w of writes) { const r = this.inventory.get(w.key); r.reserved = w.newReserved; r.version++; }
+    this.reservations.set(rid, row); return 'OK';
+  }
+}
+const tick = () =&gt; new Promise((r) =&gt; setImmediate(r));   // yields =&gt; interleaving between read and write
+
+const OVERBOOK = 1.10;
+async function reserve(db, { rid, hotel, type, dates, rooms }, maxRetries = 8) {
+  for (let attempt = 0; attempt &lt;= maxRetries; attempt++) {
+    const snap = dates.map((d) =&gt; { const key = `${hotel}|${type}|${d}`; return { key, ...db.read(key) }; });
+    await tick();                                          // user "thinks" / network hop: others may commit now
+    for (const s of snap) if (s.reserved + rooms &gt; Math.floor(OVERBOOK * s.total)) return { rid, status: 'SOLD_OUT', night: s.key };
+    const res = db.commit(rid, snap.map((s) =&gt; ({ key: s.key, expectVersion: s.version, newReserved: s.reserved + rooms })),
+      { rid, hotel, type, dates, rooms, status: 'PENDING' });
+    if (res === 'OK') return { rid, status: 'RESERVED', attempt };
+    if (res === 'DUPLICATE') return { rid, status: 'ALREADY_BOOKED' };   // idempotent: same answer as the first call
+    await tick();                                          // CONFLICT =&gt; re-read and retry
+  }
+  return { rid, status: 'RETRY_EXHAUSTED' };
+}
+
+const nights = ['2021-06-01', '2021-06-02', '2021-06-03'];
+const db = new Db(); db.seed(211, 1001, nights, 100);       // capacity 100, sellable 110
+
+// 1) double click: same reservation_id fired twice concurrently
+const dbl = await Promise.all([1, 2].map(() =&gt; reserve(db, { rid: 'R-1', hotel: 211, type: 1001, dates: nights, rooms: 3 })));
+assert.deepEqual(dbl.map((r) =&gt; r.status).sort(), ['ALREADY_BOOKED', 'RESERVED']);
+
+// 2) stampede: 150 distinct users each want 1 room for all 3 nights; only 107 rooms of sellable stock remain
+const results = await Promise.all(Array.from({ length: 150 }, (_, i) =&gt;
+  reserve(db, { rid: 'U-' + i, hotel: 211, type: 1001, dates: nights, rooms: 1 }, 400)));
+const ok = results.filter((r) =&gt; r.status === 'RESERVED').length;
+const sold = results.filter((r) =&gt; r.status === 'SOLD_OUT').length;
+for (const n of nights) assert.equal(db.read(`211|1001|${n}`).reserved, 110);   // never above 110% of 100
+assert.equal(ok, 107); assert.equal(ok + sold, 150);
+
+// 3) partial-stay atomicity: night 2 is full, so a 3-night request must not leave night 1 or 3 touched
+const db2 = new Db(); db2.seed(9, 1, nights, 10);
+db2.inventory.get('9|1|2021-06-02').reserved = 11;
+const r3 = await reserve(db2, { rid: 'X', hotel: 9, type: 1, dates: nights, rooms: 1 });
+assert.equal(r3.status, 'SOLD_OUT');
+assert.equal(db2.read('9|1|2021-06-01').reserved, 0);
+
+console.log('double-click      :', dbl.map((r) =&gt; r.status).join(' + '));
+console.log('stampede 150 users: reserved', ok, '| sold out', sold, '| CAS conflicts retried', db.casFailures);
+console.log('reserved per night:', nights.map((n) =&gt; db.read(`211|1001|${n}`).reserved).join(', '), '(cap = floor(1.1*100) = 110)');
+console.log('multi-night all-or-nothing:', r3.status, '- night 1 untouched =', db2.read('9|1|2021-06-01').reserved === 0);</code></pre>
+        <p class="code-caption">Prints: the double click resolves to RESERVED + ALREADY_BOOKED; the 150-user stampede yields exactly 107 reservations (110 minus the 3 already held), 43 sold out, and roughly ten thousand version conflicts retried; every night ends at exactly 110 reserved; and a stay whose middle night is sold out leaves the other nights untouched. All assertions pass on Node 20+.</p>
+        <div class="insight-box"><strong>Two lessons in the output:</strong> the invariant held (110, 110, 110) even under heavy interleaving, and the large conflict count is the optimistic-locking cost made visible. With real network latency and a shared hot row, switch to the guarded UPDATE so the database serialises the check-and-write for you.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview and design review checklist</h2>
+        <ul class="check-list">
+          <li>Scale: 5K hotels, 1M rooms, ~240K reservations/day, ~3 TPS, funnel to 30 and 300 QPS.</li>
+          <li>Relational DB justified by ACID and low write rate.</li>
+          <li>Unit of sale is room type; inventory row per (hotel, type, date); half-open date ranges.</li>
+          <li>Overbooking expressed as a per-hotel factor and enforced at write time with integer maths.</li>
+          <li>Reservation status state machine; pending hold with TTL sweeper.</li>
+          <li>Idempotency key with UNIQUE constraint; response replay.</li>
+          <li>Race condition explained with the two-transaction timeline; three cures compared.</li>
+          <li>Ordered locking against deadlocks; small transactions; no payment call inside a lock.</li>
+          <li>Scale plan: replicas, archive, shard by hotel_id (1,875 QPS per shard at 30K/16), Redis plus CDC.</li>
+          <li>Consistency plan: keep reservation+inventory together; Saga vs 2PC only where needed; outbox for events.</li>
+          <li>Reconciliation with the payment provider and an invariant monitor.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not just use a distributed lock (Redis, ZooKeeper) per room?</summary><p>It adds a second system whose state can disagree with the database (lock expiry during a GC pause, failover losing locks), and it still does not protect against writers that bypass it. The inventory row is already a natural, transactional lock. Distributed locks make sense when the protected resource is not in a transactional store; here it is.</p></details>
+        <details><summary>How do you implement overbooking safely?</summary><p>Treat the limit as data: <code>floor(factor x total_inventory)</code> with an integer result, enforced in the same guarded UPDATE or CHECK that protects normal capacity. Set the factor per hotel from historical cancellation and no-show rates, and give operations a workflow for the days when too many guests arrive.</p></details>
+        <details><summary>A user holds the last room in the checkout page for 20 minutes. What happens?</summary><p>The pending hold has a TTL (say 10 to 15 minutes). A sweeper marks expired pending reservations as expired and decrements total_reserved, in a transaction that rechecks the status so a payment landing at the same instant wins or loses cleanly. The payment step must verify the hold still exists before charging, otherwise refund automatically.</p></details>
+        <details><summary>Would you ever choose pessimistic locking?</summary><p>Yes for short, low-volume administrative changes (moving a booking, bulk inventory edit) and in systems where one row sees heavy contention and retry storms would be worse than queueing. Keep the transaction minimal and lock rows in a canonical order. For the customer booking path, a guarded UPDATE gives similar safety with a much shorter lock.</p></details>
+        <details><summary>How does this change for concerts or flash sales with 100K users on 1,000 seats?</summary><p>Contention dominates, so add a virtual waiting room to admit users at a controlled rate, allow short seat holds with expiry, and consider queue-based serialisation per event so the database sees one writer at a time. See the seat-race write-up in <a href="../../bookmyshow-seat-race-condition-distributed-locking.html">BookMyShow seat race condition</a>.</p></details>
+        <details><summary>Where does eventual consistency show up, and where is it forbidden?</summary><p>Allowed: search results, availability badges, analytics, emails, reporting replicas. Forbidden: the decision to accept a reservation and the payment-to-reservation link. Those run on the primary with strong consistency, and anything downstream consumes the committed change through CDC or an outbox.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./21-ad-click-aggregation.html">Chapter 21: Ad Click Event Aggregation</a> — previous chapter; the idempotent-sink idea reappears there.</li>
+          <li><a href="./23-distributed-email-service.html">Chapter 23: Distributed Email Service</a> — next chapter.</li>
+          <li><a href="./26-payment-system.html">Chapter 26: Payment System</a> — the payment step and reconciliation this flow depends on.</li>
+          <li><a href="../../bookmyshow-seat-race-condition-distributed-locking.html">BookMyShow seat race condition</a> — the same race on seats, with locking approaches.</li>
+          <li><a href="../../system-design/concurrency-control.html">Concurrency Control</a> — optimistic vs pessimistic locking in general.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — safe retries via keys.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — choosing a shard key like hotel_id.</li>
+          <li><a href="../../payment-gateway-system-design.html">Payment Gateway System Design</a> — idempotent charging in practice.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The notes list no additional resource links for this chapter.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Hotel booking is a small-scale, high-stakes correctness problem. Model stock as per-night counts by room type, make retries harmless with a unique reservation id, protect the capacity invariant atomically in the database (guarded update, version check or constraint), keep reservation and inventory in one transactional boundary, and only then reach for shards, caches and sagas as the numbers force you.</p>
+      </section>
+    </main>
+  </body>
+</html>

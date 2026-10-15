@@ -225,6 +225,22 @@ After writing the file and updating `index.html` and `graph.html`, verify:
 
 ---
 
+## PHASE 5-B — Academy Portal Map (only for Claude Academy / Skilljar-sourced topics)
+
+If the topic was built from `academy.claude.com` or `anthropic-partners.skilljar.com` / `anthropic.skilljar.com` pages:
+
+1. Append an entry per topic page to `ENTRIES` in `/academy-map.js` (repo root):
+   ```js
+   { title: 'Shown in the chooser dialog', portal: ['https://…actual lesson URL…'], local: 'topics/<folder>/<file>.html' },
+   ```
+   `local` is relative to the repo root; `portal` may be a string or an array (several lessons → one local page).
+2. Keep **both** references: the page's source link stays the actual portal URL; the registry supplies the local one. Do not replace portal URLs with local ones.
+3. Pages that list portal links and should offer the chooser (hub/crawl-map pages, `topics/claude-partner-academy-learning-guide.html`) must include `<script src="…/academy-map.js"></script>` (relative path to the repo root). Mapped links then show an "in Hub" marker and, on click, ask: actual portal topic, or the local topic in a new tab.
+4. If the topic corresponds to an item in `topics/claude-partner-academy-learning-guide.html`, add portal links for it inside that item (same markup as the G.2 "Learning Hub map" note) so the chooser applies.
+5. Verify: every new `local` file exists, and each `portal` URL appears in `academy-map.js` exactly once.
+
+---
+
 ## PHASE 6 — Category-Batch Cross-Linking
 
 When building multiple topics in the same category in one run:

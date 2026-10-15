@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Rate Limiter | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 4 of the System Design Interview Handbook (created 2026-10-15 from liquidslr/system-design-notes ch.04). Covers rate limiter requirements, placement (client, server, gateway middleware), the five algorithms with memory and accuracy trade-offs, rules and headers (429, Retry-After), Redis architecture with atomic Lua and sorted sets, race conditions, multi-data-center sync, fail-open vs fail-closed, and client best practice. Includes a runnable JavaScript implementation of all five algorithms with an injectable clock plus a Redis Lua token bucket, executed with node. Related pages - hub rate-limiting, throttling, api-gateway, chapter 5 and 6. Read time about 17 min.</div>
+        <h1>Design a Rate Limiter</h1>
+        <p class="summary">A rate limiter caps how much traffic a client can send, protecting services from abuse, overload and runaway cost. This chapter compares the five classic algorithms (token bucket, leaky bucket, fixed window, sliding log, sliding counter), then covers placement, rules, Redis-backed distributed counting, race conditions, multi-region sync, and what clients should do when throttled.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">4 of 28 · Part 2 Building Blocks</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">17 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">token bucket, leaky bucket, fixed window, sliding window log, sliding window counter, Redis Lua, HTTP 429</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Redis, Stripe, AWS API Gateway, Cloudflare, Envoy, Lyft ratelimit, Uber ratelimit</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">A rate limiter answers one question millions of times per second: "has this caller used up their share?" It must answer in microseconds, with almost no memory per caller, correctly across a fleet of servers, and without becoming the outage it was built to prevent.</p>
+        <div class="callout"><p><strong>Core idea:</strong> rate limiting is admission control. Choose a client identity, a rule (limit, window, burst), an algorithm that approximates the rule cheaply, and a shared atomic counter. Everything else (headers, retries, multi-region) is detail around those four decisions.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known public design</span>
+        <h2>Why the big API providers all throttle, and how they say they do it</h2>
+        <p>Payment, source-hosting and cloud providers publish their limits because the limiter is part of the product contract. Stripe has described, in public engineering writing, layering several limiters, including a request-rate limiter based on a token bucket and separate limiters that protect concurrent requests and load. GitHub documents hourly request budgets with response headers that report remaining quota. Cloudflare has written about approximating a sliding window with two counters. The common thread: no single algorithm is used everywhere; production systems stack a cheap global limit, per-endpoint limits, and load-shedding behind them.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Why it exists</span>
+        <h2>What rate limiting protects</h2>
+        <ul class="check-list">
+          <li><strong>Availability.</strong> A single misbehaving client, buggy retry loop, or DoS attempt can starve everyone else. Limiting prevents resource starvation.</li>
+          <li><strong>Cost.</strong> Calls to paid third-party APIs, expensive queries or ML inference cost real money; a cap bounds the bill. It also lets you size servers for a defined load rather than an unbounded one.</li>
+          <li><strong>Fairness and tiering.</strong> Free tier gets 100 requests per minute, paid tier gets 10,000. The limiter is how you sell capacity.</li>
+          <li><strong>Abuse containment.</strong> Credential stuffing, scraping, SMS pumping and signup spam are rate problems before they are anything else.</li>
+        </ul>
+        <p>Rate limiting is related to but distinct from backpressure, load shedding and circuit breaking. A limiter enforces a policy per caller regardless of current health; load shedding reacts to current overload regardless of caller; a circuit breaker protects a caller from a failing dependency. A mature system has all three.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · scope</span>
+        <h2>Requirements and numbers</h2>
+        <table class="data-table">
+          <thead><tr><th>Requirement</th><th>Meaning here</th></tr></thead>
+          <tbody>
+            <tr><td>Server-side API limiter</td><td>Enforced where we control the code; client-side limiting is advisory only.</td></tr>
+            <tr><td>Flexible rules</td><td>By user id, IP, API key, endpoint, or any combination; different limits per tier.</td></tr>
+            <tr><td>Distributed</td><td>Works across many API servers sharing one budget per caller.</td></tr>
+            <tr><td>Low latency</td><td>Added overhead should be well under a millisecond locally and low single-digit milliseconds with a network hop; it sits on every request.</td></tr>
+            <tr><td>Low memory</td><td>State per caller in the order of bytes to a few hundred bytes.</td></tr>
+            <tr><td>Informative</td><td>Throttled callers get a clear status and retry hint.</td></tr>
+            <tr><td>Fault tolerant</td><td>A limiter outage must not take the API down (decide fail-open vs fail-closed).</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Back-of-envelope: how big is the state?</p>
+        <div class="diagram-box">1M active callers, one rule each
+  counter-based (fixed window / token bucket):  ~100 B per key in Redis  →  ~100 MB
+  sliding log, limit 500 per minute, caller at the limit:
+      500 timestamps x 8 B  = 4 KB raw  → ~4 GB for 1M callers
+      Redis sorted-set overhead is several times higher → tens of GB
+  Verdict: log-based limiting is affordable for low limits (login attempts) and not for high ones.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · high-level design</span>
+        <h2>Where does the limiter live?</h2>
+        <table class="data-table">
+          <thead><tr><th>Placement</th><th>Pros</th><th>Cons</th></tr></thead>
+          <tbody>
+            <tr><td>Client-side</td><td>Saves a round trip; politeness.</td><td>Forgeable and bypassable; never a security control.</td></tr>
+            <tr><td>Inside each service</td><td>Full application context (user, plan, endpoint cost).</td><td>Duplicated across services; per-node state unless backed by a shared store.</td></tr>
+            <tr><td>Middleware / API gateway</td><td>One place, language-neutral, rejects before expensive work; often bundled with auth, TLS, routing.</td><td>Needs a shared store for fleet-wide limits; less business context.</td></tr>
+            <tr><td>Edge / CDN / WAF</td><td>Drops floods before they reach you.</td><td>Coarse rules, mostly IP-based.</td></tr>
+          </tbody>
+        </table>
+        <p>Guidance: in a microservices environment, put the general limits in the gateway (or a sidecar such as Envoy with a rate-limit service) and keep specific, business-aware limits (for example "five password attempts per account per hour") in the owning service. If you lack the staff to run the limiter, buy it: cloud gateways, CDNs and WAFs include one. Match algorithm to business need rather than defaulting to your favourite.</p>
+        <div class="diagram-box">  client ──▶ [ rate-limit middleware ] ──allowed──▶ API servers
+                  │   ▲
+        counters  ▼   │ rules (cached from config store)
+              [ Redis ]     [ rules store ]
+                  │
+         over limit: HTTP 429 + Retry-After   (or queue / drop, per policy)</div>
+        <p class="mini-heading">Rules and responses</p>
+        <ul>
+          <li><strong>Rules as configuration</strong>, loaded from files or a config service and cached in the middleware, for example: "domain=messaging, descriptor=(key=message_type, value=marketing): 5 per day" (the shape used by Lyft's open-source rate-limit service). Keep a version and an audit trail; a bad rule is a production incident.</li>
+          <li><strong>Reject with HTTP 429 Too Many Requests.</strong> Include headers telling the client what happened: the allowed limit, the remaining quota and either how long to wait (<code>Retry-After</code>) or when the window resets. The classic de facto names are <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, <code>X-RateLimit-Reset</code>; a standardised <code>RateLimit</code> header family is in progress at the IETF.</li>
+          <li><strong>Hard vs soft limits.</strong> Hard: never exceed. Soft: allow short overshoot, or log and alert without blocking, which is how you roll out a new rule safely.</li>
+          <li><strong>Queue or drop.</strong> Rate-limited requests may be dropped, delayed (leaky bucket) or sent to a lower-priority queue for later, depending on semantics.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 3 · algorithms</span>
+        <h2>The five algorithms</h2>
+
+        <p class="mini-heading">1. Token bucket</p>
+        <p>A bucket of capacity <em>B</em> holds tokens, refilled at rate <em>r</em> per second up to <em>B</em>. A request spends one token (or more, for expensive operations); no token, no service. State per caller: two numbers (token count and last-refill time). Refill is computed lazily on each request, so no timers are needed: <code>tokens = min(B, tokens + (now - last) x r)</code>.</p>
+        <div class="diagram-box">B=10, r=2/s     t=0:  [##########] 10   burst of 10 allowed → 0 left, 11th rejected
+                t=1s: [##........]  2   refill 2 → two more allowed, then rejected again
+long-run average ≤ 2 req/s, burst ≤ 10</div>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Tiny state; O(1).</li><li>Explicitly allows bursts, which matches human traffic.</li><li>Cost-weighted requests are natural.</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>Two parameters to tune.</li><li>Bursts of B are allowed on every refill period, which may exceed what a fragile backend tolerates.</li></ul></div>
+        </div>
+        <p>You usually keep several buckets: per user, per IP, per endpoint, and one global bucket protecting the backend (for example a user may burst on search but all users together cannot exceed the cluster's capacity).</p>
+
+        <p class="mini-heading">2. Leaky bucket</p>
+        <p>Requests enter a FIFO queue of fixed size and are processed at a constant outflow rate. A full queue drops new requests. Conceptually it is a traffic shaper: arbitrary input, steady output. There are two common implementations. The queue form actually buffers and delays requests (good for smoothing writes to a fragile downstream). The meter form tracks a "water level" that drains at the leak rate and rejects when it would overflow; that is arithmetically a token bucket with the roles inverted, and it is what Uber's open-source Go limiter approximates by spacing calls rather than queuing them.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Pros</h4><ul><li>Smooth, predictable output rate.</li><li>Memory-efficient with a bounded queue.</li></ul></div>
+          <div class="trade-col cons"><h4>Cons</h4><ul><li>A burst fills the queue with old requests; recent ones wait or drop (latency).</li><li>Two parameters (queue size, leak rate).</li></ul></div>
+        </div>
+
+        <p class="mini-heading">3. Fixed window counter</p>
+        <p>Time is divided into windows (for example one minute). Each caller has a counter keyed by window id; increment per request, reject when it exceeds the limit. It is the simplest possible limiter and maps to Redis <code>INCR</code> plus <code>EXPIRE</code>. The flaw is the boundary effect: with a limit of 5 per second, a caller can send 5 at the end of one window and 5 at the start of the next, so 10 requests flow in roughly 100 ms, double the quota. In the worst case the burst is 2x the limit.</p>
+        <div class="diagram-box">limit 5 / 1000 ms
+|---------------- window 0 ----------------|---------------- window 1 ----------------|
+                               ##### (t=900..980)  ##### (t=1000..1080)
+                               10 requests in 180 ms: each window saw only 5 → all allowed</div>
+
+        <p class="mini-heading">4. Sliding window log</p>
+        <p>Keep a timestamp for every accepted request. On a new request, drop timestamps older than <em>now - window</em>, count what remains, and accept only if the count is under the limit. It is exact: in any rolling window the limit holds. The price is memory proportional to the limit (see the arithmetic above). Decide whether rejected requests are logged; not logging them lets a client keep hammering without extending its own penalty.</p>
+
+        <p class="mini-heading">5. Sliding window counter</p>
+        <p>A hybrid. Keep counts for the current and previous fixed windows, and estimate the rolling count by weighting the previous window by how much of it still overlaps the rolling window:</p>
+        <div class="diagram-box">estimate = previous_count x (1 - fraction_of_current_window_elapsed) + current_count
+example: limit 100/min, previous window 84, current window 36, we are 25% into the current window
+         estimate = 84 x 0.75 + 36 = 99   → request allowed (new estimate 100)
+         the next request: 84 x 0.75 + 37 = 100 → at the limit, reject</div>
+        <p>It assumes requests in the previous window were evenly spread, so it is an approximation, but a very good one on real traffic (Cloudflare reported negligible error when they adopted it), and it needs only two counters per caller. For most public APIs this is the best default.</p>
+
+        <table class="data-table">
+          <thead><tr><th>Algorithm</th><th>Memory / caller</th><th>Burst behaviour</th><th>Accuracy</th><th>Best for</th></tr></thead>
+          <tbody>
+            <tr><td>Token bucket</td><td>O(1), 2 numbers</td><td>Allows bursts up to B</td><td>Exact for the bucket model</td><td>Public APIs, user-facing actions</td></tr>
+            <tr><td>Leaky bucket</td><td>O(1) meter, O(queue) buffered</td><td>Smooths to constant rate</td><td>Exact</td><td>Protecting a fixed-rate downstream</td></tr>
+            <tr><td>Fixed window</td><td>O(1), 1 counter</td><td>Up to 2x limit at window edges</td><td>Poor at boundaries</td><td>Coarse quotas (daily, hourly)</td></tr>
+            <tr><td>Sliding log</td><td>O(limit)</td><td>Strict</td><td>Exact</td><td>Low limits that must be exact (login)</td></tr>
+            <tr><td>Sliding counter</td><td>O(1), 2 counters</td><td>Smoothed</td><td>Approximate, very close</td><td>General high-volume limiting</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 4 · distributed design</span>
+        <h2>Counters in Redis, and why races matter</h2>
+        <p>Per-server counters undercount: with ten API servers and a limit of 100, a caller routed round-robin could get 1,000. So counters live in a shared, fast store; Redis is the usual choice because it is in-memory, supports atomic increments and expiry, and handles hundreds of thousands of operations per second per node. The middleware flow is: build the key (for example <code>rl:{user}:{endpoint}</code>), fetch or update the counter, decide, and either forward or return 429.</p>
+        <p class="mini-heading">The race condition</p>
+        <p>The naive sequence "GET count, check, SET count+1" is a read-modify-write across the network. Two servers can both read 99, both decide "allowed", and both write 100, letting 101 requests through. Fixes, from least to most robust:</p>
+        <ol>
+          <li><strong>Atomic primitives.</strong> For fixed window, <code>INCR</code> is atomic: increment first, then compare. Set the expiry only when the returned value is 1.</li>
+          <li><strong>Lua scripts.</strong> Redis executes a script atomically, so refill-and-take for a token bucket (below) is race-free and costs one round trip. This is the standard production answer.</li>
+          <li><strong>Sorted sets</strong> for the sliding log: <code>ZREMRANGEBYSCORE</code> (drop old), <code>ZCARD</code> (count), <code>ZADD</code> (record), wrapped in a <code>MULTI</code> or a script.</li>
+          <li><strong>Locks</strong> work but serialise every request and add failure modes; avoid.</li>
+        </ol>
+        <div class="warn-box"><strong>Use the store's clock.</strong> If each API server passes its own timestamp, clock skew between servers corrupts refill maths. In a Redis script, read <code>TIME</code> inside the script (or tolerate skew by design). Also give every key a TTL, or abandoned callers leak memory forever.</div>
+        <p class="mini-heading">Scaling the limiter itself</p>
+        <ul class="check-list">
+          <li>Shard keys across a Redis cluster by caller id (consistent hashing, chapter 5); a single caller always maps to one node, so atomicity is preserved.</li>
+          <li>Reduce traffic with local pre-aggregation: each API node keeps a small local allowance and syncs with Redis in batches. This trades accuracy (callers can overshoot by up to the sum of local allowances) for far fewer network calls. Good for high-volume tiers; avoid for strict security limits.</li>
+          <li>Use pipelining or connection pooling and keep Redis in the same availability zone; a cross-zone hop can cost more than the whole limiter budget.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Multi-data-center, failure policy and monitoring</h2>
+        <p><strong>Multiple regions.</strong> A global limit requires cross-region coordination, which is slow (tens to hundreds of milliseconds) and itself a failure risk. Common choices: (a) enforce limits per region with each region given a share of the budget, (b) route a caller to a home region by key so one region owns their counter, or (c) replicate counters asynchronously and accept brief overshoot (eventual consistency). Most systems pick (a) or (c); true global linearisable limits are rarely worth the latency.</p>
+        <p><strong>Fail open or closed.</strong> When Redis is unreachable, you must choose. <em>Fail open</em> (let traffic through) preserves availability but removes protection exactly when something is wrong; <em>fail closed</em> (reject) preserves protection but turns a limiter outage into a site outage. Typical practice: fail open for ordinary API quotas, fail closed for security-sensitive limits (login, OTP, payments), and give the client library a short timeout and a local fallback bucket. Make the middleware deliberately cheap to bypass, and alert loudly when it does.</p>
+        <p><strong>Rollout and tuning.</strong> Ship new rules in log-only (shadow) mode first; compare predicted rejections with real traffic; then enforce. Monitor the rejection rate per rule, the tail latency of the limiter, and the top-N throttled callers. A sudden rise in rejections is either an attack or a rule that is too tight after a traffic pattern change (a new marketing campaign, a flash sale), and you need the data to tell which.</p>
+        <p><strong>Layers.</strong> The chapter focuses on layer 7 (HTTP), but the same ideas apply at layer 3 and 4 (connection and packet rate via firewall rules such as iptables or cloud security tooling), at the database (connection and statement limits), and in queues (consumer concurrency). Defence works best in layers.</p>
+        <p><strong>Client best practice.</strong> Well-behaved clients cache responses to avoid redundant calls, respect <code>Retry-After</code>, back off exponentially with jitter, avoid retry storms, and handle 429 gracefully in the UI. A server can only protect itself so far; clients that retry instantly turn a limit into a thundering herd.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable example: all five algorithms with an injectable clock</h2>
+        <p>Every limiter takes a <code>now()</code> function so the tests are deterministic. The demo sends five requests just before a window boundary and five just after, and shows the fixed-window flaw: with a limit of 5 per second, fixed window admits all 10, while the sliding log and sliding counter admit only 5.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+
+// All limiters take an injectable clock (ms) so behaviour is deterministic.
+export class TokenBucket {
+  constructor(capacity, refillPerSec, now) { Object.assign(this, { capacity, refillPerSec, now });
+    this.tokens = capacity; this.last = now(); }
+  allow(cost = 1) {
+    const t = this.now();
+    this.tokens = Math.min(this.capacity, this.tokens + (t - this.last) / 1000 * this.refillPerSec);
+    this.last = t;                       // lazy refill: no timer needed
+    if (this.tokens &gt;= cost) { this.tokens -= cost; return true; }
+    return false;
+  }
+}
+export class LeakyBucket {               // queue drained at a constant rate (meter variant, no real queue)
+  constructor(capacity, leakPerSec, now) { Object.assign(this, { capacity, leakPerSec, now });
+    this.level = 0; this.last = now(); }
+  allow() {
+    const t = this.now();
+    this.level = Math.max(0, this.level - (t - this.last) / 1000 * this.leakPerSec); this.last = t;
+    if (this.level + 1 &lt;= this.capacity) { this.level += 1; return true; }
+    return false;
+  }
+}
+export class FixedWindow {
+  constructor(limit, windowMs, now) { Object.assign(this, { limit, windowMs, now }); this.win = -1; this.count = 0; }
+  allow() {
+    const w = Math.floor(this.now() / this.windowMs);
+    if (w !== this.win) { this.win = w; this.count = 0; }
+    return this.count &lt; this.limit ? (this.count++, true) : false;
+  }
+}
+export class SlidingLog {
+  constructor(limit, windowMs, now) { Object.assign(this, { limit, windowMs, now }); this.log = []; }
+  allow() {
+    const t = this.now();
+    while (this.log.length &amp;&amp; this.log[0] &lt;= t - this.windowMs) this.log.shift();
+    if (this.log.length &lt; this.limit) { this.log.push(t); return true; }  // rejected requests are not logged
+    return false;
+  }
+}
+export class SlidingCounter {            // weighted blend of previous and current fixed windows
+  constructor(limit, windowMs, now) { Object.assign(this, { limit, windowMs, now }); this.win = -1; this.cur = 0; this.prev = 0; }
+  allow() {
+    const t = this.now(), w = Math.floor(t / this.windowMs);
+    if (w !== this.win) { this.prev = (w === this.win + 1) ? this.cur : 0; this.cur = 0; this.win = w; }
+    const overlap = 1 - (t % this.windowMs) / this.windowMs;
+    const est = this.prev * overlap + this.cur;
+    if (est + 1 &lt;= this.limit) { this.cur++; return true; }
+    return false;
+  }
+}
+
+// ---- demo: the fixed-window boundary burst --------------------------------
+const run = (mk, times) =&gt; { let t = 0; const l = mk(() =&gt; t); return times.map(x =&gt; (t = x, l.allow())); };
+const count = a =&gt; a.filter(Boolean).length;
+// limit 5 per 1000 ms; send 5 requests at t=900..990 and 5 more at t=1000..1090
+const burst = [900, 920, 940, 960, 980, 1000, 1020, 1040, 1060, 1080];
+const fw = count(run(n =&gt; new FixedWindow(5, 1000, n), burst));
+const sl = count(run(n =&gt; new SlidingLog(5, 1000, n), burst));
+const sc = count(run(n =&gt; new SlidingCounter(5, 1000, n), burst));
+console.log(`burst across boundary -&gt; fixed:${fw} log:${sl} slidingCounter:${sc} (limit 5 per 1000ms)`);
+assert.equal(fw, 10); assert.equal(sl, 5); assert.ok(sc &lt;= 6);
+
+// token bucket: burst of 10 allowed, then ~2/s sustained
+{ let t = 0; const tb = new TokenBucket(10, 2, () =&gt; t);
+  const first = Array.from({ length: 12 }, () =&gt; tb.allow());
+  assert.equal(count(first), 10);
+  t = 1000; assert.equal(count([tb.allow(), tb.allow(), tb.allow()]), 2);
+  console.log('token bucket: burst 10 then', 2, 'per second -&gt; ok'); }
+// leaky bucket: steady drain
+{ let t = 0; const lb = new LeakyBucket(3, 1, () =&gt; t);
+  assert.equal(count([1, 2, 3, 4].map(() =&gt; lb.allow())), 3);
+  t = 1000; assert.equal(lb.allow(), true); assert.equal(lb.allow(), false);
+  console.log('leaky bucket: capacity 3, drain 1/s -&gt; ok'); }
+console.log('all checks passed');</code></pre>
+        <p class="code-caption">Prints "burst across boundary -&gt; fixed:10 log:5 slidingCounter:5 (limit 5 per 1000ms)", then confirms that the token bucket allows a burst of 10 then 2 per second and that the leaky bucket drains at 1 per second, ending with "all checks passed". Executed with node.</p>
+        <p>In production the check-and-update must be one atomic step against shared state. This Redis Lua script performs a token-bucket refill and spend in a single round trip (shown for reference; the JavaScript above is what was executed here).</p>
+        <span class="code-label">Redis Lua (reference, not run in this page)</span>
+        <pre><code class="language-lua">-- KEYS[1] = bucket key; ARGV = capacity, refill_per_sec, now_ms, cost
+local d = redis.call('HMGET', KEYS[1], 't', 'ts')
+local tokens = tonumber(d[1]) or tonumber(ARGV[1])
+local ts = tonumber(d[2]) or tonumber(ARGV[3])
+tokens = math.min(tonumber(ARGV[1]), tokens + (tonumber(ARGV[3]) - ts) / 1000 * tonumber(ARGV[2]))
+local ok = 0
+if tokens &gt;= tonumber(ARGV[4]) then tokens = tokens - tonumber(ARGV[4]); ok = 1 end
+redis.call('HSET', KEYS[1], 't', tokens, 'ts', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], math.ceil(tonumber(ARGV[1]) / tonumber(ARGV[2]) * 1000) * 2)
+return ok</code></pre>
+        <p class="code-caption">Invoke with <code>EVALSHA</code>, passing the key, then capacity, refill rate per second, current time in milliseconds and cost. Returns 1 for allowed, 0 for rejected. Prefer <code>redis.call('TIME')</code> inside the script over a client-supplied time.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What goes wrong in practice</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Redis down or slow</td><td>Added latency or request failures on every call</td><td>Short timeouts, fail-open/closed policy, local fallback bucket, replicas</td></tr>
+            <tr><td>Race between servers</td><td>Limit exceeded slightly or heavily under concurrency</td><td>Atomic Lua or INCR, never read-modify-write</td></tr>
+            <tr><td>Clock skew</td><td>Early or late refills, inconsistent windows</td><td>Store-side time, or tolerate with window slack</td></tr>
+            <tr><td>Hot key</td><td>One caller or one global bucket saturates a Redis shard</td><td>Local pre-aggregation, split a global limit into sub-buckets</td></tr>
+            <tr><td>NAT / shared IP</td><td>An office or mobile carrier gets throttled as one client</td><td>Prefer authenticated identity over IP; apply generous IP limits</td></tr>
+            <tr><td>Spoofed identity</td><td>Attacker rotates API keys or IPs to dodge the limit</td><td>Layer limits: IP, account, device, plus global backend limit</td></tr>
+            <tr><td>Retry storm after throttling</td><td>429s trigger instant retries, amplifying load</td><td>Retry-After, exponential backoff with jitter, client SDK defaults</td></tr>
+            <tr><td>Bad rule deployed</td><td>Legitimate traffic blocked fleet-wide</td><td>Staged rollout, shadow mode, fast rollback, rule validation</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Gotchas worth knowing</h2>
+        <ul class="check-list">
+          <li><strong>Latency budget.</strong> One Redis round trip inside a zone is typically sub-millisecond to low milliseconds; across zones it can double or triple. Count it in your SLO.</li>
+          <li><strong>Memory with TTL.</strong> Set expiry to roughly twice the window so idle callers vanish.</li>
+          <li><strong>Cost-based limiting.</strong> Not all requests cost the same; a search may cost 10 tokens and a ping 1. Token bucket handles this directly.</li>
+          <li><strong>Concurrency limits are different.</strong> "At most 10 in-flight requests" is a semaphore, not a rate. Many outages are fixed by a concurrency limiter (as in adaptive concurrency in Envoy) rather than a rate one.</li>
+          <li><strong>Return limits in headers on success too</strong>, so well-behaved clients can pace themselves before they are throttled.</li>
+          <li><strong>Test at the boundary.</strong> Fuzz the window edge, DST and leap-second behaviours, and process restarts; most limiter bugs live there.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Design checklist</h2>
+        <ul class="check-list">
+          <li>Identity chosen (user, key, IP, device) and spoofing considered.</li>
+          <li>Algorithm justified against burst tolerance and memory.</li>
+          <li>Rules in versioned config; shadow mode before enforce.</li>
+          <li>Atomic check-and-update; store-side clock; TTL on every key.</li>
+          <li>429 with Retry-After and quota headers.</li>
+          <li>Fail-open versus fail-closed decided per rule class.</li>
+          <li>Multi-region strategy explicit (per-region share or home region).</li>
+          <li>Metrics: rejections by rule, limiter latency, top throttled callers.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Token bucket or sliding window counter for a public API?</summary><p>If you want to allow short bursts while bounding average rate (typical for humans and SDKs), token bucket. If you want the simple promise "no more than N in any 60 seconds" with minimal state, sliding window counter. Many platforms use both: a sliding window for the headline quota and a token bucket for burst control.</p></details>
+        <details><summary>How do you rate-limit across many servers without a central Redis?</summary><p>Split the budget (each node gets limit / N and adjusts as nodes change), or route requests for the same caller to the same node with consistent hashing (chapter 5), or use gossip-style approximate counting. All trade strictness for independence. A central store is simplest when you need accuracy.</p></details>
+        <details><summary>What do you do with requests that exceed the limit: drop or queue?</summary><p>Drop with 429 for interactive APIs, because queuing hides overload and increases latency. Queue (leaky bucket style) for background or batch traffic where delay is acceptable. In both cases, bound the queue.</p></details>
+        <details><summary>How do you rate-limit by IP when users share NAT or use IPv6?</summary><p>Prefer authenticated identity; use IP only as a coarse outer limit with a generous threshold. For IPv6, limit by prefix (for example /64) because a single host controls billions of addresses within it.</p></details>
+        <details><summary>Where does idempotency fit in?</summary><p>Throttled clients will retry. If the first attempt partially succeeded, a retry could duplicate work; idempotency keys make retries safe. See the hub's idempotency page.</p></details>
+        <details><summary>How do you test a rate limiter?</summary><p>Unit-test each algorithm against a fake clock (as in the code above), property-test that no window ever exceeds the limit (for the exact algorithms), and run a concurrent load test against the real Redis path to catch races and measure tail latency.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./03-interview-framework.html">Chapter 3: A Framework for System Design Interviews</a> — previous chapter.</li>
+          <li><a href="./05-consistent-hashing.html">Chapter 5: Consistent Hashing</a> — next chapter; shards the limiter's key space.</li>
+          <li><a href="../../system-design/rate-limiting.html">Rate Limiting</a> — the hub's concept page with more algorithm diagrams.</li>
+          <li><a href="../../system-design/throttling.html">Throttling</a> — related admission-control techniques.</li>
+          <li><a href="../../system-design/api-gateway.html">API Gateway</a> — the usual home of the middleware.</li>
+          <li><a href="../../system-design/circuit-breaker.html">Circuit Breaker</a> — the client-side counterpart for failing dependencies.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — making retries after 429 safe.</li>
+        </ul>
+      </section>
+
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p><p><strong>Additional resources from the repo:</strong></p><ul><li><a href="https://martinfowler.com/bliki/CircuitBreaker.html">Circuit Breaker Algorithm</a></li><li><a href="https://github.com/uber-go/ratelimit/blob/master/ratelimit.go">Uber Rate Limiter</a></li></ul></section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>Pick the algorithm by the failure you can least afford. Token bucket for bursty clients with a long-term average, leaky bucket for a smooth downstream rate, sliding counter for cheap near-exact windows, and fixed window only when edge bursts are acceptable. In a cluster, correctness lives in a single atomic operation against a shared store, and you must decide in advance whether the limiter fails open or closed.</p></section>
+    </main>
+  </body>
+</html>

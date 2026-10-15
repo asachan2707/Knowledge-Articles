@@ -13,6 +13,7 @@
 
   var AGENT_URL   = (window.AGENT_URL || 'http://localhost:3030').replace(/\/$/, '');
   var STORAGE_KEY = 'learningHub.chatSession.v1';
+  var SERVER_PATH = '../Knowledge-Articles/agent';
 
   // ── Topic-page detection ────────────────────────────────────────────────────
   // If we're on a topic detail page (.page class present), scope the agent to
@@ -530,6 +531,21 @@
     scrollBottom();
   }
 
+  function appendServerDownError() {
+    hideEmpty();
+    var div = document.createElement('div');
+    div.className = 'lh-msg-error';
+    div.innerHTML =
+      '🔴 <strong>Agent server is not running.</strong><br><br>' +
+      'Restart it from:<br>' +
+      '<code style="display:block;margin-top:6px;padding:7px 10px;background:#fee2e2;' +
+        'border-radius:6px;font-size:.8rem;line-height:1.7;user-select:all;word-break:break-all">' +
+        'cd ' + SERVER_PATH + '<br>npm start' +
+      '</code>';
+    messagesEl.appendChild(div);
+    scrollBottom();
+  }
+
   function appendTyping() {
     hideEmpty();
     var div = document.createElement('div');
@@ -657,7 +673,18 @@
 
     } catch (err) {
       if (typingEl && typingEl.parentNode) typingEl.parentNode.removeChild(typingEl);
-      appendError(err.message || 'Something went wrong. Is the agent server running?');
+      var msg = (err.message || '').toLowerCase();
+      var isDown = err instanceof TypeError ||
+        msg.includes('failed to fetch') ||
+        msg.includes('networkerror') ||
+        msg.includes('load failed') ||
+        msg.includes('fetch') ||
+        msg.includes('econnrefused');
+      if (isDown) {
+        appendServerDownError();
+      } else {
+        appendError(err.message || 'Something went wrong. Is the agent server running?');
+      }
     } finally {
       setInputLocked(false);
       textarea.focus();

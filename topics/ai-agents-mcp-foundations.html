@@ -71,6 +71,76 @@
           keeps your builds understandable and avoids "magic" behavior you cannot debug.
         </p>
       </section>
+
+      <!-- ─── AI STACK LAYER BY LAYER (from Towards AI, 2026) ────────────── -->
+      <section class="content-card">
+        <h2>The Full AI Stack: Layer by Layer</h2>
+        <p>Each layer in the AI stack extends the previous one. None replace what's below — the stack
+        is cumulative, not substitutive.</p>
+        <table style="width:100%;border-collapse:collapse;font-size:.9rem;margin:1rem 0">
+          <thead><tr style="background:#f1f5f9"><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Layer</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">What It Does</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Key Limitation Without Next Layer</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Deep Learning</strong></td><td style="padding:.55rem .8rem">Neural networks learn patterns from data — not hand-written rules</td><td style="padding:.55rem .8rem">Only recognizes patterns; can't generate fluent language</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>LLM</strong></td><td style="padding:.55rem .8rem">Massive NLP scale — generates contextual language, not just classifies</td><td style="padding:.55rem .8rem">No real-time data, no company-specific knowledge, no actions</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>GenAI</strong></td><td style="padding:.55rem .8rem">Summarization and pattern completion — writes, codes, answers questions</td><td style="padding:.55rem .8rem">Only knows training data; hallucinated facts cannot be grounded</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>RAG</strong></td><td style="padding:.55rem .8rem">Retrieves relevant documents at query time; constrains (not expands) model knowledge</td><td style="padding:.55rem .8rem">Can answer but cannot act; no external integrations</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>MCP / Tools</strong></td><td style="padding:.55rem .8rem">Standardized interfaces to external systems — CRMs, APIs, databases</td><td style="padding:.55rem .8rem">One model, one task; cannot delegate to specialists</td></tr>
+            <tr><td style="padding:.55rem .8rem"><strong>Agentic AI</strong></td><td style="padding:.55rem .8rem">Orchestration pattern: one lead agent delegates to specialized workers, each with own RAG + tools</td><td style="padding:.55rem .8rem">—</td></tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          <p><strong>Mental model:</strong> RAG constrains knowledge. MCP extends actions. Agentic AI
+          distributes work. Each layer solves the bottleneck of the one before it.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>RAG: Grounds Responses, Doesn't Expand Capability</h2>
+        <p>A common misunderstanding: RAG "gives the model more knowledge." More precisely, RAG
+        <strong>constrains</strong> the model to respond from actual documents, reducing hallucination.
+        It does not make the model smarter — it makes the model more reliably grounded.</p>
+        <pre><code class="language-javascript">import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic();
+
+// Simulated vector search — replace with real embedding lookup
+async function retrieveDocuments(query, topK = 3) {
+  const docs = [
+    { id: "doc1", text: "Our return policy allows 30-day returns on all items.", score: 0.92 },
+    { id: "doc2", text: "Electronics have a 15-day return window.", score: 0.87 },
+    { id: "doc3", text: "Sale items are final sale — no returns accepted.", score: 0.71 }
+  ];
+  return docs.slice(0, topK);
+}
+
+async function ragQuery(userQuestion) {
+  // Step 1: Retrieve relevant context
+  const docs = await retrieveDocuments(userQuestion);
+  const context = docs.map(d => d.text).join("\n\n");
+
+  // Step 2: Pass context to model — model responds ONLY from these documents
+  const response = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 512,
+    messages: [{
+      role: "user",
+      content: `Answer the question using ONLY the context below.
+If the answer is not in the context, say "I don't have that information."
+
+Context:
+${context}
+
+Question: ${userQuestion}`
+    }]
+  });
+
+  return response.content[0].text;
+}
+
+ragQuery("Can I return a laptop I bought 20 days ago?")
+  .then(answer => console.log(answer));
+// → Uses "Electronics have a 15-day return window" — refuses to hallucinate a different policy</code></pre>
+      </section>
     </main>
   </body>
 </html>

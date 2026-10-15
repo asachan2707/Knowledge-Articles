@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agentic QE: From JIRA Ticket to Pull Request | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .85rem; margin: 1rem 0; }
+      .agent-card { border: 1px solid var(--border); border-radius: 10px; padding: .9rem 1rem; }
+      .agent-card .agent-num { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #64748b; margin-bottom: .25rem; }
+      .agent-card h4 { margin: 0 0 .3rem; font-family: Arial, Helvetica, sans-serif; font-size: .93rem; color: #0f766e; }
+      .agent-card p  { margin: 0; font-size: .84rem; color: var(--muted); }
+      .gate-table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+      .gate-table th { background: #f1f5f9; padding: .6rem .8rem; text-align: left; font-weight: 700; font-family: Arial, Helvetica, sans-serif; }
+      .gate-table td { padding: .55rem .8rem; border-bottom: 1px solid #f1f5f9; }
+      .gate-table tr:last-child td { border-bottom: none; }
+      .gate-pass  { color: #16a34a; font-weight: 700; }
+      .gate-stop  { color: #dc2626; font-weight: 700; }
+      .insight-box { background: #fdf4ff; border-left: 4px solid #a855f7; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+      .warn-box { background: #fff7ed; border-left: 4px solid #f97316; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+      .artifact-flow { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: 1rem 0; }
+      .artifact-box { background: #f1f5f9; border-radius: 6px; padding: .3rem .7rem; font-family: monospace; font-size: .82rem; }
+      .artifact-arrow { color: #0f766e; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Software engineering and testing workflow"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Agentic AI · QE · Testing · DevOps · 20 min</span>
+          </div>
+        </figure>
+
+        <h1>Agentic QE: From JIRA Ticket to Pull Request</h1>
+        <p class="summary">
+          A 9-agent system that takes a JIRA ticket and produces tested, CI-gated Playwright TypeScript
+          tests committed to a feature branch — from requirement analysis through code generation,
+          live execution, evidence reporting, and release gate enforcement. The architectural principle:
+          AI provides intelligence, rules provide control.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Rajesh Yemul · Medium · 2026</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Playwright · TypeScript · JIRA · ESLint · TSC · Git</span></div>
+          <div><span class="meta-label">Repo</span><span class="meta-value">github.com/rajeshyemul/ts-pw-test-assistant</span></div>
+        </div>
+      </header>
+
+      <!-- ─── SECTION 1: THE FULL PIPELINE ──────────────────────────────── -->
+      <section class="content-card">
+        <h2>The Full Pipeline</h2>
+        <p class="lead">
+          The system moves beyond simple test generation to a full pipeline with explicit human-readable
+          artifacts at every stage and strict gate conditions that stop the workflow when quality
+          standards are not met.
+        </p>
+
+        <div class="artifact-flow">
+          <span class="artifact-box">JIRA Ticket</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">jira_data.json</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">test_requirements.md</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">APP-5_test_cases.md</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">coverage_matrix.md</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">APP-5.spec.ts</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">execution_report.md</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">final_report.md</span>
+          <span class="artifact-arrow">→</span>
+          <span class="artifact-box">PR + feature branch</span>
+        </div>
+
+        <div class="insight-box">
+          <strong>Why file-based artifacts?</strong> Each agent writes files to disk; the next agent
+          reads them. This makes every decision <em>inspectable by humans</em>, not just trusted on
+          faith. Debugging is O(1): open the artifact, read what the agent decided.
+        </div>
+      </section>
+
+      <!-- ─── SECTION 2: THE 9 AGENTS ───────────────────────────────────── -->
+      <section class="content-card">
+        <h2>9 Specialized Agents</h2>
+        <p>Each agent has a narrow, well-defined responsibility and reads from / writes to a specific artifact.</p>
+
+        <div class="agent-grid">
+          <div class="agent-card">
+            <div class="agent-num">Agent 1</div>
+            <h4>jira_extractor</h4>
+            <p>Parse and understand JIRA ticket requirements, extract acceptance criteria, write <code>jira_data.json</code>.</p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 2</div>
+            <h4>test_case_generation</h4>
+            <p>Design test scenarios using 4 lenses: ecosystem context, user reality, system integration, value delivery.</p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 3</div>
+            <h4>e2e_validation_agent</h4>
+            <p>Check existing framework coverage. Search Page Objects and fixtures. <strong>Stop if required capability is absent.</strong></p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 4</div>
+            <h4>e2e_code_generation_agent</h4>
+            <p>Write Playwright TypeScript tests matching framework conventions (fixtures, page objects, tagging).</p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 5</div>
+            <h4>e2e_quality_check_agent</h4>
+            <p>Run TSC + ESLint. Zero errors required. Attempt auto-repair on failure. Stop if repair fails.</p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 6</div>
+            <h4>e2e_test_executor_agent</h4>
+            <p>Execute tests against live application. Sanity-check beyond exit code: assertion coverage, timing plausibility.</p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 7</div>
+            <h4>report_generation_agent</h4>
+            <p>Synthesize all artifacts into <code>final_test_generation_report.md</code> — full evidence trail.</p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 8</div>
+            <h4>pr_submitter_agent</h4>
+            <p>Enforce release gate. Strict policy: anything less than clean PASSED blocks the PR.</p>
+          </div>
+          <div class="agent-card">
+            <div class="agent-num">Agent 9</div>
+            <h4>workflow_orchestrator</h4>
+            <p>Coordinate the full sequence. Manage inter-agent state. Surface ambiguities as warnings, never hide them.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── SECTION 3: GENERATED TEST CODE ────────────────────────────── -->
+      <section class="content-card">
+        <h2>Framework-Aware Test Generation</h2>
+        <p>
+          Before generating code, the validation agent searches existing Page Objects and fixtures.
+          Tests that reference non-existent framework methods are blocked — AI respects boundaries
+          of the real engineering system.
+        </p>
+
+        <pre><code class="language-typescript">// Generated by e2e_code_generation_agent — respects existing PageObject conventions
+import { test } from "@fixtures/UiFixture";
+import { HomePage } from "@pages/homePage";
+import { BookingPage } from "@pages/bookingPage";
+
+test.describe("Room catalog and booking flow @APP-5", () => {
+  test("public room catalog displays room cards @smoke @P1 @APP-5",
+    async ({ actions }) => {
+      const homePage = new HomePage(actions);
+      await homePage.navigate();
+      await homePage.verifyRoomCatalogVisible();
+      await homePage.verifyRoomCardCount({ min: 1 });
+    }
+  );
+
+  test("clicking a room card opens booking form @regression @P2 @APP-5",
+    async ({ actions }) => {
+      const homePage    = new HomePage(actions);
+      const bookingPage = new BookingPage(actions);
+
+      await homePage.navigate();
+      await homePage.clickFirstRoomCard();
+      await bookingPage.verifyBookingFormVisible();
+      await bookingPage.verifyRequiredFields(["firstName", "lastName", "email", "checkin", "checkout"]);
+    }
+  );
+
+  test("booking form submits successfully with valid data @smoke @P1 @APP-5",
+    async ({ actions }) => {
+      const bookingPage = new BookingPage(actions);
+      await bookingPage.navigateDirect("room-1");
+
+      await bookingPage.fillBookingForm({
+        firstName: "Test",
+        lastName:  "User",
+        email:     "test@example.com",
+        checkin:   "2026-11-01",
+        checkout:  "2026-11-05"
+      });
+
+      await bookingPage.submitBookingForm();
+      await bookingPage.verifyBookingConfirmation();
+    }
+  );
+});</code></pre>
+
+        <pre><code class="language-javascript">// Quality check agent — runs TypeScript compiler + ESLint before execution
+const { execSync } = require("child_process");
+const path = require("path");
+
+class QualityCheckAgent {
+  constructor(projectRoot) {
+    this.projectRoot = projectRoot;
+  }
+
+  async check(specFile) {
+    const issues = [];
+
+    // Step 1: TypeScript compilation check
+    try {
+      execSync(`npx tsc --noEmit --strict`, { cwd: this.projectRoot, stdio: "pipe" });
+    } catch (err) {
+      const tsErrors = err.stdout.toString().split("\n").filter(Boolean);
+      issues.push(...tsErrors.map(e => ({ type: "typescript", message: e })));
+    }
+
+    // Step 2: ESLint check
+    try {
+      execSync(`npx eslint ${specFile} --format json`, { cwd: this.projectRoot, stdio: "pipe" });
+    } catch (err) {
+      const lintResults = JSON.parse(err.stdout.toString() || "[]");
+      lintResults.forEach(file =>
+        file.messages.forEach(m =>
+          issues.push({ type: "eslint", rule: m.ruleId, message: m.message, line: m.line })
+        )
+      );
+    }
+
+    if (issues.length > 0) {
+      return { status: "FAILED", issues, gate: "STOP" };
+    }
+    return { status: "PASSED", issues: [], gate: "PROCEED" };
+  }
+}
+
+// Gate policy: zero tolerance on quality check failures
+const checker = new QualityCheckAgent("/path/to/project");
+checker.check("tests/APP-5.spec.ts").then(result => {
+  if (result.gate === "STOP") {
+    console.error("Quality gate FAILED — workflow stopped");
+    console.error(result.issues);
+    process.exit(1);
+  }
+  console.log("Quality gate PASSED — proceeding to execution");
+});</code></pre>
+      </section>
+
+      <!-- ─── SECTION 4: RELEASE GATE POLICY ────────────────────────────── -->
+      <section class="content-card">
+        <h2>Release Gate Policy</h2>
+        <p>The PR submitter agent enforces a strict binary gate. Ambiguity surfaces as STOPPED, never hidden.</p>
+
+        <table class="gate-table">
+          <thead><tr><th>Test Execution Status</th><th>Gate Decision</th></tr></thead>
+          <tbody>
+            <tr><td><span class="gate-pass">PASSED</span></td><td class="gate-pass">Proceed to PR</td></tr>
+            <tr><td><span class="gate-stop">PASSED WITH WARNINGS</span></td><td class="gate-stop">STOP — do not submit</td></tr>
+            <tr><td><span class="gate-stop">FAILED</span></td><td class="gate-stop">STOP — do not submit</td></tr>
+            <tr><td><span class="gate-stop">BLOCKED</span></td><td class="gate-stop">STOP — do not submit</td></tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-javascript">// PR Submitter Agent — strict gate enforcement
+class PRSubmitterAgent {
+  constructor(gitClient) {
+    this.git = gitClient;
+  }
+
+  async submit(finalReport, branchName) {
+    const { testStatus, warnings, failures } = finalReport;
+
+    // Strict gate: only clean PASSED proceeds
+    if (testStatus !== "PASSED" || warnings.length > 0) {
+      return {
+        action: "BLOCKED",
+        reason: this._buildBlockReason(testStatus, warnings, failures),
+        prCreated: false
+      };
+    }
+
+    // All gates passed — create feature branch and PR
+    await this.git.createBranch(branchName);
+    await this.git.commitAll(`feat(test): add E2E tests for ${finalReport.ticketId}`);
+    const pr = await this.git.createPR({
+      title: `[${finalReport.ticketId}] Automated E2E tests`,
+      body:  this._buildPRBody(finalReport),
+      branch: branchName
+    });
+
+    return { action: "PR_CREATED", prUrl: pr.url, prCreated: true };
+  }
+
+  _buildBlockReason(status, warnings, failures) {
+    if (status === "PASSED WITH WARNINGS") return `Warnings detected: ${warnings.join(", ")} — manual review required`;
+    if (status === "FAILED")               return `Test failures: ${failures.length} test(s) failed`;
+    return `Execution blocked: ${status}`;
+  }
+
+  _buildPRBody(report) {
+    return [
+      `## Automated E2E Tests — ${report.ticketId}`,
+      `\n### Test Results`,
+      `- Status: **${report.testStatus}**`,
+      `- Tests: ${report.testCount} (${report.passCount} passed, ${report.failCount} failed)`,
+      `- Coverage: ${report.coverageAreas.join(", ")}`,
+      `\n### Evidence`,
+      `- JIRA requirements: ✅ extracted`,
+      `- Framework coverage: ✅ validated`,
+      `- TypeScript: ✅ 0 errors`,
+      `- ESLint: ✅ 0 violations`,
+      `- Live execution: ✅ all tests passed`
+    ].join("\n");
+  }
+}</code></pre>
+
+        <div class="warn-box">
+          <strong>Key lesson from testing APP-2 (warning path):</strong> PASSED WITH WARNINGS blocks
+          the PR — always. The warning path scenario was more instructive than the clean path.
+          Ambiguity must never be hidden; it surfaces immediately as a blocked workflow.
+        </div>
+      </section>
+
+      <!-- ─── SECTION 5: AGENT DEFINITIONS ─────────────────────────────── -->
+      <section class="content-card">
+        <h2>Agent Instructions in Plain Markdown</h2>
+        <p>
+          Each agent is defined in <code>config/agents/*.md</code> — readable English descriptions
+          of role, inputs, steps, rules, and outputs. This is the cleanest form of "rules as code":
+          auditable, version-controlled, and modifiable without touching runtime code.
+        </p>
+
+        <pre><code class="language-markdown"># Agent: e2e_validation_agent
+
+## Role
+Validate whether the existing Playwright test framework contains the Page Objects,
+fixtures, and utilities required to implement the test cases specified in
+`APP-5_test_cases.md`.
+
+## Inputs
+- `APP-5_test_cases.md` — test cases to validate
+- `src/pages/` — existing Page Object files
+- `src/fixtures/` — existing fixture files
+
+## Steps
+1. Parse each test case and extract required capabilities
+2. Search `src/pages/` for matching Page Objects by method name
+3. Search `src/fixtures/` for required fixture types
+4. For each capability, record: file path, line number, confidence
+
+## Rules
+- NEVER invent or assume a framework capability exists without finding it in the codebase
+- If a required capability is absent, set status = BLOCKED and record what is missing
+- Evidence must be explicit: file path + line number, not "I believe it exists"
+- A partial match (similar method name) is a WARNING, not a CONFIRMED capability
+
+## Output
+Write `test_coverage_matrix.md` with:
+- status: COVERED | PARTIAL | MISSING | BLOCKED
+- For each capability: evidence (file:line) or missing reason</code></pre>
+      </section>
+
+      <!-- ─── SECTION 6: KEY DESIGN PRINCIPLES ────────────────────────────── -->
+      <section class="content-card">
+        <h2>Five Design Principles</h2>
+        <ul class="takeaways">
+          <li><strong>AI provides intelligence, rules provide control.</strong> AI understands requirements and generates code; rules define what agents can do, when to stop, when humans intervene.</li>
+          <li><strong>File-based artifact persistence.</strong> Every agent decision is written to disk — inspectable, auditable, debuggable without replay.</li>
+          <li><strong>Framework-first generation.</strong> Search before generating. Non-existent framework methods stop the workflow — AI never invents plausible-looking but broken code.</li>
+          <li><strong>Small specialized agents over large general ones.</strong> A narrow agent with explicit inputs/outputs is far more trustworthy than one agent "do everything" prompt.</li>
+          <li><strong>Warnings block; they never hide.</strong> PASSED WITH WARNINGS is a stop condition, not a "close enough." Semantic correctness matters beyond compilation and execution.</li>
+        </ul>
+      </section>
+
+      <!-- ─── KEY TAKEAWAY ─────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A stable existing framework is a prerequisite — AI exposes weaknesses, it doesn't fix them.
+          The architecture that makes this system trustworthy is not the AI capability; it's the
+          separation of intelligence (AI understands requirements, writes tests) from control (rules
+          define when to stop, what counts as passing). Artifact-based state makes every decision
+          inspectable. The warning-path scenario — where the workflow correctly blocks a PR despite
+          technically passing tests — is the hardest case to implement correctly and the most
+          important one to test. "A passing test isn't automatically a good test" is the system's
+          guiding invariant.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

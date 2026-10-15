@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Metrics Monitoring and Alerting System | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 20 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.20. Covers an internal metrics monitoring and alerting system: time-series data model (name + labels), write-heavy storage in a TSDB (InfluxDB, Prometheus, Gorilla), pull vs push collection with service discovery and consistent-hash collector sharding, Kafka buffering in the transmission pipeline, where to aggregate, query service and cache, compression (delta-of-delta, XOR), downsampling retention tiers, alert manager (rules, for-duration, dedup, at-least-once notification) and Grafana-style visualization, plus capacity math and cardinality pitfalls. Includes a runnable Node.js example (series index, Gorilla-style compression, downsampling, consistent-hash scrape sharding, alert state machine) that was executed. About 30 min read. Related: observability, service-discovery, consistent-hashing, caching, message-queue, chapter 19 and 21.</div>
+        <h1>Design a Metrics Monitoring and Alerting System</h1>
+        <p class="summary">Monitoring is a write-heavy time-series pipeline with spiky reads and a hard reliability bar: the system that tells you everything is broken must not be the thing that is broken. This chapter walks from data model to collection, buffering, storage, alerting and dashboards, and shows where each decision bites.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">20 of 28 · Part 5 Data Infrastructure</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">27 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Time-series model, pull vs push, Kafka buffer, TSDB compression, downsampling, alert state machine</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Prometheus, InfluxDB, Gorilla, Graphite, CloudWatch, Grafana, Alertmanager, Kafka, Flink</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">At small scale you monitor a service by tailing a log and watching a graph. At large scale there are hundreds of thousands of machines, each emitting hundreds of numbers every few seconds, and the people on call need two things from you: a dashboard that loads in a second during an incident, and a page that arrives within minutes of a real failure without crying wolf. A metrics platform is the infrastructure that provides both.</p>
+        <p>The interview framing is deliberately narrow. The system is for internal use at a large company, not a SaaS like Datadog; it collects operational metrics (CPU, memory, disk, request rate, queue depth), not business metrics; and it explicitly excludes log aggregation (the ELK-style problem) and distributed tracing. State that scoping out loud: monitoring is a family of problems and half of the marks are for choosing which one you are solving.</p>
+        <div class="callout"><p><strong>Core idea:</strong> A metric sample is (series identity, timestamp, value), and a series is identified by a name plus a set of labels. Writes are a constant firehose of tiny appends; reads are rare, bursty and time-bounded to the recent past. Pick storage, buffering and retention to exploit that asymmetry, and keep the number of distinct series (cardinality) under control, because it is the true cost driver.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Public design · Facebook Gorilla and Prometheus</span>
+        <h2>Two designs that shaped the field</h2>
+        <p>Facebook's Gorilla paper (VLDB 2015) described an in-memory time-series store built for monitoring. Its key observations: the overwhelming majority of reads, roughly 85%, target data from the last 26 hours, so keep the recent window in RAM; and consecutive samples are so regular that timestamps can be stored as a delta of deltas and values as an XOR with the previous value, reaching on the order of a dozen times compression and about a byte or two per sample. Prometheus, born at SoundCloud, took a different and equally influential path: pull-based scraping of plain-text <code>/metrics</code> endpoints, a dimensional data model (metric name plus labels), service discovery to find targets, a local TSDB with a write-ahead log and two-hour blocks, and a query language (PromQL) built for aggregating across labels. Alerts are evaluated against the stored data and routed through a separate component, Alertmanager. Most modern stacks, including Thanos, Cortex/Mimir and VictoriaMetrics, are descendants of those two ideas. The design below is the generalisation you can defend on a whiteboard.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>Scope, requirements and back-of-envelope numbers</h2>
+        <p class="mini-heading">Agreed assumptions</p>
+        <ul class="check-list">
+          <li>Internal system for a company with 100 million daily active users, 1,000 server pools of 100 machines each.</li>
+          <li>Roughly 100 metrics per machine: CPU load, memory, disk, request count, message-queue depth.</li>
+          <li>One year of retention, tiered: raw resolution for 7 days, 1-minute resolution for the next 30 days, 1-hour resolution for the rest of the year.</li>
+          <li>Alert channels: email, phone, PagerDuty, webhooks.</li>
+          <li>Out of scope: logs, tracing, business metrics.</li>
+        </ul>
+        <p class="mini-heading">Non-functional</p>
+        <ul class="check-list">
+          <li><strong>Scalable</strong> as metrics and alert rules grow.</li>
+          <li><strong>Low query latency</strong> for dashboards and alert evaluation.</li>
+          <li><strong>Reliable:</strong> missing a critical alert is the worst failure.</li>
+          <li><strong>Flexible:</strong> able to swap technologies (a new TSDB, a new notification channel) without a rewrite.</li>
+        </ul>
+        <p class="mini-heading">Capacity (my assumptions, arithmetic shown)</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Machines</td><td>1,000 pools × 100</td><td>100,000</td></tr>
+            <tr><td>Active series</td><td>100,000 machines × 100 metrics</td><td>about 10 million</td></tr>
+            <tr><td>Write rate at 10 s scrape</td><td>10 M series ÷ 10 s</td><td>1 M samples/s</td></tr>
+            <tr><td>Samples per day</td><td>1 M × 86,400</td><td>86.4 billion</td></tr>
+            <tr><td>Raw tier, uncompressed</td><td>86.4 B × 16 bytes (8 B timestamp + 8 B double) × 7 days</td><td>about 9.7 TB</td></tr>
+            <tr><td>Raw tier, Gorilla-style compression</td><td>86.4 B × about 1.4 bytes × 7</td><td>about 0.85 TB</td></tr>
+            <tr><td>1-minute tier</td><td>10 M series × 1,440 points/day × 30 days</td><td>432 B points; at about 2 bytes each, about 0.86 TB</td></tr>
+            <tr><td>1-hour tier</td><td>10 M × 24 × about 330 days</td><td>79 B points; at about 2 bytes each, about 0.16 TB</td></tr>
+            <tr><td>Wire traffic into the pipeline</td><td>1 M samples/s × about 50 bytes batched</td><td>about 50 MB/s, comfortably one Kafka cluster</td></tr>
+            <tr><td>Alert evaluation load</td><td>10,000 rules ÷ 60 s interval</td><td>about 170 queries/s, mostly over the last few minutes</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>Insight:</strong> The rollup tiers are not automatically smaller. Going from 10 s to 1 min cuts points only 6×, and averaged values are noisier and compress worse than raw, so the 1-minute tier can rival the raw tier in bytes, especially if you keep min, max, sum and count instead of only the mean. The 1-hour tier is where the savings really appear. This is why rollups are paired with expiry of the raw data, and why storing several aggregates per bucket is a deliberate cost decision. The other thing to notice: the whole year fits in a couple of terabytes of compressed data. This is a throughput and cardinality problem, not a disk problem.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Data model</span>
+        <h2>Time series, labels and the shape of the workload</h2>
+        <p>Metrics are time series: ordered timestamped values for one identity. The identity is the metric name plus a set of key-value labels (also called tags or dimensions). "CPU load on production instance i631 at 20:00" is one point of the series <code>cpu.load{env=prod, instance=i631}</code>. "Average CPU across the us-west web servers over the last 10 minutes" selects all series matching <code>cpu.load{region=us-west, role=web}</code>, fetches their points in the window and averages them. A common textual wire format, the line protocol, encodes this as <code>name label=value,label=value timestamp value</code>; Prometheus's exposition format and InfluxDB's line protocol are variations of it.</p>
+        <div class="diagram-box"><pre>
+  series identity                                   points (t, v)
+  cpu.load{host=web01,region=us-west}  --------&gt;   (1613707265, 50) (1613707275, 62) (1613707285, 76) ...
+  cpu.load{host=web02,region=us-west}  --------&gt;   (1613707265, 43) (1613707275, 53) ...
+  cpu.load{host=db01,region=us-east}   --------&gt;   ...
+
+  query: avg(cpu.load{region="us-west"}[10m])  =  select 2 series by label index, read 10 min of points, reduce
+</pre></div>
+        <p class="mini-heading">Access pattern</p>
+        <p>Writes are constant, high volume, append-only and in timestamp order per series. Reads are infrequent most of the time, then spike during incidents when many engineers open the same dashboards, and nearly all of them look at recent data with aggregation across labels. That is the opposite of a transactional workload and the reason general-purpose stores struggle.</p>
+        <p class="mini-heading">Why not a relational or NoSQL database?</p>
+        <p>A relational database can hold this with heroic tuning (partitioning by time, narrow indexes, aggressive batching) but you will be fighting its row layout, per-row overhead and B-tree write amplification at a million inserts per second. A wide-column NoSQL store can ingest quickly, but you must design a row key that supports both "all series for a label filter" and "range over time", and aggregation happens in client code. A purpose-built time-series database (TSDB) bundles the right pieces: a write path that batches into an in-memory structure backed by a log, immutable time-partitioned blocks on disk, inverted indexes from labels to series, columnar-ish compression, and a query language with window and aggregation functions. OpenTSDB is the Hadoop/HBase-based option, Amazon Timestream and Twitter's internal store are other examples, and InfluxDB and Prometheus are the best known open-source choices. The notes cite InfluxDB sustaining over 250,000 writes per second on 8 cores and 32 GB RAM, which tells you that 1 M samples/s needs a sharded fleet of such nodes rather than one machine.</p>
+        <p class="mini-heading">Cardinality is the cost knob</p>
+        <p>TSDBs index every label, so each distinct combination of label values is a new series with its own index entries, in-memory buffer and storage chunk. Series count, not sample count, determines memory. A label such as <code>request_id</code>, <code>user_id</code> or a raw URL path turns 10 million series into billions and takes the database down. Keep label values bounded (host, region, status class, endpoint template), push unbounded identifiers to logs or traces, and enforce limits at ingestion. The example below shows this explosion in miniature.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Components and data flow</h2>
+        <p>Five functions: collect, transmit, store, alert, visualise. In boxes:</p>
+        <div class="diagram-box"><pre>
+  Metrics sources                Collectors            Buffer               Writers               Storage
+  (app servers, DBs,   scrape/   (auto-scaled,   --&gt;  Kafka topics  --&gt;    consumers /     --&gt;   Time-series DB
+   queues, hosts)      push      sharded)             (partitioned)        stream jobs            (hot: 7d raw)
+                                                                           (Flink: rollups)         |
+                                                                                                    | cold: 1m / 1h tiers, object store
+                                          +---------------------------------------------------------+
+                                          v
+                                   Query service  &lt;-- cache --&gt;  Visualization (Grafana dashboards)
+                                          ^
+                                          |  every N seconds
+                                   Alert manager --&gt; Alert store (KV) --&gt; Kafka --&gt; Notifiers (email, SMS/phone, PagerDuty, webhook)
+                                          ^
+                                   Rule config (YAML) in cache / store
+</pre></div>
+        <table class="data-table">
+          <thead><tr><th>Component</th><th>Job</th></tr></thead>
+          <tbody>
+            <tr><td>Metrics source</td><td>Anything emitting numbers: app servers, databases, message queues, hosts.</td></tr>
+            <tr><td>Metrics collector</td><td>Gathers samples and writes them downstream.</td></tr>
+            <tr><td>Time-series database</td><td>Stores series; offers aggregation-friendly queries.</td></tr>
+            <tr><td>Query service</td><td>Thin API between the TSDB and its consumers (dashboards, alerting); optional if the TSDB's own interface is good enough.</td></tr>
+            <tr><td>Alerting system</td><td>Evaluates rules and sends notifications to channels.</td></tr>
+            <tr><td>Visualization system</td><td>Graphs and dashboards over metrics and alerts.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Collection</span>
+        <h2>Metrics collection: pull versus push</h2>
+        <p>For metrics, an occasional lost sample is acceptable; a gauge reported every 10 seconds will be reported again in 10 seconds. That relaxes the delivery requirement and lets clients fire and forget. There are two ways to get data out of a source.</p>
+        <p class="mini-heading">Pull</p>
+        <p>The collector decides when and where. Every source exposes a plain HTTP endpoint (conventionally <code>/metrics</code>) served by a client library, and collectors scrape it on an interval. Collectors need an up-to-date list of targets, which is the job of <strong>service discovery</strong> (ZooKeeper, etcd, Consul, or the Kubernetes API): it supplies addresses plus scrape configuration such as interval, timeout, retries and labels to attach. Collectors either subscribe to change notifications or re-poll periodically to see targets appear and vanish as autoscaling and deployments churn.</p>
+        <p>A single collector cannot scrape 100,000 machines, so you run many, and they must not duplicate work. Place collectors and targets on a <strong>consistent hash ring</strong>: each target maps to one collector, and when a collector joins or dies only a fraction of targets move. Prometheus does a related thing with hash-based sharding relabeling, and the example below measures the movement (roughly one quarter of targets move when a fourth collector is added to three).</p>
+        <div class="diagram-box"><pre>
+        service discovery (etcd / ZooKeeper / k8s API)
+              |  targets + scrape config
+              v
+  +----------------------------- hash ring of collectors -----------------------------+
+  |   collector C1 owns  host-17, host-203 ...    C2 owns host-5, host-88 ...    C3 ... |
+  +------------------------------------------------------------------------------------+
+        |  GET /metrics every 10s (timeout, retry)
+        v
+  [ web01 :9100 ]  [ web02 :9100 ] ...     "up" series recorded for every target, 1 or 0
+</pre></div>
+        <p class="mini-heading">Push</p>
+        <p>The source (or an agent running beside it) sends data to a collector endpoint. Agents can do light local aggregation, for example summing a counter for a minute, which shrinks traffic. The collector tier becomes an ordinary stateless service behind a load balancer and autoscaling group; but it can be overwhelmed and drop writes, so it needs backpressure behaviour and capacity headroom. Graphite and CloudWatch are push systems; Prometheus is pull. Prometheus does support push for short-lived jobs through its Pushgateway, which is the standard bridge between the two worlds.</p>
+        <table class="data-table">
+          <thead><tr><th>Concern</th><th>Pull</th><th>Push</th></tr></thead>
+          <tbody>
+            <tr><td>Debugging</td><td>Open <code>/metrics</code> in a browser or curl it from your laptop; see exactly what a target exposes.</td><td>If data is missing, the fault could be the source, the network or the collector.</td></tr>
+            <tr><td>Health checking</td><td>A failed scrape is itself the health signal; the <code>up</code> series falls out for free.</td><td>Silence is ambiguous: dead host or broken pipe? Needs a heartbeat convention.</td></tr>
+            <tr><td>Short-lived jobs</td><td>May finish before the next scrape; needs a push gateway.</td><td>Natural: send before exit.</td></tr>
+            <tr><td>Firewalls and multi-DC</td><td>Collectors must reach every endpoint; NAT, VPC peering and security groups get complicated.</td><td>Sources only need to reach a public or well-known collector address.</td></tr>
+            <tr><td>Performance</td><td>Scrape is HTTP over TCP; per-target connection overhead is modest at 10 s intervals.</td><td>Can use UDP or batched TCP; lower overhead per sample (though connection setup cost is small compared with the payload).</td></tr>
+            <tr><td>Authenticity</td><td>Collector only talks to configured targets, so data origin is implicit.</td><td>Anyone who can reach the collector can inject data; requires authentication or allow-lists.</td></tr>
+            <tr><td>Control and overload</td><td>Collector sets the rate; a slow target cannot flood it.</td><td>A misbehaving source can flood the collector; needs rate limits and quotas.</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>My take:</strong> there is no universal winner; a large organisation ends up supporting both. Default to pull for long-running services (cheap debugging, free health signal, central control of rate), add push for batch jobs, edge devices and environments you cannot reach, and make both converge on the same internal format before the buffer.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Transmission pipeline</span>
+        <h2>Scaling the transmission pipeline with a queue</h2>
+        <p>Collectors scale out behind autoscaling groups whatever the collection model. The weak link is downstream: if the TSDB is down, slow, or being compacted, collectors either block or drop. Insert a durable buffer, Kafka, between collectors and storage, as covered in the previous chapter. Collectors become producers that write batches into topics; consumers (or a stream processor such as Flink, Spark Streaming or the older Storm) read from the topics and write to the TSDB. The queue decouples collection from processing, absorbs write bursts and TSDB maintenance windows, lets you add consumers (rollup jobs, an anomaly detector, a second storage backend) without touching collectors, and retains data so that you can replay after a bug or outage.</p>
+        <p>Partition the topics so that related data lands together: for instance by hash of the series identity, so each series' samples remain in order in one partition (order matters to delta encoding and to counter-reset logic), and by priority class so critical infrastructure metrics are not stuck behind a noisy batch tenant. Partitioning purely by metric name creates hot partitions when one metric (say <code>http.requests</code>) dominates, so mix in labels.</p>
+        <p>The cost is operating Kafka. Teams that do not want that burden use purpose-built ingestion tiers such as Gorilla-style in-memory write fleets, or managed streams. The point to make in the interview is not "Kafka" but "a replicated, partitioned, replayable buffer decoupling ingest from storage", with Kafka as the typical answer and its operational overhead as the honest drawback.</p>
+        <div class="warn-box"><p><strong>Bootstrapping trap:</strong> do not make your monitoring system depend on the same Kafka cluster, database or network as the systems it monitors, or the first big outage will blind you at the moment you need it. Run it on separate infrastructure, ideally in at least two failure domains, and monitor the monitor with an independent, simple "dead man's switch".</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Aggregation</span>
+        <h2>Where should aggregation happen?</h2>
+        <table class="data-table">
+          <thead><tr><th>Location</th><th>What it can do</th><th>Benefit</th><th>Cost</th></tr></thead>
+          <tbody>
+            <tr><td>Collection agent (client)</td><td>Simple: sum a counter for a minute, pre-compute a local histogram.</td><td>Smallest traffic; cheapest.</td><td>Only simple logic; loses per-instance detail; harder to change centrally.</td></tr>
+            <tr><td>Ingestion pipeline (stream processor)</td><td>Arbitrary: windowed rollups, drop labels, join with metadata.</td><td>Cuts write volume to the TSDB and query cost later.</td><td>Raw data is lost unless you also keep it; late-arriving data complicates windows; Flink or similar to operate.</td></tr>
+            <tr><td>Query side</td><td>Anything the query language allows.</td><td>Nothing is discarded; maximum flexibility.</td><td>Slow when scanning many series or long ranges; repeated expensive dashboard queries.</td></tr>
+          </tbody>
+        </table>
+        <p>Pragmatic mix: keep raw samples for the hot window and aggregate at query time, but pre-compute <em>recording rules</em> (for example, per-service request rate) for the dashboards and alerts that run constantly, and use stream aggregation to produce the long-term tiers. Average-of-averages is a classic trap: roll up sums and counts, not means, if later you need correct weighted averages; and percentiles cannot be averaged at all, so ship histograms (bucket counts) or sketches if you need fleet-wide latency percentiles.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Query service</span>
+        <h2>Query service, cache and query languages</h2>
+        <p>A query service in front of the TSDB gives dashboards and the alert manager one stable API, so you can swap the TSDB without touching clients, enforce limits (maximum series per query, timeout, concurrency per tenant) and add a cache. A cache of recent results absorbs the incident-time stampede where thirty engineers refresh the same graph; cache keys include the query, step and a rounded time window so overlapping refreshes hit. Note the alternative: most visualisation and alerting tools already integrate with the major TSDBs natively, and a well-chosen TSDB has its own caches; then the extra service is unnecessary indirection. Add it when you need multi-tenancy, a migration seam, or federation across clusters.</p>
+        <p>Why do TSDBs avoid SQL? Time-series questions are about windows, rates, gaps and moving averages. Writing an exponential moving average or "per-second rate of a counter that resets" in SQL means nested window functions and derived buckets (the notes show a SQL query roughly twenty lines long), whereas InfluxDB's Flux expresses it as a three-step pipeline and PromQL as a one-liner like <code>avg by (region)(rate(http_requests_total[5m]))</code>. Languages evolve (InfluxDB's newer versions moved back toward SQL and InfluxQL), so in an interview say "a domain-specific query language with range selectors, rates and label aggregation", and name examples.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Storage layer</span>
+        <h2>Storage: hot window, compression, rollups, cold tier</h2>
+        <p><strong>Choose a TSDB that exploits recency.</strong> The Facebook paper found about 85% of queries touch data from the previous 26 hours. A store with a memory-resident (or at least cache-resident) recent window and time-partitioned on-disk blocks serves nearly all reads cheaply; older blocks are touched rarely and can live on cheaper media. Inside the TSDB the typical write path is: append to a write-ahead log, update an in-memory head structure, periodically flush immutable blocks (Prometheus cuts a block every two hours), and compact blocks in the background. Immutable time-partitioned blocks make retention a delete-by-directory and allow queries to skip blocks outside the requested range.</p>
+        <p class="mini-heading">Compression: delta-of-delta and XOR</p>
+        <p>Samples are very regular, so store differences rather than values. Scrapes arrive at near-fixed intervals; the delta between timestamps is constant, so the <em>delta of the deltas</em> is zero almost always and can be encoded in one bit. Successive values of a gauge are often equal or share most bits, so XOR-ing each double with the previous one produces a word full of leading and trailing zeros; store only the meaningful middle bits plus their position. Gorilla reports around a byte or two per sample from these two tricks, against 16 bytes raw. The example below implements both in bit-level form, losslessly round-trips the data, and measures about 3 bits per point for a slowly changing series versus about 66 bits for noisy trigonometric data, which is the honest range: smooth gauges and counters compress superbly, high-entropy floats do not.</p>
+        <div class="diagram-box"><pre>
+  timestamps   1000  1010  1020  1030  1041  1051
+  delta              10    10    10    11    10
+  delta-of-delta           0     0     1    -1        encode: '0' '0' '10'+val '10'+val   (1 bit each when regular)
+
+  values       42.0  42.0  42.0  42.5  42.5
+  XOR prev           0     0   nonzero  0           encode: '0' '0' '1'+leading+length+bits  '0'
+</pre></div>
+        <p class="mini-heading">Downsampling (rollup)</p>
+        <p>Converting high-resolution points to coarse ones saves space on old data, whose questions are about trends, not seconds. The policy in this chapter: raw for 7 days, 1-minute for the next 30 days, 1-hour for the remainder of the year. The worked example in the notes takes six 10-second CPU points (10, 16, 20, 30, 20, 30) down to two 30-second points. The plain averages are 15.3 and 26.7; the notes print 19 and 25, which does not match, so trust the principle (one bucket, one aggregate) rather than those figures. The executable example below asserts the correct arithmetic. Make the rollup policy configurable per metric class, and store the right aggregate per bucket: for gauges keep min, max, sum and count (so you can derive the mean); for counters keep the last value or the increase; for latency keep histogram buckets.</p>
+        <p class="mini-heading">Cold storage</p>
+        <p>Data that nobody queries goes to object storage or an archival tier whose cost per GB is far lower. Systems like Thanos and Mimir keep long-term blocks in S3-compatible stores and query them through a gateway, trading slower queries for dramatically cheaper retention.</p>
+        <p class="mini-heading">Sharding the TSDB</p>
+        <p>One node cannot hold 10 million active series and a million writes per second. Shard by series (hash of the identity, or by label such as pool) and replicate shards; queries fan out across shards and merge. Sharding by time instead leaves recent shards hot while old ones idle. A federated tier (a global view over regional clusters) is the usual way to reach company-wide dashboards without one gigantic cluster.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Alerting</span>
+        <h2>The alerting system</h2>
+        <p>Alert rules are declarative, usually YAML kept in version control: a query expression, a condition, a <code>for</code> duration, labels such as severity, and annotations for the runbook link. The shape follows Prometheus:</p>
+        <pre><code class="language-yaml">- name: instance_down
+  rules:
+  - alert: instance_down
+    expr: up == 0          # query evaluated every interval
+    for: 5m                # must hold continuously for 5 minutes
+    labels:
+      severity: page</code></pre>
+        <p>The flow: rule configuration is loaded into a cache; the alert manager (or rule evaluator) runs each rule's expression against the query service at its interval; when the condition holds long enough, it creates an alert event. The <code>for</code> clause is a state machine: <em>inactive</em>, then <em>pending</em> when the condition first holds, then <em>firing</em> once it has held for the duration, then <em>resolved</em> when it stops holding. This is what suppresses flapping on a single bad scrape.</p>
+        <div class="diagram-box"><pre>
+        condition true                     held for `for:`                    condition false
+  inactive ------------&gt; pending ---------------------------&gt; firing -------------------------&gt; resolved
+      ^                    |  condition false                    |  (repeat reminders every repeat_interval)
+      +--------------------+  (reset, nothing sent)              +--&gt; notification sent once on transition
+</pre></div>
+        <p class="mini-heading">Alert manager responsibilities</p>
+        <ul class="check-list">
+          <li><strong>Dedup and merge:</strong> the same alert from many evaluator replicas, or one alert re-evaluated every minute, yields one event. Group related alerts (fifty hosts in one rack) into one notification keyed by labels.</li>
+          <li><strong>Inhibition and silences:</strong> if the whole datacenter is down, suppress the per-host alerts; allow humans to silence during planned maintenance.</li>
+          <li><strong>Access control:</strong> only authorised people may edit rules, silences and routing.</li>
+          <li><strong>Retry:</strong> notifications are delivered at least once; the alert store (a key-value store such as Cassandra) holds the state of every alert so that a restart neither loses an alert nor re-sends everything.</li>
+          <li><strong>Routing:</strong> severity and team labels pick channels: page the on-call via PagerDuty or phone, send a lower-severity item to email or chat, call a webhook for automation.</li>
+        </ul>
+        <p>After state is recorded, the event is published to Kafka and alert consumers deliver to each channel, with per-channel retries and backoff. Splitting evaluation from delivery lets a slow SMS provider stall only its own consumer.</p>
+        <div class="warn-box"><p><strong>Reliability of the alerting path:</strong> run evaluators in at least two replicas (with deduplication downstream), alert on the absence of data (<code>absent()</code>, a stale heartbeat), and keep an independent external check that pages you if the monitoring system itself stops evaluating. A silent alert pipeline is worse than a noisy one.</p></div>
+        <p>The notes make a pragmatic observation worth repeating in the interview: mature off-the-shelf alerting (Alertmanager, Grafana alerting, PagerDuty, Opsgenie) exists, and building your own is hard to justify unless your requirements are exotic.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Visualization</span>
+        <h2>Dashboards</h2>
+        <p>A visualisation layer plots metrics and alert state over time ranges, with variable templating (choose a region or service), annotations (deploys, incidents) and drill-down. Building one that handles arbitrary queries, downsampled rendering, and access control is a large product; Grafana covers it and connects to nearly every TSDB. Spend your design time on what feeds it: query latency (hence caches, rollups, recording rules), safe defaults (a dashboard asking for 90 days at 1-second step must be rejected or auto-coarsened to roughly one point per pixel), and permissions. Auto-selecting the resolution tier from the requested range is the user-visible benefit of the downsampling pipeline.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decision table</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Pick when</th></tr></thead>
+          <tbody>
+            <tr><td>Collection</td><td>Pull</td><td>Push</td><td>Pull for stable fleets; push for batch jobs, edge and cross-network sources; run both</td></tr>
+            <tr><td>Buffer</td><td>Kafka between collectors and TSDB</td><td>Direct write</td><td>Kafka whenever loss of a storage outage would be unacceptable; direct for small setups</td></tr>
+            <tr><td>Aggregation</td><td>At ingest</td><td>At query</td><td>Ingest for long-term tiers and hot dashboards; query for flexible ad hoc analysis</td></tr>
+            <tr><td>Storage</td><td>Purpose-built TSDB</td><td>General DB / NoSQL</td><td>TSDB unless the team has deep expertise and tiny scale</td></tr>
+            <tr><td>Retention</td><td>Tiered rollups</td><td>Keep raw forever</td><td>Tiered: questions about old data are coarse and cheaper to answer</td></tr>
+            <tr><td>Query front</td><td>Own query service plus cache</td><td>Direct TSDB access</td><td>Own service for multi-tenancy and swap-ability; direct for simplicity</td></tr>
+            <tr><td>Alerting</td><td>Build</td><td>Buy / open source</td><td>Buy or adopt open source almost always</td></tr>
+            <tr><td>Dashboards</td><td>Build</td><td>Grafana</td><td>Grafana</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>Time-series building blocks you can execute</h2>
+        <p>The example gives you five pieces: a series index that canonicalises name plus labels and keeps an inverted index for label matching (and demonstrates a cardinality explosion); a bit-level Gorilla-style compressor with delta-of-delta timestamps and XOR floats, verified lossless; a downsampler; a virtual-node consistent-hash ring to shard scrape targets across collectors; and an alert rule state machine with a <code>for</code> duration and notify-on-transition behaviour.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import { strict as assert } from 'node:assert';
+import { createHash } from 'node:crypto';
+
+// ---------- 1. Series identity: name + sorted labels -&gt; stable id; inverted index per label ----------
+class SeriesIndex {
+  constructor() { this.ids = new Map(); this.byLabel = new Map(); this.series = []; }
+  idFor(name, labels) {
+    const canon = name + '{' + Object.entries(labels).sort(([a], [b]) =&gt; a &lt; b ? -1 : 1).map(([k, v]) =&gt; `${k}=${v}`).join(',') + '}';
+    if (!this.ids.has(canon)) {
+      const id = this.series.length; this.ids.set(canon, id); this.series.push({ name, labels, canon });
+      for (const [k, v] of Object.entries({ __name__: name, ...labels })) {
+        const key = `${k}=${v}`; if (!this.byLabel.has(key)) this.byLabel.set(key, new Set()); this.byLabel.get(key).add(id);
+      }
+    }
+    return this.ids.get(canon);
+  }
+  match(matchers) {                                              // intersect posting lists, smallest first
+    const lists = Object.entries(matchers).map(([k, v]) =&gt; this.byLabel.get(`${k}=${v}`) ?? new Set()).sort((a, b) =&gt; a.size - b.size);
+    return [...(lists[0] ?? [])].filter(id =&gt; lists.every(l =&gt; l.has(id)));
+  }
+  get cardinality() { return this.series.length; }
+}
+
+// ---------- 2. Gorilla-style compression: delta-of-delta timestamps, XOR floats ----------
+class BitWriter {
+  constructor() { this.bits = []; }
+  write(value, n) { for (let i = n - 1; i &gt;= 0; i--) this.bits.push(Number((BigInt(value) &gt;&gt; BigInt(i)) &amp; 1n)); }
+  get size() { return this.bits.length; }
+}
+class BitReader {
+  constructor(bits) { this.bits = bits; this.pos = 0; }
+  read(n) { let v = 0n; for (let i = 0; i &lt; n; i++) v = (v &lt;&lt; 1n) | BigInt(this.bits[this.pos++]); return v; }
+}
+const toBits = x =&gt; { const d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, x); return d.getBigUint64(0); };
+const fromBits = b =&gt; { const d = new DataView(new ArrayBuffer(8)); d.setBigUint64(0, b); return d.getFloat64(0); };
+const clz64 = x =&gt; { let n = 0; for (let i = 63n; i &gt;= 0n &amp;&amp; !((x &gt;&gt; i) &amp; 1n); i--) n++; return n; };
+const ctz64 = x =&gt; { let n = 0; for (let i = 0n; i &lt; 64n &amp;&amp; !((x &gt;&gt; i) &amp; 1n); i++) n++; return n; };
+const zz = v =&gt; (v &lt;&lt; 1) ^ (v &gt;&gt; 31);                              // zigzag for signed 32-bit values
+const unzz = u =&gt; (u &gt;&gt;&gt; 1) ^ -(u &amp; 1);
+
+function compress(points) {
+  const w = new BitWriter(); w.write(points[0][0], 64); w.write(toBits(points[0][1]), 64);
+  let prevT = points[0][0], prevDelta = 0, prevV = toBits(points[0][1]);
+  for (const [t, v] of points.slice(1)) {
+    const delta = t - prevT, dod = delta - prevDelta;           // timestamps
+    if (dod === 0) w.write(0, 1);                                // '0'            : delta unchanged (the common case)
+    else if (dod &gt;= -63 &amp;&amp; dod &lt;= 64) { w.write(0b10, 2); w.write(dod + 63, 7); }
+    else if (dod &gt;= -255 &amp;&amp; dod &lt;= 256) { w.write(0b110, 3); w.write(dod + 255, 9); }
+    else { w.write(0b111, 3); w.write(zz(dod) &gt;&gt;&gt; 0, 32); }
+    prevT = t; prevDelta = delta;
+    const x = toBits(v) ^ prevV;                                 // values
+    if (x === 0n) w.write(0, 1);                                 // identical value: one bit
+    else { const lz = Math.min(Number(clz64(x)), 31), tz = Number(ctz64(x)), len = 64 - lz - tz;
+      w.write(1, 1); w.write(lz, 5); w.write(len - 1, 6); w.write(x &gt;&gt; BigInt(tz), len); }
+    prevV = toBits(v);
+  }
+  return { bits: w.bits, count: points.length };
+}
+function decompress({ bits, count }) {
+  const r = new BitReader(bits); let t = Number(r.read(64)), v = r.read(64); const out = [[t, fromBits(v)]];
+  let delta = 0;
+  for (let i = 1; i &lt; count; i++) {
+    let dod;
+    if (r.read(1) === 0n) dod = 0;
+    else if (r.read(1) === 0n) dod = Number(r.read(7)) - 63;
+    else if (r.read(1) === 0n) dod = Number(r.read(9)) - 255;
+    else dod = unzz(Number(r.read(32)));
+    delta += dod; t += delta;
+    if (r.read(1) === 1n) { const lz = Number(r.read(5)), len = Number(r.read(6)) + 1, tz = 64 - lz - len; v ^= r.read(len) &lt;&lt; BigInt(tz); }
+    out.push([t, fromBits(v)]);
+  }
+  return out;
+}
+
+// ---------- 3. Downsampling (rollup) ----------
+function downsample(points, stepSec, agg = a =&gt; a.reduce((s, x) =&gt; s + x, 0) / a.length) {
+  const buckets = new Map();
+  for (const [t, v] of points) { const b = Math.floor(t / stepSec) * stepSec; (buckets.get(b) ?? buckets.set(b, []).get(b)).push(v); }
+  return [...buckets].map(([t, vs]) =&gt; [t, agg(vs)]);
+}
+
+// ---------- 4. Consistent-hash ring (virtual nodes): which collector scrapes which target ----------
+class Ring {
+  constructor(nodes, vnodes = 64) { this.ring = []; for (const n of nodes) for (let i = 0; i &lt; vnodes; i++) this.ring.push([this.h(`${n}#${i}`), n]); this.ring.sort((a, b) =&gt; a[0] - b[0]); }
+  h(s) { return createHash('sha1').update(s).digest().readUInt32BE(0); }
+  owner(key) { const k = this.h(key); let lo = 0, hi = this.ring.length; while (lo &lt; hi) { const m = (lo + hi) &gt;&gt; 1; this.ring[m][0] &lt; k ? lo = m + 1 : hi = m; } return this.ring[lo % this.ring.length][1]; }
+}
+
+// ---------- 5. Alert rule: expr + `for` duration -&gt; inactive / pending / firing, with dedup ----------
+class AlertRule {
+  constructor({ name, predicate, forSec }) { Object.assign(this, { name, predicate, forSec }); this.state = new Map(); this.sent = []; }
+  evaluate(now, samples) {                                       // samples: Map&lt;seriesKey, value&gt;
+    for (const [key, val] of samples) {
+      const st = this.state.get(key) ?? { s: 'inactive' };
+      if (this.predicate(val)) {
+        if (st.s === 'inactive') { st.s = 'pending'; st.since = now; }
+        if (st.s === 'pending' &amp;&amp; now - st.since &gt;= this.forSec) { st.s = 'firing'; this.sent.push(`FIRING ${this.name} ${key}@${now}`); } // only once per transition
+      } else {
+        if (st.s === 'firing') this.sent.push(`RESOLVED ${this.name} ${key}@${now}`);
+        st.s = 'inactive';
+      }
+      this.state.set(key, st);
+    }
+  }
+}
+
+// ---------- Tests ----------
+const idx = new SeriesIndex();
+const a = idx.idFor('cpu.load', { host: 'web01', region: 'us-west' }), a2 = idx.idFor('cpu.load', { region: 'us-west', host: 'web01' });
+idx.idFor('cpu.load', { host: 'web02', region: 'us-west' }); idx.idFor('cpu.load', { host: 'db01', region: 'us-east' });
+assert.equal(a, a2); assert.equal(idx.cardinality, 3);
+assert.equal(idx.match({ __name__: 'cpu.load', region: 'us-west' }).length, 2);
+const bad = new SeriesIndex(); for (let i = 0; i &lt; 1000; i++) bad.idFor('http.req', { host: 'h1', request_id: 'r' + i }); // label explosion
+console.log('good labels -&gt; series:', idx.cardinality, '| request_id as a label -&gt; series:', bad.cardinality);
+
+const T0 = 1613707200; const pts = []; let v = 50;
+for (let i = 0; i &lt; 360; i++) { if (i % 30 === 0) v = 40 + (i % 7) * 5; pts.push([T0 + i * 10 + (i === 100 ? 1 : 0), v]); } // 10s scrape, 1 jitter, step values
+const c = compress(pts), back = decompress(c);
+assert.deepEqual(back, pts);
+const rawBits = pts.length * 128;
+console.log(`gorilla-style: ${pts.length} points, ${rawBits} raw bits -&gt; ${c.bits.length} bits (${(c.bits.length / pts.length).toFixed(2)} bits/point, ${(rawBits / c.bits.length).toFixed(1)}x smaller), lossless`);
+const noisy = pts.map(([t], i) =&gt; [t, Math.sin(i / 3) * 100]); const cn = compress(noisy); assert.deepEqual(decompress(cn), noisy);
+console.log(`noisy floats: ${(cn.bits.length / noisy.length).toFixed(1)} bits/point (XOR helps much less)`);
+
+const tenSec = [10, 16, 20, 30, 20, 30].map((x, i) =&gt; [i * 10, x]);
+assert.deepEqual(downsample(tenSec, 30), [[0, 46 / 3], [30, 80 / 3]]);
+const rolled = downsample(pts, 60); assert.equal(rolled.length, 60); console.log('10s -&gt; 1m rollup:', pts.length, '-&gt;', rolled.length, 'points');
+
+const ring = new Ring(['c1', 'c2', 'c3']); const targets = Array.from({ length: 3000 }, (_, i) =&gt; `host-${i}`);
+const before = new Map(targets.map(t =&gt; [t, ring.owner(t)])); const load = {}; for (const o of before.values()) load[o] = (load[o] ?? 0) + 1;
+const ring4 = new Ring(['c1', 'c2', 'c3', 'c4']); const moved = targets.filter(t =&gt; ring4.owner(t) !== before.get(t)).length;
+console.log('scrape shards', JSON.stringify(load), '| after adding c4, targets moved:', moved, `(${(moved / 30).toFixed(1)}%)`);
+assert.ok(moved &lt; 3000 * 0.40); assert.ok(Object.values(load).every(n =&gt; n &gt; 700));
+
+const rule = new AlertRule({ name: 'instance_down', predicate: x =&gt; x === 0, forSec: 300 });
+const series = [1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]; // up{} sampled every 60s
+series.forEach((x, i) =&gt; rule.evaluate(i * 60, new Map([['i-631', x]])));
+console.log(rule.sent.join('\n'));
+assert.equal(rule.sent.length, 2); assert.ok(rule.sent[0].startsWith('FIRING') &amp;&amp; rule.sent[1].startsWith('RESOLVED'));
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Run with <code>node tsdb.mjs</code> (Node 20+). It prints 3 series for sane labels versus 1000 when <code>request_id</code> is used as a label; a compression result of 360 points going from 46,080 raw bits to 1,053 bits (about 2.9 bits per point, 43.8× smaller) with identical values after decompression, and about 66 bits per point for noisy floats; the 360 to 60 point rollup; the per-collector target counts and the roughly 24% of targets that move when a fourth collector is added; and the alert lines FIRING at t=600 and RESOLVED at t=960. It ends with "all assertions passed".</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What goes wrong and how to contain it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>TSDB down or slow</td><td>Collectors back up; gaps in graphs</td><td>Kafka buffer with retention longer than the worst outage; consumers resume and backfill</td></tr>
+            <tr><td>Collector dies</td><td>Its targets go unscraped</td><td>Ring rebalances targets to survivors; replica collectors with dedup for critical shards</td></tr>
+            <tr><td>Cardinality explosion</td><td>Memory growth, slow queries, OOM</td><td>Per-tenant series limits, ingestion-time label allow-lists, drop or rewrite offending labels, alert on series growth rate</td></tr>
+            <tr><td>Clock skew</td><td>Samples in the future or out of order</td><td>Stamp at the collector for pull; reject or clamp out-of-window timestamps; NTP everywhere</td></tr>
+            <tr><td>Counter reset</td><td>Negative rate after process restart</td><td>Rate functions treat decreases as resets; ship monotonic counters, compute rate at query time</td></tr>
+            <tr><td>Alert flapping</td><td>Pages on and off</td><td><code>for</code> duration, hysteresis (different thresholds to fire and clear), grouping</td></tr>
+            <tr><td>Alert storm</td><td>Hundreds of pages in a minute</td><td>Group by labels, inhibition rules, rate-limit notifications</td></tr>
+            <tr><td>Silent monitoring failure</td><td>Nothing alerts because nothing evaluates</td><td>Dead man's switch to an external service; absent-data alerts</td></tr>
+            <tr><td>Notification channel outage</td><td>Alert fires but nobody hears</td><td>Retry with backoff, secondary channel (phone if chat fails), delivery receipts</td></tr>
+            <tr><td>Query overload during incident</td><td>Dashboards time out when needed most</td><td>Result cache, query limits and priorities (alert queries before ad hoc), recording rules</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production gotchas</span>
+        <h2>Where it strains, and what experienced teams learn</h2>
+        <ul class="check-list">
+          <li><strong>Memory scales with active series.</strong> A Prometheus-class head costs on the order of a few KB per active series, so 10 M series is tens of GB in a single process; shard or federate rather than buying a bigger box.</li>
+          <li><strong>Churn is cardinality too.</strong> Containers that restart with new pod names create new series continuously; even if the live count is steady, the index grows. Prefer stable labels (deployment, not pod) for long-term views.</li>
+          <li><strong>Use histograms deliberately.</strong> Each bucket is a series; ten buckets across a million label combinations is ten million series. Never average percentiles; aggregate buckets and compute quantiles afterward.</li>
+          <li><strong>Scrape interval is a fixed tax.</strong> Halving the interval doubles ingest and storage. Keep 10-15 s for infrastructure, go finer only for specific metrics that need it.</li>
+          <li><strong>Alert on symptoms, not causes.</strong> Page on user-visible error rate and latency; use cause metrics (CPU, disk) for dashboards and tickets. Good alerts are actionable, urgent and rare.</li>
+          <li><strong>Treat rules as code.</strong> Version them, review them, test them against historical data, and attach a runbook link to every page.</li>
+          <li><strong>Plan the tenancy model.</strong> Per-team quotas, per-tenant limits and cost attribution prevent one noisy team from degrading everyone.</li>
+          <li><strong>Back up configuration, not only data.</strong> Losing dashboards and rules is often more painful than losing a week of samples.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Scoped to infrastructure metrics; excluded logs and tracing; asked internal versus SaaS.</li>
+          <li>Computed series, write rate, daily samples and storage per tier with and without compression.</li>
+          <li>Described the time-series model and why labels and cardinality matter.</li>
+          <li>Chose a TSDB and justified not using a general-purpose database.</li>
+          <li>Compared pull and push with service discovery and consistent-hash sharded collectors.</li>
+          <li>Added a Kafka buffer and discussed partitioning and its operational cost.</li>
+          <li>Placed aggregation (agent, ingest, query) and explained trade-offs.</li>
+          <li>Covered query service and cache, compression, downsampling tiers and cold storage.</li>
+          <li>Designed alerting: rules, <code>for</code> state machine, dedup, store, notification consumers, retries.</li>
+          <li>Used an off-the-shelf dashboard; addressed monitoring the monitor.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Pull or push, and why does Prometheus pull?</summary><p>Pull gives centrally controlled rates, a free liveness signal (a failed scrape is a failed target) and easy debugging, which suit long-running services discovered through a registry. Push suits ephemeral jobs and unreachable networks. Prometheus chose pull for operational transparency and uses a Pushgateway for the exceptions. Many organisations end up running both.</p></details>
+        <details><summary>How do you avoid losing metrics when the database is down?</summary><p>Put a replicated, partitioned queue (Kafka) between collectors and the database, sized to retain more than the longest expected outage. Consumers replay when the database returns. Because metrics tolerate small losses, you can also let agents drop the oldest samples locally under extreme backpressure rather than blocking the application.</p></details>
+        <details><summary>How would you downsample without losing the ability to compute correct averages and percentiles?</summary><p>Store sum and count (and min and max) per bucket rather than only the average, so weighted means are exact. For percentiles, store histogram bucket counts or a mergeable sketch (t-digest, DDSketch); percentiles of percentiles are meaningless.</p></details>
+        <details><summary>What stops a new label from taking the system down?</summary><p>Ingestion limits: a per-tenant cap on active series, label allow-lists and value length limits, automatic rejection with an explicit error to the sender, and dashboards that show top series by cardinality so the owner can fix it. Cardinality is governed like a quota, not trusted to goodwill.</p></details>
+        <details><summary>How do you make alerts reliable without duplicating pages?</summary><p>Evaluate in redundant replicas, derive a stable alert fingerprint from rule name plus labels, and let the alert manager deduplicate and group on that fingerprint. Persist state so restarts do not re-fire. Deliver at least once through a queue with retries and make notification handlers tolerant of duplicates.</p></details>
+        <details><summary>Why have a separate query service at all?</summary><p>It isolates clients from the storage engine so you can migrate or shard it, centralises limits and caching, and gives alerting a priority lane. If your TSDB and tools already offer those, skip it; extra layers are extra failure points in the system that must stay up during outages.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./19-distributed-message-queue.html">Chapter 19: Distributed Message Queue</a> — the buffer between collectors and storage.</li>
+          <li><a href="./21-ad-click-aggregation.html">Chapter 21: Ad Click Aggregation</a> — the next chapter; the same stream-aggregation and windowing techniques applied to money-relevant events.</li>
+          <li><a href="../../system-design/observability.html">Observability</a> — metrics, logs and traces in context.</li>
+          <li><a href="../../system-design/service-discovery.html">Service Discovery</a> — how collectors find scrape targets.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — sharding collectors and TSDB nodes with minimal movement.</li>
+          <li><a href="../../system-design/caching.html">Caching</a> — the query-result cache that protects the TSDB during incidents.</li>
+          <li><a href="../../cassandra.html">Cassandra</a> — a typical alert state store and a wide-column option for time-series.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The notes link one reference for this chapter:</p>
+        <ul>
+          <li><a href="https://www.vldb.org/pvldb/vol8/p1816-teller.pdf">Gorilla: A Fast, Scalable, In-Memory Time Series Database</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Metrics monitoring is a time-series pipeline: a label-based data model, collectors (pull for services, push for ephemeral jobs) sharded by consistent hashing, a replayable queue to decouple ingest from storage, a TSDB that exploits recent-data locality and delta compression, tiered rollups for retention, and an alert manager that turns rule matches into deduplicated, at-least-once notifications. Control cardinality like a budget, buy dashboards and alert routing rather than building them, and never let the monitoring system share a failure domain with what it watches.</p>
+      </section>
+    </main>
+  </body>
+</html>

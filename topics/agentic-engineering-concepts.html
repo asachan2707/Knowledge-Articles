@@ -19,6 +19,7 @@
   </head>
   <body>
     <main class="page container">
+      <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Merged 2026-10-13: original 30 concepts + Medium 'Agentic AI Design Patterns: 10 Architectures' (vinothkumara89, fully read). Added section '10 Agent Design Patterns — a selection guide': single agent, sequential, parallel+synthesizer, loop, review/critique, iterative refinement, coordinator, hierarchical decomposition, swarm, ReAct (+ human-in-the-loop, custom logic) with a table of when/cost-latency/failure mode; each pattern cross-references existing concept numbers and adds only production deltas (token multiplication, termination guarantees, loop idempotency, critic independence, depth/budget caps). Core advice: start with the simplest architecture that works. Code: Node ESM generator/critic loop with iteration cap and stall guard, ran: accepted after 4 rounds. Read time 32 min (page kicker previously said 25; index card said 35 — mismatch noted). Related: 9-agentic-harness-architectures, building-ai-agents-end-to-end.</div>
       <header class="page-header">
         <a class="back-link" href="../index.html">← Back to Learning Hub</a>
         <figure class="article-hero">
@@ -27,7 +28,7 @@
             alt="AI agent network diagram" loading="lazy" />
           <div class="article-hero-overlay"></div>
           <div class="article-hero-content">
-            <span class="article-hero-kicker">AI · Agents · Engineering · Reference · 25 min read</span>
+            <span class="article-hero-kicker">AI · Agents · Engineering · Reference · 32 min read</span>
           </div>
         </figure>
         <h1>30 Core Agentic Engineering Concepts Every Developer Should Know</h1>
@@ -232,6 +233,116 @@ execSync(proposal.command);</code></pre>
     await this.save(state); // checkpoint after each turn
   }
 }</code></pre>
+      </section>
+
+      <!-- ─── 10 AGENT DESIGN PATTERNS: SELECTION GUIDE ──────────── -->
+      <section class="content-card">
+        <style>
+          .pattern-table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:.82rem; }
+          .pattern-table th, .pattern-table td { border:1px solid var(--border); padding:.5rem .6rem; text-align:left; vertical-align:top; line-height:1.45; }
+          .pattern-table th { background:#0f172a; color:#f8fafc; font-family:Arial,Helvetica,sans-serif; }
+        </style>
+        <h2>10 Agent Design Patterns — a selection guide</h2>
+        <p>Concepts 7–12 describe the building blocks. This section answers the question that comes
+        next in a design review: <em>which shape should this system take?</em> The ten patterns below
+        run from a single agent with tools up to code-driven orchestration. The rule that governs all
+        of them: <strong>start with the simplest architecture that solves the problem</strong>, and
+        add a layer only when you can name the failure it removes.</p>
+
+        <div class="table-wrap" style="overflow-x:auto">
+        <table class="pattern-table">
+          <thead><tr><th>Pattern</th><th>Reach for it when</th><th>Cost / latency</th><th>Typical failure mode</th></tr></thead>
+          <tbody>
+            <tr><td>1. Single agent</td><td>One domain, under about 10 tools</td><td>Lowest</td><td>Tool-choice errors as the tool list grows</td></tr>
+            <tr><td>2. Sequential</td><td>Fixed stages (extract, clean, transform, load)</td><td>Sum of stages</td><td>Early-stage error flows downstream; rigid</td></tr>
+            <tr><td>3. Parallel + synthesizer</td><td>Independent analyses of one input</td><td>Latency = slowest branch; tokens x N</td><td>Branches contradict; synthesizer papers over it</td></tr>
+            <tr><td>4. Loop</td><td>Repeat until a measurable condition holds</td><td>Unbounded without a cap</td><td>No exit condition, or one never satisfiable</td></tr>
+            <tr><td>5. Review and critique</td><td>Output must meet explicit criteria</td><td>+1 model call per check</td><td>Critic shares the generator's blind spots</td></tr>
+            <tr><td>6. Iterative refinement</td><td>Quality improves with revision (drafts, code)</td><td>Rounds x (generate + review)</td><td>Oscillation, diminishing returns</td></tr>
+            <tr><td>7. Coordinator</td><td>Request type unknown up front; route to specialists</td><td>+1 routing call, then specialist cost</td><td>Misrouting; coordinator becomes a bottleneck</td></tr>
+            <tr><td>8. Hierarchical decomposition</td><td>Open-ended research or large tasks</td><td>Highest; grows per level</td><td>Hard to debug; errors compound up the tree</td></tr>
+            <tr><td>9. Swarm</td><td>Peer specialists, no clear owner of the flow</td><td>High, hard to predict</td><td>Handoff ping-pong, no stop condition</td></tr>
+            <tr><td>10. ReAct</td><td>Next step depends on the last observation</td><td>One call per step</td><td>Loops on a failing tool; context bloat</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p>Two more patterns are about control rather than topology: <strong>human-in-the-loop
+        checkpoints</strong> (concept 25) for regulated or irreversible steps, and
+        <strong>custom logic orchestration</strong>, where ordinary code owns the branching and the
+        model fills in only the judgment calls.</p>
+
+        <h3>Pattern notes: what the textbook leaves out</h3>
+
+        <h4>1. Single agent</h4>
+        <p>Already covered by concepts 1–2 and the topology list in concept 8. Delta: the limit is rarely the number of tools itself but the overlap between their descriptions. Merge or rename look-alike tools before splitting into agents; a split buys you a second context and a second bill.</p>
+
+        <h4>2. Sequential</h4>
+        <p>Topology (2) in concept 8. Put a schema check between stages so a malformed hand-off fails at the boundary, not three stages later. Each stage is also an independent eval target, which is the main production argument for this pattern.</p>
+
+        <h4>3. Parallel with a synthesizer</h4>
+        <p>Fan-out is shown in concept 7. Delta: token cost scales linearly with branch count, and every branch re-reads the shared input, so prompt caching of that shared prefix matters (concept 30). Decide the conflict policy before building the synthesizer: majority, weighted by confidence, or escalate. Set a per-branch timeout and let the synthesizer proceed with partial results, otherwise the slowest branch sets your p99.</p>
+
+        <h4>4. Loop</h4>
+        <p>Concept 6 covers stop conditions. Delta: demand two independent guarantees, a semantic exit predicate and a hard cap on iterations, tokens, or wall-clock time. Every tool call inside a loop will eventually be repeated, so side-effecting tools need idempotency keys (concept 16).</p>
+
+        <h4>5. Review and critique</h4>
+        <p>This is the verification agent from concept 14. Delta: give the critic a rubric, not a vague "is this good?", and try a different model or prompt from the generator to reduce correlated errors. Run deterministic checks (schema, tests, regex) first because they are free and never flatter the draft.</p>
+
+        <h4>6. Iterative refinement</h4>
+        <p>Review plus a loop. The runnable example below shows the essentials. Production insight: track the score per round. If it does not strictly improve, stop; further rounds mostly burn tokens or swing between two phrasings.</p>
+
+        <h4>7. Coordinator</h4>
+        <p>Differs from the parallel pattern in who chooses: the model picks specialists at runtime instead of running a fixed set. Constrain its output to an enum of known specialists, log the routing decision, and add a fallback route. A cheap model is usually enough for the coordinator; a router that is wrong is worse than one that is slow.</p>
+
+        <h4>8. Hierarchical task decomposition</h4>
+        <p>Concept 7 plus the hierarchical topology in concept 8. Delta: cap depth at two or three levels, pass budgets down (each child receives a slice of the parent's token allowance), and trace with parent IDs (concept 17) so one failed leaf can be found without reading the whole tree.</p>
+
+        <h4>9. Swarm</h4>
+        <p>See the swarm architecture in <a href="./9-agentic-harness-architectures.html">9 Agentic Harness Architectures</a> for the mechanics. Delta: with no supervisor, nobody owns termination. Enforce a global hop counter, forbid immediate hand-back to the sender, and cap total spend at the system level. Token usage multiplies because every peer carries a growing shared transcript.</p>
+
+        <h4>10. ReAct</h4>
+        <p>Term 10 in the quick reference below and a full chapter in the harness article. Delta: detect repeated identical tool calls (same name, same arguments) and break the loop with an explicit message rather than letting the model retry forever.</p>
+
+        <h3>Runnable example: refinement loop with a cap and exit predicate</h3>
+        <p>Node 20+, no dependencies. Save as <code>refine.mjs</code> and run <code>node refine.mjs</code>. The model is injected as <code>callModel</code>, and the fake here is deterministic so the output is reproducible; replace it with a real client to use it for real.</p>
+        <pre class="code-block"><code>// Generator/critic refinement loop with an iteration cap and an exit predicate.
+// callModel is injected, so swapping in a real SDK client changes nothing else.
+async function refine({ task, callModel, maxRounds = 4, goodEnough = (r) =&gt; r.score &gt;= 0.9 }) {
+  let draft = await callModel({ role: &#x27;generator&#x27;, task });
+  const history = [];
+
+  for (let round = 1; round &lt;= maxRounds; round++) {
+    const review = await callModel({ role: &#x27;critic&#x27;, task, draft });
+    history.push({ round, score: review.score, issues: review.issues });
+
+    if (goodEnough(review)) return { draft, rounds: round, status: &#x27;accepted&#x27;, history };
+
+    // Stall guard: a critic that keeps returning the same score is not helping.
+    const prev = history.at(-2);
+    if (prev &amp;&amp; prev.score &gt;= review.score) return { draft, rounds: round, status: &#x27;stalled&#x27;, history };
+
+    draft = await callModel({ role: &#x27;generator&#x27;, task, draft, issues: review.issues });
+  }
+  return { draft, rounds: maxRounds, status: &#x27;cap_reached&#x27;, history };
+}
+
+// Deterministic fake model: each revision fixes one issue from a fixed checklist.
+const CHECKLIST = [&#x27;add a title&#x27;, &#x27;add a summary line&#x27;, &#x27;add a call to action&#x27;];
+const fakeModel = async (req) =&gt; {
+  if (req.role === &#x27;generator&#x27;) {
+    if (!req.draft) return &#x27;body text&#x27;;
+    const [fix] = req.issues;
+    return `${req.draft} + [${fix}]`;
+  }
+  const missing = CHECKLIST.filter((c) =&gt; !req.draft.includes(`[${c}]`));
+  return { score: 1 - missing.length / CHECKLIST.length, issues: missing };
+};
+
+const result = await refine({ task: &#x27;write a product blurb&#x27;, callModel: fakeModel });
+console.log(result.status, &#x27;after&#x27;, result.rounds, &#x27;rounds&#x27;);
+console.log(result.history.map((h) =&gt; h.score.toFixed(2)).join(&#x27; -&gt; &#x27;));
+console.log(result.draft);</code></pre>
+        <p>Note the three distinct exits: <code>accepted</code> (the predicate passed), <code>stalled</code> (no progress), and <code>cap_reached</code> (budget spent). Returning the reason lets callers escalate to a human instead of treating all three as success.</p>
       </section>
 
       <!-- ─── CATEGORY 3: RELIABILITY ────────────────────────────── -->
@@ -482,6 +593,53 @@ const response = await claude.messages.create({
           reliability primitives (13–18). Memory and production patterns build on top. The 30 concepts
           here cover the patterns that appear in every serious production agent system.
         </p>
+      </section>
+
+      <!-- ─── 20 AGENTIC AI TERMS (Let's Code Future, Sep 2026) ──────────── -->
+      <section class="content-card">
+        <h2>20 Essential Agentic AI Terms — Quick Reference</h2>
+        <p>These terms appear in nearly every agent engineering conversation. Know them before
+        your first code review or system design discussion involving agentic systems.</p>
+
+        <style>
+          .term-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .75rem; margin: 1rem 0; }
+          .term-card { border: 1px solid var(--border); border-radius: 8px; padding: .8rem 1rem; }
+          .term-card .term-num { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #64748b; }
+          .term-card h4 { margin: .15rem 0 .3rem; font-family: Arial, Helvetica, sans-serif; font-size: .92rem; color: #0f766e; }
+          .term-card p  { margin: 0; font-size: .83rem; color: var(--muted); line-height: 1.5; }
+        </style>
+
+        <div class="term-grid">
+          <div class="term-card"><div class="term-num">01</div><h4>AI Agent</h4><p>A model that perceives its environment, decides on actions, executes tools, and iterates toward a goal — without a human in the loop for each step.</p></div>
+          <div class="term-card"><div class="term-num">02</div><h4>Agentic Loop</h4><p>The perception → reasoning → action → observation cycle. The agent runs this loop until a stop condition is reached: task complete, max iterations, or error.</p></div>
+          <div class="term-card"><div class="term-num">03</div><h4>Tool Calling</h4><p>The mechanism by which a model invokes external functions (web search, DB query, file write). The model outputs a structured tool call; the harness executes it and returns the result.</p></div>
+          <div class="term-card"><div class="term-num">04</div><h4>MCP (Model Context Protocol)</h4><p>A standardized interface for connecting models to tools and resources. MCP servers expose capabilities via a schema; agents discover and call them safely.</p></div>
+          <div class="term-card"><div class="term-num">05</div><h4>Multi-Agent System</h4><p>Multiple agents, each specialized for a domain, coordinated by an orchestrator. Enables parallelism, specialization, and task graphs too complex for a single agent.</p></div>
+          <div class="term-card"><div class="term-num">06</div><h4>HITL (Human-in-the-Loop)</h4><p>A design pattern where the agent pauses for human approval before proceeding — typically on irreversible actions (send email, deploy, delete data).</p></div>
+          <div class="term-card"><div class="term-num">07</div><h4>Memory (Short-term)</h4><p>The current context window — what the model can "see" right now. Bounded. Once context is full, old information is lost unless explicitly persisted.</p></div>
+          <div class="term-card"><div class="term-num">08</div><h4>Memory (Long-term)</h4><p>Externalized storage (vector DB, key-value store) that the agent retrieves from at runtime. Not bounded by context window size.</p></div>
+          <div class="term-card"><div class="term-num">09</div><h4>Planning</h4><p>The agent decomposing a high-level goal into a sequence of subtasks. Can be explicit (write a plan first) or implicit (ReAct: reason about next action each step).</p></div>
+          <div class="term-card"><div class="term-num">10</div><h4>ReAct</h4><p>Reasoning + Acting. A prompting pattern where the model alternates between reasoning steps ("I should search for X") and tool calls. The most widely-used agent pattern.</p></div>
+          <div class="term-card"><div class="term-num">11</div><h4>Autonomous Workflow</h4><p>A pipeline of agent actions that runs to completion without human intervention, triggered by an event or schedule. Differentiated from HITL by absence of approval gates.</p></div>
+          <div class="term-card"><div class="term-num">12</div><h4>Orchestrator</h4><p>The agent (or service) that coordinates other agents. Assigns subtasks, collects results, handles failures. Distinct from workers, which execute tasks.</p></div>
+          <div class="term-card"><div class="term-num">13</div><h4>Context Engineering</h4><p>The discipline of deciding what information an agent gets, when it gets it, and in what form — so the model operates on exactly what it needs and nothing it doesn't.</p></div>
+          <div class="term-card"><div class="term-num">14</div><h4>Grounding</h4><p>Connecting the model's responses to verifiable facts — via RAG, tool calls, or explicit document injection. Reduces hallucination by constraining outputs to evidence.</p></div>
+          <div class="term-card"><div class="term-num">15</div><h4>Stop Condition</h4><p>The criterion that terminates the agent loop: task completion signal, max iteration count, error threshold, or explicit DONE token. Without one, agents run forever.</p></div>
+          <div class="term-card"><div class="term-num">16</div><h4>Guardrail</h4><p>A policy check applied to agent inputs or outputs — blocking harmful content, enforcing output schema, validating tool arguments before execution.</p></div>
+          <div class="term-card"><div class="term-num">17</div><h4>Evaluation (Evals)</h4><p>Automated testing of agent behavior on a defined test set. Measures task success rate, factual accuracy, tool use correctness, and latency. The equivalent of unit tests for agents.</p></div>
+          <div class="term-card"><div class="term-num">18</div><h4>Hallucination</h4><p>The model generates plausible but factually incorrect content. In agents, the most dangerous form is hallucinating tool arguments (calling a real API with invented data).</p></div>
+          <div class="term-card"><div class="term-num">19</div><h4>Graph Engineering</h4><p>Structuring agent workflows as explicit dependency graphs (task graph + capability graph + run graph) rather than loops. Enables parallelism, approval gates, and auditability.</p></div>
+          <div class="term-card"><div class="term-num">20</div><h4>Agentic Harness</h4><p>The infrastructure layer around the model: tool registry, session persistence, retry logic, error boundaries, cost tracking, and observability hooks.</p></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Related Reading</h2>
+        <ul>
+          <li><a href="./9-agentic-harness-architectures.html">9 Agentic Harness Architectures</a></li>
+          <li><a href="./building-ai-agents-end-to-end.html">Building AI Agents End to End</a></li>
+        </ul>
       </section>
     </main>
   </body>

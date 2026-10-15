@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Google Drive Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Reading guide for the three Google Drive resources: Differential Synchronization essay (read in full), its video and the Dropbox scaling talk (videos, not read). Covers shadow copies, fuzzy patching, version numbers and edit stack, backup shadow, comparison with locking, OT and three-way merge, and block-level file sync background. Includes an executed Node differential-sync example. Related: chapter 15, consistency models, concurrency control. Created 2026-10-15 from the Additional Resources section of liquidslr/system-design-notes. Read time about 9 min.</div>
+        <h1>Google Drive and File Sync: Reading Guide</h1>
+        <p class="summary">A reading guide to Neil Fraser's Differential Synchronization essay, with two unread videos flagged, and an executed shadow/diff/fuzzy-patch implementation.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 15</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">9 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Shadow copy, diff and fuzzy patch, edit stack, OT vs CRDT</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Google Docs, Dropbox, git, rsync</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Chapter 15 designs a file storage and sync service. Its attached resources are a short list but cover two different ideas: how to keep two copies of <em>a document</em> converged while people edit it concurrently (differential synchronization), and how a large file-sync company scales the storage and metadata behind <em>files</em> (the Dropbox talk). The first is a clean, readable essay I could read in full. The other two links are videos that I could not read.</p>
+        <div class="callout"><p><strong>Core idea:</strong> there are two sync problems hiding in "Google Drive". Syncing <em>files</em> is about blocks, hashes, and metadata; syncing <em>live document edits</em> is about merging concurrent changes. Chapter 15 mostly solves the first and mentions the second. The resources let you see the second properly.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Reading order</span>
+        <h2>The Three Resources at a Glance</h2>
+        <table class="data-table">
+          <thead><tr><th>Resource</th><th>Read?</th><th>Topic</th><th>Priority</th></tr></thead>
+          <tbody>
+            <tr><td>Differential Synchronization</td><td>Yes, in full</td><td>Concurrent document editing</td><td>Read first</td></tr>
+            <tr><td>Differential Synchronization Video</td><td>Video, not read in full</td><td>Presumably the same material as a talk</td><td>Optional</td></tr>
+            <tr><td>How We've Scaled Dropbox</td><td>Video, not read in full</td><td>File sync at scale</td><td>Optional, see note</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><p><strong>Videos:</strong> I could not read the two YouTube links, so I describe them only from their titles. For Dropbox I add a few general, publicly known facts about block-based sync clearly marked as background rather than as content of the talk.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 1</span>
+        <h2>Differential Synchronization</h2>
+        <h3>What it is</h3>
+        <p>An essay by Neil Fraser (of Google, written around 2009) describing the algorithm that powered collaborative editing in Google's early real-time products. It positions itself against two incumbents: locking and operational transformation, and it proposes something simpler: repeatedly diff, send the diff, patch.</p>
+
+        <h3>The loop</h3>
+        <p>Each endpoint keeps, besides its live text, a <strong>shadow</strong>: its copy of what the other side last saw. A sync cycle on one side is: (1) diff the live text against the shadow to get the user's recent edits; (2) copy the live text into the shadow; (3) send the edits; the receiver applies them to its own live text on a best-effort basis and to its shadow strictly. Then the roles swap. Both directions run continuously in the background and never need the document to be quiet.</p>
+        <div class="diagram-box"><pre>
+   Client text --diff vs Client Shadow--> edits ------------------------+
+        ^                                                               v
+        |                                                      patch Server Shadow (strict)
+   patch (fuzzy)                                                patch Server text   (fuzzy)
+        ^                                                               |
+        +------- edits <--diff vs Server Shadow-- Server text <---------+
+        </pre></div>
+
+        <h3>Why it works</h3>
+        <ul class="check-list">
+          <li><strong>Fuzzy patching.</strong> A patch carries context, so it can be applied to text that has changed since. If the context no longer matches, the patch simply fails. That is acceptable: the failed change shows up again in the next diff and is effectively reverted at its origin, so the system converges to a state where both sides agree, even if one edit was lost.</li>
+          <li><strong>Strict shadows.</strong> The shadow patch is guaranteed to apply cleanly, because the shadow equals the sender's previous text; only the live-text patch is fuzzy.</li>
+          <li><strong>Semantic diffs.</strong> Diffs should be human-meaningful (word-level), not minimal at the character level, or two concurrent edits to one word can blend into nonsense. The essay gives a cat-versus-cut-versus-hag illustration.</li>
+          <li><strong>Any content type</strong> works if you have a diff and a fuzzy patch for it.</li>
+        </ul>
+
+        <h3>Reliability: version numbers and the edit stack</h3>
+        <p>Over an unreliable network, each edit batch is tagged with the sender's shadow version, and each message acknowledges the version of the other side's last accepted edit. Unacknowledged edits stay on a stack and are resent every cycle until acknowledged. The server also keeps a <em>backup shadow</em>, the previous version, so it can recover when a response was lost: it sees a version mismatch but a matching backup, rolls back to the backup, discards the already-processed edit, applies the new one, and continues. The essay walks through duplicate, lost-outbound, lost-return and out-of-order packets, and says anything worse should reinitialise rather than loop forever. A checksum accompanies edits; on mismatch the full text is retransmitted.</p>
+        <div class="insight-box"><p><strong>Design principle:</strong> state the invariants (the shadow equals the peer's last known text), make the protocol idempotent with version numbers, and fall back to a full resync. That trio is what you want from any sync protocol, including file sync.</p></div>
+
+        <h3>The comparison with other approaches</h3>
+        <table class="data-table">
+          <thead><tr><th>Approach</th><th>Essay's critique</th></tr></thead>
+          <tbody>
+            <tr><td>Locking</td><td>Blocks real-time collaboration; lost unlock messages leave nobody owning the lock.</td></tr>
+            <tr><td>Event passing / operational transformation</td><td>Needs every user action captured and transformed; one lost operation forks the document; not naturally convergent.</td></tr>
+            <tr><td>Three-way merge</td><td>Half-duplex: if the user edits while a sync is in flight, the incoming version may be discarded.</td></tr>
+            <tr><td>Differential sync</td><td>Symmetric, continuous, self-healing, tolerates unreliable networks.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Scaling and limits</h3>
+        <p>Many clients can share one server text; the load can be spread by load-balanced servers over shared storage or by tree-shaped server links. Diff cost grows quadratically with the size of the change, so frequent diffs of small changes are cheap; sync intervals can adapt (shorter when active, longer when idle). Limits per the essay: one packet in flight at a time hurts high-latency links, and edits from different users blend together, so attribution and per-user undo are hard.</p>
+
+        <h3>What is still true, what is dated</h3>
+        <ul class="check-list">
+          <li><strong>Still true:</strong> shadow-copy and diff protocols underlie many sync systems (rsync-like delta transfer, Dropbox-style block diffs, git). The self-healing and idempotent-ack design remains good practice.</li>
+          <li><strong>Dated or contested:</strong> industry practice for rich collaborative editing moved towards operational transformation (Google Docs later used OT, as widely reported) and CRDTs (Yjs, Automerge), which preserve intent and per-user attribution better. Differential sync's "a failed patch just reverts" is fine for a text box and unacceptable for a spreadsheet cell or a structured document. I am relying on general industry knowledge here, not on the essay.</li>
+        </ul>
+
+        <h3>How it connects to Chapter 15</h3>
+        <p>The chapter's conflict-resolution section (first version wins, the loser is saved as a conflict copy) is the file-level answer: coarse, safe, and loses nothing. Fraser's algorithm is the fine-grained alternative for documents. The chapter's block-level delta sync (send only changed blocks) is the same diff-the-shadow idea at 4 MB granularity instead of words. When an interviewer asks "what about real-time collaboration?", this essay is your answer, plus the OT/CRDT caveat above.</p>
+        <p class="source-link">Original: <a href="https://neil.fraser.name/writing/sync/" target="_blank" rel="noopener">Differential Synchronization</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 2</span>
+        <h2>Differential Synchronization Video</h2>
+        <p>Video, not read in full. From the title it is a talk on the same topic as the essay above, presumably by the same author. I have no verified information about what it adds, so treat the essay as the authority and use the video only as a more visual walk-through if you prefer.</p>
+        <p class="source-link">Original: <a href="https://www.youtube.com/watch?v=S2Hp_1jqpY8" target="_blank" rel="noopener">Differential Synchronization Video</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 3</span>
+        <h2>How We've Scaled Dropbox</h2>
+        <p>Video, not read in full. From the title it is a talk about scaling Dropbox, and I will not describe its content. For context, here is what is generally and publicly known about block-based file sync (this is background, not claims about the talk):</p>
+        <ul class="check-list">
+          <li>Files are split into fixed-size blocks (a figure of about 4 MB is widely cited for Dropbox), each block hashed by content. Only blocks the server has never seen are uploaded, which gives both delta sync and cross-user deduplication.</li>
+          <li>The metadata (file tree, versions, block lists) lives in a database that must be strongly consistent per account and is the harder thing to scale; block storage is a comparatively simple content-addressed object store.</li>
+          <li>Clients learn about changes through a notification channel (long polling or a socket) and then fetch metadata deltas.</li>
+        </ul>
+        <p>Chapter 15 covers the same pieces (block servers, metadata DB, notification service, cold storage for old versions). When you watch the talk, check whether and how it addresses metadata sharding, which the chapter treats lightly.</p>
+        <p class="source-link">Original: <a href="https://www.youtube.com/watch?v=PE4gwstWhmc&amp;feature=youtu.be" target="_blank" rel="noopener">How We’ve Scaled Dropbox</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Synthesis</span>
+        <h2>How the Resources Fit Together</h2>
+        <table class="data-table">
+          <thead><tr><th>Granularity</th><th>Unit of diff</th><th>Conflict policy</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr><td>File</td><td>Whole file / version</td><td>Conflict copy</td><td>Chapter 15</td></tr>
+            <tr><td>Block</td><td>Content-hashed block</td><td>Re-assemble from block list; version at file level</td><td>Chapter 15, Dropbox-style background</td></tr>
+            <tr><td>Document text</td><td>Word-level diff with context</td><td>Fuzzy patch; failed edits revert</td><td>Differential Synchronization</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Reading order</p>
+        <ol>
+          <li>Chapter 15 first.</li>
+          <li>Differential Synchronization essay, in full: it is a short, clear read.</li>
+          <li>Watch the videos only if you have time; read them critically, since I could not check them.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Differential Synchronization with Edit Stack and Fuzzy Patching</h2>
+        <p>A compact implementation of the protocol: word-level LCS diff producing hunks with preceding context, a strict patch for shadows and a fuzzy one for live text, version numbers with acknowledgement, and resend of unacknowledged edits. The scenarios: concurrent non-overlapping edits merge; a lost message is repaired by resending from the stack; a conflicting edit to the same word converges to one side's version.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Differential synchronization (Fraser): shadow + diff + fuzzy patch, with edits stack &amp; version numbers.
+const tok = (s) =&gt; s.match(/\s+|[^\s]+/g) ?? [];
+function diff(a, b) {           // word-level LCS -&gt; hunks {at (token index in a), del[], ins[], ctx (preceding text)}
+  const A = tok(a), B = tok(b), n = A.length, m = B.length;
+  const L = Array.from({ length: n + 1 }, () =&gt; new Array(m + 1).fill(0));
+  for (let i = n - 1; i &gt;= 0; i--) for (let j = m - 1; j &gt;= 0; j--)
+    L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const hunks = []; let i = 0, j = 0, h = null;
+  const flush = () =&gt; { if (h) { hunks.push(h); h = null; } };
+  while (i &lt; n || j &lt; m) {
+    if (i &lt; n &amp;&amp; j &lt; m &amp;&amp; A[i] === B[j]) { flush(); i++; j++; continue; }
+    h ??= { at: i, del: [], ins: [], ctx: A.slice(Math.max(0, i - 3), i).join("") };
+    if (j &lt; m &amp;&amp; (i &gt;= n || L[i][j + 1] &gt;= L[i + 1][j])) h.ins.push(B[j++]); else h.del.push(A[i++]);
+  }
+  flush(); return hunks;
+}
+function patch(text, hunks, strict = false) {   // fuzzy: find ctx+del near expected spot; failed hunks are skipped
+  let t = text, failed = 0;
+  for (const h of hunks.slice().reverse()) {
+    const needle = h.ctx + h.del.join("");
+    const pos = t.indexOf(needle);
+    if (pos &lt; 0) { failed++; if (strict) throw new Error("shadow mismatch"); continue; }
+    t = t.slice(0, pos + h.ctx.length) + h.ins.join("") + t.slice(pos + needle.length);
+  }
+  return { text: t, failed };
+}
+class Peer {
+  constructor(name, text) { this.name = name; this.text = text; this.shadow = text; this.n = 0; this.m = 0; this.stack = []; }
+  // one half-cycle: diff text vs shadow, snapshot, queue edits with version n
+  produce() {
+    const hunks = diff(this.shadow, this.text);
+    if (hunks.length) { this.stack.push({ n: this.n, hunks }); this.n++; }
+    this.shadow = this.text;
+    return { ack: this.m, edits: this.stack.slice() };      // resend everything unacknowledged
+  }
+  receive(msg) {
+    this.stack = this.stack.filter((e) =&gt; e.n &gt;= msg.ack);  // drop acknowledged edits
+    for (const e of msg.edits) {
+      if (e.n &lt; this.m) continue;                           // duplicate: already applied
+      this.shadow = patch(this.shadow, e.hunks, true).text; // shadow patch is strict
+      const r = patch(this.text, e.hunks);                  // live text patch is fuzzy
+      this.text = r.text; this.m = e.n + 1;
+    }
+  }
+}
+const base = "The quick brown fox jumps over the lazy dog today";
+const client = new Peer("client", base), server = new Peer("server", base);
+client.text = "The quick red fox jumps over the lazy dog today";          // client edit
+server.text = "The quick brown fox jumps over the sleepy dog today!";     // concurrent server edit
+const sync = (from, to) =&gt; to.receive(from.produce());
+sync(client, server);      // server gets "red" while it has its own edits
+sync(server, client);      // client gets "sleepy" and "!"
+sync(client, server);
+console.log("client:", client.text);
+console.log("server:", server.text);
+console.assert(client.text === server.text &amp;&amp; client.text === "The quick red fox jumps over the sleepy dog today!");
+// lost packet: client's message dropped, edits stay on the stack and are resent
+client.text += " Bye"; client.produce(); /* lost */ client.text += "!!";
+sync(client, server);
+console.log("after loss+resend:", JSON.stringify(server.text), "stack size at client:", client.stack.length);
+console.assert(server.text.endsWith("Bye!!"));
+sync(server, client);      // ack
+console.assert(client.stack.length === 0);
+// conflicting edit on the same words: fuzzy patch fails on one side, the next diff converges
+const a = new Peer("a", "I like Macs a lot"), b = new Peer("b", "I like Macs a lot");
+a.text = "I like Macintoshes a lot"; b.text = "I like Smith &amp; Wesson a lot";
+sync(a, b); sync(b, a); sync(a, b);
+console.log("conflict converged:", a.text === b.text, "-&gt;", a.text);
+console.assert(a.text === b.text);</code></pre>
+        <p class="code-caption">Executed with Node 24. Prints both peers converging to "The quick red fox jumps over the sleepy dog today!", the server catching up after a lost message with a client stack size of 2, and "conflict converged: true". The assertions pass silently.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Build exercise</span>
+        <h2>What to Build</h2>
+        <ul class="check-list">
+          <li>Add a backup shadow to the server and simulate a lost <em>return</em> packet (the case the toy handles only because edits resend); verify the rollback path.</li>
+          <li>Replace the word-level diff with a character-level one and show a concurrent edit to one word producing mixed output.</li>
+          <li>Implement a block-level uploader: chunk a buffer into fixed blocks, hash with <code>node:crypto</code>, and report which blocks a second, slightly edited version must upload. Compare to fixed versus content-defined chunking when you insert a byte near the start.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Reading Checklist</h2>
+        <ul class="check-list">
+          <li>I can state, for each resource, the one problem it solves and the one number or mechanism that proves it.</li>
+          <li>I know which resources I read in full and which I only know by title.</li>
+          <li>I can map each resource to the handbook chapter section it extends.</li>
+          <li>I have run the code example and changed one parameter to see its behaviour change.</li>
+        </ul>
+      </section>
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul><li><a href="../chapters/15-google-drive.html">Chapter 15: Google Drive</a> — the chapter these resources extend.</li><li><a href="../../system-design/consistency-models.html">Consistency Models</a> — convergence and eventual consistency.</li><li><a href="../../system-design/concurrency-control.html">Concurrency Control</a> — locking versus optimistic approaches.</li><li><a href="../../system-design/pub-sub.html">Pub/Sub</a> — change notification to clients.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Resources listed in the “Additonal Resources” section of <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu). Summaries are in my own words and are not a substitute for the originals:</p>
+        <ul><li><a href="https://neil.fraser.name/writing/sync/" target="_blank" rel="noopener">Differential Synchronization</a> — https://neil.fraser.name/writing/sync/</li><li><a href="https://www.youtube.com/watch?v=S2Hp_1jqpY8" target="_blank" rel="noopener">Differential Synchronization Video</a> — https://www.youtube.com/watch?v=S2Hp_1jqpY8</li><li><a href="https://www.youtube.com/watch?v=PE4gwstWhmc&amp;feature=youtu.be" target="_blank" rel="noopener">How We’ve Scaled Dropbox</a> — https://www.youtube.com/watch?v=PE4gwstWhmc&amp;feature=youtu.be</li></ul>
+      </section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>File sync and document sync are different problems. Files: content-hashed blocks, metadata database, conflict copies. Documents: continuous diff against a shadow with fuzzy patches, acknowledged by version numbers. Fraser's design is simple and self-healing; know its limits against OT and CRDTs.</p></section>
+    </main>
+  </body>
+</html>

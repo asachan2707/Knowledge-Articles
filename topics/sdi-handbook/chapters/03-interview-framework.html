@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A Framework for System Design Interviews | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 3 of the System Design Interview Handbook (created 2026-10-15 from liquidslr/system-design-notes ch.03). Covers the 4-step interview framework (understand and scope, high-level design with buy-in, deep dive, wrap-up), 45-minute time allocation, dos and don&#x27;ts, interviewer signals and common failure modes, a worked news-feed scoping example, and a runnable JavaScript time planner plus scale advisor executed with node. Related pages - 01 scale from zero, 02 estimation, real-interview-system-design-questions. Read time about 13 min.</div>
+        <h1>A Framework for System Design Interviews</h1>
+        <p class="summary">A system design interview tests how you handle ambiguity, not whether you can recite an architecture. This chapter lays out a four-step loop (scope, high-level design, deep dive, wrap-up), the time budget for a 45-minute round, what interviewers actually score, and the habits that separate strong candidates from rehearsed ones.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">3 of 28 · Part 1 Foundations</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">13 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">scoping questions, functional vs non-functional requirements, high-level design, deep dive, bottlenecks, time management</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">news feed, URL shortener, chat system (worked prompts)</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">There is no single correct answer to "design Twitter", and the interviewer knows it. What they are measuring is how you behave when the problem is underspecified and the clock is running: do you ask, structure, estimate, decide, justify and adapt? A framework does not replace knowledge; it makes sure your knowledge gets used on the right problem, in the right order.</p>
+        <div class="callout"><p><strong>Core idea:</strong> run a four-step loop, and keep the interviewer in it. (1) Scope the problem, (2) sketch a high-level design and get agreement, (3) deep-dive the hardest components, (4) wrap up with bottlenecks and improvements.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Why it exists</span>
+        <h2>What the interview is really testing</h2>
+        <p>Real design work is messy: a product manager hands you a sentence, constraints are unstated, and the best engineer in the room is the one who converts the sentence into a shared, bounded problem. The interview simulates exactly that, with one person playing the stakeholder and one the architect. Interviewers usually calibrate on a handful of signals:</p>
+        <table class="data-table">
+          <thead><tr><th>Signal</th><th>Strong behaviour</th><th>Weak behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>Handling ambiguity</td><td>Asks targeted questions, states assumptions, confirms them.</td><td>Starts drawing a database immediately.</td></tr>
+            <tr><td>Structure</td><td>Announces a plan, moves through phases, returns to the diagram.</td><td>Jumps between topics; loses the thread.</td></tr>
+            <tr><td>Technical depth</td><td>Explains why a choice fits this load and what it costs.</td><td>Names technologies as a shopping list.</td></tr>
+            <tr><td>Trade-off reasoning</td><td>Offers two options, picks one with a reason, notes the downside.</td><td>Presents a single option as obviously correct.</td></tr>
+            <tr><td>Communication</td><td>Thinks aloud, invites correction, uses the whiteboard well.</td><td>Silent for minutes, or lectures without checking in.</td></tr>
+            <tr><td>Coachability</td><td>Takes a hint, adapts the design without defensiveness.</td><td>Defends the first idea against all evidence.</td></tr>
+          </tbody>
+        </table>
+        <p>Seniority shifts the weighting. A mid-level candidate is expected to produce a sound, working design; a senior candidate should drive the conversation, quantify, and expose failure modes unprompted; a staff-level candidate should question the problem framing itself and discuss organisational and operational consequences (rollout, ownership, cost). Calibrate your ambition accordingly rather than trying to cover everything.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · about 3 to 10 minutes</span>
+        <h2>Understand the problem and establish design scope</h2>
+        <p>The commonest failure is answering fast. Strong candidates slow down here, because every later decision depends on the answers. Your goal is to leave this step with a short, written list of agreed features and numbers.</p>
+        <p class="mini-heading">What to pin down</p>
+        <ul class="check-list">
+          <li><strong>Users and use cases.</strong> Who uses it and what are the two or three flows that must work? (Resist the urge to build all of them.)</li>
+          <li><strong>Platforms.</strong> Web, mobile, or both? Mobile implies flaky networks, push notifications and version skew.</li>
+          <li><strong>Scale.</strong> Users, DAU, read/write mix, data volume, growth horizon.</li>
+          <li><strong>Non-functional requirements.</strong> Latency target, availability target, consistency needs, durability, security, regulatory limits. These decide your architecture more than features do.</li>
+          <li><strong>Existing constraints.</strong> Is there a stack, a cloud, a team size, a budget? Can we use managed services?</li>
+          <li><strong>Out of scope.</strong> Say aloud what you are not designing, so the interviewer can object now rather than at minute 40.</li>
+        </ul>
+        <p class="mini-heading">Worked example: "design a news feed"</p>
+        <p>Good scoping questions and what each one unlocks:</p>
+        <table class="data-table">
+          <thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
+          <tbody>
+            <tr><td>Mobile, web, or both?</td><td>Client behaviour, push, pagination style.</td></tr>
+            <tr><td>Which features: publish a post, see friends' posts?</td><td>Defines the two flows to design: publishing and retrieval.</td></tr>
+            <tr><td>Ranked or reverse-chronological?</td><td>Chronological is a merge of timelines; ranking adds a scoring service.</td></tr>
+            <tr><td>Maximum number of friends? Followers per account?</td><td>Fan-out strategy; a celebrity with millions of followers breaks naive push.</td></tr>
+            <tr><td>Traffic: DAU?</td><td>Feeds the estimate in step 2.</td></tr>
+            <tr><td>Images and video, or text only?</td><td>Media storage and CDN scope.</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><strong>Anti-pattern: the interrogation.</strong> Asking twenty questions in a row feels like stalling. Ask the five that change the design, propose reasonable defaults for the rest ("I will assume 10 million DAU, average 200 friends; tell me if that is off"), and keep moving.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · about 10 to 15 minutes</span>
+        <h2>Propose a high-level design and get buy-in</h2>
+        <p>Now you build a blueprint the interviewer can react to. Treat them as a teammate: show the sketch early, ask whether the direction fits, and revise. Buy-in is the point; a beautiful design the interviewer never agreed to is a liability.</p>
+        <ol>
+          <li><strong>Back-of-envelope sanity check.</strong> Do the arithmetic from chapter 2 now, if it changes the design. Ask whether the interviewer wants numbers before you spend time.</li>
+          <li><strong>API sketch.</strong> Two to five endpoints with parameters: <code>POST /v1/posts</code>, <code>GET /v1/feed?cursor=…</code>. It nails the contract and exposes missing requirements.</li>
+          <li><strong>Boxes and arrows.</strong> Clients, load balancer, services, data stores, cache, queue, CDN. Label every arrow with the data that flows.</li>
+          <li><strong>Data model.</strong> Entities, keys, and the access patterns each query needs. Choose SQL or NoSQL because of those patterns, not fashion.</li>
+          <li><strong>Walk through the main use cases end to end.</strong> Narrate a write and a read through the diagram. This is where gaps surface.</li>
+        </ol>
+        <div class="diagram-box">Feed example, split into two flows
+  PUBLISH:  client ─▶ LB ─▶ post service ─▶ post DB
+                                   └────▶ fan-out workers ─▶ friends' feed caches
+  RETRIEVE: client ─▶ LB ─▶ feed service ─▶ feed cache ─▶ hydrate posts/users ─▶ client</div>
+        <p>Splitting a system into flows is a reusable trick: chat is send versus sync, a crawler is fetch versus parse versus store, a payment system is authorise versus settle versus reconcile. Name the flows, then design each.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 3 · about 10 to 25 minutes</span>
+        <h2>Design deep dive</h2>
+        <p>By now you and the interviewer should agree on goals and a skeleton. The deep dive is where you pick the two or three components that are hardest or most distinctive and design them properly. The interviewer will often steer; if they do not, steer yourself toward the real risk.</p>
+        <table class="data-table">
+          <thead><tr><th>Problem</th><th>Typical deep dive</th></tr></thead>
+          <tbody>
+            <tr><td>URL shortener</td><td>ID generation and collision handling (hash versus counter versus base62), redirect latency and caching, abuse control.</td></tr>
+            <tr><td>Chat system</td><td>Connection management, message ordering, delivery latency, presence, offline sync.</td></tr>
+            <tr><td>News feed</td><td>Fan-out on write versus on read, celebrity handling, cache design for timelines.</td></tr>
+            <tr><td>Rate limiter</td><td>Algorithm choice and correctness under concurrency across nodes.</td></tr>
+            <tr><td>Key-value store</td><td>Partitioning, replication, consistency model, failure handling.</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">How to go deep without drowning</p>
+        <ul class="check-list">
+          <li><strong>State the criterion first</strong> ("the hard part is fan-out for accounts with millions of followers"), then dive. It tells the interviewer you chose depth deliberately.</li>
+          <li><strong>Present options with cost.</strong> Fan-out on write gives fast reads but expensive writes and wasted work for inactive users; fan-out on read is the opposite. A hybrid is the usual answer: push for normal accounts, pull for celebrities.</li>
+          <li><strong>Hunt bottlenecks yourself.</strong> Identify the single point of failure, the hot key, the unbounded queue, the cross-shard operation.</li>
+          <li><strong>Do not over-engineer.</strong> A design that survives the stated scale with the fewest moving parts beats one that name-drops ten technologies.</li>
+          <li><strong>Check in.</strong> "Does it make sense to go further into storage, or would you rather see failure handling?" is a legitimate, confident question.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 4 · about 3 to 5 minutes</span>
+        <h2>Wrap up</h2>
+        <p>Do not end by trailing off. Use the last minutes to show you can evaluate your own work:</p>
+        <ul class="check-list">
+          <li><strong>Recap</strong> the design in thirty seconds: flows, key components, the main trade-offs you accepted.</li>
+          <li><strong>Name bottlenecks and risks</strong>: what breaks first at 10x load? What is the worst failure, and how does the system degrade?</li>
+          <li><strong>Operational concerns</strong>: monitoring (latency, error rate, queue depth), alerting, deploys and rollbacks, runbooks.</li>
+          <li><strong>Failure handling</strong>: server failure, network partition, data-center loss, poison messages, retries and idempotency.</li>
+          <li><strong>Evolution</strong>: how to go from 1 million to 10 million users, what you would build next, and what you would deliberately postpone.</li>
+          <li><strong>Other axes</strong> if time allows: privacy and security, cost, multi-region, compliance, data retention.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Time</span>
+        <h2>Time management for a 45-minute round</h2>
+        <table class="data-table">
+          <thead><tr><th>Phase</th><th>Typical range</th><th>Midpoint plan</th><th>Common failure</th></tr></thead>
+          <tbody>
+            <tr><td>1. Scope and requirements</td><td>3 to 10 min</td><td>5 min</td><td>Rushing, or interrogating for 15.</td></tr>
+            <tr><td>2. High-level design and buy-in</td><td>10 to 15 min</td><td>13 min</td><td>Over-polishing before agreement.</td></tr>
+            <tr><td>3. Deep dive</td><td>10 to 25 min</td><td>22 min</td><td>Going deep on trivia; never reaching the hard part.</td></tr>
+            <tr><td>4. Wrap-up</td><td>3 to 5 min</td><td>5 min</td><td>Running out of time with no summary.</td></tr>
+          </tbody>
+        </table>
+        <p>The ranges overlap because the interviewer controls the pace; if they say "let's go deeper on storage", the deep dive has started whatever the clock says. Glance at the time at the end of each phase and say aloud "I'll spend about ten more minutes on the overall design, then deep-dive". Announcing the plan also shows structure.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Dos and don'ts</span>
+        <h2>Behaviour that moves the evaluation</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Do</h4><ul><li>Ask clarifying questions and write down the answers.</li><li>Think aloud; make reasoning audible.</li><li>Treat the interviewer as a collaborator and take hints gracefully.</li><li>Propose more than one approach and justify the choice.</li><li>Prioritise: build the critical path first.</li><li>Use numbers to justify decisions.</li><li>Say "I don't know that internals, but I'd expect…" and reason from first principles.</li></ul></div>
+          <div class="trade-col cons"><h4>Don't</h4><ul><li>Design before you understand the requirements.</li><li>Go silent for minutes while you think.</li><li>Dive into one corner and leave the system unfinished.</li><li>Over-engineer with technology you cannot defend.</li><li>Bluff about internals; probing questions will expose it.</li><li>Argue with feedback or treat hints as attacks.</li><li>Memorise a canned design for a famous problem and recite it.</li></ul></div>
+        </div>
+        <div class="insight-box"><strong>Why memorised answers fail.</strong> Interviewers change one constraint ("now it must work offline", "now writes are 100x reads") to see whether the design bends. If you built the design from requirements, it bends. If you recalled it, it breaks. The framework protects you because it derives the design from stated constraints.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Tools to articulate decisions</h2>
+        <p>Vocabulary that makes trade-offs crisp is worth rehearsing. These appear in nearly every deep dive in the rest of this handbook.</p>
+        <table class="data-table">
+          <thead><tr><th>Axis</th><th>Left</th><th>Right</th><th>Anchor question</th></tr></thead>
+          <tbody>
+            <tr><td>Consistency vs availability</td><td>Strong</td><td>Eventual</td><td>What happens to a user if they read stale data for a few seconds?</td></tr>
+            <tr><td>Latency vs throughput</td><td>Small batches, sync</td><td>Big batches, async</td><td>Is the user waiting?</td></tr>
+            <tr><td>Read vs write cost</td><td>Pre-compute (fan-out on write)</td><td>Compute on demand</td><td>Which side is hot, and for whom?</td></tr>
+            <tr><td>Simplicity vs scale</td><td>One database</td><td>Sharded, multi-region</td><td>Does the estimate force the complexity?</td></tr>
+            <tr><td>Build vs buy</td><td>Custom</td><td>Managed or OSS</td><td>Is this a differentiator or plumbing?</td></tr>
+            <tr><td>Cost vs durability</td><td>Fewer copies</td><td>More copies, more regions</td><td>What is the cost of losing this data?</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable example: a time-budget planner and a scale advisor</h2>
+        <p>This is a deliberately small piece of code that encodes the framework. <code>timePlan</code> converts the phase fractions into a minute-by-minute schedule for any round length. <code>advise</code> takes a load profile and lists which chapter-1 tiers the numbers force you to add, which is the same reasoning you should say aloud in step 2.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+
+// (a) Time budget for a 45-minute loop: fractions are midpoints of the usual ranges
+const PHASES = [
+  ['1 Scope &amp; requirements', 0.12], ['2 High-level design', 0.28],
+  ['3 Deep dive', 0.48], ['4 Wrap-up', 0.12],
+];
+export function timePlan(totalMin = 45) {
+  let clock = 0;
+  return PHASES.map(([name, f]) =&gt; {
+    const mins = Math.round(totalMin * f), row = { name, from: clock, to: clock + mins };
+    clock += mins; return row;
+  });
+}
+
+// (b) A scale advisor: which tiers does a load profile force you to add?
+export function advise({ dau, reqPerUserDay, readRatio, hotsetGB, totalTB, peakFactor = 3 }) {
+  const qps = dau * reqPerUserDay / 86400, peak = qps * peakFactor;
+  const writes = peak * (1 - readRatio), why = [];
+  why.push(`peak ~${Math.ceil(peak)} QPS (${Math.ceil(writes)} writes/s)`);
+  const steps = ['single box'];
+  if (peak &gt; 500) steps.push('separate DB tier, stateless web tier + load balancer');
+  if (readRatio &gt; 0.8) steps.push('read replicas + cache-aside');
+  if (hotsetGB &gt; 1 &amp;&amp; hotsetGB &lt; 500) steps.push(`cache cluster (~${hotsetGB} GB hot set)`);
+  if (writes &gt; 2000 || totalTB &gt; 10) steps.push('shard the database (consistent hashing)');
+  if (peak &gt; 50000) steps.push('multi data center + GeoDNS, queue for async work');
+  return { why, steps };
+}
+
+const plan = timePlan(45);
+console.table(plan);
+assert.equal(plan.at(-1).to, 45);
+const small = advise({ dau: 10_000, reqPerUserDay: 20, readRatio: 0.9, hotsetGB: 0.2, totalTB: 0.1 });
+const big = advise({ dau: 50e6, reqPerUserDay: 40, readRatio: 0.9, hotsetGB: 300, totalTB: 200 });
+console.log(small.why[0], '-&gt;', small.steps.join(' | '));
+console.log(big.why[0], '-&gt;', big.steps.join(' | '));
+assert.deepEqual(small.steps, ['single box', 'read replicas + cache-aside']);
+assert.ok(big.steps.some(s =&gt; s.startsWith('shard')) &amp;&amp; big.steps.some(s =&gt; s.startsWith('multi')));
+console.log('all checks passed');</code></pre>
+        <p class="code-caption">Prints a table of the four phases (0-5, 5-18, 18-40, 40-45 minutes), then a recommendation for a small app (single box plus replicas and cache) and for a 50M-DAU app (peak around 69,000 QPS: sharding, multi-data-center and queues), ending with "all checks passed". Executed with node.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>How interviews go wrong</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>What it looks like</th><th>Recovery</th></tr></thead>
+          <tbody>
+            <tr><td>Premature solution</td><td>Names Kafka and Cassandra in minute two.</td><td>Say "let me step back and confirm requirements", then restart at step 1.</td></tr>
+            <tr><td>Running out of time</td><td>Beautiful API, no storage or failure story.</td><td>Announce a time plan; if behind, say what you will skip and why.</td></tr>
+            <tr><td>Tunnel vision</td><td>Twenty minutes on one cache policy.</td><td>Check in; return to the end-to-end flow.</td></tr>
+            <tr><td>Hand-waving</td><td>"We'll just use a queue" with no semantics.</td><td>Specify delivery guarantee, ordering, failure behaviour.</td></tr>
+            <tr><td>Defensiveness</td><td>Rejects the interviewer's hint.</td><td>Restate the hint, evaluate it honestly, adopt it if better.</td></tr>
+            <tr><td>Ignoring numbers</td><td>Architecture independent of scale.</td><td>Do a quick estimate and tie a decision to it.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practice</span>
+        <h2>How to prepare, and the production angle</h2>
+        <ul class="check-list">
+          <li><strong>Practise out loud with a timer</strong>, ideally with another person who plays hostile-but-fair. Silent reading builds recognition, not performance.</li>
+          <li><strong>Learn building blocks, not answers.</strong> Chapters 4 to 8 (rate limiter, consistent hashing, key-value store, unique ID, URL shortener) are the components later systems reuse.</li>
+          <li><strong>Draw small.</strong> Legible boxes with labelled arrows beat sprawling diagrams.</li>
+          <li><strong>Mirror real design reviews.</strong> The same skeleton works at work: problem statement, non-goals, numbers, alternatives considered, risks. A design document with those sections is the written form of this loop.</li>
+          <li><strong>Record your assumptions.</strong> They become the most useful part of a design review because disagreements surface there.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Framework checklist</h2>
+        <ul class="check-list">
+          <li>Requirements, scale and non-goals agreed and written down.</li>
+          <li>Non-functional targets named: latency, availability, consistency, durability.</li>
+          <li>API and data model sketched; main flows walked through.</li>
+          <li>Estimates done where they change the design.</li>
+          <li>Deep dive on the genuinely hard components, with options and costs.</li>
+          <li>Bottlenecks, failure handling and monitoring discussed.</li>
+          <li>Summary and next steps stated before time is up.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Should I start with the API, the data model or the diagram?</summary><p>Start with the diagram of main flows so the interviewer sees the shape, then add the API and data model as you elaborate each flow. If the problem is data-centric (a ledger, a storage service), start with the data model and access patterns; if it is interaction-centric (chat), start with the protocol.</p></details>
+        <details><summary>What if I do not know the technology the interviewer asks about?</summary><p>Say so briefly, then reason from the properties you do know: "I haven't operated that system; here is what I would need from it and how I'd check it." Honest, structured reasoning scores higher than a confident error.</p></details>
+        <details><summary>How much should I draw versus say?</summary><p>Draw the skeleton and key flows; say the details. Do not annotate every box. Keep the diagram a shared artefact the interviewer can point at.</p></details>
+        <details><summary>What if the interviewer is silent?</summary><p>Silence is not disapproval. Keep narrating your plan and check in at phase boundaries. If you hear nothing at all, ask one concrete question such as whether the direction matches what they expected.</p></details>
+        <details><summary>How deep should the estimate be in an interview?</summary><p>Just enough to select an architectural regime. Two or three numbers with units (QPS, storage, bandwidth) and an immediate design consequence is usually plenty; chapter 2 gives the recipe.</p></details>
+        <details><summary>Is it acceptable to change my design mid-interview?</summary><p>Yes, and it is a positive signal when you explain why: "given the 10x write ratio you described, I'd move from synchronous to queued writes." Silent, unexplained changes confuse; explained changes show adaptability.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./02-back-of-envelope-estimation.html">Chapter 2: Back-of-the-Envelope Estimation</a> — the numbers you use in step 2.</li>
+          <li><a href="./04-rate-limiter.html">Chapter 4: Design a Rate Limiter</a> — the first full application of this framework.</li>
+          <li><a href="../../real-interview-system-design-questions.html">Real Interview System Design Questions</a> — practise prompts to run the loop against.</li>
+          <li><a href="../../system-design-concepts.html">System Design Concepts</a> — the vocabulary behind the trade-offs above.</li>
+          <li><a href="../../system-design-complete-visual-guide.html">System Design Complete Visual Guide</a> — building blocks illustrated.</li>
+        </ul>
+      </section>
+
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p></section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>The interview is a collaborative design session with a time limit. Spend the first minutes removing ambiguity, draw something the interviewer can agree with before you refine it, go deep where the problem is genuinely hard, and close by naming the bottlenecks and trade-offs you accepted. Thinking out loud and adapting to feedback matters more than any single clever component.</p></section>
+    </main>
+  </body>
+</html>

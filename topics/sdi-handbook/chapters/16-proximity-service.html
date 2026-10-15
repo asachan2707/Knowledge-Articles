@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Proximity Service | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 16 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.16. Covers a Yelp-style proximity service: 5,000 search QPS sizing, LBS vs business service split, why a two-column lat/long index fails, and the geospatial index family (even grid, geohash, quadtree, Google S2/Hilbert, R-tree), boundary issues and neighbour cells, adaptive radius expansion, quadtree memory arithmetic, caching by geohash, sharding and replication, and the final request path. Includes an executed Node.js example (geohash encode/decode/neighbours and a capped-bucket quadtree k-NN verified against brute force). About 21 min read. Related: ch17 Nearby Friends, ch18 Google Maps, uber-architecture-driver-tracking, caching.</div>
+        <h1>Design a Proximity Service</h1>
+        <p class="summary">Find the restaurants within 500 metres of me. The problem is a read-heavy, slowly changing geospatial index, and the whole chapter is the question of how to turn two-dimensional distance into something a database or an in-memory structure can answer fast.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">16 of 28 · Part 4 Geo Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">21 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Geohash, quadtree, S2 cells, neighbour search, read-heavy scaling</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Yelp, Google Maps, PostGIS, Redis GEO, MongoDB 2dsphere, Elasticsearch geo_point, Lucene BKD</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">"Find nearby" sounds like a WHERE clause. It is actually a mismatch between the shape of the question (a disc on a sphere) and the shape of every ordinary index (a one-dimensional sorted order). Every algorithm in this chapter is a different way to flatten the plane into a line while keeping near things near.</p>
+        <div class="callout"><p><strong>Core idea:</strong> map each point to a cell identifier such that nearby points share identifier prefixes (or tree paths), then answer a radius query as "look up my cell and its neighbours, fetch candidates, filter by exact distance". The index narrows; the exact maths decides.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design to anchor on</span>
+        <h2>Geospatial indexes in the wild</h2>
+        <p>Redis GEOADD stores each member in a sorted set using a 52-bit integer geohash as its score, so GEOSEARCH is a handful of range scans on a skip list plus an exact distance filter. MongoDB's 2dsphere index and Google's S2 library use hierarchical cell IDs on a cube mapped sphere. PostGIS uses an R-tree (GiST) over bounding boxes, and Lucene and Elasticsearch use BKD trees for geo points. Four products, four structures, one pattern: reduce 2D to an ordered key, scan a few ranges, then filter exactly. Knowing this is what lets you say "I would use Redis GEO or PostGIS in practice, but here is what is inside".</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and numbers</span>
+        <h2>Scope and sizing</h2>
+        <ul class="check-list">
+          <li><strong>Search:</strong> given (lat, lon, radius) return businesses within that radius; default 5 km, user-selectable from 0.5 km to 20 km.</li>
+          <li><strong>Business CRUD:</strong> owners add, edit, delete. Changes need not be visible instantly; next-day is acceptable.</li>
+          <li><strong>Detail view:</strong> full business info by ID.</li>
+          <li><strong>Non-functional:</strong> low latency (users are standing on a street), availability through lunchtime spikes in dense areas, and privacy compliance (GDPR/CCPA) for any stored user location.</li>
+        </ul>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Searches per second</td><td>100 M DAU × 5 searches ÷ 86,400 s</td><td>about 5,800; round to about 5,000 average</td></tr>
+            <tr><td>Peak</td><td>2x to 5x, lunch and evening, city centres</td><td>10 K to 25 K QPS</td></tr>
+            <tr><td>Businesses</td><td>given</td><td>200 M</td></tr>
+            <tr><td>Index entries</td><td>200 M businesses × 3 precisions × 8-byte ID</td><td>about 4.8 GB (fits in RAM on one machine)</td></tr>
+            <tr><td>Quadtree leaves</td><td>200 M ÷ 100 per leaf</td><td>at least 2 M leaves; about 1.7 GB with 8-byte IDs plus bounds</td></tr>
+            <tr><td>Business rows</td><td>200 M × about 1 KB</td><td>about 200 GB; shard or replicate, cache hot rows</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Why these numbers matter:</strong> the geospatial index itself is small enough for a single node's memory, so it needs replicas for throughput, not shards for capacity. The business detail table is where size forces partitioning. Mixing those two up is the most common mistake on this chapter.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Two services with opposite personalities</h2>
+        <div class="diagram-box" style="white-space:pre">
+  client ──▶ <span class="hi">Load balancer</span> ─┬─▶ <span class="ok">Location-Based Service (LBS)</span>   read-only, stateless, hot
+                          │        │  geohash/quadtree lookup, distance filter, rank
+                          │        ▼
+                          │   <span class="step">Geospatial index</span> (cache + read replicas)
+                          │
+                          └─▶ <span class="hi">Business Service</span>       CRUD + detail views, write path
+                                   │
+                                   ▼
+                       <span class="step">Primary DB ──▶ replicas</span>   (business table, geo index table)
+                                   │
+                          nightly job: rebuild/patch geo index
+        </div>
+        <p>The <strong>LBS</strong> handles only search. It is read-only, stateless and absorbs the spiky load, so it autoscales horizontally with no coordination. The <strong>Business Service</strong> owns writes and detail reads at far lower volume. Splitting them lets each scale on its own signal and lets you deploy a risky index change to the LBS without touching CRUD. The database runs one primary with many replicas; replication lag of seconds is acceptable because business data is not real-time.</p>
+        <p class="mini-heading">APIs</p>
+        <table class="data-table">
+          <thead><tr><th>Endpoint</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /v1/search/nearby?latitude=&amp;longitude=&amp;radius=</code></td><td>Paginate (cursor), return IDs plus a thin summary; clients fetch detail lazily. Accept a category filter; apply it after retrieval at small scale, or as part of the index key at large scale.</td></tr>
+            <tr><td><code>GET /v1/businesses/{id}</code></td><td>Cacheable by ID, long TTL.</td></tr>
+            <tr><td><code>POST /v1/businesses</code>, <code>PUT</code>, <code>DELETE</code></td><td>Write path; DELETE should be a tombstone so the index job can remove it.</td></tr>
+          </tbody>
+        </table>
+        <p>Schema: a <code>business</code> table (id, name, address, lat, lon, category, hours, rating …) and a <code>geospatial_index</code> table keyed by <code>(geohash, business_id)</code>. A relational database is a good fit: read-heavy, simple relationships, and strong tooling. Note that the chapter's later redis-based serving layer is a cache over this table, not a replacement for it.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 1</span>
+        <h2>Why the naive query fails, and the index family</h2>
+        <p>The first idea is a bounding box: <code>WHERE lat BETWEEN a AND b AND lon BETWEEN c AND d</code>. Even with an index on each column this is slow. A B-tree on <code>lat</code> returns every business in a horizontal band around the whole globe, a B-tree on <code>lon</code> returns a vertical band, and the database must intersect two huge sets. A composite index <code>(lat, lon)</code> is only effective on the first column. That is the "one-dimensional index" problem.</p>
+        <div class="diagram-box" style="white-space:pre">
+  index on lat only         index on lon only          what you want
+  ━━━━━━━━━━━━━━━━         ┃ ┃ ┃ ┃ ┃ ┃                  
+  ━━━━━━━━━━━━━━━━         ┃ ┃ ┃ ┃ ┃ ┃                   ┌───┐
+  ━━━ <span class="warn">band</span> ━━━━━━━         ┃ ┃ <span class="warn">band</span> ┃ ┃                   │ ● │  small box
+  ━━━━━━━━━━━━━━━━         ┃ ┃ ┃ ┃ ┃ ┃                   └───┘
+  millions of rows         millions of rows          the intersection is tiny, finding it is not
+        </div>
+        <p>All fixes convert 2D location to a 1D key (hash-based) or a tree that prunes in both dimensions at once.</p>
+        <table class="data-table">
+          <thead><tr><th>Approach</th><th>Idea</th><th>Strength</th><th>Weakness</th></tr></thead>
+          <tbody>
+            <tr><td>Even grid</td><td>Cut the world into fixed squares; key = cell</td><td>Trivial</td><td>Density varies by orders of magnitude: Manhattan cell holds a million places, Sahara cell none. Hot and empty cells.</td></tr>
+            <tr><td>Geohash</td><td>Interleave bits of lon and lat; base32 string; prefix = region</td><td>Simple, works in any KV/SQL store, easy updates</td><td>Fixed cell sizes per precision; boundary effects</td></tr>
+            <tr><td>Quadtree</td><td>Recursively split a cell into 4 until it holds at most N points</td><td>Adapts to density; natural k-nearest</td><td>In-memory; rebuild or lock on update</td></tr>
+            <tr><td>Google S2</td><td>Project sphere onto a cube, order cells on a Hilbert curve; 64-bit cell IDs, levels 0 to 30</td><td>Better locality, arbitrary region coverings (geofences), no polar distortion</td><td>Harder to implement and explain</td></tr>
+            <tr><td>R-tree</td><td>Bounding boxes in a balanced tree (PostGIS GiST)</td><td>Rectangles, polygons, disk-friendly</td><td>Overlapping boxes degrade queries; updates reshuffle</td></tr>
+          </tbody>
+        </table>
+        <p>Geohash is the interview default because you can implement it in ten lines and run it in plain SQL or Redis. The rest of this chapter treats it as the primary and compares quadtree and S2 against it.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 2</span>
+        <h2>Geohash in detail</h2>
+        <p><strong>Construction.</strong> Start with the interval lon in [-180, 180]. Ask whether the point is in the upper or lower half: that is bit 1. Then lat in [-90, 90]: bit 2. Alternate lon and lat, halving each time. Group every 5 bits into one base32 character (digits and letters excluding a, i, l, o). The code is executable below; the reference vector <code>(57.64911, 10.40744) → u4pruydqqvj</code> is checked in the tests. Because bits alternate, the sequence of cells is a <em>Z-order curve</em> (a Morton code).</p>
+        <p><strong>Prefix property.</strong> Two points that share a prefix lie inside the same ancestor cell, so a prefix <code>LIKE '9q8yy%'</code> on a B-tree is a range scan. The converse does not hold: two points can be metres apart and share no prefix, because a cell boundary (such as the equator, the prime meridian, or the edge of any parent cell) cuts between them.</p>
+        <table class="data-table">
+          <thead><tr><th>Length</th><th>Cell size (approx)</th><th>Typical use</th></tr></thead>
+          <tbody>
+            <tr><td>4</td><td>39 km × 19.5 km</td><td>Radius up to about 20 km</td></tr>
+            <tr><td>5</td><td>4.9 km × 4.9 km</td><td>Radius 1 to 5 km</td></tr>
+            <tr><td>6</td><td>1.2 km × 0.6 km</td><td>Radius 0.5 to 1 km</td></tr>
+            <tr><td>7</td><td>153 m × 153 m</td><td>City block level</td></tr>
+            <tr><td>8</td><td>38 m × 19 m</td><td>Building level</td></tr>
+          </tbody>
+        </table>
+        <p>Cell widths shrink towards the poles because longitude lines converge, so a "length 6" cell is physically narrower at 60 degrees north than at the equator. The sample code derives precision from actual cell dimensions at the query latitude rather than a fixed table.</p>
+        <p class="mini-heading">Choosing precision and covering the circle</p>
+        <p>Pick the longest geohash whose cell is at least as large as the search radius. The query disc then can overlap at most the home cell and its eight neighbours, so the candidate set is those nine cells. For a 500 m radius that is length 6. Fetch the IDs in all nine cells in parallel, compute exact great-circle (haversine) distance, drop anything outside the radius, sort, paginate.</p>
+        <div class="diagram-box" style="white-space:pre">
+        ┌────────┬────────┬────────┐
+        │ NW     │ N      │ NE     │     candidate cells = home + 8 neighbours
+        ├────────┼────────┼────────┤
+        │ W      │ <span class="hi"> HOME </span>│ E      │     the search circle (radius r ≤ cell size) can never
+        │        │   <span class="ok">●─r─╮</span>│        │     reach beyond this 3×3 block
+        ├────────┼────────┼────────┤
+        │ SW     │ S      │ SE     │     <span class="warn">but 3×3 may hold ~10x more points than the circle needs → exact filter</span>
+        └────────┴────────┴────────┘
+        </div>
+        <p class="mini-heading">Boundary issues</p>
+        <ul class="check-list">
+          <li><strong>Close but different prefixes.</strong> Solved by the 3x3 neighbour query above. Compute neighbours by stepping one cell width/height from the cell centre and re-encoding, as in the example. Handle longitude wrap at the antimeridian and clamp at the poles.</li>
+          <li><strong>Long shared prefix, different cell.</strong> Two points sharing five characters can still lie in distinct length-6 cells; the neighbour query again covers it. Never assume "same prefix means close" without the exact distance filter.</li>
+          <li><strong>Not enough results.</strong> In sparse areas the 3x3 block may hold fewer than the wanted count. Drop one character (cell grows 32x in area) and query again, repeating until enough or until a cap. The product behaviour "widen the search" maps cleanly onto "shorten the prefix".</li>
+        </ul>
+        <div class="warn-box"><strong>Gotcha:</strong> the 3x3 block is a superset, so you must always do the exact distance filter and you must over-fetch for ranking. Also remember a geohash cell is not a circle; at the corners the true circle includes noticeably less area than the block, which is why post-filtering removes a large fraction of candidates.</div>
+        <p class="mini-heading">Storing it</p>
+        <p>The geospatial index table is just <code>(geohash, business_id)</code>, with one row per business per supported precision (for example 4, 5, 6) or a single 12-character hash queried with prefix ranges. Prefer separate rows per precision for key-value stores, where range scans are weaker than point lookups: <code>GET geohash:6:9q8yym → {ids}</code>. In SQL, a composite primary key <code>(geohash, business_id)</code> turns every lookup into an index range scan. Updates are cheap: insert or delete one row per precision. Avoid keeping a precision in a single column that is then updated in place; with per-precision rows there is nothing to compute at read time.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 3</span>
+        <h2>Quadtree and S2</h2>
+        <p><strong>Quadtree.</strong> Start with one node covering the world. While a node holds more than N businesses (the chapter uses 100), split it into four equal quadrants and push points down. The result has tiny cells in downtown Tokyo and enormous ones over the Pacific, so every leaf holds a bounded number of points regardless of density. That bound is the point: query cost is proportional to the result, not to cell area.</p>
+        <p>Searching: descend to the leaf containing the query point, collect its candidates, then expand to sibling and neighbour leaves in best-first order of box distance until the k-th best distance is smaller than the next box's distance. That prune rule is what makes k-nearest queries ("the three closest petrol stations, however far") natural here and awkward with geohash, where you would loop over shrinking prefixes. The example implements it and verifies against brute force.</p>
+        <p class="mini-heading">Memory and build arithmetic</p>
+        <p>200 M businesses with at most 100 per leaf gives at least 2 M leaves. A leaf holds up to 100 eight-byte IDs plus a bounding box (say 32 bytes): about 830 bytes. 2 M × 830 B ≈ 1.7 GB, and internal nodes add roughly a third as many nodes with only child pointers, tens of megabytes. Real trees are less full than the maximum (splits create half-empty children), so budget 2 to 4x. Everything fits comfortably on one commodity server. Construction is O(n log n) in practice, which for 200 M points is minutes.</p>
+        <p class="mini-heading">Operational consequences</p>
+        <ul class="check-list">
+          <li><strong>Start-up time.</strong> A fresh LBS node cannot serve until the tree is built (or loaded from a snapshot). Do not restart the fleet at once. Roll out in small waves, keep capacity for the nodes that are building, and prefer loading a serialised snapshot over rebuilding from the database.</li>
+          <li><strong>Updates.</strong> Simple approach: every node rebuilds periodically (nightly) from the source of truth, which matches the "next-day visibility" requirement. In-place updates are possible but need fine-grained locking or copy-on-write subtrees, and a deletion that merges nodes is fiddly. Prefer immutable snapshots swapped atomically with a pointer flip.</li>
+          <li><strong>Consistency between nodes.</strong> Nodes rebuilt at different moments disagree for a while. For a search service this is fine; for a booking service it would not be.</li>
+        </ul>
+        <p><strong>Google S2.</strong> The sphere is projected onto the six faces of a cube, each face is recursively quartered into cells (levels 0 to 30, level 30 is about a centimetre), and cells are numbered along a Hilbert space-filling curve. Hilbert has better locality than Z-order: it never makes the long diagonal jumps of Morton order, so a region maps to fewer contiguous ID ranges. Two further advantages: a <em>region coverer</em> can approximate any shape (circle, polygon, geofence) with a set of cells of mixed levels given min level, max level and max cell count, and the projection keeps cell areas roughly uniform. This is why S2 is the choice for geofencing, and it underlies MongoDB's 2dsphere. The cost is conceptual weight and a library dependency.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Geohash vs quadtree vs S2</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Geohash strengths</h4><ul><li>Stateless: just a key into a DB or Redis</li><li>Updates are single-row inserts and deletes</li><li>Fixed-radius search is a 9-key fetch</li><li>Trivial to shard or cache</li></ul></div>
+          <div class="trade-col cons"><h4>Geohash weaknesses</h4><ul><li>Cell size cannot follow population density</li><li>Boundary handling needed</li><li>k-nearest is indirect</li><li>Z-order jumps reduce locality</li></ul></div>
+          <div class="trade-col pros"><h4>Quadtree strengths</h4><ul><li>Bounded points per leaf in any region</li><li>Natural k-nearest and variable radius</li><li>Excellent in-memory speed</li></ul></div>
+          <div class="trade-col cons"><h4>Quadtree weaknesses</h4><ul><li>Build time and cold start</li><li>Updates require rebuild or locks</li><li>Each node holds a full copy</li></ul></div>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Question</th><th>Answer I would give</th></tr></thead>
+          <tbody>
+            <tr><td>Default for a fixed-radius search with frequent writes?</td><td>Geohash, because writes are trivial and the store can be a plain table or Redis.</td></tr>
+            <tr><td>Need "closest k regardless of distance"?</td><td>Quadtree (or S2 with level expansion).</td></tr>
+            <tr><td>Geofences or polygon regions?</td><td>S2 coverings or PostGIS.</td></tr>
+            <tr><td>Build vs buy?</td><td>Use PostGIS, Redis GEO or Elasticsearch unless you have a latency or scale reason not to; explain the internals to show understanding.</td></tr>
+            <tr><td>Hot cities?</td><td>Geohash cells in dense areas become big. Mix precisions: use longer prefixes (finer cells) for hot regions, or switch that region to a quadtree.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and caching</span>
+        <h2>Database, cache, regions</h2>
+        <h3>The business table</h3>
+        <p>200 GB is small enough for one primary, but concentrated read traffic and operational limits push toward sharding by <code>business_id</code>. Sharding by ID spreads rows evenly and keeps detail lookups to one shard. Sharding by location sounds attractive for locality but creates hot shards (Manhattan) and awkward neighbour queries across shard borders, so avoid it for the business table.</p>
+        <h3>The geospatial index</h3>
+        <p>About 5 GB does not need sharding. Use one primary and as many read replicas as the QPS demands. If you do want to cache aggressively, put the index in Redis (<code>geohash:6:9q8yym → set of IDs</code>) in front of the SQL table, or just embed it in the LBS process memory. Redis cluster by key hash spreads cells evenly.</p>
+        <h3>Cache keys</h3>
+        <p>Raw GPS coordinates are a poor cache key: they are noisy at the metre level and change continuously as the user moves, so the hit rate approaches zero. The geohash cell is a natural quantisation: everyone standing in the same 1.2 km by 0.6 km cell reuses the same entry. Two caches work in tandem: <code>geohash → [business_ids]</code> (tiny, extremely hot, long TTL since data changes daily) and <code>business_id → detail</code> (larger, TTL by volatility). Note ranking by distance cannot be cached per cell, since it depends on the exact origin, so the LBS sorts at request time over at most a few hundred candidates, which costs microseconds.</p>
+        <h3>Regions and availability</h3>
+        <p>Deploy the LBS in several regions and route users to the closest. Replicas of the index are read-only copies, so there is no cross-region write path to worry about. Business writes go to a single primary region and replicate asynchronously; the daily batch rebuild distributes new snapshots. Because tolerance for staleness is high, you can serve from the stale copy during a primary-region outage.</p>
+        <h3>Business updates</h3>
+        <p>A write lands in the primary; a nightly job (or a stream consumer for fresher updates) recomputes affected geohash rows and refreshes caches. Handling an update that moves a business (new lat/lon) means removing it from the old cell's rows and adding to the new; do both in one transaction. Cache invalidation then needs only the old and new cell keys.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Final request path</span>
+        <h2>Putting it together</h2>
+        <div class="diagram-box" style="white-space:pre">
+ 1. client → LB: lat=37.77672, lon=-122.41673, radius=500 m
+ 2. LB → LBS (any node, stateless)
+ 3. LBS: radius 500 m → geohash length 6;  home = 9q8yym
+ 4. LBS: neighbours(9q8yym) → 8 cells → list of 9 keys
+ 5. LBS → Redis (geohash index), 9 GETs in parallel → candidate business_ids
+ 6. LBS: exact haversine filter ≤ 500 m; sort by distance (or rating-weighted rank)
+ 7. LBS → Redis (business info), MGET top page → names, photos, ratings
+ 8. LBS → client: ranked page + cursor           <span class="ok">typical budget: tens of ms</span>
+        </div>
+        <p>The two latency levers are the parallel fan-out in step 5 and the fact that the only mutable state the LBS touches is cache. If both Redis tiers fail, the LBS can fall back to the SQL replicas (slower but correct), which is a nicely cheap degradation path.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>Geohash with neighbours and a quadtree k-NN</h2>
+        <p>The example implements geohash encode, decode, neighbour computation (with wraparound and clamping) and precision selection from actual cell size. It indexes 20,000 random San Francisco points, runs the 500 m search through the nine-cell method, and asserts the result is identical to brute-force haversine. It then builds a capped-leaf quadtree and checks its 5-nearest answer against brute force.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Geohash (encode/decode/neighbours/cover-radius) + bucket-capped quadtree kNN, validated vs brute force.
+import assert from 'node:assert/strict';
+const B32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+
+function encode(lat, lon, len = 9) {
+  let latR = [-90, 90], lonR = [-180, 180], bits = 0, ch = 0, even = true, out = '';
+  while (out.length &lt; len) {
+    const r = even ? lonR : latR, v = even ? lon : lat, mid = (r[0] + r[1]) / 2;
+    ch &lt;&lt;= 1; if (v &gt;= mid) { ch |= 1; r[0] = mid; } else r[1] = mid;
+    even = !even;
+    if (++bits === 5) { out += B32[ch]; bits = 0; ch = 0; }
+  }
+  return out;
+}
+function bounds(hash) {
+  let latR = [-90, 90], lonR = [-180, 180], even = true;
+  for (const c of hash) {
+    const v = B32.indexOf(c);
+    for (let b = 4; b &gt;= 0; b--) {
+      const r = even ? lonR : latR, mid = (r[0] + r[1]) / 2;
+      if ((v &gt;&gt; b) &amp; 1) r[0] = mid; else r[1] = mid;
+      even = !even;
+    }
+  }
+  return { latR, lonR };
+}
+const decode = h =&gt; { const { latR, lonR } = bounds(h); return { lat: (latR[0] + latR[1]) / 2, lon: (lonR[0] + lonR[1]) / 2 }; };
+
+// neighbours by decoding the cell centre and stepping one cell height/width (wraps in lon, clamps in lat)
+function neighbours(hash) {
+  const { latR, lonR } = bounds(hash);
+  const h = latR[1] - latR[0], w = lonR[1] - lonR[0];
+  const c = decode(hash), out = [];
+  for (const dy of [-1, 0, 1]) for (const dx of [-1, 0, 1]) {
+    if (!dx &amp;&amp; !dy) continue;
+    const lat = c.lat + dy * h; if (lat &gt; 90 || lat &lt; -90) continue;
+    let lon = c.lon + dx * w; if (lon &gt; 180) lon -= 360; if (lon &lt; -180) lon += 360;
+    out.push(encode(lat, lon, hash.length));
+  }
+  return [...new Set(out)];
+}
+
+const R = 6371008.8;
+const rad = d =&gt; d * Math.PI / 180;
+function haversine(a, b) {
+  const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+// pick the longest precision whose cell is still at least as big as the radius (both dims)
+function precisionFor(radiusM, lat) {
+  for (let len = 12; len &gt;= 1; len--) {
+    const { latR, lonR } = bounds(encode(lat, 0, len));
+    const hM = rad(latR[1] - latR[0]) * R, wM = rad(lonR[1] - lonR[0]) * R * Math.cos(rad(lat));
+    if (Math.min(hM, wM) &gt;= radiusM) return len;
+  }
+  return 1;
+}
+
+class GeoIndex { // the "geospatial index table": geohash -&gt; set of business ids
+  cells = new Map(); pts = new Map(); len = 6;
+  constructor(len) { this.len = len; }
+  add(id, lat, lon) {
+    this.pts.set(id, { lat, lon });
+    const k = encode(lat, lon, this.len);
+    (this.cells.get(k) ?? this.cells.set(k, new Set()).get(k)).add(id);
+  }
+  search(lat, lon, radiusM) {
+    const me = { lat, lon }, home = encode(lat, lon, this.len);
+    const cand = [];
+    for (const cell of [home, ...neighbours(home)]) for (const id of this.cells.get(cell) ?? []) cand.push(id);
+    return cand.map(id =&gt; ({ id, d: haversine(me, this.pts.get(id)) })).filter(x =&gt; x.d &lt;= radiusM).sort((a, b) =&gt; a.d - b.d);
+  }
+}
+
+class Quadtree {
+  constructor(box, cap = 100, depth = 0) { this.box = box; this.cap = cap; this.pts = []; this.kids = null; this.depth = depth; }
+  insert(p) {
+    if (this.kids) return this.kids[this.#q(p)].insert(p);
+    this.pts.push(p);
+    if (this.pts.length &gt; this.cap &amp;&amp; this.depth &lt; 24) {
+      const { x0, y0, x1, y1 } = this.box, mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      this.kids = [{ x0, y0, x1: mx, y1: my }, { x0: mx, y0, x1, y1: my }, { x0, y0: my, x1: mx, y1 }, { x0: mx, y0: my, x1, y1 }]
+        .map(b =&gt; new Quadtree(b, this.cap, this.depth + 1));
+      const old = this.pts; this.pts = [];
+      old.forEach(q =&gt; this.kids[this.#q(q)].insert(q));
+    }
+  }
+  #q(p) { const mx = (this.box.x0 + this.box.x1) / 2, my = (this.box.y0 + this.box.y1) / 2; return (p.x &gt;= mx ? 1 : 0) + (p.y &gt;= my ? 2 : 0); }
+  // k nearest in planar space with best-first pruning on box distance
+  knn(x, y, k) {
+    const best = []; // sorted ascending, max k
+    const boxD = b =&gt; { const dx = Math.max(b.x0 - x, 0, x - b.x1), dy = Math.max(b.y0 - y, 0, y - b.y1); return dx * dx + dy * dy; };
+    const visit = n =&gt; {
+      if (best.length === k &amp;&amp; boxD(n.box) &gt; best[k - 1].d) return;
+      if (!n.kids) { for (const p of n.pts) { const d = (p.x - x) ** 2 + (p.y - y) ** 2; best.push({ ...p, d }); } best.sort((a, b) =&gt; a.d - b.d); best.length = Math.min(best.length, k); return; }
+      [...n.kids].sort((a, b) =&gt; boxD(a.box) - boxD(b.box)).forEach(visit);
+    };
+    visit(this); return best;
+  }
+  leaves() { return this.kids ? this.kids.reduce((s, c) =&gt; s + c.leaves(), 0) : 1; }
+}
+
+// ------------- tests -------------
+assert.equal(encode(57.64911, 10.40744, 11), 'u4pruydqqvj');        // canonical reference vector
+assert.equal(encode(42.6, -5.6, 5), 'ezs42');
+const d = decode('ezs42'); assert.ok(Math.abs(d.lat - 42.6) &lt; 0.03 &amp;&amp; Math.abs(d.lon + 5.6) &lt; 0.03);
+console.log('SF 37.77672,-122.41673 -&gt;', encode(37.77672, -122.41673, 6));
+console.log('neighbours of 9q8yyk:', neighbours('9q8yyk').join(' '));
+assert.equal(neighbours('9q8yyk').length, 8);
+console.log('precision for 500m @SF:', precisionFor(500, 37.78), '| 5km:', precisionFor(5000, 37.78));
+
+// random SF-ish businesses; geohash search must equal brute force
+let s = 42; const rand = () =&gt; (s = (s * 1664525 + 1013904223) &gt;&gt;&gt; 0) / 2 ** 32;
+const pts = Array.from({ length: 20000 }, (_, i) =&gt; ({ id: i, lat: 37.70 + rand() * 0.15, lon: -122.52 + rand() * 0.18 }));
+const radius = 500, len = precisionFor(radius, 37.78);
+const idx = new GeoIndex(len); pts.forEach(p =&gt; idx.add(p.id, p.lat, p.lon));
+const me = { lat: 37.776720, lon: -122.416730 };
+const fast = idx.search(me.lat, me.lon, radius);
+const brute = pts.map(p =&gt; ({ id: p.id, d: haversine(me, p) })).filter(x =&gt; x.d &lt;= radius).sort((a, b) =&gt; a.d - b.d);
+console.log(`geohash(len ${len}) found ${fast.length} within ${radius}m; brute force ${brute.length}`);
+assert.deepEqual(fast.map(x =&gt; x.id), brute.map(x =&gt; x.id));
+
+// quadtree kNN in a planar projection (fine at city scale)
+const kx = Math.cos(rad(37.78));
+const proj = p =&gt; ({ id: p.id, x: p.lon * kx, y: p.lat });
+const qt = new Quadtree({ x0: -123 * kx, y0: 37, x1: -122 * kx, y1: 38 }, 100);
+pts.forEach(p =&gt; qt.insert(proj(p)));
+const q = proj(me), near = qt.knn(q.x, q.y, 5);
+const bf = pts.map(proj).map(p =&gt; ({ ...p, d: (p.x - q.x) ** 2 + (p.y - q.y) ** 2 })).sort((a, b) =&gt; a.d - b.d).slice(0, 5);
+console.log('quadtree leaves:', qt.leaves(), '| 5-NN ids:', near.map(n =&gt; n.id).join(','));
+assert.deepEqual(near.map(n =&gt; n.id), bf.map(n =&gt; n.id));
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the geohash of the sample SF point (9q8yym), eight neighbours of 9q8yyk, precision 6 for 500 m and 4 for 5 km, 51 matches found by geohash equal to brute force, the quadtree leaf count and 5 nearest IDs, and "all assertions passed". Executed with Node 20+.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>Boundary bug</td><td>Missing obvious nearby results at certain street corners</td><td>Always query 3x3; test at equator, meridian, antimeridian, poles.</td></tr>
+            <tr><td>Hot cell</td><td>One geohash key melts a Redis shard at stadium event</td><td>Local in-process cache for hot keys; replicate hot keys; shard the key into sub-cells (longer prefix).</td></tr>
+            <tr><td>Cold start of a quadtree node</td><td>New instances serve nothing for minutes</td><td>Snapshot load, readiness probe tied to build completion, staggered rollout.</td></tr>
+            <tr><td>Stale cache after a business moves or closes</td><td>User walks to a closed restaurant</td><td>Targeted invalidation on write plus modest TTL; show "hours may differ".</td></tr>
+            <tr><td>Primary DB down</td><td>No business edits</td><td>Search continues from replicas and caches; owners queue edits.</td></tr>
+            <tr><td>Redis tier down</td><td>Latency spike</td><td>Fall back to SQL replica index; circuit breaker; reduce page size.</td></tr>
+            <tr><td>Bad GPS fix (indoors, urban canyon)</td><td>Results offset by hundreds of metres</td><td>Send accuracy radius from the device and widen to match; let the user pin the map.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Production gotchas</span>
+        <h2>Things that bite after launch</h2>
+        <ul class="check-list">
+          <li><strong>Distance on a sphere.</strong> Use haversine (or Vincenty for high accuracy). Euclidean on raw degrees is wrong because a degree of longitude shrinks with the cosine of latitude, which the quadtree example corrects for with a projection factor.</li>
+          <li><strong>Latitude/longitude order.</strong> GeoJSON and many databases use (lon, lat); most mobile APIs use (lat, lon). Mixing them puts San Francisco in Antarctica. Write the test.</li>
+          <li><strong>Privacy.</strong> The query contains the user's location. Log at geohash-length-5 granularity, not raw coordinates; set retention; honour deletion requests; coarsen before sending to analytics.</li>
+          <li><strong>Ranking beyond distance.</strong> Real products blend distance, rating, open-now, popularity, personalisation. Retrieval (this chapter) gives a candidate set; a separate ranker orders it. Do not push ranking into the index.</li>
+          <li><strong>Categories and filters.</strong> Filtering "open now AND vegetarian" after retrieval wastes work in dense areas. At scale, include category in the index key (or use a search engine such as <a href="../../elasticsearch.html">Elasticsearch</a> that combines geo and attribute filters).</li>
+          <li><strong>Pagination stability.</strong> Distance-sorted results shift as the user moves; use a cursor that pins the origin snapshot.</li>
+          <li><strong>Test data skew.</strong> Uniform random test data hides every density problem. Load-test with real city clustering.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Scope: radius search, business CRUD with delayed visibility, detail view; non-functional privacy and spikes.</li>
+          <li>Sizing: about 5 K QPS average, 200 M businesses, index of a few GB.</li>
+          <li>Split LBS (stateless reads) from Business Service (CRUD); primary plus replicas.</li>
+          <li>Explain why two B-tree indexes fail; introduce geospatial indexing.</li>
+          <li>Geohash: construction, prefix property, precision table, neighbours, boundary pitfalls, widen-by-shortening-prefix.</li>
+          <li>Quadtree: bounded leaf, k-NN pruning, memory arithmetic, cold start, rebuild strategy.</li>
+          <li>S2 and Hilbert for geofencing; name PostGIS, Redis GEO, Elasticsearch as buy options.</li>
+          <li>Cache by geohash and by business ID; do not key by coordinates.</li>
+          <li>Shard business table by ID; replicate the geo index rather than shard it.</li>
+          <li>Walk the final eight-step request path and the fallback path.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not just use a database with a spatial index?</summary><p>Often you should: PostGIS with a GiST index answers this directly and handles polygons, joins and filters. The interview asks you to explain what is inside, and at extreme read QPS an in-memory or Redis-backed cell lookup is cheaper per query than a disk-based spatial index.</p></details>
+        <details><summary>What if a geohash cell contains millions of businesses?</summary><p>You chose too coarse a precision for that region. Use adaptive precision: split hot cells into longer prefixes, or serve dense regions from a quadtree. A skewed distribution is the textbook reason quadtrees exist.</p></details>
+        <details><summary>How do you support "open now" or "category" filters efficiently?</summary><p>Small result sets: post-filter. Large: add the category to the index key, or push everything to a search engine that supports geo plus filter queries in one pass.</p></details>
+        <details><summary>How would you handle a moving user, such as someone driving?</summary><p>Re-query when the user leaves their current cell or moves more than a fraction of the radius, rather than every GPS tick. Cache neighbours of the current cell client-side. Truly continuous tracking is the next chapter's problem.</p></details>
+        <details><summary>Geohash versus S2: which would you really pick?</summary><p>For a fixed-radius lookup with a key-value store, geohash for simplicity. For anything involving regions, high latitude accuracy, variable-size coverings or a need for locality-preserving ranges, S2 (or H3, Uber's hexagonal grid, which has uniform neighbour distances).</p></details>
+        <details><summary>How fresh must the index be?</summary><p>The requirement says daily. If the product later wants minutes, stream changes from the primary (CDC) into index updates and invalidate the specific cell keys; the architecture already supports this because the index is derived data.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./15-google-drive.html">Chapter 15: Google Drive</a> — previous chapter.</li>
+          <li><a href="./17-nearby-friends.html">Chapter 17: Nearby Friends</a> — next chapter; the same geometry with constantly moving points.</li>
+          <li><a href="./18-google-maps.html">Chapter 18: Google Maps</a> — tiles and routing on top of the same cell ideas.</li>
+          <li><a href="../../uber-architecture-driver-tracking.html">Uber architecture: driver tracking</a> — geospatial indexing for moving drivers (H3 cells).</li>
+          <li><a href="../../system-design/caching.html">Caching</a> — cache-key design and invalidation.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — why business_id, not location, is the shard key.</li>
+          <li><a href="../../elasticsearch.html">Elasticsearch</a> — geo_point queries combined with attribute filters.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repo's top-level Readme lists no additional resources for this chapter; the chapter notes themselves reference:</p>
+        <ul>
+          <li><a href="https://www.movable-type.co.uk/scripts/geohash.html">Geohash Algorithm</a> — https://www.movable-type.co.uk/scripts/geohash.html</li>
+          <li><a href="https://en.wikipedia.org/wiki/Quadtree">Quadtree Indexing</a> — https://en.wikipedia.org/wiki/Quadtree</li>
+          <li><a href="https://s2geometry.io/">Google S2 Geometry</a> — https://s2geometry.io/</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Proximity search is "flatten the plane, scan a few ranges, filter exactly". Geohash with a 3x3 neighbour query is the simple, update-friendly default; a quadtree wins when density varies or you need k-nearest; S2 wins for regions. The index is small enough to replicate rather than shard, and the cache key is the cell, never the raw coordinate.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Apache Kafka — Key Concepts | System Design: The Complete Guide | Learning Hub</title>
+  <link rel="stylesheet" href="../../styles.css" />
+  <script src="../../read-state.js" defer></script>
+  <script src="../../highlight.js" defer></script>
+  <script src="../../chat-widget.js" defer></script>
+  <style>
+    .module-tag {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: var(--accent-soft, #f0e8d8);
+      color: var(--accent, #a0522d);
+      margin-bottom: 0.4rem;
+    }
+    .diagram-wrap {
+      overflow-x: auto;
+      margin: 1.2rem 0;
+    }
+    .diagram-wrap svg {
+      display: block;
+      max-width: 100%;
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    .compare-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+      background: var(--surface, #faf8f4);
+    }
+    .compare-card h4 {
+      margin: 0 0 0.5rem;
+      font-size: 0.95rem;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .compare-card ul {
+      margin: 0;
+      padding-left: 1.1rem;
+      font-size: 0.88rem;
+    }
+    .compare-card ul li { margin-bottom: 0.25rem; }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin: 0.6rem 0;
+    }
+    .pill {
+      padding: 0.25rem 0.65rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 0.82rem;
+      background: #fff;
+    }
+    .steps-list { counter-reset: step-counter; list-style: none; padding: 0; }
+    .steps-list li {
+      counter-increment: step-counter;
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+      font-size: 0.9rem;
+    }
+    .steps-list li::before {
+      content: counter(step-counter);
+      flex-shrink: 0;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 50%;
+      background: var(--accent, #a0522d);
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 0.05rem;
+    }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+    @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+    table.sd-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+    table.sd-table th { background: var(--accent-soft, #f0e8d8); text-align: left; padding: 7px 10px; font-size: 0.8rem; }
+    table.sd-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    table.sd-table tr:last-child td { border-bottom: none; }
+    .realworld-badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      background: #e8f4e8;
+      color: #2d6a2d;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      margin-right: 0.3rem;
+    }
+  
+    .nav-row { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin:1.5rem 0; }
+    .nav-row .resource-link { max-width:none; }
+    .nav-next { text-align:right; }
+    @media (max-width:640px){ .nav-row{grid-template-columns:1fr;} .nav-next{text-align:left;} }
+  </style>
+</head>
+<body>
+<main class="page container">
+  <header class="page-header">
+    <a class="back-link" href="../system-design-complete-visual-guide.html#messaging">← Back to System Design: The Complete Guide</a>
+    <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Split out 2026-10-15 from the single-page System Design: The Complete Guide. Module 06 of the guide (Messaging &amp; Streaming). Topics, partitions, consumer groups and offsets, and the three places Kafka can lose messages.</div>
+    <span class="module-tag">Module 06 · Messaging &amp; Streaming</span>
+    <h1>Apache Kafka — Key Concepts</h1>
+    <p class="summary">Topics, partitions, consumer groups and offsets, and the three places Kafka can lose messages.</p>
+    <div class="article-meta">
+      <span class="meta-item">2 min read · topic 1 of 7 in Messaging</span>
+    </div>
+  </header>
+
+  <section class="content-card">
+      <div class="diagram-wrap">
+        <svg viewBox="0 0 720 130" xmlns="http://www.w3.org/2000/svg" font-family="Arial,sans-serif" font-size="12">
+          <!-- Producer -->
+          <rect x="10" y="40" width="120" height="50" rx="8" fill="#dbeafe" stroke="#3b82f6"/>
+          <text x="70" y="63" text-anchor="middle" font-weight="700">Producer</text>
+          <text x="70" y="80" text-anchor="middle" font-size="10" fill="#555">Application Thread</text>
+          <text x="70" y="93" text-anchor="middle" font-size="10" fill="#555">Accumulator → Sender</text>
+
+          <!-- Kafka Broker / Topic -->
+          <rect x="175" y="10" width="380" height="110" rx="8" fill="#fef9c3" stroke="#d97706"/>
+          <text x="365" y="30" text-anchor="middle" font-weight="700" fill="#92400e">Kafka Broker Cluster</text>
+          <rect x="195" y="38" width="100" height="70" rx="5" fill="#fde68a" stroke="#d97706"/>
+          <text x="245" y="58" text-anchor="middle" font-size="11" font-weight="700">Partition 0</text>
+          <text x="245" y="72" text-anchor="middle" font-size="10">Leader replica</text>
+          <text x="245" y="86" text-anchor="middle" font-size="10">+ follower replicas</text>
+          <rect x="315" y="38" width="100" height="70" rx="5" fill="#fde68a" stroke="#d97706"/>
+          <text x="365" y="58" text-anchor="middle" font-size="11" font-weight="700">Partition 1</text>
+          <rect x="435" y="38" width="100" height="70" rx="5" fill="#fde68a" stroke="#d97706"/>
+          <text x="485" y="58" text-anchor="middle" font-size="11" font-weight="700">Partition 2</text>
+
+          <!-- Consumer Groups -->
+          <rect x="590" y="20" width="120" height="40" rx="8" fill="#d1fae5" stroke="#059669"/>
+          <text x="650" y="38" text-anchor="middle" font-weight="700">Consumer A</text>
+          <text x="650" y="52" text-anchor="middle" font-size="10" fill="#065f46">(Group 1)</text>
+          <rect x="590" y="75" width="120" height="40" rx="8" fill="#d1fae5" stroke="#059669"/>
+          <text x="650" y="93" text-anchor="middle" font-weight="700">Consumer B</text>
+          <text x="650" y="107" text-anchor="middle" font-size="10" fill="#065f46">(Group 2)</text>
+
+          <!-- arrows -->
+          <defs><marker id="arrKaf" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#888"/></marker></defs>
+          <line x1="130" y1="65" x2="175" y2="65" stroke="#888" stroke-width="1.5" marker-end="url(#arrKaf)"/>
+          <line x1="555" y1="40" x2="590" y2="40" stroke="#888" stroke-width="1.5" marker-end="url(#arrKaf)"/>
+          <line x1="555" y1="95" x2="590" y2="95" stroke="#888" stroke-width="1.5" marker-end="url(#arrKaf)"/>
+        </svg>
+      </div>
+
+      <div class="callout">
+        <p><strong>Can Kafka lose messages?</strong> Yes — if misconfigured. Three danger points: (1) <strong>Producer:</strong> must set <code>acks=all</code> and <code>retries&gt;0</code>. (2) <strong>Broker:</strong> async disk flush means unacked messages lost on crash — configure replication factor ≥ 3 and <code>min.insync.replicas=2</code>. (3) <strong>Consumer:</strong> auto-commit can ack a message before it's processed — use synchronous commit in exception handlers.</p>
+      </div>
+
+  </section>
+
+  <section class="content-card">
+    <h2>Go deeper</h2>
+    <ul>
+      <li><a href="../system-design/message-queue.html">Message Queue</a> — concept 30 in the Learning Guide: full mechanics, code and trade-offs.</li>
+      <li><a href="../system-design/pub-sub.html">Publish-Subscribe</a> — concept 31 in the Learning Guide: full mechanics, code and trade-offs.</li>
+      <li><a href="./core-concepts-deep-dive.html">Core Concepts Deep Dive</a> — the trade-off treatment of this topic, with runnable JavaScript.</li>
+    </ul>
+  </section>
+  <div class="nav-row"><div></div><a class="resource-link nav-next" href="./top-5-kafka-use-cases.html"><span class="resource-meta">Next →</span><span class="resource-title">Top 5 Kafka Use Cases</span></a></div>
+  <section class="content-card">
+    <h2>Related Reading</h2>
+    <ul>
+      <li><a href="../system-design-concepts.html">System Design Learning Guide: 33 Concepts + Interview Handbook</a> — the sequenced path with case studies.</li>
+      <li><a href="../system-design-complete-visual-guide.html#messaging">Messaging &amp; Streaming</a> — all topics in this module.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

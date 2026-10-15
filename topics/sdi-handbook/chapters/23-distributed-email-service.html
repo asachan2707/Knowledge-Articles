@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Distributed Email Service | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 23 of the System Design Interview Handbook. Created 2026-10-15 from liquidslr/system-design-notes ch.23. Covers a Gmail-scale distributed email service: SMTP/IMAP/MX basics, send and receive pipelines with queues and workers, per-user partitioned metadata store (timeuuid, denormalized read/unread, thread headers), attachments in object storage, deliverability (SPF/DKIM/DMARC, IP warm-up), Elasticsearch vs custom LSM search, multi-DC availability, plus numbers (100k sends/s, 730 PB/year metadata, 1,460 PB/year attachments). Includes a runnable Node.js example (partitioned mailbox, unread view, thread builder, MX failover with jittered backoff) that was executed. Read time about 24 min. Related: message queue, object storage (ch24), notification system (ch10), chat system (ch12).</div>
+        <h1>Design a Distributed Email Service</h1>
+        <p class="summary">A Gmail-class mail system is mostly a storage and queueing problem wearing a protocol costume. Learn the send and receive pipelines, why the mailbox is partitioned by user, how search and deliverability fit in, and where the real cost lives.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">23 of 28 · Part 6 Transactional Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">24 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Per-user partitioning, queue-backed send/receive, denormalized read/unread, async search indexing, sender reputation</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Gmail, Bigtable, HBase, Cassandra, Elasticsearch, Kafka, S3, Postfix, Dovecot</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Email is the oldest federated, store-and-forward messaging system still in daily use. Anyone can run a server, any server can talk to any other, and the whole thing works because of a handful of 1980s protocols that nobody dares break. Designing a Gmail-scale service means keeping that protocol surface at the edge and building a modern, partitioned, queue-driven backend behind it.</p>
+        <p>The interview framing is deceptively simple: users send, receive, fetch, filter, and search mail, with attachments. The depth is in three questions. How do you store a billion mailboxes so that reads are cheap and nothing is ever lost? How do you move mail between organizations reliably when the other side is flaky, hostile, or both? And how do you make sure the mail you send lands in an inbox rather than a spam folder?</p>
+        <div class="callout"><p><strong>Core idea:</strong> Every user's mailbox is an independent unit. Partition everything (metadata, search index, cache, real-time connections) by <code>user_id</code>, put durable queues between every stage of the send and receive pipelines, keep large blobs in object storage, and treat deliverability as a first-class product problem rather than an afterthought.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Background · How mail storage evolved</span>
+        <h2>From one file per message to purpose-built mailbox stores</h2>
+        <p>The classic Unix mail stack stored a mailbox either as a single append-only file (the <em>mbox</em> format) or as a directory with one file per message (D. J. Bernstein's <em>Maildir</em>, designed to avoid locking). Servers such as Postfix (SMTP) and Dovecot (IMAP) run happily on this for thousands of users per machine. Maildir fixed concurrency, but every message is still a file: an inbox with 100,000 messages is 100,000 inodes, listing requires directory scans, and a dead disk means dead mail unless you bolt on RAID and backups.</p>
+        <p>Large providers abandoned this model. Facebook publicly described building its Messages product on HBase (an open-source Bigtable clone) with attachments in a separate blob tier, and Google has described Bigtable as a general substrate for user-facing products. The common thread in these public designs is exactly what this chapter recommends: a wide-column, strongly consistent store keyed by user, with small hot metadata separated from large cold bytes.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · Scope and Requirements</span>
+        <h2>What we are building</h2>
+        <p>The interviewer sets the target at one billion users. Functional scope: send and receive mail, fetch mail, organize into folders and filter by attributes (read or unread), full-text search, anti-spam and anti-virus, and attachments. Authentication is waved away, and clients talk HTTP to our servers rather than SMTP, IMAP or POP. We still speak SMTP between servers, because that is how the rest of the world delivers mail to us.</p>
+        <table class="data-table">
+          <thead><tr><th>Non-functional</th><th>What it forces</th></tr></thead>
+          <tbody>
+            <tr><td>Reliability</td><td>Once we acknowledge a message we must never lose it. Durable queue plus synchronous replication before the SMTP <code>250 OK</code>.</td></tr>
+            <tr><td>Availability</td><td>Replicas everywhere, partial failure tolerated: a dead shard hurts only the users on it, never everyone.</td></tr>
+            <tr><td>Scalability</td><td>Mailboxes are independent, so horizontal partitioning by user works almost without cross-shard traffic.</td></tr>
+            <tr><td>Flexibility</td><td>HTTP/JSON between client and backend lets us add labels, snooze, smart replies, without negotiating a protocol extension with every mail client on earth.</td></tr>
+          </tbody>
+        </table>
+
+        <p class="mini-heading">Back-of-the-envelope</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Outbound sends</td><td>10 mails/user/day × 10<sup>9</sup> users = 10<sup>10</sup>/day ÷ 86,400 s</td><td>about 115k/s, round to 100k/s average (peak is 2-3x that)</td></tr>
+            <tr><td>Inbound deliveries</td><td>40 mails/user/day × 10<sup>9</sup> = 4×10<sup>10</sup>/day ÷ 86,400</td><td>about 460k/s average; inbound is roughly 4x outbound and much of it is spam we reject early</td></tr>
+            <tr><td>Metadata and body text</td><td>40 × 50 KB = 2 MB/user/day; × 10<sup>9</sup> = 2 PB/day; × 365</td><td>about 730 PB/year before replication</td></tr>
+            <tr><td>Attachments</td><td>20% of 4×10<sup>10</sup> mails = 8×10<sup>9</sup>/day × 500 KB = 4 PB/day; × 365</td><td>about 1,460 PB/year, twice the text volume</td></tr>
+            <tr><td>Per-user growth</td><td>730 PB ÷ 10<sup>9</sup> users</td><td>about 0.7 GB/year text plus 1.5 GB/year attachments per user</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>Read the numbers:</strong> the system is write-heavy in bytes but the writes are small and sequential per user. Attachments dominate raw capacity, which is why they live in an object store with erasure coding (see <a href="./24-s3-object-storage.html">chapter 24</a>). With 3x replication the footprint is north of 6 EB per year, which is why deduplicating identical attachments and tiering old mail to cold storage show up in every real design. Also note that the 50 KB figure per mail includes headers and bodies, and that inbound counts include mail you accept before spam filtering rejects it.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · Email 101</span>
+        <h2>Protocols and DNS you must know</h2>
+        <table class="data-table">
+          <thead><tr><th>Protocol</th><th>Role</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>SMTP</td><td>Server-to-server transfer and client submission</td><td>Port 25 between MTAs, 587 (STARTTLS) or 465 (implicit TLS) for authenticated submission. Store-and-forward: a relay owns the message once it replies <code>250</code>.</td></tr>
+            <tr><td>POP3</td><td>Download mail from a server</td><td>Traditionally downloads and deletes. Single-device mindset.</td></tr>
+            <tr><td>IMAP</td><td>Remote access to a server-side mailbox</td><td>Mail stays on the server; folders, flags, and server-side search; <code>IDLE</code> gives push-like notification.</td></tr>
+            <tr><td>HTTPS</td><td>Web and mobile clients</td><td>Not a mail protocol but the right choice for rich clients. This is our client API.</td></tr>
+          </tbody>
+        </table>
+        <p>To find where to deliver mail for <code>bob@gmail.com</code>, a sending server queries DNS for the domain's <strong>MX records</strong>. Each record carries a hostname and a preference number; the sender tries the lowest number first and falls back to higher numbers. If no MX exists, SMTP falls back to the domain's A record. The code example below implements exactly this selection plus retry.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+<span class="dim">Alice (outlook.com client)          outlook.com MTA                gmail.com MTA             Bob</span>
+   |  <span class="step">SMTP submit</span>                    |                              |                      |
+   |------------------------------&gt;|  <span class="hi">DNS: MX gmail.com ?</span>             |                      |
+   |                               |  -&gt; 5 gmail-smtp-in.l.google.com             |
+   |                               |  <span class="step">SMTP: MAIL FROM / RCPT TO / DATA</span> |                      |
+   |                               |-----------------------------&gt;|  <span class="ok">250 queued (durable)</span>  |
+   |                               |&lt;-----------------------------|                      |
+   |                               |                              |  store in Bob's box  |
+   |                               |                              |&lt;----- IMAP/HTTPS ----|
+</pre></div>
+        <p>Three protocol facts shape the design. First, SMTP carries an <em>envelope</em> (<code>MAIL FROM</code>, <code>RCPT TO</code>) that is separate from the visible headers; Bcc recipients exist only in the envelope, so the sending pipeline must expand To, Cc and Bcc into one envelope recipient list and then strip Bcc from the stored copy that other recipients see. Second, attachments travel base64-encoded inside the MIME body, which inflates them by about one third, so a 25 MB cap on the encoded message means about 18 MB of actual file. Third, temporary failures (4xx) and permanent failures (5xx) must be told apart: the former are retried for days, the latter generate a bounce.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · High-Level Design</span>
+        <h2>From a single mail server to a distributed one</h2>
+        <p>A traditional server bundles SMTP, mailbox storage on local disk, and IMAP/POP in one process on one machine. Disk I/O becomes the bottleneck as users grow, and the machine is a single point of failure. The distributed version keeps SMTP at the edge (other servers still deliver mail to us that way), replaces local files with a partitioned replicated store, and exposes a REST API for our own clients.</p>
+        <table class="data-table">
+          <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>POST /v1/messages</code></td><td>Send a message to the recipients in To, Cc and Bcc</td></tr>
+            <tr><td><code>GET /v1/folders</code></td><td>List a user's folders (inbox, sent, drafts, trash, spam, archive, plus custom)</td></tr>
+            <tr><td><code>GET /v1/folders/{id}/messages</code></td><td>Paginated message list of one folder; use a keyset cursor (the last email id), not offset</td></tr>
+            <tr><td><code>GET /v1/messages/{id}</code></td><td>One message with headers, body, read flag, attachment references</td></tr>
+          </tbody>
+        </table>
+
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+<span class="hi">Web / mobile client</span> ---- HTTPS ----&gt; <span class="step">LB (rate limit)</span> ---&gt; <span class="hi">Web servers</span> (login, profile, folders, send API)
+        ^                                                    |
+        | <span class="note">websocket / long poll</span>                                  v
+ <span class="hi">Real-time servers</span> &lt;----- new-mail events -----  <span class="step">Outgoing queue</span> --&gt; <span class="hi">SMTP out workers</span> --&gt; other MTAs
+        ^                                                                       (spam/virus check, retry)
+        |
+ <span class="step">Mail processing workers</span> &lt;-- <span class="step">Incoming queue</span> &lt;-- <span class="hi">SMTP servers</span> &lt;-- <span class="step">SMTP LB</span> &lt;-- internet
+        |
+        +--&gt; <span class="ok">Metadata DB</span> (per-user partition)   +--&gt; <span class="ok">Object store</span> (attachments, big bodies)
+        +--&gt; <span class="ok">Redis cache</span> (recent mail)         +--&gt; <span class="ok">Search store</span> (per-user index)
+</pre></div>
+
+        <p class="mini-heading">Components and what each one owns</p>
+        <ul class="check-list">
+          <li><strong>Web servers:</strong> stateless request/response tier for login, signup, profile, folder and message APIs. Scale by adding boxes behind the load balancer.</li>
+          <li><strong>Real-time servers:</strong> hold WebSocket connections and push new-mail and state-change events. Fall back to long polling for clients that cannot upgrade. See <a href="../../system-design/websockets.html">WebSockets</a>.</li>
+          <li><strong>Metadata DB:</strong> headers, body text, flags, folder membership. Strongly consistent, partitioned by user.</li>
+          <li><strong>Attachment store:</strong> an object store such as S3. Metadata rows keep only a reference.</li>
+          <li><strong>Distributed cache:</strong> recently received and recently opened mail, because recency dominates access.</li>
+          <li><strong>Search store:</strong> a per-user full-text index, fed asynchronously.</li>
+        </ul>
+
+        <p class="mini-heading">Email sending flow</p>
+        <ol>
+          <li>The client posts the message; the load balancer applies per-account rate limits (a compromised account is the number one source of outbound spam).</li>
+          <li>A web server validates the payload: size, address syntax, attachment references already uploaded to object storage. It runs a cheap spam and abuse check on the way out.</li>
+          <li>If every recipient is on our own domain, we short-circuit: skip SMTP entirely and drop the message into the incoming path (the receive pipeline) for those recipients. This is both faster and keeps internal mail off the public internet.</li>
+          <li>Otherwise the message goes onto the <strong>outgoing queue</strong>; validation failures go to an error queue for inspection or an immediate bounce to the sender.</li>
+          <li>SMTP out workers pull from the queue, run deeper spam and virus scanning, sign with DKIM, resolve MX, and open an SMTP session to the recipient's server. A copy is written to the sender's Sent folder.</li>
+        </ol>
+        <div class="warn-box"><p><strong>Watch the queue depth.</strong> A growing outgoing queue means either the destination servers are down or throttling you (retry with exponential backoff and jitter, per-destination concurrency caps) or you simply have too few consumers (autoscale workers). Per-domain queues or per-domain concurrency limits prevent one slow destination from head-of-line blocking everything else.</p></div>
+
+        <p class="mini-heading">Email receiving flow</p>
+        <ol>
+          <li>Inbound SMTP connections arrive at an SMTP load balancer and are spread across SMTP servers.</li>
+          <li>The SMTP server applies the acceptance policy at connection time: unknown recipient, blocklisted IP, failed SPF, over-size message. Rejecting during the SMTP dialogue is far cheaper than accepting and bouncing later, and avoids backscatter.</li>
+          <li>Large attachments are written straight to object storage; the rest of the message is enqueued on the incoming queue. Only after the queue write is durable does the server reply <code>250</code>.</li>
+          <li>Mail processing workers consume the queue: virus scan, spam classification, user filters and labels. They then write to the metadata DB, the cache, the search pipeline, and notify the real-time tier.</li>
+          <li>Online users get a push; offline users pick the mail up via the HTTP API on next sign-in.</li>
+        </ol>
+        <p>At-least-once consumption means workers may process a message twice after a crash, so processing must be idempotent: derive the mail's id deterministically from the envelope id and recipient, and make inserts upserts. See <a href="../../system-design/idempotency.html">idempotency</a>.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 1</span>
+        <h2>The metadata database</h2>
+        <p class="mini-heading">Workload characteristics</p>
+        <ul class="check-list">
+          <li>Headers are small and read constantly (every inbox render). Bodies range from a line to megabytes but are typically opened once.</li>
+          <li>Almost every operation touches one user's data only: fetch, mark read, move, search. There is essentially no cross-user transaction.</li>
+          <li>Recency drives access: the last few weeks of mail get nearly all the reads, so hot and cold tiers pay off.</li>
+          <li>Durability requirement is absolute. A lost email is a headline.</li>
+        </ul>
+        <p class="mini-heading">Choosing a store</p>
+        <table class="data-table">
+          <thead><tr><th>Option</th><th>Fits</th><th>Misses</th></tr></thead>
+          <tbody>
+            <tr><td>Relational (sharded MySQL/Postgres)</td><td>Rich indexes and transactions; trivial to filter unread</td><td>Tuned for small rows; multi-MB bodies hurt buffer pools and replication; resharding a billion accounts is painful</td></tr>
+            <tr><td>Distributed object store</td><td>Cheap, durable, great for blobs and backups</td><td>No cheap "mark as read", no ordered folder listing, no per-message mutation</td></tr>
+            <tr><td>Wide-column NoSQL (Bigtable, HBase, Cassandra)</td><td>Partition by user, sort by time, massive write throughput, LSM-friendly</td><td>Limited secondary indexes; filtering on non-key columns is off the table; Cassandra is tunable-consistency, Bigtable and HBase are strongly consistent per row</td></tr>
+          </tbody>
+        </table>
+        <p>No off-the-shelf product ticks every box, which is why the biggest providers build their own. In an interview you do not design a database; you state the properties you need: values up to a few MB per cell, strong consistency, minimal disk I/O per operation, high availability with fault tolerance, and easy incremental backup. Then you use a wide-column model as the working assumption.</p>
+
+        <p class="mini-heading">Data model</p>
+        <p>The partition key is <code>user_id</code>, so a mailbox is co-located and every query is single-partition. The clustering key orders rows inside the partition. The price is that you cannot share one stored copy of a message among multiple users; each recipient gets their own row. That is a deliberate choice: a mailbox is private state (read flags, labels, deletion are per user), and copy-per-recipient keeps deletion and legal holds simple.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+<span class="hi">folders</span>        PK ((user_id), folder_id)          name, ...
+<span class="hi">emails</span>         PK ((user_id), folder_id, email_id)   <span class="dim">email_id = timeuuid, sorted DESC</span>
+                 from, to[], subject, body, is_read, preview, attachment_count, headers
+<span class="hi">attachments</span>    PK ((email_id), filename)             size, object_key (-&gt; object store)
+<span class="hi">read_emails</span>    PK ((user_id), folder_id, email_id)   <span class="dim">denormalized copy</span>
+<span class="hi">unread_emails</span>  PK ((user_id), folder_id, email_id)   <span class="dim">denormalized copy</span>
+</pre></div>
+        <ul class="check-list">
+          <li><strong>timeuuid for the email id:</strong> embeds the creation timestamp, so the clustering order is "newest first" for free and a page cursor is just the last id seen.</li>
+          <li><strong>Read/unread denormalization:</strong> a wide-column store forbids filtering on a non-key column (or makes it a scan). Instead of scanning a folder and filtering in memory, maintain two tables and move a row between them when the flag flips. Both live in the same partition, so the pair of writes is a cheap single-partition batch. The runnable example mirrors this with two sets.</li>
+          <li><strong>Threads:</strong> clients rebuild conversations from the <code>Message-Id</code>, <code>In-Reply-To</code> and <code>References</code> headers. Store those, and compute the thread grouping either at read time (cheap for one folder page) or at ingest by resolving to a thread id (better for counts).</li>
+          <li><strong>Label model:</strong> the folders table is the simple answer. Gmail-style multi-label means one message is in several "folders", which in this model is several clustering rows pointing at one body; mention it as an extension.</li>
+        </ul>
+        <div class="warn-box"><p><strong>Hot and huge partitions.</strong> One user with ten years of mail is a very wide partition, and compaction and repair on wide partitions are painful. Practical mitigations: bucket the clustering key by time (<code>(user_id, month)</code>), keep bodies above a size threshold in the object store and only a pointer in the row, and cap list endpoints. Also expect a few shared mailboxes (support@, newsletters) that are orders of magnitude hotter than normal users.</p></div>
+
+        <p class="mini-heading">Consistency versus availability</p>
+        <p>By the CAP trade-off we pick consistency. A user who marks a message read, refreshes, and sees it unread again perceives a bug; a deleted mail reappearing is worse. The cost is that during a failover or partition, writes for the affected partitions are briefly unavailable. Because partitions are per user, the blast radius is a slice of users, not the service. Put the leader of each partition in a datacenter close to the user, replicate synchronously to at least one other failure domain before acknowledging, and replicate asynchronously across regions. See <a href="../../system-design/cap-theorem.html">CAP theorem</a> and <a href="../../system-design/consistency-models.html">consistency models</a>.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 2</span>
+        <h2>Email deliverability</h2>
+        <p>Standing up an SMTP server is an afternoon of work. Getting a major provider to put your mail in the inbox is a reputation game. Recipient systems assume unknown senders are spammers until proven otherwise.</p>
+        <table class="data-table">
+          <thead><tr><th>Lever</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td>Dedicated sending IPs</td><td>Reputation is tracked per IP and per domain. Shared IPs inherit their worst neighbour's sins.</td></tr>
+            <tr><td>Traffic segregation</td><td>Put transactional mail (password resets, receipts) on separate IPs and subdomains from marketing blasts so complaint rates on one do not poison the other.</td></tr>
+            <tr><td>IP warm-up</td><td>Ramp volume gradually over roughly two to six weeks so large providers learn you are consistent and wanted.</td></tr>
+            <tr><td>Fast abuse handling</td><td>Throttle and ban compromised or abusive accounts quickly; one spam wave can sink the reputation of the whole pool.</td></tr>
+            <tr><td>Feedback loops</td><td>Large ISPs report which messages users flagged as spam; ingest those, suppress those recipients, and watch complaint rate and bounce rate as SLOs.</td></tr>
+            <tr><td>SPF</td><td>A DNS TXT record listing IPs authorized to send for a domain.</td></tr>
+            <tr><td>DKIM</td><td>Sign selected headers and body hash with a private key; recipients verify with the public key published in DNS under a selector.</td></tr>
+            <tr><td>DMARC</td><td>A policy that says what to do when SPF or DKIM fails to align with the visible From domain, and where to send aggregate reports.</td></tr>
+            <tr><td>Hygiene</td><td>Valid reverse DNS on every sending IP, TLS on outbound (STARTTLS, MTA-STS), consistent HELO names, unsubscribe headers for bulk mail, handling bounces by removing dead addresses.</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>Interview posture:</strong> you are not expected to recite the RFCs. Name the families (reputation, authentication, feedback, hygiene), show that you know a cold IP lands in spam, and say the service needs a dedicated deliverability function with dashboards and a bounce-processing pipeline.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 3</span>
+        <h2>Search</h2>
+        <p>Email search differs from web search in ways that change the architecture. It is scoped to a single mailbox; results are sorted by attributes such as date rather than relevance; users expect their newest mail to be searchable immediately and results to be accurate; and the write-to-read ratio is inverted: every incoming mail, label change and read flag causes an index update, yet most users search rarely.</p>
+        <table class="data-table">
+          <thead><tr><th></th><th>Web search</th><th>Mailbox search</th></tr></thead>
+          <tbody>
+            <tr><td>Scope</td><td>The whole web</td><td>One user's mail</td></tr>
+            <tr><td>Sorting</td><td>Relevance</td><td>Time and attributes (from, to, subject, unread, has attachment)</td></tr>
+            <tr><td>Freshness</td><td>Minutes to hours is fine</td><td>Near-instant and precise</td></tr>
+            <tr><td>Workload</td><td>Read-heavy</td><td>Write-heavy, with spiky reads</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Option A: Elasticsearch</p>
+        <p>Run an Elasticsearch cluster and route documents by <code>user_id</code> (custom routing) so one user's documents sit in one shard and a query hits a single shard instead of fanning out. Mutations are written to the primary metadata DB first and then published to Kafka; an indexer consumes the stream and updates Elasticsearch asynchronously, decoupling mail ingestion latency from index health. Queries go to the index synchronously. Typical gotchas: index lag means "I just got that mail, why can't I find it?" (mitigate by also checking the last few minutes of mail in the primary store), and mapping many users into shared indices needs care so one giant tenant does not become a hot shard. See <a href="../../elasticsearch.html">Elasticsearch</a>.</p>
+        <p class="mini-heading">Option B: a custom engine on an LSM tree</p>
+        <p>Because the workload is write-dominated, a log-structured merge tree is a natural fit. Writes go to an in-memory memtable (plus a write-ahead log), the memtable is flushed to immutable sorted files when it fills, and background compaction merges levels. All disk writes are sequential. This is the design behind Bigtable, Cassandra, and RocksDB. A custom index can even live inside the mailbox store itself, so a single system holds both mail and its index with no sync pipeline.</p>
+        <table class="data-table">
+          <thead><tr><th>Dimension</th><th>Elasticsearch</th><th>Custom LSM-based</th></tr></thead>
+          <tbody>
+            <tr><td>Time to build</td><td>Days, off the shelf</td><td>Many engineer-years</td></tr>
+            <tr><td>Operational surface</td><td>Another cluster to run, upgrade, and keep consistent with the DB</td><td>One system; the index is part of the store</td></tr>
+            <tr><td>Scale ceiling</td><td>High but eventually hits cluster-state and shard-count limits</td><td>Tuned for per-user shape, scales further</td></tr>
+            <tr><td>Consistency with source of truth</td><td>Eventual via the Kafka pipeline; needs reconciliation jobs</td><td>Can be transactional with the mail row</td></tr>
+          </tbody>
+        </table>
+        <p>The sensible recommendation: start with Elasticsearch, keep the indexing pipeline replayable from the mail log, and revisit a custom engine only when cost or latency data justify it.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 4</span>
+        <h2>Scalability, availability and real-time delivery</h2>
+        <p>Because users do not interact with each other's stored data, almost every tier scales independently: web servers are stateless, queues are partitioned, workers are stateless consumers, the DB and search index are keyed by user, and the cache is sharded by user. Compose them into <strong>cells</strong>: a cell is a self-contained slice (a few million users with their own DB shard, cache, index and workers). A directory service maps <code>user_id</code> to a cell. Cells give you a bounded blast radius, a unit of capacity planning, and an easy way to move users when you rebalance.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+          <span class="step">Global router: user_id -&gt; (primary DC, cell)</span>
+                   |                         |
+          <span class="hi">DC-East (leader)</span>              <span class="hi">DC-West (follower)</span>
+      DB shard A  ---- sync/async repl ----&gt;  DB shard A'
+      Search idx  ---- rebuilt from log ----&gt; Search idx'
+      Queues      ---- mirrored ------------&gt; Queues'
+         <span class="warn">failover: promote follower, route users of the failed cell, accept brief write unavailability</span>
+</pre></div>
+        <p>For the real-time path, a user holds one persistent connection to some real-time server. A small presence map (user to server) lets a mail-processing worker publish "new mail for user X" to the right box; if the user is offline nothing is pushed and the next HTTP sync catches up using the last-seen email id as cursor. Keep push payloads tiny (a signal, not the mail) so a lost event is harmless: the client always reconciles through the API.</p>
+        <p>Cache policy: write-through the newest few hundred headers per user into Redis at ingest, evict with LRU, and treat the cache as disposable since the DB is authoritative. See <a href="../../system-design/caching.html">caching</a>.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decisions and what they cost</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Partition by user_id</h4><ul><li>Every query is single-partition</li><li>Search, cache and connections shard the same way</li><li>Failure and migration blast radius is small</li><li>Simple per-user export, delete, and legal hold</li></ul></div>
+          <div class="trade-col cons"><h4>What it costs</h4><ul><li>No shared single copy of a mail sent to many recipients (storage amplification)</li><li>Hot and huge mailboxes need special handling</li><li>Cross-user features (shared inbox, delegated access) need extra modeling</li></ul></div>
+          <div class="trade-col pros"><h4>Queues between every stage</h4><ul><li>Absorbs spikes and destination outages</li><li>Independent scaling of workers</li><li>Natural retry and dead-letter handling</li></ul></div>
+          <div class="trade-col cons"><h4>What it costs</h4><ul><li>At-least-once means idempotent consumers</li><li>Latency from queueing and multi-stage scanning</li><li>More moving parts to monitor</li></ul></div>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Choice</th><th>We take</th><th>Because</th></tr></thead>
+          <tbody>
+            <tr><td>Consistency vs availability for mailbox state</td><td>Consistency</td><td>Lost or resurrected mail is unacceptable; brief unavailability for a user slice is tolerable</td></tr>
+            <tr><td>Denormalize read/unread vs filter on read</td><td>Denormalize</td><td>Write is a cheap single-partition batch; scans are not</td></tr>
+            <tr><td>Index synchronously vs via Kafka</td><td>Asynchronously</td><td>Index outages must not block mail acceptance; accept seconds of lag</td></tr>
+            <tr><td>Inline attachments vs object store</td><td>Object store</td><td>Keeps metadata rows small and hot; blobs are cheap and erasure coded</td></tr>
+            <tr><td>Own SMTP edge vs buying a relay</td><td>Own (for a mailbox provider)</td><td>You are the MTA for your users; relaying outbound via a third party is fine only for small apps</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What breaks and what you do about it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Destination mail server down or throttling</td><td>Outgoing queue grows, 4xx replies</td><td>Exponential backoff with jitter, per-domain concurrency limit, retry for days then bounce with a clear DSN</td></tr>
+            <tr><td>Worker crashes mid-processing</td><td>Duplicate delivery after redelivery</td><td>Idempotent inserts keyed by (recipient, envelope/message id); acknowledge queue message only after DB commit</td></tr>
+            <tr><td>Metadata shard leader dies</td><td>Writes fail for that user slice</td><td>Automatic failover to synchronous replica; clients retry; the incoming queue holds mail meanwhile so nothing is lost</td></tr>
+            <tr><td>Search index behind or corrupted</td><td>Missing results</td><td>Replay from Kafka or the mail log; fall back to a recent-mail scan; track index lag as an SLI</td></tr>
+            <tr><td>Compromised account sends spam</td><td>Complaint spike, IP blocklisting</td><td>Per-account send rate limits, anomaly detection, outbound content scanning, quarantine and force reset</td></tr>
+            <tr><td>Spam flood or backscatter</td><td>Queue and storage blowup, bounces to forged senders</td><td>Reject at SMTP time (unknown user, SPF fail, reputation), never bounce after accepting for unauthenticated sources</td></tr>
+            <tr><td>Region outage</td><td>Entire cell unreachable</td><td>Promote follower DC; inbound mail is retried by senders (MX fallback and sender queues give you hours to days)</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and Production Gotchas</span>
+        <h2>Things that bite after launch</h2>
+        <ul class="check-list">
+          <li><strong>The 250 OK contract:</strong> after you reply 250 to a sender you are responsible for the message. Replicate it durably before replying, and if you must shed load return a 4xx before accepting, never drop after.</li>
+          <li><strong>Greylisting and retry storms:</strong> many senders retry on fixed schedules, producing synchronized thundering herds when you recover from an outage. Rate-limit accepting and let the senders' own backoff spread.</li>
+          <li><strong>Mailbox size distribution is heavy-tailed:</strong> median users are small, the top 0.1% are enormous. Plan for them explicitly with bucketed partitions and quota enforcement.</li>
+          <li><strong>Deletion is a pipeline:</strong> removing a message touches metadata, cache, search, object store, and backups. Use tombstones and an asynchronous reaper, and keep a recoverable window (trash for 30 days is a common product choice).</li>
+          <li><strong>MIME is hostile input:</strong> nested multipart bombs, malformed encodings, giant headers. Parse in sandboxed workers with strict limits, and never render HTML mail without sanitization (remote images are a tracking and exploit vector).</li>
+          <li><strong>Unicode and addresses:</strong> internationalized addresses, case-insensitive local parts by convention, plus-addressing; normalize before keying anything.</li>
+          <li><strong>Migration cost:</strong> moving a user between cells means copying a possibly multi-GB mailbox while it is live. Do it with dual-writes and a catch-up log, not a stop-the-world copy.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Wrap-up Topics</span>
+        <h2>Extras worth mentioning if time allows</h2>
+        <ul class="check-list">
+          <li><strong>Fault tolerance:</strong> walk through each box and say what happens when it dies. Queues and replicated stores should make every answer "retry, no loss".</li>
+          <li><strong>Compliance:</strong> mail is full of personal data. Under GDPR-style rules you need deletion that reaches every copy (including search indexes, caches and backups), data residency by region, and audit logging for access.</li>
+          <li><strong>Security:</strong> TLS in transit, encryption at rest with per-user or per-tenant keys, phishing and malware detection, safe-browsing link checks, account-takeover detection.</li>
+          <li><strong>Optimizations:</strong> deduplicate identical attachments by content hash (a mail sent to a mailing list should store one blob with a reference count), compress old mail, tier cold mail to cheaper storage, and pre-compute thread and preview data at ingest.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code · Runnable</span>
+        <h2>A mailbox core you can run</h2>
+        <p>The example below implements four ideas from the chapter: a per-user partitioned store with time-ordered ids and keyset pagination, the denormalized unread view, thread reconstruction from <code>Message-Id</code>/<code>In-Reply-To</code>/<code>References</code> using union-find, and outbound delivery that tries MX hosts by preference with full-jitter exponential backoff between rounds. It uses only Node built-ins.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Mini mail core: per-user partitioned mailbox, denormalized read/unread views,
+// thread reconstruction from headers, and MX-priority delivery with backoff.
+import assert from 'node:assert/strict';
+
+// ---- 1. Time-ordered ids (stand-in for Cassandra timeuuid): ms timestamp + sequence.
+let seq = 0;
+const timeId = (ts) =&gt; `${String(ts).padStart(13, '0')}-${String(seq++).padStart(6, '0')}`;
+
+// ---- 2. Mailbox store. Partition key = userId, clustering key = emailId (newest first).
+class MailStore {
+  constructor() { this.byUser = new Map(); }
+  #p(u) {
+    if (!this.byUser.has(u)) this.byUser.set(u, { emails: new Map(), unread: new Set(), read: new Set(), folders: new Map() });
+    return this.byUser.get(u);
+  }
+  put(userId, folder, msg, ts) {
+    const p = this.#p(userId);
+    const id = timeId(ts);
+    p.emails.set(id, { id, folder, isRead: false, ...msg });
+    // denormalized "tables": (folder, read-state) -&gt; ids, so no filter-on-read is needed
+    p.unread.add(id);
+    if (!p.folders.has(folder)) p.folders.set(folder, new Set());
+    p.folders.get(folder).add(id);
+    return id;
+  }
+  markRead(userId, id) {            // batch of 2 writes, both inside ONE partition
+    const p = this.#p(userId);
+    p.emails.get(id).isRead = true;
+    p.unread.delete(id); p.read.add(id);
+  }
+  list(userId, folder, { unreadOnly = false, limit = 50, before = '\uffff' } = {}) {
+    const p = this.#p(userId);
+    const ids = [...(p.folders.get(folder) ?? [])]
+      .filter((id) =&gt; id &lt; before &amp;&amp; (!unreadOnly || p.unread.has(id)))
+      .sort().reverse().slice(0, limit);       // newest first, keyset pagination via `before`
+    return ids.map((id) =&gt; p.emails.get(id));
+  }
+  get(userId, id) { return this.#p(userId).emails.get(id); }
+}
+
+// ---- 3. Thread reconstruction using Message-Id / In-Reply-To / References.
+function buildThreads(messages) {
+  const parent = new Map();                          // union-find over message-ids
+  const find = (x) =&gt; { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const add = (x) =&gt; { if (!parent.has(x)) parent.set(x, x); };
+  for (const m of messages) {
+    add(m.messageId);
+    for (const ref of [m.inReplyTo, ...(m.references ?? [])].filter(Boolean)) {
+      add(ref); parent.set(find(ref), find(m.messageId));
+    }
+  }
+  const threads = new Map();
+  for (const m of messages) {
+    const root = find(m.messageId);
+    (threads.get(root) ?? threads.set(root, []).get(root)).push(m.subject);
+  }
+  return [...threads.values()];
+}
+
+// ---- 4. Outbound delivery: try MX hosts by ascending priority, exponential backoff w/ full jitter.
+async function deliver(mxRecords, send, { maxAttempts = 5, base = 100, cap = 5000, rand = Math.random, sleep } = {}) {
+  const hosts = [...mxRecords].sort((a, b) =&gt; a.pref - b.pref);
+  const waits = [];
+  for (let attempt = 0; attempt &lt; maxAttempts; attempt++) {
+    for (const mx of hosts) {
+      try { await send(mx.host); return { ok: true, host: mx.host, attempt, waits }; }
+      catch { /* try next MX in the same round */ }
+    }
+    const w = Math.floor(rand() * Math.min(cap, base * 2 ** attempt)); // full jitter
+    waits.push(w); await sleep(w);
+  }
+  return { ok: false, waits };                       // caller moves it to the dead-letter / bounce path
+}
+
+// ---------------- self-test ----------------
+const store = new MailStore();
+const a = store.put('bob', 'inbox', { subject: 'Hello', messageId: '&lt;1@x&gt;' }, 1000);
+const b = store.put('bob', 'inbox', { subject: 'Re: Hello', messageId: '&lt;2@y&gt;', inReplyTo: '&lt;1@x&gt;', references: ['&lt;1@x&gt;'] }, 2000);
+const c = store.put('bob', 'inbox', { subject: 'Lunch?', messageId: '&lt;3@z&gt;' }, 3000);
+store.markRead('bob', b);
+console.log('inbox newest-first:', store.list('bob', 'inbox').map((m) =&gt; m.subject));
+console.log('unread only       :', store.list('bob', 'inbox', { unreadOnly: true }).map((m) =&gt; m.subject));
+console.log('page 2 (before c) :', store.list('bob', 'inbox', { before: c, limit: 1 }).map((m) =&gt; m.subject));
+const all = store.list('bob', 'inbox');
+console.log('threads           :', JSON.stringify(buildThreads(all)));
+assert.deepEqual(store.list('bob', 'inbox').map((m) =&gt; m.subject), ['Lunch?', 'Re: Hello', 'Hello']);
+assert.deepEqual(store.list('bob', 'inbox', { unreadOnly: true }).map((m) =&gt; m.subject), ['Lunch?', 'Hello']);
+assert.equal(buildThreads(all).length, 2);
+
+const tried = [];
+const res = await deliver(
+  [{ host: 'mx-backup.example.com', pref: 20 }, { host: 'mx1.example.com', pref: 10 }],
+  async (h) =&gt; { tried.push(h); if (tried.length &lt; 4) throw new Error('421 try later'); },
+  { rand: () =&gt; 0.5, sleep: async () =&gt; {} });
+console.log('delivery          :', JSON.stringify(res), 'tried:', tried.join(' &gt; '));
+assert.equal(res.ok, true);
+assert.equal(tried[0], 'mx1.example.com');           // lowest preference number first
+assert.deepEqual(res.waits, [50]);                    // one full round failed, 0.5 * min(5000, 100*2^0)
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the inbox newest-first, the unread-only view, a second page via the cursor, the two reconstructed threads, and a delivery that fails over from the primary MX to the backup and succeeds on the second round after one jittered wait, ending with "all assertions passed". Run with <code>node mail.mjs</code> (Node 20+).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>State scope, and the choice of HTTP for clients with SMTP kept at the edge.</li>
+          <li>Show the arithmetic: 100k sends/s, 730 PB text and 1,460 PB attachments per year.</li>
+          <li>Draw send and receive pipelines with queues, workers, spam/virus scanning, and object store.</li>
+          <li>Partition the metadata by user_id; define folders, emails (timeuuid), attachments; denormalize read/unread; mention thread headers.</li>
+          <li>Pick consistency over availability for mailbox state and say why.</li>
+          <li>Cover deliverability: dedicated IPs, warm-up, SPF/DKIM/DMARC, feedback loops, bounce handling.</li>
+          <li>Search: Kafka-fed Elasticsearch routed by user, or a custom LSM engine, with trade-offs.</li>
+          <li>Multi-DC leader/follower, cells, failure handling, then compliance, security and attachment deduplication.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not store each recipient's mail as a reference to one shared copy?</summary><p>It saves space for mailing lists but couples users: read state, labels and deletion are per user, retention and legal holds differ, and a shared row becomes a hot spot. The usual compromise is per-recipient metadata rows with shared immutable blobs (attachments, large bodies) deduplicated in the object store by content hash with reference counting.</p></details>
+        <details><summary>How do you guarantee an email is never lost?</summary><p>Define the ownership hand-offs. Inbound: do not reply 250 until the message is persisted to a replicated queue or store. Internal stages: acknowledge a queue message only after the next durable write. Outbound: keep retrying with backoff for days, and generate a bounce if you give up. Storage: synchronous replication in the shard plus asynchronous cross-region copies and periodic verified backups.</p></details>
+        <details><summary>How do you make the pipelines idempotent?</summary><p>Derive a stable id from the envelope (for example a hash of the queue message id and recipient) and use it as the clustering key or an upsert key. Re-running the worker overwrites the same row. For the outbound side, keep the message id in the send record so a retry after a lost acknowledgment does not enqueue a second SMTP delivery.</p></details>
+        <details><summary>How do you show unread counts cheaply?</summary><p>Keep a counter per (user, folder) updated when messages move between the read and unread tables, or count the unread partition slice with a cap (show "99+"). Counters drift under retries, so recompute periodically from the table as the source of truth.</p></details>
+        <details><summary>Why use Kafka for indexing rather than writing to Elasticsearch directly?</summary><p>The index is a derived view. Writing it from the request path ties mail acceptance to index health and gives you dual-write inconsistency. A log decouples them, lets you rebuild indexes by replay, and absorbs reindex storms (for example after a mapping change).</p></details>
+        <details><summary>How would you add conversation view and labels?</summary><p>Store thread id at ingest (resolve via References/In-Reply-To, fall back to normalized subject plus participants), and model labels as additional clustering rows or a set column plus a denormalized per-label table. Every extra index is another write, so budget write amplification before adding it.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./22-hotel-reservation.html">Chapter 22: Hotel Reservation System</a> — previous chapter, on transactional correctness and inventory.</li>
+          <li><a href="./24-s3-object-storage.html">Chapter 24: S3-like Object Storage</a> — next chapter; the attachment store from this design, in detail.</li>
+          <li><a href="./10-notification-system.html">Chapter 10: Notification System</a> — queue-driven fan-out and retries, the same shape as outbound mail.</li>
+          <li><a href="./12-chat-system.html">Chapter 12: Chat System</a> — real-time delivery and per-user message stores.</li>
+          <li><a href="../../system-design/message-queue.html">Message Queues</a> — the durable buffer between every pipeline stage.</li>
+          <li><a href="../../elasticsearch.html">Elasticsearch</a> — the search store option.</li>
+          <li><a href="../../cassandra.html">Cassandra</a> — partition and clustering keys, tombstones, wide partitions.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A distributed email service is a set of independent per-user mailboxes joined by durable queues. Partition by user, keep blobs in object storage, choose consistency for mailbox state, index asynchronously, and invest as much in sender reputation as in storage. The protocol work is at the edge; the engineering work is in never losing a message you have acknowledged.</p>
+      </section>
+    </main>
+  </body>
+</html>

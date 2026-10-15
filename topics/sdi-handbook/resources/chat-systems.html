@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat Systems Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Reading guide for the two Chat Systems resources of the System Design Interview Handbook (Discord message storage; Slack Flannel). Both articles were fetched and read. Covers partition-key bucketing, the tombstone/GC incident, lazy-loading edge cache and reconnect storms. Includes an executed Node bucketed message-store example. Related: chapter 12, Discord presence, WebSockets, Cassandra. Created 2026-10-15 from the Additional Resources section of liquidslr/system-design-notes. Read time about 13 min.</div>
+        <h1>Chat Systems: Reading Guide</h1>
+        <p class="summary">A reading guide to two engineering posts on chat at scale: Discord's bucketed Cassandra message store and Slack's Flannel edge cache for client bootstrap.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 12</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">13 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Bucketed partitions, tombstones, lazy loading, edge cache</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Cassandra, Discord, Slack Flannel</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Chapter 12 of the handbook asks you to design a chat system on a whiteboard. The two resources attached to it are the opposite of a whiteboard: one is a post-migration report on where a billion-message-scale history store actually hurt, the other is an account of how a client/server contract that was fine for small teams fell over for big ones. Together they teach the two lessons interview answers usually skip: <em>storage layout is decided by access pattern and partition size, not by the logical model</em>, and <em>the biggest cost in a chat product is often the connect/reconnect path, not the steady-state message path</em>.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Discord's post is a lesson in choosing a partition key and then bounding partition size; Slack's Flannel post is a lesson in not shipping the world to every client. Read both with the question "what grows without bound here, and who pays for it?"</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Reading order</span>
+        <h2>Both Resources at a Glance</h2>
+        <table class="data-table">
+          <thead><tr><th>Resource</th><th>Problem it attacks</th><th>Handbook chapter hook</th><th>Priority</th></tr></thead>
+          <tbody>
+            <tr><td>How Discord stores billions of messages</td><td>Durable, low-latency history reads at growing scale</td><td>Message store, key design, data model</td><td>Read in full</td></tr>
+            <tr><td>Flannel: An Application-Level Edge Cache to Make Slack Scale</td><td>Heavy client bootstrap and reconnection storms</td><td>Connection handling, presence, fan-out</td><td>Read in full</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>How these were read:</strong> both articles were fetched and read for this guide. The summaries below are in my own words; numbers quoted are the ones the articles themselves report. Both are from the mid-2010s, so treat the specific products as snapshots of a design, not of today's systems.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 1</span>
+        <h2>How Discord stores billions of messages</h2>
+        <h3>What it is</h3>
+        <p>An engineering-blog post from Discord describing why they moved their message history out of a single MongoDB replica set and into Cassandra, what the schema looked like, what went wrong in production, and what they changed. It was written about a year after the migration, when the team was still very small (the post mentions four backend engineers and no dedicated ops staff), which is part of why it reads as practical rather than polished.</p>
+
+        <h3>The story in order</h3>
+        <ul class="check-list">
+          <li><strong>Start simple on purpose.</strong> The first version kept all messages in one MongoDB collection with a single compound index on channel and creation time. Sharding was deliberately avoided, and a migration was assumed from day one. This is the correct way to start: the point of a v1 is to find out what the workload is.</li>
+          <li><strong>The trigger was memory, not volume.</strong> At roughly the hundred-million-message mark, data and index no longer fit in RAM and latency became unpredictable. The lesson is that a B-tree index that stops fitting in memory turns every random read into disk I/O, and chat history is a <em>random-read</em> workload (people jump to old messages, reply links, search results, pins).</li>
+          <li><strong>Requirements were written down before choosing.</strong> Linear scalability, automatic failover, low maintenance, proven technology, predictable latency without a separate cache tier, and not being a blob store. Cassandra was the only candidate meeting all of them. Notice the explicit non-goal of putting Redis or Memcached in front: they wanted the database itself to have flat latency.</li>
+          <li><strong>Workload shape drove the design.</strong> Three kinds of communities with very different profiles: voice-heavy servers with almost no text history, private friend groups with modest history that rarely stays cached, and giant public servers where recent data is hot. The first two produce cache misses; only the third behaves like a classic cache-friendly workload. A design that works only for the third would have failed the first two.</li>
+        </ul>
+
+        <h3>The schema and the bucketing trick</h3>
+        <p>Cassandra can be thought of as a key-key-value store: the partition key decides which replicas own the data, and the clustering key decides the on-disk order inside the partition. The first design used the channel as partition key and a time-sortable message ID (a Snowflake) as clustering key. That gives you the access path the product needs, "newest N messages in this channel", as a single sequential read on one replica set.</p>
+        <p>The problem: a partition per channel is unbounded. The post reports early warnings about partitions over about 100 MB and notes that big partitions strain the JVM's garbage collector during compaction and cannot be split across nodes. The fix was to make time part of the partition key: group messages into windows of roughly ten days, so the partition key becomes (channel, bucket). The bucket is derived from the message ID or timestamp, so no lookup table is needed.</p>
+        <div class="diagram-box"><pre>
+  Before:  PK = channel_id                 one ever-growing partition per channel
+           CK = message_id (snowflake)
+
+  After:   PK = (channel_id, bucket)       bucket = time window of ~10 days
+           CK = message_id  DESC
+
+  read "latest 50":
+     bucket(now) --> bucket(now)-1 --> bucket(now)-2 ... until 50 rows found
+     (stop at the bucket of the channel's first message)
+        </pre></div>
+        <p>The cost of bucketing is the read path: a quiet channel might need to walk many empty buckets to collect a page of history. That sets up the post's best story.</p>
+
+        <h3>Dark launch and the surprises</h3>
+        <ul class="check-list">
+          <li><strong>Eventual consistency bit immediately.</strong> They double-wrote to Mongo and Cassandra and saw rows with missing authors. Cassandra writes are upserts with last-write-wins per column, so a concurrent edit and delete could resurrect a partial row. Their remedy was to treat such rows as corrupt and delete them, rather than rewriting whole messages, which would risk undeleting content.</li>
+          <li><strong>Nulls are not free.</strong> Writing a null column creates a tombstone. Most messages populate only a handful of the sixteen columns, so naive writes created a dozen needless tombstones each. Writing only the populated columns removed that overhead. This is a general Cassandra rule worth memorising: never write "empty" values.</li>
+          <li><strong>Result.</strong> Writes were sub-millisecond and reads in the low single-digit milliseconds, steady across a week of testing, including jumps to very old messages in huge channels. They made Cassandra primary and retired Mongo within a week.</li>
+        </ul>
+
+        <h3>The tombstone incident</h3>
+        <p>About half a year later the cluster began suffering repeated multi-second stop-the-world GC pauses. The cause was a public channel that took around twenty seconds to load and contained exactly one message: millions had been deleted via the API, and each read scanned millions of tombstones, generating garbage faster than the JVM could reclaim it. They shortened tombstone lifetime (safe because they ran regular repairs) and changed the reader to remember empty buckets so that a read does not rescan them.</p>
+        <div class="warn-box"><p><strong>Senior takeaway:</strong> in an LSM store, <em>deletes are writes</em>, and a "range scan over deleted data" is the classic failure. Any chat design with delete-heavy channels (bots, moderation purges, retention jobs) must plan for tombstone volume and for reads that skip empty ranges.</p></div>
+
+        <h3>Scale numbers the post gives</h3>
+        <p>Message volume grew from tens of millions per day to over a hundred million per day during the time covered. The cluster at publication was twelve nodes, replication factor three, close to a terabyte of compressed data per node. Future plans listed in the post were Cassandra 3's more compact storage format, larger per-node data, and evaluating Scylla for faster repairs.</p>
+
+        <h3>What still holds, and what is dated</h3>
+        <ul class="check-list">
+          <li><strong>Still true:</strong> partition key choice is the architecture; bound partition size using time; Snowflake-style IDs give you ordering and a cheap bucket function; tombstones and GC are the operational enemy; test with dual writes before cutover.</li>
+          <li><strong>Dated:</strong> the specific cluster size, the Cassandra 2 era GC behaviour, and the hardware choices. Discord has since written publicly about a later generation of this system (a move to a C++ Cassandra-compatible database and a service layer in front of it that coalesces duplicate requests for hot data); I did not re-read that follow-up for this guide, so consider it a pointer rather than a source.</li>
+        </ul>
+
+        <h3>How it connects to Chapter 12</h3>
+        <p>The chapter's message store discussion usually says "use a key-value store with horizontal scaling, because history is huge and read-heavy for recent items". This post gives the missing detail: the key is <code>(conversation, time bucket)</code>, ordering within it is by a time-sortable ID, and the ID doubles as the message sequence. It also supplies a realistic answer to "what happens when someone deletes a million messages?" which almost no whiteboard answer addresses.</p>
+        <p class="source-link">Original: <a href="https://discord.com/blog/how-discord-stores-billions-of-messages" target="_blank" rel="noopener">How Discord stores billions of messages</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 2</span>
+        <h2>Flannel: An Application-Level Edge Cache to Make Slack Scale</h2>
+        <h3>What it is</h3>
+        <p>A Slack engineering post (published in 2017) about a service called Flannel: a purpose-built cache deployed at edge locations that sits between Slack clients and the main application servers. It exists to solve a problem created by an early product assumption, not a storage problem.</p>
+
+        <h3>The problem</h3>
+        <p>Slack's client was designed to start by downloading a full snapshot of the team: users, channels, memberships, recent messages. Then it opened a WebSocket for live events. For a small team this is excellent because everything is local and instant. For teams with tens of thousands of members it degrades in four ways the post lists: slow startup, a large in-memory footprint on the client, reconnects that cost almost as much as first load, and reconnection storms in which a whole office loses and regains network at once and the combined load makes everything slower, causing more retries.</p>
+
+        <h3>The design</h3>
+        <div class="diagram-box"><pre>
+  client --> Flannel (edge PoP) --WebSocket--> Slack servers (main region)
+                |  caches users, channels, bots
+                |  returns a *slim* bootstrap payload
+                |  answers queries on demand (e.g. quick switcher autocomplete)
+                v
+  client lazily asks Flannel for objects it actually needs
+        </pre></div>
+        <ul class="check-list">
+          <li><strong>Slim boot, lazy load, query-on-miss.</strong> The client receives minimal data up front and fetches channels or users when the UI needs them. The quick switcher is the example: typing sends prefix queries to Flannel instead of searching a local copy of every user.</li>
+          <li><strong>Proactive push.</strong> If an incoming message mentions a user the client has not loaded, Flannel pushes that user's record just ahead of the message, saving a round trip. That is a neat piece of latency engineering: the cache predicts the next query from the stream.</li>
+          <li><strong>Affinity via consistent hashing.</strong> Requests from the same team and network region are routed to the same Flannel instance, so cache hit rate is high and memory is not duplicated across the fleet.</li>
+          <li><strong>Freshness.</strong> Flannel itself holds a WebSocket to the main-region servers and consumes the same real-time events as a client would. The post does not describe a separate invalidation protocol; the event stream is the consistency mechanism.</li>
+        </ul>
+
+        <h3>Numbers reported</h3>
+        <p>At the time of writing, peaks of about four million simultaneous connections and about six hundred thousand client queries per second. Bootstrap payload shrank by roughly 7x for a team of about 1,500 users and about 44x for a team of about 32,000. The post also says presence events delivered to clients dropped by about 5x after moving presence to a publish/subscribe model, and sketches future work: moving fan-out into Flannel so that one copy per edge server, not one per user, crosses the backbone.</p>
+
+        <h3>What still holds, and what is dated</h3>
+        <ul class="check-list">
+          <li><strong>Still true:</strong> do not make clients download whole datasets; subscribe to what is visible; cache close to users; use consistent hashing for affinity; presence is a fan-out amplifier and should be subscription-based.</li>
+          <li><strong>Dated or unstated:</strong> exact scale figures; the post says little about failure behaviour of the cache tier itself, so you must reason about it yourself (what happens when an edge node dies and its team is rehashed elsewhere? A cold cache for a large team is another reconnect storm).</li>
+        </ul>
+
+        <h3>How it connects to Chapter 12</h3>
+        <p>The chapter treats presence and online-status fan-out as an add-on. Flannel shows the real cost: with N members in a team, naive presence is O(N) events per change and O(N) state per client. The practical remedies are the ones the post names: lazy loading, subscription scoping, and an edge tier that collapses duplicate work. It also reinforces the chapter's choice of WebSockets for the live channel while pointing out that the <em>initial sync</em> is a separate problem that deserves its own design.</p>
+        <p class="source-link">Original: <a href="https://slack.engineering/flannel-an-application-level-edge-cache-to-make-slack-scale/" target="_blank" rel="noopener">Flannel: An Application-Level Edge Cache to Make Slack Scale</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Synthesis</span>
+        <h2>How the Two Resources Fit Together</h2>
+        <p>They cover the two halves of a chat product. Discord's post is the <strong>cold path</strong>: durable history, read on demand, in bounded partitions. Flannel is the <strong>hot path and the connect path</strong>: what a client sees at login, how presence and lookups are served, and how to survive everyone reconnecting at once. A complete answer uses both: a bucketed, time-sorted store behind a history API; a WebSocket tier for live delivery; an edge cache for roster-style data; and subscription-scoped presence.</p>
+        <table class="data-table">
+          <thead><tr><th>Concern</th><th>Discord post says</th><th>Flannel post says</th><th>Combined design move</th></tr></thead>
+          <tbody>
+            <tr><td>Unbounded growth</td><td>Cap partitions with time buckets</td><td>Cap client state with lazy loading</td><td>Every collection that grows with the product needs a bound</td></tr>
+            <tr><td>Cache philosophy</td><td>No cache tier; make the DB predictable</td><td>Application-level edge cache with affinity</td><td>Cache <em>roster data</em> at the edge; keep <em>history</em> in the DB</td></tr>
+            <tr><td>Failure mode</td><td>Tombstone scans causing GC pauses</td><td>Reconnect storms</td><td>Both are self-amplifying; design for load shedding and backoff</td></tr>
+            <tr><td>Consistency</td><td>Last-write-wins; repair bad rows</td><td>Event stream keeps cache fresh</td><td>Accept eventual consistency; define which entities may be stale</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Recommended reading order</p>
+        <ol>
+          <li>Read the handbook chapter first for the vocabulary (WebSocket, fan-out, presence, message IDs).</li>
+          <li>Read Discord's post next, in full: it is the more transferable of the two.</li>
+          <li>Read Flannel second, focusing on the problem statement and the lazy-load idea; skim the sections about product-specific rollout.</li>
+        </ol>
+        <div class="insight-box"><p><strong>Skip nothing, but weigh differently:</strong> neither article is long. If you only have time for one before an interview, pick Discord's.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Bucketed Message Store with Snowflake-Style IDs</h2>
+        <p>This example models the schema from Discord's post: partition key (channel, bucket), clustering by a time-sortable ID, and a reader that walks buckets backwards. The second scenario reproduces the quiet-channel problem: with one old message, fetching the latest page must scan every bucket in between, which is exactly what remembering empty buckets avoids.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Discord-style bucketed message store: partition key (channelId, bucket), clustering key messageId (Snowflake).
+const EPOCH = 1420070400000n;           // Discord's public epoch (2015-01-01)
+const BUCKET_MS = 10n * 24n * 3600n * 1000n; // ~10 days of time per bucket
+let seq = 0n;
+const snowflake = (ms) =&gt; ((BigInt(ms) - EPOCH) &lt;&lt; 22n) | (seq++ &amp; 0x3fffn); // time | sequence (worker bits omitted)
+const bucketOf = (id) =&gt; (id &gt;&gt; 22n) / BUCKET_MS;
+
+class Store {
+  constructor() { this.parts = new Map(); this.bucketReads = 0; this.firstBucket = new Map(); }
+  key(ch, b) { return `${ch}:${b}`; }
+  write(ch, id, text) {
+    const b = bucketOf(id), k = this.key(ch, b);
+    if (!this.parts.has(k)) this.parts.set(k, []);
+    const rows = this.parts.get(k);
+    rows.push({ id, text });
+    rows.sort((x, y) =&gt; (x.id &lt; y.id ? 1 : -1));   // clustering order: newest first
+    if (!this.firstBucket.has(ch) || b &lt; this.firstBucket.get(ch)) this.firstBucket.set(ch, b);
+  }
+  delete(ch, id) {
+    const rows = this.parts.get(this.key(ch, bucketOf(id)));
+    const i = rows.findIndex((r) =&gt; r.id === id);
+    if (i &gt;= 0) rows.splice(i, 1);
+  }
+  // newest `limit` messages: walk buckets backwards from the bucket of `beforeId`
+  latest(ch, nowId, limit) {
+    const out = []; this.bucketReads = 0;
+    for (let b = bucketOf(nowId); b &gt;= this.firstBucket.get(ch) &amp;&amp; out.length &lt; limit; b--) {
+      this.bucketReads++;
+      for (const r of this.parts.get(this.key(ch, b)) ?? []) { if (out.length &lt; limit) out.push(r); }
+    }
+    return out;
+  }
+}
+
+const day = 24 * 3600 * 1000, t0 = Number(EPOCH) + 400 * day;
+const s = new Store(), ch = "general";
+const ids = [];
+for (let d = 0; d &lt; 60; d += 5) { const id = snowflake(t0 + d * day); ids.push(id); s.write(ch, id, `msg day ${d}`); }
+const now = snowflake(t0 + 61 * day);
+let got = s.latest(ch, now, 3);
+console.log("latest 3:", got.map((m) =&gt; m.text), "buckets read:", s.bucketReads);
+// ordering check: ids strictly increase with time
+console.assert(ids.every((v, i) =&gt; i === 0 || v &gt; ids[i - 1]), "snowflake order");
+console.assert(got[0].text === "msg day 55");
+// quiet channel: only one old message -&gt; reader must walk many empty buckets
+const quiet = new Store(); quiet.write("q", snowflake(t0), "old one");
+const later = snowflake(t0 + 300 * day);
+got = quiet.latest("q", later, 50);
+console.log("quiet channel:", got.length, "message, buckets scanned:", quiet.bucketReads);
+console.assert(got.length === 1 &amp;&amp; quiet.bucketReads &gt; 25);</code></pre>
+        <p class="code-caption">Executed with Node 24. Prints the three newest messages (reading 3 buckets), then shows a quiet channel with a single message forcing 31 bucket reads. The assertions pass silently.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Build exercise</span>
+        <h2>What to Build</h2>
+        <ul class="check-list">
+          <li>Extend the store above with delete support that writes a tombstone marker, and add a counter for tombstones scanned per read. Delete 100,000 messages from one channel and measure how reads degrade.</li>
+          <li>Add the "remember empty buckets" optimisation (a per-channel map of the oldest and newest non-empty bucket) and show the scanned-tombstone count drops.</li>
+          <li>Write a toy Flannel: an in-memory cache keyed by team, fed by an event stream, with a <code>boot()</code> that returns a slim payload and a <code>query(prefix)</code> that serves autocomplete. Simulate 1,000 clients reconnecting simultaneously with and without the cache and compare backend calls.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Reading Checklist</h2>
+        <ul class="check-list">
+          <li>I can state, for each resource, the one problem it solves and the one number or mechanism that proves it.</li>
+          <li>I know which resources I read in full and which I only know by title.</li>
+          <li>I can map each resource to the handbook chapter section it extends.</li>
+          <li>I have run the code example and changed one parameter to see its behaviour change.</li>
+        </ul>
+      </section>
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul><li><a href="../chapters/12-chat-system.html">Chapter 12: Chat System</a> — the chapter these resources extend.</li><li><a href="../../discord-presence-system-design.html">Discord Presence System Design</a> — presence fan-out, the cost Flannel attacks.</li><li><a href="../../system-design/websockets.html">WebSockets</a> — the live channel both products depend on.</li><li><a href="../../cassandra.html">Cassandra</a> — the store behind the Discord post.</li><li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — how Flannel routes teams to cache hosts.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Resources listed in the “Additonal Resources” section of <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu). Summaries are in my own words and are not a substitute for the originals:</p>
+        <ul><li><a href="https://discord.com/blog/how-discord-stores-billions-of-messages" target="_blank" rel="noopener">How Discord stores billions of messages</a> — https://discord.com/blog/how-discord-stores-billions-of-messages</li><li><a href="https://slack.engineering/flannel-an-application-level-edge-cache-to-make-slack-scale/" target="_blank" rel="noopener">Flannel: An Application-Level Edge Cache to Make Slack Scale</a> — https://slack.engineering/flannel-an-application-level-edge-cache-to-make-slack-scale/</li></ul>
+      </section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>Chat storage is a partition-key problem with a bounded-growth rule, and chat clients are a connect-path problem with a bounded-state rule. Both resources show a system that worked until one unbounded thing (a partition, a payload) stopped fitting, and the fix was to bound it.</p></section>
+    </main>
+  </body>
+</html>

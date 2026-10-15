@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Designing a Delayed Job Scheduler | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+      <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Created 2026-10-13. Source: Medium 'Amazon Interview Question: Design a Delayed Job Scheduler' (fully read). Contract: at-least-once execution + idempotent handlers; exactly-once is impossible (worker can finish then die before recording). Design: single jobs table (run_at, state, attempt, lease_owner, lease_expires_at, unique idempotency_key) with partial index on pending rows; DB row is source of truth AND the lock (rejects Redis lock as second failure domain); in-memory min-heap is only a cache (O(log n)); timer uses wait-with-timeout + notify, hands off to worker pool; hybrid polling (~30s lookahead); claiming via FOR UPDATE SKIP LOCKED; leases + ownership-checked heartbeats; retry = reschedule with capped jittered exponential backoff, dead-letter state; cancel only clean for pending jobs; scaling: per-minute time buckets, jitter/rate-limit for midnight stampede; single clock authority (DB now()). Alternatives table: DB polling, Redis ZSET, SQS delay (max 15 min), EventBridge Scheduler, Temporal timers, Kafka timing wheel, Celery/Sidekiq. Code: Node 20 MinHeap + FakeClock + JobTable, 7 self-tests pass. Hero image reused from 22-system-design-failure-scenarios; credit line generic. Related: real-interview-system-design-questions, redis-production-guide, 22-system-design-failure-scenarios.</div>
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Code on a laptop screen representing backend system design work"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Backend · Interview · 25 min</span>
+            <p class="article-hero-credit">
+              Photo by
+              <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash contributor</a>
+              on <a href="https://unsplash.com" target="_blank" rel="noopener">Unsplash</a>
+            </p>
+          </div>
+        </figure>
+
+        <h1>Designing a Delayed Job Scheduler: Timers, Leases and Honest Delivery Guarantees</h1>
+        <p class="summary">
+          "Run this job at 9:00 tomorrow, let me cancel it, and keep working when machines die." Four problems hide
+          in that sentence: timing, durability, distributed claiming and clocks. This page builds the system from a
+          single heap to a multi-worker, database-backed scheduler, with SQL and runnable JavaScript.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: Medium · Emily (Amazon interview question: design a delayed job scheduler)</span>
+          <span class="meta-item">Domain: System Design / Backend</span>
+          <span class="meta-item">Published: Aug 2026</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          A delayed job scheduler looks like a toy until you list what it must survive: millions of pending jobs, a
+          restart at any moment, ten workers that must not fire the same job twice, and clocks that disagree by
+          hundreds of milliseconds. The naive answer, one sleeping thread per job, dies for two independent reasons.
+          It burns a thread (and its stack memory) per pending job, and it forgets every job the moment the process
+          restarts. Everything else in this design is a response to those two failures plus the new ones that appear
+          once you add more machines.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> the database row is the source of truth and the lock; the in-memory heap is
+            only a cache that tells you when to wake up. The honest contract is <em>at-least-once execution with
+            idempotent handlers</em>, because exactly-once cannot be guaranteed when a worker may finish the work and
+            die before recording it.
+          </p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · What the interviewer is really testing (illustrative)</span>
+        <p>
+          Picture the loop. The prompt sounds small: "design a delayed job scheduler." A weaker candidate draws a
+          queue, a worker box and an arrow, then spends forty minutes on API shapes. A stronger candidate narrows the
+          scope in two minutes (precision, scale, cancel, guarantees), builds the single-process version in five,
+          and then spends the rest of the hour on what breaks when you add a second machine.
+        </p>
+        <p>
+          This is an illustrative framing, not a transcript, but the signals are consistent across loops like this.
+          Interviewers tend to listen for: do you state the delivery guarantee out loud and defend it; do you reach
+          for a lock service by reflex or notice the row is already a lock; do you treat time as an input you can
+          control; and can you name the knee where the design stops scaling and say what you would do next. The
+          closing line of the source article puts it well: the question is about stopping two machines from
+          duplicating work while clocks tick and processes fail.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · Requirements and API</span>
+        <h2>Pin the contract before drawing boxes</h2>
+        <p>Ask these, and write the answers on the board:</p>
+        <ul class="check-list">
+          <li><strong>Precision:</strong> seconds, or milliseconds? "Within a second" is cheap. "Within 10 ms" changes the architecture.</li>
+          <li><strong>Scale:</strong> pending jobs (millions? billions?) and the peak firing rate, not the average. Schedules cluster at round times.</li>
+          <li><strong>Horizon:</strong> do jobs run seconds out or a year out? A year-long delay rules out in-memory-only designs and many broker delay features.</li>
+          <li><strong>Cancel and reschedule:</strong> required, and for pending jobs only, or also in-flight?</li>
+          <li><strong>Delivery guarantee:</strong> at-least-once, at-most-once, or "exactly-once" (which you will politely reframe).</li>
+          <li><strong>Payload:</strong> small inline blobs, or a reference to an object store? Keep hot rows narrow.</li>
+        </ul>
+        <span class="code-label">API surface (HTTP-style sketch)</span>
+        <pre><code class="language-text">POST   /jobs            { payload_ref, run_at, idempotency_key }  -&gt; 201 { job_id }
+                        (same idempotency_key =&gt; returns the existing job, no duplicate)
+DELETE /jobs/{job_id}                                           -&gt; 200 cancelled | 202 cancel_requested | 409 too_late
+GET    /jobs/{job_id}                                           -&gt; { state, attempt, run_at, ... }
+(internal) claim / heartbeat / complete / fail                  -&gt; used by workers only</code></pre>
+        <p>
+          The idempotency key on submission matters as much as the one on execution. Callers retry
+          <code>POST /jobs</code> after timeouts, and without a unique key you schedule the welcome email twice
+          before the scheduler has even started.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · The single-process core</span>
+        <h2>One min-heap and one timer thread</h2>
+        <p>
+          Start with the version that works on one box, because the distributed design is just this core with a
+          durable table underneath. Keep a min-heap ordered by run time. Insert and extract-min cost O(log n);
+          peeking at the next due job is O(1). A sorted array makes insertion O(n), and scanning an unsorted list
+          for due jobs is O(n) on every tick, so the heap is the natural fit.
+        </p>
+        <p>
+          One timer thread owns the heap. Its loop is: look at the top, compute how long until it is due, and wait
+          for that long. The key detail is <em>wait with timeout plus notify</em>, not <code>sleep</code>. If the
+          timer is sleeping 40 minutes toward a job and someone submits a job due in 5 seconds, a sleeping thread
+          oversleeps by 40 minutes. A condition variable lets the submit path wake the timer early so it can
+          recompute its deadline. In Node you get the same effect by clearing and re-arming a single
+          <code>setTimeout</code> whenever the heap's top changes.
+        </p>
+        <p>
+          The second rule is just as important: the timer thread decides <em>what is due</em> and hands off to a
+          worker pool. It never executes the job. One slow handler on the timer thread delays every other job in the
+          process, and you have rebuilt a single-threaded bottleneck with extra steps.
+        </p>
+        <table class="data-table">
+          <thead><tr><th>Operation</th><th>Min-heap</th><th>Sorted list</th><th>Unsorted list</th></tr></thead>
+          <tbody>
+            <tr><td>Add job</td><td>O(log n)</td><td>O(n)</td><td>O(1)</td></tr>
+            <tr><td>Peek next due</td><td>O(1)</td><td>O(1)</td><td>O(n)</td></tr>
+            <tr><td>Pop next due</td><td>O(log n)</td><td>O(1) or O(n)</td><td>O(n)</td></tr>
+            <tr><td>Cancel by id</td><td>O(n), or lazy delete</td><td>O(n)</td><td>O(n)</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Cancellation in a heap is awkward. The usual trick is lazy deletion: mark the job cancelled and discard it
+          when it surfaces at the top. A hashed timing wheel (used by Netty and by the Linux kernel's timer
+          machinery in spirit) gives O(1) insertion for huge numbers of short timers, which is why it shows up in
+          network stacks. For a job scheduler measured in seconds to months, the heap is simpler and plenty fast.
+        </p>
+        <p>
+          The weakness is obvious: the heap lives in RAM, so a restart loses it. That is not a bug to patch inside
+          the process, it is the signal that the real state belongs somewhere durable.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 3 · Durable schema</span>
+        <h2>One table, one partial index, the database as the source of truth</h2>
+        <p>
+          Put every job in a single table. The scheduler does not need a separate "queue" and "metadata" store;
+          state, lease and schedule are columns on the same row, so a claim is one atomic statement. Keep the
+          payload small or store a reference to it (an object-store key) so the hot table stays compact.
+        </p>
+        <span class="code-label">SQL Example (PostgreSQL)</span>
+        <pre><code class="language-sql">CREATE TABLE jobs (
+  job_id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  payload_ref       TEXT        NOT NULL,                 -- pointer to the payload, not the payload
+  run_at            TIMESTAMPTZ NOT NULL,
+  state             TEXT        NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending','running','done','cancelled','dead')),
+  attempt           INT         NOT NULL DEFAULT 0,
+  max_attempts      INT         NOT NULL DEFAULT 5,
+  lease_owner       TEXT,
+  lease_expires_at  TIMESTAMPTZ,
+  cancel_requested  BOOLEAN     NOT NULL DEFAULT false,
+  idempotency_key   TEXT        UNIQUE,                   -- NULLs are allowed to repeat
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Partial index: only pending rows are indexed. Done/dead rows (the vast majority
+-- over time) cost nothing in this index, so the poll query stays tiny and hot.
+CREATE INDEX jobs_pending_run_at ON jobs (run_at) WHERE state = 'pending';
+
+-- Lets the reaper find abandoned leases cheaply.
+CREATE INDEX jobs_running_lease ON jobs (lease_expires_at) WHERE state = 'running';</code></pre>
+        <p>
+          The partial index is the quiet hero. A scheduler table is mostly history: after a month, 99% of rows are
+          <code>done</code>. A full index on <code>run_at</code> drags all of them along, bloating memory and slowing
+          every write. Indexing only <code>pending</code> rows keeps the structure proportional to <em>outstanding
+          work</em>, not to total history. Archive or partition finished rows on a schedule anyway.
+        </p>
+        <p>
+          Why not Redis as the lock? A Redis lock adds a second failure domain: now a job can be claimed in Redis but
+          not recorded in the database, or the lock can expire while the database says otherwise. The job already
+          lives in a row, and a row can be locked and updated transactionally. Use the thing that already holds the
+          truth.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 4 · Hybrid polling</span>
+        <h2>Poll coarsely, fire precisely</h2>
+        <p>
+          Polling the database every 10 ms for millisecond precision would crush it. Polling every minute makes jobs
+          up to a minute late. The hybrid is the standard answer: every few seconds each worker queries for jobs
+          due within the <em>next ~30 seconds</em> and loads them into its local min-heap. The in-process timer then
+          fires them with millisecond accuracy from memory. Database load is a few cheap indexed queries per worker
+          per interval, and precision comes from RAM.
+        </p>
+        <p>
+          The heap is allowed to be stale or lost. If a worker crashes, the next worker's poll picks the same rows
+          up from the table. If a job is cancelled after being loaded into a heap, the claim step (next section) is
+          what protects you, since the claim re-checks <code>state = 'pending'</code> in the database. That is the
+          property that makes the heap safe to treat as a cache.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 5 · Claiming with SKIP LOCKED</span>
+        <h2>Many workers, disjoint batches, no lock service</h2>
+        <p>
+          With N workers polling the same table, the same due rows appear in everyone's result. Without protection,
+          all N run them. <code>SELECT ... FOR UPDATE SKIP LOCKED</code> fixes this: each worker locks the rows it
+          selects, and other workers simply skip rows that are already locked instead of waiting. The result is
+          disjoint batches with no blocking.
+        </p>
+        <span class="code-label">SQL Example (claim a batch atomically)</span>
+        <pre><code class="language-sql">WITH due AS (
+  SELECT job_id
+  FROM   jobs
+  WHERE  (state = 'pending' AND run_at &lt;= now())
+      OR (state = 'running' AND lease_expires_at &lt;= now())   -- reclaim abandoned work
+  ORDER  BY run_at
+  LIMIT  50
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs j
+SET    state            = 'running',
+       attempt          = attempt + 1,
+       lease_owner      = $1,                       -- this worker's id
+       lease_expires_at = now() + interval '30 seconds'
+FROM   due
+WHERE  j.job_id = due.job_id
+RETURNING j.job_id, j.payload_ref, j.attempt;</code></pre>
+        <p>
+          Two notes from production. First, keep the claim transaction short: select, update, commit, then run the
+          jobs outside the transaction. Holding row locks while executing handlers pins connections and turns
+          SKIP LOCKED back into queueing. Second, the pattern is well known in Postgres-backed queues, and the same
+          clause exists in MySQL 8 and Oracle, but verify behavior on your engine and version. Without it, workers
+          either block on each other or you resort to optimistic <code>UPDATE ... WHERE state='pending'</code>
+          retries that waste round trips under contention.
+        </p>
+        <p>
+          The knee: one hot table with a single index is a single contention point. SKIP LOCKED scales further than
+          most people expect, since claims are cheap and non-blocking, but eventually the poll query and write rate
+          become the limit. That is where the bucketing and sharding in the scaling section come in.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 6 · Leases and heartbeats</span>
+        <h2>A claim is a rental, not a purchase</h2>
+        <p>
+          A worker that claims a job and then dies must not strand it forever. So a claim is a <em>lease</em>: the
+          row records <code>lease_owner</code> and <code>lease_expires_at</code>, and if the lease lapses another
+          worker may reclaim the row (that is the second branch of the <code>WHERE</code> clause above). Pick a lease
+          comfortably longer than a typical run and a few missed heartbeats, but short enough that recovery after a
+          crash is acceptable. Thirty seconds with a ten-second heartbeat is a reasonable starting point.
+        </p>
+        <p>
+          Long jobs extend the lease with periodic heartbeats. The gotcha that bites teams: the heartbeat update must
+          <em>check ownership</em>.
+        </p>
+        <span class="code-label">SQL Example (ownership-checked heartbeat)</span>
+        <pre><code class="language-sql">UPDATE jobs
+SET    lease_expires_at = now() + interval '30 seconds'
+WHERE  job_id = $1
+  AND  lease_owner = $2           -- still mine?
+  AND  state = 'running'
+  AND  lease_expires_at &gt; now();  -- and not already expired
+-- rows updated = 0  =&gt;  I lost the lease. Stop work immediately.</code></pre>
+        <p>
+          Without the <code>lease_owner</code> predicate, a worker that stalled (long GC pause, VM freeze, network
+          partition) wakes up, "extends" a lease that now belongs to someone else, and two workers both believe they
+          own the job. Zero rows updated is the abort signal. The same ownership predicate belongs on
+          <code>complete</code> and <code>fail</code> writes, so a zombie worker cannot overwrite the new owner's
+          result.
+        </p>
+        <p>
+          Be honest about the limit: a paused worker may keep running side effects for a while after losing its
+          lease, because it does not know yet. Leases bound the damage window; they do not eliminate it. That is the
+          bridge to the next section.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 7 · Delivery guarantees</span>
+        <h2>Exactly-once is not on the menu</h2>
+        <p>
+          Consider the sequence: the worker sends the email, then crashes before marking the row <code>done</code>.
+          The lease expires and another worker runs the job again. There is no ordering of "do the side effect" and
+          "record that I did" that is atomic across the database and the outside world. Swap the order (record first,
+          then act) and a crash in between loses the job, which is at-most-once. So the real choice is
+          at-least-once or at-most-once, and most business jobs want at-least-once.
+        </p>
+        <p>
+          Make duplicates harmless instead of pretending they cannot happen. Pass <code>job_id</code> (or a derived
+          key) to every downstream call and dedupe there: a unique constraint on a processed-jobs table, an
+          idempotency key on the payment API call, <code>INSERT ... ON CONFLICT DO NOTHING</code> for the effect.
+          The scheduler delivers at-least-once; the handler turns that into effectively-once. State this contract in
+          your documentation so handler authors know their half of the deal.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 8 · Retries</span>
+        <h2>A retry is just rescheduling</h2>
+        <p>
+          When a handler throws, do not build a second mechanism. Set <code>state</code> back to
+          <code>pending</code>, move <code>run_at</code> into the future, and let the normal machinery pick it up.
+          The delay follows <strong>capped exponential backoff with jitter</strong>:
+          <code>delay = random(0, min(cap, base * 2^attempt))</code>. The cap stops delays from growing to days; the
+          jitter prevents a thousand jobs that failed together (because a dependency blipped) from retrying together
+          and re-crashing it. "Full jitter" (uniform from zero to the ceiling) is a good default.
+        </p>
+        <ul class="check-list">
+          <li>Bound retries by <strong>attempts</strong> and by <strong>age</strong>. A report that is useless after an hour should not retry for a day.</li>
+          <li>On exhaustion, move to a terminal <code>dead</code> state (dead-letter) and alert on it. A silent drop is the worst outcome.</li>
+          <li>Classify errors. A malformed payload will never succeed; send it straight to dead instead of burning five attempts.</li>
+          <li>Keep dead rows queryable with a requeue tool for humans. You will use it.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 9 · Scaling</span>
+        <h2>Bucket the clock, spread the stampede</h2>
+        <p>
+          <strong>Poll-query bottleneck.</strong> At large scale every worker running
+          <code>WHERE state='pending' AND run_at &lt;= ...</code> over one big index becomes the load. Divide time
+          into buckets (say, one per minute): store a <code>bucket</code> column (or partition by it) so workers scan
+          only the current and next bucket. Old buckets are then dropped wholesale, which is a metadata operation
+          (<code>DROP PARTITION</code>) instead of millions of deletes. You can additionally shard by
+          <code>job_id</code> hash so workers own key ranges, but do that after buckets, not before.
+        </p>
+        <p>
+          <strong>The midnight stampede.</strong> Humans schedule at round times: midnight, the top of the hour,
+          "9:00 sharp". A million jobs due in the same second means a thundering herd on the database, on workers and
+          on every downstream service. Two answers depending on the business need:
+        </p>
+        <ul class="check-list">
+          <li><strong>Flexible deadlines:</strong> add jitter at scheduling time (spread "midnight" across the next few minutes). Cheap and effective.</li>
+          <li><strong>Strict deadlines:</strong> rate-limit dispatch (a token bucket per tenant or per downstream), drain in order of priority, and publish a <em>lateness metric</em> (actual start minus run_at) so you can see the backlog and alert on it.</li>
+        </ul>
+        <p>
+          Per-tenant fairness belongs here too. One customer scheduling ten million jobs for the same minute should
+          not starve everyone else. Weighted claiming, or per-tenant caps in the claim query, keeps the tail
+          honest.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 10 · Clocks</span>
+        <h2>Pick exactly one authority for time</h2>
+        <p>
+          If worker A's clock is 800 ms ahead of worker B's, A fires jobs early and B declares A's healthy leases
+          expired. Distributed clocks drift, and NTP only bounds the error, it does not erase it. The cleanest fix is
+          to never compare timestamps from different machines: let the <strong>database server's
+          <code>now()</code></strong> be the only clock, as in the SQL above. Leases, run times and expiry are all
+          judged by one authority.
+        </p>
+        <p>
+          If you must trust local clocks (the in-memory timer necessarily does), document a tolerance, such as
+          "jobs may fire up to one second early or late", and make the claim step the arbiter: a heap that wakes
+          slightly early finds nothing claimable yet, and simply polls again. Never base a correctness decision, such
+          as "my lease is still valid, so I may write", on a local clock alone. Use the ownership-checked update.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 11 · Cancellation</span>
+        <h2>Clean for pending, cooperative for running</h2>
+        <p>
+          Cancelling a pending job is a single conditional update:
+          <code>UPDATE jobs SET state='cancelled' WHERE job_id=$1 AND state='pending'</code>. One row changed means
+          success; zero rows means the job already started (or finished), and you tell the caller exactly that.
+          Because the claim re-checks state, a stale copy sitting in some worker's heap cannot resurrect it.
+        </p>
+        <p>
+          A job that is already running cannot be killed safely from outside, since you do not know what it has
+          done. Set <code>cancel_requested = true</code> and let the handler check the flag at natural checkpoints
+          (between batches, before each external call) and stop cleanly, ideally compensating for partial work. Say
+          so explicitly in the API: the response is "cancel requested", not "cancelled". Be wary of hard-killing
+          threads; you trade a clean cancel for corrupted state.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable Code</span>
+        <h2>A complete scheduler core in JavaScript with a fake clock</h2>
+        <p>
+          This is a self-contained model of the design: a min-heap, an in-memory table that mimics
+          <code>SKIP LOCKED</code> and lease semantics, jittered backoff, cancellation, and a test suite that drives a
+          <code>FakeClock</code> instead of waiting real seconds. Save it as <code>scheduler.mjs</code> and run
+          <code>node scheduler.mjs</code> (Node 20+). It prints seven <code>ok</code> lines and "all tests passed".
+          The table plays the role of the database, including being the only holder of time.
+        </p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// delayed-scheduler.mjs  (Node 20+, ES2022, zero dependencies)
+import assert from 'node:assert/strict';
+
+/* ---------- Clock: the ONLY source of time in this file ---------- */
+class SystemClock { now() { return Date.now(); } }
+class FakeClock {
+  #t; constructor(t = 0) { this.#t = t; }
+  now() { return this.#t; }
+  advance(ms) { this.#t += ms; }
+}
+
+/* ---------- Binary min-heap: O(log n) push/pop, O(1) peek ---------- */
+class MinHeap {
+  #a = []; #lt;
+  constructor(lt = (x, y) =&gt; x &lt; y) { this.#lt = lt; }
+  get size() { return this.#a.length; }
+  peek() { return this.#a[0]; }
+  push(v) {
+    const a = this.#a; a.push(v);
+    let i = a.length - 1;
+    while (i &gt; 0) {
+      const p = (i - 1) &gt;&gt; 1;
+      if (!this.#lt(a[i], a[p])) break;
+      [a[i], a[p]] = [a[p], a[i]]; i = p;
+    }
+  }
+  pop() {
+    const a = this.#a; if (!a.length) return undefined;
+    const top = a[0], last = a.pop();
+    if (a.length) {
+      a[0] = last; let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1; let m = i;
+        if (l &lt; a.length &amp;&amp; this.#lt(a[l], a[m])) m = l;
+        if (r &lt; a.length &amp;&amp; this.#lt(a[r], a[m])) m = r;
+        if (m === i) break;
+        [a[i], a[m]] = [a[m], a[i]]; i = m;
+      }
+    }
+    return top;
+  }
+  clear() { this.#a.length = 0; }
+}
+
+/* ---------- In-memory "jobs table" mimicking Postgres semantics ---------- */
+class JobTable {
+  #rows = new Map(); #byKey = new Map(); #seq = 0;
+  #locked = new Set();             // rows locked by some OTHER open transaction
+  constructor(clock) { this.clock = clock; }        // clock == DB now()
+
+  insert({ payload, runAt, idempotencyKey = null, maxAttempts = 5 }) {
+    if (idempotencyKey &amp;&amp; this.#byKey.has(idempotencyKey))   // UNIQUE constraint
+      return this.#rows.get(this.#byKey.get(idempotencyKey));
+    const row = {
+      job_id: `job-${++this.#seq}`, payload, run_at: runAt, state: 'pending',
+      attempt: 0, max_attempts: maxAttempts, lease_owner: null, lease_expires_at: null,
+      idempotency_key: idempotencyKey, cancel_requested: false, created_at: this.clock.now(),
+    };
+    this.#rows.set(row.job_id, row);
+    if (idempotencyKey) this.#byKey.set(idempotencyKey, row.job_id);
+    return row;
+  }
+  get(id) { return this.#rows.get(id); }
+  lockRows(ids) { ids.forEach((i) =&gt; this.#locked.add(i)); }     // test hook
+  unlockRows(ids) { ids.forEach((i) =&gt; this.#locked.delete(i)); }
+
+  /** UPDATE ... WHERE job_id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING * */
+  claimDue({ owner, limit, leaseMs }) {
+    const now = this.clock.now();
+    const eligible = [...this.#rows.values()]
+      .filter((r) =&gt;
+        (r.state === 'pending' &amp;&amp; r.run_at &lt;= now) ||
+        (r.state === 'running' &amp;&amp; r.lease_expires_at &lt;= now))   // abandoned lease
+      .filter((r) =&gt; !this.#locked.has(r.job_id))               // SKIP LOCKED
+      .sort((a, b) =&gt; a.run_at - b.run_at)
+      .slice(0, limit);
+    for (const r of eligible) {
+      r.state = 'running'; r.attempt += 1;
+      r.lease_owner = owner; r.lease_expires_at = now + leaseMs;
+    }
+    return eligible.map((r) =&gt; ({ ...r }));
+  }
+  /** Earliest pending run_at (what the partial index on run_at serves). */
+  nextRunAt(horizonMs) {
+    const lim = this.clock.now() + horizonMs;
+    const due = [...this.#rows.values()].filter((r) =&gt; r.state === 'pending' &amp;&amp; r.run_at &lt;= lim);
+    return due.map((r) =&gt; r.run_at);
+  }
+  /** Heartbeat: 0 rows updated =&gt; we lost the lease =&gt; caller must abort. */
+  heartbeat(id, owner, leaseMs) {
+    const r = this.#rows.get(id), now = this.clock.now();
+    if (!r || r.state !== 'running' || r.lease_owner !== owner || r.lease_expires_at &lt;= now) return false;
+    r.lease_expires_at = now + leaseMs; return true;
+  }
+  complete(id, owner) {
+    const r = this.#rows.get(id);
+    if (!r || r.state !== 'running' || r.lease_owner !== owner) return false;
+    r.state = 'done'; r.lease_owner = null; r.lease_expires_at = null; return true;
+  }
+  /** Retry == reschedule. Ownership-checked just like complete(). */
+  fail(id, owner, nextRunAt) {
+    const r = this.#rows.get(id);
+    if (!r || r.state !== 'running' || r.lease_owner !== owner) return false;
+    r.lease_owner = null; r.lease_expires_at = null;
+    if (r.attempt &gt;= r.max_attempts || nextRunAt === null) r.state = 'dead';
+    else { r.state = 'pending'; r.run_at = nextRunAt; }
+    return true;
+  }
+  /** Clean only for pending rows; running rows just get a cooperative flag. */
+  cancel(id) {
+    const r = this.#rows.get(id);
+    if (!r) return 'not_found';
+    if (r.state === 'pending') { r.state = 'cancelled'; return 'cancelled'; }
+    if (r.state === 'running') { r.cancel_requested = true; return 'cancel_requested'; }
+    return 'too_late';
+  }
+}
+
+/* ---------- Retry policy: capped exponential backoff, full jitter ---------- */
+function backoffMs(attempt, { baseMs = 1000, capMs = 60_000, rng = Math.random } = {}) {
+  const ceiling = Math.min(capMs, baseMs * 2 ** (attempt - 1));
+  return Math.floor(rng() * ceiling);                  // uniform in [0, ceiling)
+}
+
+/* ---------- Scheduler node: heap = cache, table = truth ---------- */
+class SchedulerNode {
+  #heap = new MinHeap((a, b) =&gt; a &lt; b);                // heap of run_at values
+  constructor({ id, table, clock, handler, leaseMs = 30_000, batch = 10,
+                horizonMs = 30_000, maxAgeMs = 3_600_000, backoff = {} }) {
+    Object.assign(this, { id, table, clock, handler, leaseMs, batch, horizonMs, maxAgeMs, backoff });
+  }
+  /** Poll the table for jobs due inside the look-ahead window (every few seconds). */
+  refill() {
+    this.#heap.clear();
+    for (const t of this.table.nextRunAt(this.horizonMs)) this.#heap.push(t);
+  }
+  /** How long a real timer thread would wait (wait-with-timeout, not sleep). */
+  msUntilNext() {
+    const top = this.#heap.peek();
+    return top === undefined ? this.horizonMs : Math.max(0, top - this.clock.now());
+  }
+  /** One scheduling pass: claim due work and hand it to the "worker pool". */
+  async tick() {
+    this.refill();
+    const claimed = this.table.claimDue({ owner: this.id, limit: this.batch, leaseMs: this.leaseMs });
+    for (const job of claimed) await this.#run(job);
+    return claimed.length;
+  }
+  async #run(job) {
+    const ctx = {
+      cancelled: () =&gt; this.table.get(job.job_id).cancel_requested,
+      heartbeat: () =&gt; this.table.heartbeat(job.job_id, this.id, this.leaseMs),
+    };
+    try {
+      await this.handler(job, ctx);
+      this.table.complete(job.job_id, this.id);        // false =&gt; lease lost, someone else owns it
+    } catch (err) {
+      const tooOld = this.clock.now() - job.created_at &gt; this.maxAgeMs;
+      const next = tooOld ? null : this.clock.now() + backoffMs(job.attempt, this.backoff);
+      this.table.fail(job.job_id, this.id, next);
+    }
+  }
+}
+
+/* ============================ self-test ============================ */
+const sec = (n) =&gt; n * 1000;
+const ok = (msg) =&gt; console.log('ok -', msg);
+
+// 1. Fires on time, never early
+{
+  const clock = new FakeClock(0), table = new JobTable(clock), ran = [];
+  const node = new SchedulerNode({ id: 'A', table, clock, handler: async (j) =&gt; ran.push(j.payload) });
+  table.insert({ payload: 'email', runAt: sec(10) });
+  clock.advance(sec(9)); await node.tick();
+  assert.deepEqual(ran, []);
+  assert.equal(node.msUntilNext(), sec(1));
+  clock.advance(sec(1)); await node.tick();
+  assert.deepEqual(ran, ['email']);
+  ok('job fires at run_at, not before');
+}
+
+// 2. Cancellation: clean for pending, cooperative for running
+{
+  const clock = new FakeClock(0), table = new JobTable(clock), ran = [];
+  const node = new SchedulerNode({ id: 'A', table, clock, handler: async (j) =&gt; ran.push(j.payload) });
+  const j = table.insert({ payload: 'x', runAt: sec(5) });
+  assert.equal(table.cancel(j.job_id), 'cancelled');
+  clock.advance(sec(10)); await node.tick();
+  assert.deepEqual(ran, []);
+  const k = table.insert({ payload: 'y', runAt: sec(10) });
+  table.claimDue({ owner: 'A', limit: 1, leaseMs: sec(30) });
+  assert.equal(table.cancel(k.job_id), 'cancel_requested');
+  ok('cancel: pending is clean, running is cooperative');
+}
+
+// 3. Retry = reschedule with backoff; exhaustion =&gt; dead
+{
+  const clock = new FakeClock(0), table = new JobTable(clock);
+  let calls = 0;
+  const node = new SchedulerNode({
+    id: 'A', table, clock, backoff: { baseMs: 1000, capMs: 8000, rng: () =&gt; 0.999999 },
+    handler: async () =&gt; { if (++calls &lt; 3) throw new Error('boom'); },
+  });
+  const j = table.insert({ payload: 'p', runAt: 0 });
+  await node.tick();                                   // attempt 1 fails
+  assert.equal(table.get(j.job_id).state, 'pending');
+  assert.ok(table.get(j.job_id).run_at &gt; 0 &amp;&amp; table.get(j.job_id).run_at &lt; 1000);
+  clock.advance(sec(2)); await node.tick();            // attempt 2 fails (ceiling 2s)
+  clock.advance(sec(4)); await node.tick();            // attempt 3 succeeds
+  assert.equal(table.get(j.job_id).state, 'done');
+  assert.equal(table.get(j.job_id).attempt, 3);
+
+  const t2 = new JobTable(clock);
+  const n2 = new SchedulerNode({ id: 'B', table: t2, clock, handler: async () =&gt; { throw new Error('x'); } });
+  const d = t2.insert({ payload: 'q', runAt: clock.now(), maxAttempts: 2 });
+  await n2.tick(); clock.advance(sec(5)); await n2.tick();
+  assert.equal(t2.get(d.job_id).state, 'dead');
+  ok('retry reschedules with jittered backoff; exhausted jobs go dead');
+}
+
+// 4. Claim contention: SKIP LOCKED gives disjoint batches; each job runs once
+{
+  const clock = new FakeClock(0), table = new JobTable(clock);
+  const ids = Array.from({ length: 6 }, (_, i) =&gt; table.insert({ payload: i, runAt: 0 }).job_id);
+  table.lockRows(ids.slice(0, 3));                     // another tx holds the first three
+  const b = table.claimDue({ owner: 'B', limit: 10, leaseMs: sec(30) });
+  assert.deepEqual(b.map((r) =&gt; r.job_id), ids.slice(3));
+  table.unlockRows(ids.slice(0, 3));
+  const a = table.claimDue({ owner: 'A', limit: 10, leaseMs: sec(30) });
+  assert.deepEqual(a.map((r) =&gt; r.job_id), ids.slice(0, 3));
+  assert.equal(table.claimDue({ owner: 'C', limit: 10, leaseMs: sec(30) }).length, 0);
+  ok('SKIP LOCKED: disjoint claims, no double dispatch');
+}
+
+// 5. Crash AFTER executing: at-least-once + idempotent handler =&gt; one effect
+{
+  const clock = new FakeClock(0), table = new JobTable(clock), effects = new Set();
+  const handler = async (j) =&gt; { effects.add(j.job_id); };   // idempotent: Set keyed by job_id
+  const nodeB = new SchedulerNode({ id: 'B', table, clock, handler, leaseMs: sec(30) });
+  const j = table.insert({ payload: 'charge', runAt: 0 });
+  const [claimed] = table.claimDue({ owner: 'A', limit: 1, leaseMs: sec(30) });
+  await handler(claimed);                              // side effect lands... then A dies
+  assert.equal(await nodeB.tick(), 0);                 // lease still valid: B must wait
+  clock.advance(sec(31));
+  assert.equal(await nodeB.tick(), 1);                 // lease expired: B re-runs it
+  assert.equal(table.get(j.job_id).attempt, 2);
+  assert.equal(effects.size, 1);
+  ok('crash after execution: re-delivered, deduped by job_id');
+}
+
+// 6. Heartbeat racing expiry: the old owner must abort
+{
+  const clock = new FakeClock(0), table = new JobTable(clock);
+  const j = table.insert({ payload: 'long', runAt: 0 });
+  table.claimDue({ owner: 'A', limit: 1, leaseMs: sec(30) });
+  assert.equal(table.heartbeat(j.job_id, 'A', sec(30)), true);
+  clock.advance(sec(31));
+  table.claimDue({ owner: 'B', limit: 1, leaseMs: sec(30) });     // B steals the expired lease
+  assert.equal(table.heartbeat(j.job_id, 'A', sec(30)), false);   // A: 0 rows =&gt; abort
+  assert.equal(table.complete(j.job_id, 'A'), false);
+  assert.equal(table.complete(j.job_id, 'B'), true);
+  ok('heartbeat/complete are ownership-checked');
+}
+
+// 7. Idempotent submission + stampede drained in batches
+{
+  const clock = new FakeClock(0), table = new JobTable(clock), ran = [];
+  const node = new SchedulerNode({ id: 'A', table, clock, batch: 100, handler: async (j) =&gt; ran.push(j.job_id) });
+  const a = table.insert({ payload: 1, runAt: 0, idempotencyKey: 'order-42' });
+  const b = table.insert({ payload: 1, runAt: 0, idempotencyKey: 'order-42' });
+  assert.equal(a.job_id, b.job_id);
+  for (let i = 0; i &lt; 999; i++) table.insert({ payload: i, runAt: sec(60) });
+  clock.advance(sec(60));
+  let passes = 0; while (await node.tick()) passes++;
+  assert.equal(ran.length, 1000);
+  assert.ok(passes &gt;= 10);
+  ok('duplicate submit collapses; 1000-job stampede drains in rate-limited batches');
+}
+console.log('all tests passed');
+</code></pre>
+        <p>
+          Notice what the tests prove. The crash-after-execution test shows the handler running twice at the
+          scheduler level but producing one effect, because it dedupes on <code>job_id</code>. The heartbeat test
+          shows the old owner getting <code>false</code> on both heartbeat and complete once the lease has been
+          taken. And none of the tests sleep, because time is an injected dependency.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Alternatives</span>
+        <h2>When each building block wins</h2>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Approach</th><th>Wins when</th><th>Watch out for</th></tr></thead>
+            <tbody>
+              <tr><td><strong>DB polling + SKIP LOCKED</strong> (this design)</td><td>Durable, queryable, cancellable jobs; arbitrary horizons; moderate scale (thousands to low tens of thousands of fires per second per cluster, with bucketing); you already run Postgres</td><td>Poll load and index churn at high scale; you own the lease, retry and reaper logic. Libraries such as Quartz (JDBC job store) implement a version of this</td></tr>
+              <tr><td><strong>Redis sorted set</strong> (score = run time)</td><td>Low-latency, high-throughput delayed queues where losing a few jobs on failover is tolerable; the pattern behind Sidekiq's scheduled and retry sets</td><td>Persistence is asynchronous by default, so a crash can lose recent writes. Moving a due member to a work list must be atomic (a Lua script or <code>ZPOPMIN</code>-style flow). No built-in leases. See the Redis guide below</td></tr>
+              <tr><td><strong>SQS delay</strong></td><td>You want zero infrastructure for short delays; per-message <code>DelaySeconds</code> up to 15 minutes, and a visibility timeout that acts as an automatic lease</td><td>The 15-minute cap means long delays need a re-enqueue loop or a store of record. Cancellation of a specific delayed message is not supported. Standard queues are at-least-once. For arbitrary future times, look at EventBridge Scheduler instead</td></tr>
+              <tr><td><strong>Managed schedulers</strong> (AWS EventBridge Scheduler)</td><td>One-off or recurring invocations at arbitrary future times, with retries and dead-letter targets, without running anything</td><td>Quotas and per-schedule pricing at very high volume; less control over claim, ordering and fairness; latency is not millisecond-grade</td></tr>
+              <tr><td><strong>Temporal timers</strong></td><td>Long-running workflows where "wait 3 days then act" is one step in a larger durable flow, with history and retries built in</td><td>You adopt a workflow engine and its model; heavy for a pure fire-and-forget "call this URL at 9:00" job at huge volume</td></tr>
+              <tr><td><strong>Kafka + timing wheel</strong></td><td>Very high volume with a log-based pipeline already in place; tiered delay topics (1s, 1m, 1h) with a wheel in the consumer</td><td>Kafka has no native delay, so you build it; no per-job cancel; consumer rebalances and ordering add subtle bugs</td></tr>
+              <tr><td><strong>Celery ETA/countdown, Sidekiq <code>perform_in</code></strong></td><td>App-level convenience on top of a broker you already run</td><td>Celery ETA tasks are held in worker memory until due, so a large backlog of far-future tasks is a known trap; with Redis the visibility timeout interacts with long ETAs. Treat them as short-delay tools</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          My default recommendation: start with the database, because it gives you correctness, observability and
+          cancellation for free, and move the <em>hot</em> window (jobs due in the next minute) into Redis or a
+          broker only when measured poll load demands it. Keep the database as the system of record either way.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Testing</span>
+        <h2>Time is a dependency, so inject it</h2>
+        <p>
+          Code that calls <code>Date.now()</code> or <code>sleep()</code> directly is untestable and flaky. Define a
+          small <code>Clock</code> interface with <code>now()</code>, give production a system implementation and
+          tests a fake you can advance by hours instantly. In the SQL-backed version the same idea applies at the
+          boundary: pass the "current time" into queries as a parameter (or wrap <code>now()</code>) in tests, so you
+          can age a lease without waiting for it.
+        </p>
+        <p>The four tests that earn their keep:</p>
+        <ul class="check-list">
+          <li><strong>Claim contention:</strong> N workers, one batch of due jobs, assert each job is claimed by exactly one. Run it against a real Postgres in CI, not just a mock, since SKIP LOCKED behavior is the thing under test.</li>
+          <li><strong>Crash after execution:</strong> run the side effect, kill the worker before <code>complete</code>, advance past the lease, assert redelivery and that the idempotent effect happened once.</li>
+          <li><strong>Heartbeat racing expiry:</strong> expire the lease, let a second worker claim, then heartbeat from the first. Assert zero rows and that the first worker aborts.</li>
+          <li><strong>Stampede:</strong> schedule thousands of jobs for the same instant, assert the dispatch rate limit holds, nothing is dropped, and the lateness metric reflects the delay.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>Production gotchas worth pre-empting</h2>
+        <ul class="check-list">
+          <li><strong>Long transactions in the claim path</strong> hold locks and bloat the table. Claim fast, commit, run outside.</li>
+          <li><strong>Dead tuples:</strong> high-churn updates to the same rows create vacuum pressure in Postgres. Tune autovacuum for this table and archive finished rows.</li>
+          <li><strong>Reaper storms:</strong> after a mass worker crash, thousands of leases expire at once and get reclaimed together. Jitter lease lengths slightly.</li>
+          <li><strong>Poison jobs</strong> that crash the worker process (not just throw) never reach the failure path; the attempt counter on claim is what eventually dead-letters them. That is why <code>attempt</code> increments at claim time.</li>
+          <li><strong>Timer drift under load:</strong> if the worker pool is saturated, jobs start late. Alert on lateness, not just on errors.</li>
+          <li><strong>Clock changes:</strong> use monotonic clocks for local waits, wall clock only for stored timestamps.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Practical learning</span>
+        <h2>Design checklist</h2>
+        <ul class="check-list">
+          <li>Stated the contract: at-least-once execution, idempotent handlers, with <code>job_id</code> as the dedupe key.</li>
+          <li>Durable table with a partial index on pending rows; payloads referenced, not inlined.</li>
+          <li>Idempotency key on submission, enforced by a unique constraint.</li>
+          <li>Min-heap + one timer using wait/notify; timer never executes jobs.</li>
+          <li>Hybrid polling: coarse DB poll for a ~30 s window, precise firing from memory.</li>
+          <li>Claim via <code>FOR UPDATE SKIP LOCKED</code> in a short transaction; no external lock service.</li>
+          <li>Leases with heartbeats; every heartbeat, complete and fail checks ownership.</li>
+          <li>Retries as rescheduling: capped exponential backoff, jitter, attempt and age bounds, dead-letter state.</li>
+          <li>Cancellation semantics documented: clean for pending, cooperative for running.</li>
+          <li>Scale plan: time buckets, drop old partitions, jitter or rate-limited dispatch, lateness metric, per-tenant fairness.</li>
+          <li>One clock authority (DB <code>now()</code>) or a documented NTP tolerance.</li>
+          <li>Injected Clock and the four tests: contention, crash-after-execute, heartbeat race, stampede.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common questions</h2>
+        <h3>Why not just use cron or a cron-like library?</h3>
+        <p>
+          Cron answers "run this recurring task on one machine". It has no durable per-job state, no claiming across
+          machines, no cancellation of individual future events, and no retry semantics. A delayed job scheduler
+          deals with millions of independent one-off events, which is a different shape.
+        </p>
+        <h3>Isn't polling wasteful? Why not push notifications from the database?</h3>
+        <p>
+          Postgres <code>LISTEN/NOTIFY</code> can wake workers when a new job is inserted, which helps latency for
+          immediate jobs, but delayed jobs are triggered by the passage of time, not by a write. Something must
+          still look at the clock. Polling a narrow partial index for a 30-second window is cheap and robust, and
+          NOTIFY can be layered on as an optimization.
+        </p>
+        <h3>Can we get exactly-once with transactions?</h3>
+        <p>
+          Only when the side effect lives in the same database transaction as the state change (for example,
+          inserting a row into the same Postgres). For emails, payments and webhooks the outside world is not part
+          of your transaction, so you rely on idempotency keys at the boundary.
+        </p>
+        <h3>What lease duration should I choose?</h3>
+        <p>
+          Longer than your p99 heartbeat gap by a safe multiple (three missed heartbeats is a common rule), shorter
+          than the time you can tolerate a crashed job sitting idle. Measure p99 job duration, and have long jobs
+          heartbeat rather than inflating the lease for everyone.
+        </p>
+        <h3>How do I handle recurring schedules?</h3>
+        <p>
+          Model each occurrence as a one-off job. When occurrence N completes, insert occurrence N+1 computed from
+          the schedule definition (ideally in the same transaction as completing N). Do not pre-create a year of
+          rows; and decide up front what happens to missed occurrences after downtime (skip, or catch up).
+        </p>
+        <h3>When do I outgrow this design?</h3>
+        <p>
+          Signs: the poll query dominates database CPU even with buckets, lateness grows during peaks, or a single
+          table's write rate saturates one primary. Then shard by tenant or job hash, move the hot window to a log
+          or in-memory tier, or adopt a managed scheduler. The contract (leases, idempotent handlers) stays the same.
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Related Topics</span>
+        <h2>Keep reading</h2>
+        <ul class="check-list">
+          <li><a href="./real-interview-system-design-questions.html">Real Interview System Design Questions</a>: other scenarios that lean on heartbeats, re-queuing and idempotent tasks.</li>
+          <li><a href="./redis-production-guide.html">Redis Production Guide</a>: sorted sets, persistence and atomicity for the Redis-based delayed queue option.</li>
+          <li><a href="./22-system-design-failure-scenarios.html">22 System Design Failure Scenarios</a>: how real systems break, including spikes and recovery planning.</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A delayed job scheduler is a heap that tells you when to wake up, sitting on a database row that tells you
+          the truth. Let the row be the lock (SKIP LOCKED plus ownership-checked leases), make time a single
+          authority you can inject in tests, treat retries as rescheduling, and promise only at-least-once with
+          idempotent handlers. If you can explain why a worker can finish a job and still have it run twice, and why
+          that is fine, you understand the problem.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

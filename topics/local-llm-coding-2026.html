@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Best Local LLM for Coding in 2026 — MacBook Edition | Learning Hub</title>
+    <title>Running Local LLMs: Deployment Guide and Best Models for Coding (2026) | Learning Hub</title>
     <link rel="stylesheet" href="../styles.css" />
     <script src="../read-state.js" defer></script>
     <script src="../highlight.js" defer></script>
@@ -24,6 +24,32 @@
       .bench-bar-wrap { flex:1; background:#f1f5f9; border-radius:4px; height:10px; }
       .bench-bar { height:10px; border-radius:4px; background:#6366f1; }
       .bench-score { min-width:40px; text-align:right; font-weight:700; color:#4338ca; }
+
+      .hw-table { width:100%; border-collapse:collapse; font-size:.875rem; margin:1rem 0; }
+      .hw-table th { background:var(--surface); padding:.55rem .75rem; text-align:left; border-bottom:2px solid var(--border); font-weight:700; }
+      .hw-table td { padding:.5rem .75rem; border-bottom:1px solid var(--border); vertical-align:top; }
+      .hw-table tr:last-child td { border-bottom:none; }
+      .hw-table .ok  { color:#166534; font-weight:700; }
+      .hw-table .warn { color:#854d0e; font-weight:700; }
+      .hw-table .bad  { color:#991b1b; font-weight:700; }
+      .tool-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:.85rem; margin:1.1rem 0; }
+      .tool-card { border:1px solid var(--border); border-radius:10px; padding:.9rem 1rem; background:var(--surface); }
+      .tool-card h4 { margin:0 0 .25rem; font-size:.95rem; }
+      .tool-card p  { margin:0; font-size:.83rem; color:var(--muted); line-height:1.45; }
+      .tool-tag { display:inline-block; font-size:.68rem; font-weight:700; padding:.15rem .5rem; border-radius:12px; margin-bottom:.4rem; }
+      .tag-rec  { background:#f0fdf4; color:#166534; border:1px solid #bbf7d0; }
+      .tag-gui  { background:#eff6ff; color:#1e40af; border:1px solid #bfdbfe; }
+      .tag-adv  { background:#fefce8; color:#854d0e; border:1px solid #fef08a; }
+      .quant-row { display:flex; align-items:center; gap:.7rem; padding:.45rem 0; border-bottom:1px solid #f1f5f9; font-size:.87rem; }
+      .quant-row:last-child { border-bottom:none; }
+      .quant-label { min-width:100px; font-weight:700; font-family:monospace; }
+      .quant-bar-wrap { flex:1; background:#f1f5f9; border-radius:4px; height:9px; }
+      .quant-bar { height:9px; border-radius:4px; }
+      .qbar-q4 { background:#6366f1; width:62%; }
+      .qbar-q5 { background:#3b82f6; width:73%; }
+      .qbar-q6 { background:#10b981; width:82%; }
+      .qbar-q8 { background:#f59e0b; width:94%; }
+      .quant-note { min-width:140px; color:var(--muted); font-size:.8rem; text-align:right; }
     </style>
   </head>
   <body>
@@ -36,39 +62,67 @@
             alt="MacBook with code editor open" loading="lazy" />
           <div class="article-hero-overlay"></div>
           <div class="article-hero-content">
-            <span class="article-hero-kicker">Local LLM · AI · Coding · 20 min read</span>
+            <span class="article-hero-kicker">Local LLM · AI · Deployment · Coding · 30 min read</span>
           </div>
         </figure>
-        <h1>Best Local LLM for Coding in 2026 — MacBook Edition</h1>
+        <h1>Running Local LLMs: Deployment Guide and Best Models for Coding (2026)</h1>
         <p class="summary">
-          Two articles merged: a personal MacBook M-series benchmark run and a data-science-collective
-          deep dive into coding LLMs. In 2026, Apple Silicon changed the equation — a MacBook Pro M4 Max
-          can run 30B-parameter models at usable speeds. This guide covers which models to run, how to
-          set them up with Ollama, and how to wire them into your editor and Node.js toolchain.
+          Two articles merged into one guide. Part 1 (The LLM Landscape Part 2: The Starter's Guide to Local LLM
+          Deployment) covers why to run models locally, hardware sizing, model formats, quantisation, runtimes,
+          production serving and failure modes. Part 2 (a personal MacBook benchmark plus a Data Science Collective
+          deep dive) covers which models are best for coding on Apple Silicon and how to wire them into Ollama,
+          Node.js, Continue.dev and Aider.
         </p>
         <div class="article-meta">
-          <div><span class="meta-label">Sources</span><span class="meta-value">Personal benchmark · Data Science Collective (Medium) · 2026</span></div>
+          <div><span class="meta-label">Sources</span><span class="meta-value">The LLM Landscape Part 2: Starter's Guide to Local LLM Deployment (2026-09-03) · Personal MacBook benchmark · Data Science Collective (Medium) · 2026</span></div>
           <div><span class="meta-label">Hardware tested</span><span class="meta-value">M3 Pro (18 GB), M4 Max (48 GB), M4 Ultra (192 GB)</span></div>
-          <div><span class="meta-label">Tools</span><span class="meta-value">Ollama · LM Studio · Continue.dev · VS Code</span></div>
+          <div><span class="meta-label">Tools</span><span class="meta-value">Ollama · LM Studio · llama.cpp · vLLM · LiteLLM · Continue.dev · Aider</span></div>
         </div>
       </header>
 
       <section class="content-card">
         <p class="lead">
-          Running a local LLM for coding used to mean buying an NVIDIA GPU. Apple Silicon unified memory
-          changed that. An M4 Max with 48 GB memory runs Qwen2.5-Coder-32B at 18 tokens/second — fast
-          enough for interactive autocomplete. No cloud bill, no data leaving your machine, no API rate
-          limits. The bottleneck shifted from "can I run it?" to "which model is actually good for code?"
+          The cloud API abstraction hides enormous costs: per-token billing, data egress fees,
+          latency from round-trips, vendor lock-in, and the legal risk of sending proprietary
+          text to a third party. Local LLMs eliminate all four simultaneously — but they
+          substitute a different cost: upfront hardware investment, operational complexity, and
+          a capability ceiling that, in 2025-26, sits about 6-12 months behind frontier models.
+          Knowing exactly where that ceiling is, and which use cases land safely below it, is
+          the entire skill.
         </p>
         <div class="callout">
-          <p><strong>Core idea:</strong> In 2026, Apple Silicon makes local coding LLMs genuinely viable.
-          Qwen2.5-Coder-32B on M4 Max beats GPT-4o on several coding benchmarks and runs entirely
-          offline at real-time speeds.</p>
+          <p>
+            <strong>Core idea:</strong> Local LLMs are not a free alternative to GPT-4 — they
+            are a different trade-off surface. You trade peak intelligence and maintenance-free
+            access for data sovereignty, zero marginal cost, and sub-100 ms first-token latency
+            on suitable hardware. The right question is never "can I run it locally?" but "does
+            my task fit the capability budget of a model I can afford to run?"
+          </p>
         </div>
       </section>
-
       <section class="story-card">
-        <span class="section-label">The turning point</span>
+        <span class="section-label">Story · Healthcare SaaS, 2024</span>
+        <p>
+          A mid-size EMR (electronic medical records) vendor was spending $340,000/year on
+          OpenAI API calls to power a clinical-note summarisation feature. The legal team flagged
+          that HIPAA BAA coverage from OpenAI did not extend to model training opt-out guarantees
+          for their tier. Procurement mandated a 90-day proof-of-concept for an on-prem
+          alternative.
+        </p>
+        <p>
+          The team evaluated Llama 3 70B Q4_K_M on a pair of A100-80GB nodes. Summarisation
+          quality (measured by physician rating) dropped from 4.4/5 to 4.1/5 — acceptable.
+          Average latency fell from 2,400 ms (API round-trip) to 380 ms (local GPU). Annual
+          hardware amortisation: $68,000. Break-even: 7 months.
+        </p>
+        <p>
+          The hidden win was contractual: the compliance team could now sign off that no patient
+          data ever left the data centre. The product shipped 60 days later with a "100% on-prem
+          AI" selling point that differentiated it in competitive deals.
+        </p>
+      </section>
+      <section class="story-card">
+        <span class="section-label">Story · The coding turning point</span>
         <p>
           The author's previous attempt at local coding LLMs — a 13B model on an M2 Pro — produced code
           that hallucinated library APIs and ran at 3 tokens/second. Unusable. The M4 Max attempt was
@@ -77,10 +131,384 @@
           a threshold.
         </p>
       </section>
-
       <section class="content-card">
-        <span class="section-label">Top models for coding</span>
-        <h2>The 2026 lineup — what to actually run</h2>
+        <span class="section-label">Why Run LLMs Locally</span>
+        <h2>The Five Reasons That Actually Matter</h2>
+        <p>
+          Blog posts enumerate ten reasons to run models locally. In practice, only five show up
+          in production decisions:
+        </p>
+        <ol>
+          <li>
+            <strong>Data sovereignty and privacy.</strong> GDPR, HIPAA, SOC 2, and internal
+            data-classification policies prohibit sending certain data categories to third-party
+            inference APIs. Local deployment is the only technically compliant solution — signing
+            a BAA does not substitute for not transmitting data.
+          </li>
+          <li>
+            <strong>Deterministic cost.</strong> API billing is O(tokens). A 100k-document
+            classification pipeline at GPT-4o prices costs $200–$800 per run. On a leased A10G,
+            the marginal cost is electricity — roughly $0.40/hour. After the hardware break-even,
+            batch jobs become nearly free.
+          </li>
+          <li>
+            <strong>Latency.&nbsp;</strong> Tier-1 API providers target P50 first-token latency
+            around 400–800 ms under normal load, spiking to 3–5 s during congestion. A
+            quantised 7B model on a consumer GPU delivers first token in under 50 ms. For
+            streaming UIs or real-time pipelines, this is the difference between a fluid and a
+            broken experience.
+          </li>
+          <li>
+            <strong>Offline and air-gapped operation.</strong> Defence, industrial control, and
+            field-deployed applications cannot rely on internet connectivity. A quantised model
+            on a laptop runs on a plane, in a submarine, or in a factory with no network
+            dependency.
+          </li>
+          <li>
+            <strong>Fine-tuning and customisation control.</strong> You cannot fine-tune GPT-4o
+            on arbitrary data and retain the weights. With local models you own the fine-tuned
+            artefact — and you can re-run RLHF experiments without incurring per-sample API
+            charges.
+          </li>
+        </ol>
+        <div class="callout">
+          <p>
+            <strong>What is NOT on the list:</strong> "Better quality." At any given point in
+            time, frontier cloud models (GPT-4o, Claude Opus, Gemini Ultra) outperform any
+            locally runnable model on complex reasoning, long-context, and multi-step tasks.
+            Running locally is a strategic trade, not a quality upgrade.
+          </p>
+        </div>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Hardware Requirements</span>
+        <h2>Sizing Your Hardware: The Real Numbers</h2>
+        <p>
+          The most common mistake is conflating model <em>parameter count</em> with
+          <em>memory requirement</em>. A 7B model at full precision (BF16) needs ~14 GB of
+          VRAM. At Q4 quantisation it drops to ~4.5 GB, fitting a 6 GB RTX 3060. Know the
+          arithmetic before buying hardware.
+        </p>
+        <table class="hw-table">
+          <thead>
+            <tr>
+              <th>Model size</th>
+              <th>Full precision (FP16)</th>
+              <th>Q4_K_M GGUF</th>
+              <th>Minimum GPU</th>
+              <th>Tokens/sec (Q4)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>3–4B</strong></td>
+              <td>6–8 GB</td>
+              <td class="ok">2.5–3 GB</td>
+              <td>CPU-only viable, any GPU</td>
+              <td class="ok">80–120 t/s CPU · 200+ GPU</td>
+            </tr>
+            <tr>
+              <td><strong>7–8B</strong></td>
+              <td>14–16 GB</td>
+              <td class="ok">4.5–5 GB</td>
+              <td>RTX 3060 6 GB (tight)</td>
+              <td class="ok">50–90 t/s (GPU)</td>
+            </tr>
+            <tr>
+              <td><strong>13–14B</strong></td>
+              <td>26–28 GB</td>
+              <td class="warn">8–9 GB</td>
+              <td>RTX 3090 / 4090 24 GB</td>
+              <td class="warn">30–55 t/s</td>
+            </tr>
+            <tr>
+              <td><strong>32–34B</strong></td>
+              <td>64 GB</td>
+              <td class="warn">19–21 GB</td>
+              <td>RTX 4090 24 GB (tight), dual 3090</td>
+              <td class="warn">15–28 t/s</td>
+            </tr>
+            <tr>
+              <td><strong>70B</strong></td>
+              <td>140 GB</td>
+              <td class="bad">40–42 GB</td>
+              <td>A100-80G (1 card) · 2× 3090 (split)</td>
+              <td class="bad">8–18 t/s GPU · ~2 t/s CPU</td>
+            </tr>
+          </tbody>
+        </table>
+        <h3>Apple Silicon: The Underappreciated Option</h3>
+        <p>
+          M-series Macs use unified memory — CPU and GPU share the same DRAM pool. An M3 Max
+          with 128 GB unified memory runs a Q4_K_M 70B model entirely in-memory with ~15 t/s
+          generation. The bandwidth (400 GB/s on M3 Max) exceeds many discrete GPU setups for
+          LLM inference, which is memory-bandwidth-bound, not compute-bound at typical batch
+          sizes. For a developer workstation, a 64 GB M4 Pro Mac Studio at ~$2,000 beats a
+          $4,500 RTX 4090 workstation for model sizes up to 34B.
+        </p>
+        <h3>CPU-Only Inference</h3>
+        <p>
+          llama.cpp's AVX-512 kernels and BLAS optimisations make CPU inference viable for 7B
+          models: roughly 8–15 t/s on a modern Ryzen 9 or Core i9. This is acceptable for
+          batch summarisation but painful for interactive use. If the only hardware is a laptop
+          without discrete GPU, stick to 3–7B models. Anything larger is unusably slow.
+        </p>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Model Formats</span>
+        <h2>GGUF, GPTQ, AWQ, ExLlamaV2: Which Format to Use</h2>
+        <p>
+          The format war is mostly settled in 2025: <strong>GGUF</strong> via llama.cpp is the
+          de-facto standard for local inference. Understanding why — and when to deviate — is
+          still important.
+        </p>
+        <dl>
+          <dt><strong>GGUF (llama.cpp)</strong></dt>
+          <dd>
+            A self-contained binary format that bundles weights, tokeniser, and metadata in a
+            single file. CPU-friendly quantisation (uses Q-series like Q4_K_M). Runs on CPU,
+            CUDA, Metal, ROCm with the same binary. Best for: Ollama, LM Studio, Jan.ai,
+            anything cross-platform. <em>Use this unless you have a specific reason not to.</em>
+          </dd>
+          <dt><strong>GPTQ (AutoGPTQ)</strong></dt>
+          <dd>
+            GPU-only post-training quantisation that applies group-wise 4-bit or 8-bit weights.
+            Slightly better quality than GGUF Q4 at the same bit-width due to calibration-based
+            quantisation. Requires a CUDA GPU. Use when you have a pure-CUDA server pipeline
+            and need the extra quality point.
+          </dd>
+          <dt><strong>AWQ (Activation-Aware Weight Quantisation)</strong></dt>
+          <dd>
+            Preserves "important" weights (identified by activation magnitude) at higher
+            precision. Matches Q5 GGUF quality at Q4 memory footprint. vLLM and TGI (HuggingFace
+            Text Generation Inference) support AWQ natively — better for GPU server deployments
+            than GGUF.
+          </dd>
+          <dt><strong>ExLlamaV2 (EXL2)</strong></dt>
+          <dd>
+            Mixed-precision quantisation that budgets bits per tensor layer. Highest quality per
+            GB among all formats. Requires ExLlamaV2 inference engine. Best for: maximising
+            quality on fixed GPU VRAM when you're running a single model on a dedicated machine.
+          </dd>
+        </dl>
+        <div class="callout">
+          <p>
+            <strong>Decision rule:</strong> Use GGUF for anything involving Ollama or a Mac.
+            Use AWQ + vLLM for a production Linux GPU server serving concurrent users. Use EXL2
+            only if you're squeezing maximum quality out of a 24 GB GPU and are willing to
+            manage the ExLlamaV2 ecosystem.
+          </p>
+        </div>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Quantisation Deep-Dive</span>
+        <h2>Q4_K_M vs Q5_K_M vs Q8_0: The Real Trade-offs</h2>
+        <p>
+          GGUF quantisation levels follow the pattern <code>Q{bits}_{method}_{variant}</code>.
+          The key variants for production use:
+        </p>
+        <div style="margin:1.1rem 0;">
+          <div class="quant-row">
+            <span class="quant-label">Q4_K_M</span>
+            <div class="quant-bar-wrap"><div class="quant-bar qbar-q4"></div></div>
+            <span class="quant-note">Fastest · smallest · ~2% perplexity loss</span>
+          </div>
+          <div class="quant-row">
+            <span class="quant-label">Q5_K_M</span>
+            <div class="quant-bar-wrap"><div class="quant-bar qbar-q5"></div></div>
+            <span class="quant-note">Balanced · ~15% larger than Q4 · ~1% loss</span>
+          </div>
+          <div class="quant-row">
+            <span class="quant-label">Q6_K</span>
+            <div class="quant-bar-wrap"><div class="quant-bar qbar-q6"></div></div>
+            <span class="quant-note">Near-lossless · 50% larger than Q4</span>
+          </div>
+          <div class="quant-row">
+            <span class="quant-label">Q8_0</span>
+            <div class="quant-bar-wrap"><div class="quant-bar qbar-q8"></div></div>
+            <span class="quant-note">Functionally lossless · 2× size of Q4</span>
+          </div>
+        </div>
+        <p>
+          The "_K_M" suffix means "K-quant, medium" — a calibration-based scheme that allocates
+          higher precision to layers that are more sensitive to quantisation (typically attention
+          layers). This is why Q4_K_M performs noticeably better than naive Q4_0 at the same
+          file size.
+        </p>
+        <h3>Practical guidance</h3>
+        <ul>
+          <li>
+            <strong>Q4_K_M:</strong> Default for everyday use. Fits the largest model your VRAM
+            supports. Perplexity loss is indistinguishable to humans on conversational or
+            summarisation tasks.
+          </li>
+          <li>
+            <strong>Q5_K_M:</strong> Use when you have 10–15% headroom in VRAM and the task is
+            sensitive (code generation, structured JSON output, mathematical reasoning). The
+            extra precision reduces token probability smearing.
+          </li>
+          <li>
+            <strong>Q8_0:</strong> Use only for evaluation baselines or when you're fine-tuning
+            from a quantised checkpoint. The 2× memory cost rarely buys enough quality for
+            production interactive workloads.
+          </li>
+        </ul>
+        <h3>Coding-specific quantisation notes</h3>
+        <ul class="check-list">
+          <li><strong>Q8_0</strong> — near full-precision quality, ~1.1× model size in RAM. Use if you have headroom.</li>
+          <li><strong>Q4_K_M</strong> — best quality-per-GB trade-off. Default recommendation. ~4× compression vs fp16.</li>
+          <li><strong>Q4_K_S</strong> — slightly smaller than K_M, slightly lower quality. Use when K_M won't fit.</li>
+          <li><strong>Q3_K_M</strong> — noticeable quality drop on hard reasoning. Only if K_M doesn't fit.</li>
+          <li><strong>Q2_K</strong> — significant degradation. Avoid for coding tasks.</li>
+        </ul>
+        <p>Rule: <strong>Q4_K_M is the default</strong>. Only go lower if the model won't fit. Going higher rarely pays off enough to justify the RAM cost.</p>
+        <div class="callout">
+          <p>
+            <strong>The perplexity trap:</strong> Perplexity benchmarks measure statistical
+            deviation from FP16 output. A 2% perplexity increase does not mean 2% worse answers.
+            On simple tasks, Q4_K_M is subjectively indistinguishable from FP16.
+            On complex multi-step reasoning, the degradation compounds. Benchmark your specific
+            task, not perplexity.
+          </p>
+        </div>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Tooling Landscape</span>
+        <h2>Choosing Your Local LLM Runtime</h2>
+        <div class="tool-grid">
+          <div class="tool-card">
+            <span class="tool-tag tag-rec">RECOMMENDED</span>
+            <h4>Ollama</h4>
+            <p>
+              One-command install. Manages model downloads, GGUF format, Metal/CUDA/ROCm
+              acceleration automatically. Exposes an OpenAI-compatible REST API on
+              <code>localhost:11434</code>. Best-in-class DX for developers. Use as the
+              default starting point for any new project.
+            </p>
+          </div>
+          <div class="tool-card">
+            <span class="tool-tag tag-gui">GUI</span>
+            <h4>LM Studio</h4>
+            <p>
+              Desktop GUI with a model browser, chat interface, and built-in server mode.
+              Excellent for non-developers and rapid model evaluation. Supports GGUF natively.
+              The server mode is OpenAI-compatible. Not ideal for headless/server deployments.
+            </p>
+          </div>
+          <div class="tool-card">
+            <span class="tool-tag tag-adv">ADVANCED</span>
+            <h4>llama.cpp (direct)</h4>
+            <p>
+              The C++ inference engine that powers most of the ecosystem. Best-in-class
+              CPU performance, bleeding-edge quantisation formats, full control over
+              hyperparameters. Required when you need features before Ollama exposes them
+              (e.g., speculative decoding, context extension).
+            </p>
+          </div>
+          <div class="tool-card">
+            <span class="tool-tag tag-gui">GUI</span>
+            <h4>Jan.ai</h4>
+            <p>
+              Open-source desktop app similar to LM Studio. Strong privacy focus (all local,
+              no telemetry). Useful for team-wide internal deployment where you want a polished
+              interface without LM Studio's licensing grey area.
+            </p>
+          </div>
+          <div class="tool-card">
+            <span class="tool-tag tag-gui">GUI</span>
+            <h4>GPT4All</h4>
+            <p>
+              Nomic AI's desktop app. Includes a local document ingestion pipeline and embedding
+              model. Good entry point for non-technical users doing document Q&amp;A. Less
+              flexible than Ollama for programmatic access.
+            </p>
+          </div>
+          <div class="tool-card">
+            <span class="tool-tag tag-adv">PRODUCTION</span>
+            <h4>vLLM</h4>
+            <p>
+              Python serving framework with PagedAttention for high-throughput GPU inference.
+              Supports AWQ, GPTQ, FP8. The right choice for multi-user API servers on
+              NVIDIA hardware. Not designed for CPU or Apple Silicon.
+            </p>
+          </div>
+        </div>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Model Selection Guide</span>
+        <h2>Which Model Family for Which Task</h2>
+        <p>
+          In 2025-26, the open-weight model landscape has consolidated around a handful of
+          families. The right choice depends on task type, not just benchmark scores.
+        </p>
+        <table class="hw-table">
+          <thead>
+            <tr>
+              <th>Model family</th>
+              <th>Best sizes</th>
+              <th>Strengths</th>
+              <th>Weaknesses</th>
+              <th>Recommended use case</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Llama 3.1/3.2</strong> (Meta)</td>
+              <td>8B, 70B</td>
+              <td>Strong instruction following, broad knowledge, permissive licence</td>
+              <td>70B needs significant hardware</td>
+              <td>General assistant, document Q&amp;A, RAG</td>
+            </tr>
+            <tr>
+              <td><strong>Mistral / Mistral-Nemo</strong></td>
+              <td>7B, 12B</td>
+              <td>Punches above weight for 7B, fast inference, Apache 2.0</td>
+              <td>Weaker on long-context vs Llama 3</td>
+              <td>Lightweight chat, classification, summarisation</td>
+            </tr>
+            <tr>
+              <td><strong>Qwen 2.5</strong> (Alibaba)</td>
+              <td>7B, 14B, 32B, 72B</td>
+              <td>Best multilingual open model, strong coding (Coder variant), math</td>
+              <td>Alibaba licence has commercial restrictions</td>
+              <td>Multilingual, coding, structured output</td>
+            </tr>
+            <tr>
+              <td><strong>Gemma 2</strong> (Google)</td>
+              <td>2B, 9B, 27B</td>
+              <td>Excellent quality-per-parameter ratio, safety tuned, Google licence</td>
+              <td>Commercial use requires agreement</td>
+              <td>Edge deployment, on-device, constrained hardware</td>
+            </tr>
+            <tr>
+              <td><strong>Phi-3/4</strong> (Microsoft)</td>
+              <td>3.8B, 14B</td>
+              <td>Exceptional reasoning for small size, fast, MIT licence</td>
+              <td>Knowledge cutoff may lag, narrow training distribution</td>
+              <td>Laptop/mobile, agentic reasoning on constrained hardware</td>
+            </tr>
+            <tr>
+              <td><strong>DeepSeek-R1</strong></td>
+              <td>7B, 70B</td>
+              <td>Chain-of-thought reasoning, maths, competitive coding</td>
+              <td>Verbose output, slower TTFT due to reasoning tokens</td>
+              <td>Complex reasoning, step-by-step problem solving</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          <p>
+            <strong>Opinionated defaults for 2026:</strong> Start with <strong>Llama 3.1 8B Q5_K_M</strong>
+            for general tasks on consumer hardware. Use <strong>Qwen2.5 14B</strong> if you
+            need multilingual or structured JSON output. Use <strong>DeepSeek-R1 7B</strong>
+            if reasoning quality matters more than speed.
+          </p>
+        </div>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Part 2 · Top models for coding</span>
+        <h2>The 2026 lineup — what to actually run for code</h2>
+        <p>Beyond the general-purpose families above, these are the models that stand out for software work. On an M4 Max with 48 GB, Qwen2.5-Coder-32B runs at about 18 tokens/second — fast enough for interactive autocomplete.</p>
         <div class="model-grid">
           <div class="model-card">
             <span class="verdict v-best">Best overall</span>
@@ -114,9 +542,8 @@
           </div>
         </div>
       </section>
-
       <section class="content-card">
-        <span class="section-label">Benchmarks</span>
+        <span class="section-label">Part 2 · Coding benchmarks</span>
         <h2>HumanEval pass@1 — local models vs cloud APIs</h2>
         <div class="bench-row"><span class="bench-label">GPT-4o (cloud)</span><div class="bench-bar-wrap"><div class="bench-bar" style="width:90%"></div></div><span class="bench-score">90.2</span></div>
         <div class="bench-row"><span class="bench-label">Qwen2.5-Coder-32B</span><div class="bench-bar-wrap"><div class="bench-bar" style="width:93%"></div></div><span class="bench-score">92.7</span></div>
@@ -127,9 +554,8 @@
         <div class="bench-row"><span class="bench-label">Llama 3.3-70B Q4</span><div class="bench-bar-wrap"><div class="bench-bar" style="width:78%"></div></div><span class="bench-score">78.9</span></div>
         <p style="font-size:.82rem;color:var(--muted);margin-top:.5rem;">HumanEval pass@1. Qwen2.5-Coder-32B at Q4_K_M on M4 Max. Cloud APIs at default temperature.</p>
       </section>
-
       <section class="content-card">
-        <span class="section-label">Setup</span>
+        <span class="section-label">Part 2 · Coding setup</span>
         <h2>Installing and running with Ollama</h2>
         <pre class="code-block"><code># Install Ollama (macOS)
 brew install ollama
@@ -147,9 +573,23 @@ ollama serve
 ollama run qwen2.5-coder:32b-instruct-q4_K_M \
   "Write a Node.js function that debounces async functions with proper cancellation"</code></pre>
       </section>
-
       <section class="content-card">
-        <span class="section-label">JavaScript integration</span>
+        <span class="section-label">Integration Patterns</span>
+        <h2>Connecting Local Models to Your Stack</h2>
+        <p>
+          Ollama exposes an OpenAI-compatible API at <code>http://localhost:11434/v1</code>.
+          Any library that accepts an OpenAI base URL works without modification: LangChain,
+          LlamaIndex, Instructor, Continue.dev, OpenWebUI. The next sections show Node.js clients and editor setup in detail.
+        </p>
+        <h3>LangChain / LlamaIndex</h3>
+        <p>
+          Both frameworks have first-class Ollama support. Pass
+          <code>base_url="http://localhost:11434"</code> to the ChatOpenAI or Ollama LLM
+          class. No API key required. Model switching is a single string change.
+        </p>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Part 2 · JavaScript integration</span>
         <h2>Calling local Ollama from Node.js</h2>
         <pre class="code-block"><code>// ollama-client.js — OpenAI-compatible API
 // Ollama exposes an OpenAI-compatible endpoint at /v1
@@ -234,9 +674,8 @@ async function isModelLoaded(model) {
   return data.models?.some(m => m.name === model) ?? false;
 }</code></pre>
       </section>
-
       <section class="content-card">
-        <span class="section-label">Editor integration</span>
+        <span class="section-label">Part 2 · Editor integration</span>
         <h2>Wiring local LLM into VS Code</h2>
 
         <h3>Continue.dev — best open-source coding assistant</h3>
@@ -280,38 +719,463 @@ aider --model ollama/qwen2.5-coder:32b-instruct-q4_K_M \
       --no-auto-commits \
       src/api/users.js</code></pre>
       </section>
-
       <section class="content-card">
-        <span class="section-label">Quantisation guide</span>
-        <h2>Choosing the right quantisation for your RAM</h2>
-        <ul class="check-list">
-          <li><strong>Q8_0</strong> — near full-precision quality, ~1.1× model size in RAM. Use if you have headroom.</li>
-          <li><strong>Q4_K_M</strong> — best quality-per-GB trade-off. Default recommendation. ~4× compression vs fp16.</li>
-          <li><strong>Q4_K_S</strong> — slightly smaller than K_M, slightly lower quality. Use when K_M won't fit.</li>
-          <li><strong>Q3_K_M</strong> — noticeable quality drop on hard reasoning. Only if K_M doesn't fit.</li>
-          <li><strong>Q2_K</strong> — significant degradation. Avoid for coding tasks.</li>
-        </ul>
-        <p>Rule: <strong>Q4_K_M is the default</strong>. Only go lower if the model won't fit. Going higher rarely pays off enough to justify the RAM cost.</p>
+        <span class="section-label">Code Example</span>
+        <h2>Ollama API: Streaming Chat + Model Management</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Ollama OpenAI-compatible streaming chat + model management
+// Node 18+ with native fetch; no additional dependencies required.
+
+const OLLAMA_BASE = "http://localhost:11434";
+
+// ─── 1. List locally available models ───────────────────────────────────────
+async function listLocalModels() {
+  const res = await fetch(`${OLLAMA_BASE}/api/tags`);
+  if (!res.ok) throw new Error(`Ollama not running? ${res.status}`);
+  const { models } = await res.json();
+  return models.map(m => ({
+    name:        m.name,
+    sizeGB:      (m.size / 1e9).toFixed(1),
+    modifiedAt:  m.modified_at,
+    paramSize:   m.details?.parameter_size,
+    quantLevel:  m.details?.quantization_level,
+  }));
+}
+
+// ─── 2. Pull a model if not present ─────────────────────────────────────────
+async function ensureModel(modelName) {
+  const models = await listLocalModels();
+  if (models.some(m => m.name === modelName)) {
+    console.log(`[ollama] ${modelName} already present`);
+    return;
+  }
+
+  console.log(`[ollama] pulling ${modelName}...`);
+  const res = await fetch(`${OLLAMA_BASE}/api/pull`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: modelName, stream: true }),
+  });
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const lines = decoder.decode(value).split("\n").filter(Boolean);
+    for (const line of lines) {
+      const event = JSON.parse(line);
+      if (event.total && event.completed) {
+        const pct = ((event.completed / event.total) * 100).toFixed(0);
+        process.stdout.write(`\r  ${event.status} ${pct}%  `);
+      } else {
+        console.log(`  ${event.status}`);
+      }
+    }
+  }
+  console.log("\n[ollama] pull complete");
+}
+
+// ─── 3. Streaming chat with OpenAI-compatible API ───────────────────────────
+async function* streamChat(model, messages, options = {}) {
+  const body = {
+    model,
+    messages,
+    stream: true,
+    options: {
+      temperature:  options.temperature  ?? 0.7,
+      top_p:        options.top_p        ?? 0.9,
+      num_predict:  options.maxTokens    ?? 512,
+      num_ctx:      options.contextSize  ?? 4096,
+    },
+  };
+
+  const res = await fetch(`${OLLAMA_BASE}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Ollama error ${res.status}: ${err}`);
+  }
+
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let   buffer  = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // keep incomplete last line
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const raw = line.slice(6).trim();
+      if (raw === "[DONE]") return;
+      try {
+        const chunk = JSON.parse(raw);
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) yield delta;
+      } catch {
+        // Malformed chunk; skip
+      }
+    }
+  }
+}
+
+// ─── 4. Utility: collect full response from stream ──────────────────────────
+async function chat(model, userMessage, systemPrompt = "") {
+  const messages = [
+    ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
+    { role: "user", content: userMessage },
+  ];
+
+  let output = "";
+  process.stdout.write(`[${model}] `);
+  for await (const token of streamChat(model, messages)) {
+    process.stdout.write(token);
+    output += token;
+  }
+  process.stdout.write("\n");
+  return output;
+}
+
+// ─── 5. Example: multi-turn conversation with context tracking ───────────────
+async function runDemo() {
+  const MODEL = "llama3.1:8b"; // or "qwen2.5:14b", "mistral:7b"
+
+  await ensureModel(MODEL);
+
+  const history = [];
+  const turns = [
+    "Explain what a GGUF file is in two sentences.",
+    "What quantisation level would you recommend for an 8 GB GPU?",
+    "Why is Q4_K_M better than plain Q4_0?",
+  ];
+
+  for (const userMsg of turns) {
+    history.push({ role: "user", content: userMsg });
+    console.log(`\nUser: ${userMsg}`);
+    process.stdout.write("Model: ");
+
+    let reply = "";
+    for await (const token of streamChat(MODEL, history)) {
+      process.stdout.write(token);
+      reply += token;
+    }
+    console.log();
+    history.push({ role: "assistant", content: reply });
+  }
+}
+
+runDemo().catch(console.error);
+</code></pre>
       </section>
-
       <section class="content-card">
-        <span class="section-label">When to use local vs cloud</span>
-        <h2>Decision framework</h2>
+        <span class="section-label">Production Local Deployment</span>
+        <h2>Serving Multiple Models at Scale</h2>
+        <p>
+          A single Ollama instance on a developer machine is not the same problem as serving
+          10 concurrent users with 3 different models on a shared GPU node. Here are the
+          production considerations that most tutorials skip.
+        </p>
+        <h3>GPU Memory Management</h3>
+        <p>
+          Ollama keeps the last-used model loaded in GPU VRAM with a 5-minute idle timeout by
+          default. If you have two models (e.g., a chat model and an embedding model), they
+          will compete for VRAM. Set <code>OLLAMA_MAX_LOADED_MODELS=2</code> and
+          <code>OLLAMA_GPU_MEMORY_FRACTION=0.9</code> to give Ollama explicit control.
+          For vLLM on dedicated servers, use tensor parallelism
+          (<code>--tensor-parallel-size 2</code>) to split a 70B model across two A100s.
+        </p>
+        <h3>Request Queuing and Concurrency</h3>
+        <p>
+          LLM inference is not parallelisable the way a stateless API is — each generation
+          step is autoregressive and serialises on the GPU. Ollama processes requests sequentially
+          per model. For higher throughput, vLLM's PagedAttention enables continuous batching:
+          it packs multiple in-flight requests into a single GPU kernel pass, dramatically
+          improving utilisation under concurrent load. Real-world throughput improvement: 2–8×
+          over naive serial inference at 10+ concurrent requests.
+        </p>
+        <h3>Context Window and KV Cache</h3>
+        <p>
+          The KV cache stores attention keys/values for the current context. At 4096 tokens,
+          a 7B model needs ~512 MB of VRAM for KV cache. At 32k tokens, that grows to ~4 GB.
+          Setting context length too high means fewer concurrent requests fit in memory.
+          Set <code>num_ctx</code> to the minimum your use case requires, not the model's maximum.
+        </p>
+        <h3>OpenAI-Compatible Reverse Proxy</h3>
+        <p>
+          For team deployments, run LiteLLM proxy in front of Ollama. LiteLLM adds rate
+          limiting per API key, request logging, cost tracking (even for local models, useful
+          for capacity planning), and fall-through to cloud APIs if the local GPU is saturated.
+          This lets you switch the backend without changing client code.
+        </p>
+        <pre><code class="language-yaml"># litellm_config.yaml — local-first with cloud fallback
+model_list:
+  - model_name: "gpt-4o"         # what clients send
+    litellm_params:
+      model: "ollama/llama3.1:8b" # what LiteLLM uses
+      api_base: "http://localhost:11434"
+  - model_name: "gpt-4o"         # fallback if local fails
+    litellm_params:
+      model: "openai/gpt-4o"
+      api_key: os.environ/OPENAI_API_KEY
+
+router_settings:
+  routing_strategy: "latency-based-routing"
+  fallbacks: [{ "gpt-4o": ["gpt-4o"] }]
+</code></pre>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What Goes Wrong and Why</h2>
+        <ul>
+          <li>
+            <strong>Model eviction under memory pressure.</strong> On macOS, the OS will
+            page out GPU memory to system RAM when other applications demand it. The model
+            is reloaded from disk on the next request — adding 5–30 seconds of cold-start
+            latency. Solution: set <code>OLLAMA_KEEP_ALIVE=-1</code> to pin the model in
+            memory permanently, and ensure other applications don't compete.
+          </li>
+          <li>
+            <strong>Tokeniser mismatch in fine-tuning.</strong> If you use a fine-tuned model
+            but load it with the wrong tokeniser (common when converting from HuggingFace to
+            GGUF), output becomes garbled after the special tokens. Always verify the tokeniser
+            embedded in the GGUF matches the base model version.
+          </li>
+          <li>
+            <strong>Context overflow without truncation.</strong> Sending a prompt that exceeds
+            <code>num_ctx</code> silently truncates from the beginning of the message, not
+            the end. The model "forgets" the system prompt. Implement explicit token counting
+            (using the <code>/api/tokenize</code> endpoint) before sending long prompts.
+          </li>
+          <li>
+            <strong>Temperature=0 is not fully deterministic.</strong> On GPU floating-point,
+            the same prompt with <code>temperature=0</code> may produce different outputs
+            across runs due to non-deterministic CUDA operations. If reproducibility is a
+            hard requirement, set a fixed seed (<code>"seed": 42</code>) in the Ollama request.
+          </li>
+          <li>
+            <strong>Quantisation artefacts in structured output.</strong> Asking a Q4_K_M model
+            for strict JSON produces malformed JSON ~5–15% of the time on complex schemas due to
+            probability smearing. Use Ollama's <code>format: "json"</code> parameter (which
+            enables grammar-constrained sampling) or the Instructor library for validated
+            structured output.
+          </li>
+          <li>
+            <strong>Thermal throttling on sustained load.</strong> Consumer GPUs (RTX 40-series)
+            throttle at 83°C. Running a 7B model for 30 minutes in a poorly ventilated case can
+            reduce sustained throughput by 20–30%. Monitor <code>nvidia-smi dmon</code> for
+            thermal events; GPU temperature should be below 75°C at sustained inference load.
+          </li>
+        </ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Scaling Constraints & Production Gotchas</span>
+        <h2>The Ceiling You Will Hit</h2>
+        <p>
+          Local LLM deployment has hard scaling limits that cloud deployments do not:
+        </p>
+        <ul>
+          <li>
+            <strong>Single GPU = single model bottleneck.</strong> You cannot horizontally scale
+            a local GPU node the way you add API concurrency. A single RTX 4090 handles ~3–5
+            concurrent streaming requests at 7B before latency degrades below acceptable
+            thresholds. Plan capacity in terms of GPU nodes, not servers.
+          </li>
+          <li>
+            <strong>Model update lag.</strong> Open-weight models lag frontier APIs by 6–18 months
+            on complex reasoning tasks. If your use case competes on AI quality (not
+            privacy/cost), local deployment may be a strategic mistake. Reassess quarterly.
+          </li>
+          <li>
+            <strong>No serverless cold-start elasticity.</strong> Cloud APIs scale to zero and
+            burst to thousands of QPS instantly. A local GPU node is always-on (power draw:
+            200–400 W for a GPU workstation) and has a fixed concurrency ceiling. For bursty
+            workloads, the economics shift toward cloud at high peak-to-average ratios.
+          </li>
+          <li>
+            <strong>Operational burden.</strong> You own model updates, GGUF compatibility,
+            driver upgrades, and hardware failure recovery. Add this to TCO calculations.
+            A small team spending 4 h/week on LLM infrastructure incurs ~$50k/year in
+            engineering cost — often exceeding the API bill it replaces.
+          </li>
+        </ul>
+        <div class="callout">
+          <p>
+            <strong>The break-even heuristic:</strong> Local deployment is economically justified
+            when your monthly API bill exceeds ~$2,000 OR when compliance mandates on-prem
+            processing. Below that threshold, the operational overhead rarely justifies the
+            hardware investment.
+          </p>
+        </div>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Decision framework</span>
+        <h2>When to Use Local vs Cloud</h2>
         <ul class="check-list">
           <li><strong>Use local when:</strong> working with private code, need offline access, running many completions (cost control), want low latency on M-series hardware.</li>
           <li><strong>Use cloud when:</strong> problem requires state-of-the-art reasoning (Claude Opus/Sonnet, GPT-4o), need multi-modal (vision), require very long context (&gt;128k tokens), prototyping speed matters more than privacy.</li>
           <li><strong>Hybrid setup:</strong> local model for autocomplete and quick edits; cloud model for architecture review, complex debugging, and multi-file refactors.</li>
         </ul>
       </section>
+      <section class="content-card">
+        <span class="section-label">Anti-Patterns</span>
+        <h2>When NOT to Use Local LLMs</h2>
+        <p>
+          As important as the deployment guide is knowing when to stop. Avoid local LLMs for:
+        </p>
+        <ul>
+          <li>
+            <strong>Complex multi-step reasoning and agent tasks.</strong> Tasks requiring 5+
+            reasoning steps (research synthesis, complex code refactoring, multi-document
+            analysis) still show meaningful quality gaps between 70B local models and
+            GPT-4o/Claude Opus. The gap shrinks but is not zero.
+          </li>
+          <li>
+            <strong>SOTA benchmark-critical applications.</strong> If your product's competitive
+            differentiation is AI quality (e.g., a legal research assistant that must be
+            demonstrably more accurate than competitors), use the frontier cloud model. The
+            quality delta compounds on edge cases.
+          </li>
+          <li>
+            <strong>Prototypes and low-traffic MVPs.</strong> The overhead of local deployment
+            is not justified when you're validating an idea. Start with cloud APIs, migrate to
+            local only after you've confirmed the use case is real and the volume warrants it.
+          </li>
+          <li>
+            <strong>Teams without a dedicated DevOps owner.</strong> Model management, hardware
+            provisioning, and inference server operations are a real ongoing cost. If nobody on
+            the team owns it, it will rot.
+          </li>
+        </ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Practical Checklist</span>
+        <h2>Before You Deploy a Local LLM</h2>
+        <ul class="check-list">
+          <li>Confirm hardware: verify available VRAM, system RAM, and thermal headroom for sustained inference load</li>
+          <li>Choose model size that fits VRAM at Q4_K_M quantisation with 20% headroom for KV cache</li>
+          <li>Start with Ollama unless you have a specific reason to use another runtime</li>
+          <li>Set <code>OLLAMA_KEEP_ALIVE=-1</code> in production to avoid cold-start latency</li>
+          <li>Set <code>num_ctx</code> to the minimum required context length, not the model maximum</li>
+          <li>Use <code>format: "json"</code> or grammar-constrained sampling for structured output tasks</li>
+          <li>Implement token counting before sending long prompts to avoid silent truncation</li>
+          <li>Monitor GPU temperature under sustained load; target below 75°C</li>
+          <li>Add a seed parameter if output reproducibility is a requirement</li>
+          <li>For multi-user serving, evaluate vLLM (CUDA) or LiteLLM proxy for concurrency management</li>
+          <li>Document the hardware TCO: amortised cost + power + operational overhead vs API bill</li>
+          <li>Benchmark your specific task (not perplexity) at Q4_K_M vs Q5_K_M before committing to a format</li>
+          <li>Plan for model updates: schedule quarterly reviews of available open-weight models</li>
+          <li>For coding: run a 14B model (Qwen2.5-Coder) for tab autocomplete and a 32B model for chat or refactors; consider a hybrid with a cloud model for architecture review and complex debugging</li>
+        </ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common Questions</h2>
 
+        <details>
+          <summary>Can I run a 70B model on a Mac with 32 GB unified memory?</summary>
+          <p>
+            Technically yes via CPU inference, but it is practically unusable: expect 1–3 tokens
+            per second. At minimum, use a 64 GB Mac (M3 Max or M4 Max) for comfortable 70B
+            inference (~12–15 t/s). With 32 GB, stick to 13B or 32B models.
+          </p>
+        </details>
+
+        <details>
+          <summary>Is Ollama suitable for production multi-user deployments?</summary>
+          <p>
+            Ollama works for small teams (2–10 concurrent users on a dedicated machine). For
+            higher concurrency, vLLM's PagedAttention and continuous batching offer significantly
+            higher throughput. Ollama is optimised for developer experience, not maximum
+            throughput. Use it behind a LiteLLM proxy to add rate limiting and logging.
+          </p>
+        </details>
+
+        <details>
+          <summary>What is the practical difference between GGUF and safetensors?</summary>
+          <p>
+            Safetensors is HuggingFace's safe tensor serialisation format — it stores weights
+            at full or half precision without quantisation. It is used for fine-tuning, training
+            pipelines, and vLLM serving. GGUF is a quantised inference format for llama.cpp.
+            They serve different parts of the lifecycle: safetensors for training/evaluation,
+            GGUF for inference on constrained hardware.
+          </p>
+        </details>
+
+        <details>
+          <summary>How do I know if my GPU will work with Ollama?</summary>
+          <p>
+            Ollama supports NVIDIA (CUDA 11.3+), AMD ROCm (limited Linux support), and Apple
+            Silicon Metal. NVIDIA support is most mature. For ROCm, check the official
+            compatibility list — not all consumer AMD GPUs are on it. Intel Arc GPUs are
+            supported via SYCL in llama.cpp but not yet in Ollama. When in doubt, test with
+            <code>ollama run llama3.2:3b "hello"</code> and check if GPU utilisation spikes in
+            nvidia-smi or Activity Monitor.
+          </p>
+        </details>
+
+        <details>
+          <summary>Can I use local LLMs with LangChain / LlamaIndex without modification?</summary>
+          <p>
+            Yes. Both frameworks support Ollama natively as a provider. Additionally, the
+            OpenAI-compatible endpoint (<code>http://localhost:11434/v1</code>) means you can
+            use the standard <code>ChatOpenAI</code> class with a custom <code>base_url</code>
+            and a dummy API key — no code changes required beyond the configuration.
+          </p>
+        </details>
+
+        <details>
+          <summary>What is the smallest model worth using for real tasks?</summary>
+          <p>
+            Phi-3 mini (3.8B) and Gemma 2 2B are surprisingly capable for classification,
+            summarisation, and extraction tasks. Phi-3 mini hits GPT-3.5 quality on many
+            benchmarks. For interactive chat, 7B is the minimum that feels natural. For code
+            completion, Qwen2.5-Coder 7B is the current sweet spot. Below 3B, output quality
+            degrades noticeably on nuanced prompts.
+          </p>
+        </details>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Related Topics</span>
+        <h2>Explore Further</h2>
+        <ul>
+          <li>
+            <a href="multi-llm-gateway-local-ai-server.html">Multi-LLM Gateway and Local AI Server</a> —
+            Running multiple models behind a unified API gateway with LiteLLM, routing, and
+            cost tracking.
+          </li>
+          <li>
+            <a href="generate-ai-images-videos-locally.html">Generate AI Images and Videos Locally</a> —
+            The local inference pattern applied to diffusion models: ComfyUI, Stable Diffusion,
+            hardware sizing for image generation.
+          </li>
+          <li>
+            <a href="8-llm-cost-optimization-techniques.html">LLM Cost Optimisation Techniques</a> —
+            When to stay on cloud APIs and how to reduce token spend — the complement to this
+            local deployment guide.
+          </li>
+        </ul>
+      </section>
       <section class="content-card takeaways">
         <h2>Key Takeaway</h2>
         <p>
-          In 2026, Apple Silicon crossed the threshold where local LLMs for coding are genuinely viable —
-          not just technically interesting. Qwen2.5-Coder-32B on an M4 Max outperforms GPT-4o on HumanEval
-          and runs entirely offline. Use Ollama for installation, Continue.dev for editor integration, and
-          the OpenAI-compatible endpoint to drop it into any Node.js toolchain. Q4_K_M quantisation is
-          the default that gets you 90% of quality at 25% of the RAM.
+          Local LLM deployment is a deliberate architectural trade: you exchange the frontier model quality and
+          zero-ops simplicity of cloud APIs for data sovereignty, deterministic cost, and sub-100 ms latency. The
+          technical pieces — GGUF quantisation, Ollama, OpenAI-compatible APIs — are mature enough that deployment is
+          not the hard part; the hard part is judging whether your task fits the capability ceiling of models you can
+          run and whether the economics justify the operational overhead. For coding, Apple Silicon crossed the
+          viability threshold: Qwen2.5-Coder-32B on an M4 Max matches or beats GPT-4o on HumanEval and runs fully
+          offline. Start with Ollama and Q4_K_M (about 90% of the quality at 25% of the RAM), use Continue.dev for the
+          editor, a hybrid local-plus-cloud setup for hard problems, and reach for vLLM or 70B models only when the
+          data shows you need them.
         </p>
       </section>
     </main>

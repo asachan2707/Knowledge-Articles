@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a URL Shortener | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 8 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.08. Covers the URL shortener: capacity math (100M writes/day, 10:1 reads, 365B records, ~36.5 TB), 301 vs 302 redirects, the two short-code strategies (counter plus base62 versus hash prefix plus collision handling with a Bloom filter), the shorten and redirect flows, caching, sharding, abuse controls and analytics. Includes an executed Node.js example (base62, counter shortener, hash shortener with Bloom filter, LRU cache). Read time about 17 minutes. Related: 07 unique-id generator, 04 rate limiter, caching, sharding, url-shortener-system-design.</div>
+        <h1>Design a URL Shortener</h1>
+        <p class="summary">A URL shortener is a deceptively small system: one write path that mints a unique short code and one very hot read path that redirects. The interesting decisions are how you mint codes, which redirect status you return, and how you keep the read path in memory.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">8 of 28 · Part 2 Building Blocks</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">17 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">base62 encoding, counter vs hash codes, 301 vs 302, Bloom filter, read-through cache</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">TinyURL, Bitly, Redis, Cassandra, DynamoDB, Snowflake</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Long URLs are awkward: they break in emails, blow past SMS limits, look ugly in print, and cannot be typed from a poster. A shortener trades a tiny lookup table for a compact, shareable alias. It also quietly becomes a click-analytics and link-management product, which is where most of the commercial value sits.</p>
+        <div class="callout"><p><strong>Core idea:</strong> the system is a giant, append-mostly key-value map from a short code to a long URL. Everything hard is about (1) generating a code that is unique without a global bottleneck, and (2) serving roughly ten reads per write at memory speed with a redirect that the browser may or may not cache.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known design</span>
+        <h2>TinyURL, Bitly and the "id to base62" pattern</h2>
+        <p>Public services such as TinyURL and Bitly popularised the simple trick that this chapter leans on: store every link under an integer primary key, then render that integer in a URL-safe alphabet. The database hands out dense integers, the encoder turns them into short strings, and decoding is the inverse arithmetic, so in principle you do not even need to index the code column. Most open-source shorteners and many internal "go/" link services follow the same shape. The variants differ mainly in <em>where the integer comes from</em>, which is why the previous chapter on unique-id generation is a prerequisite for this one.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and estimates</span>
+        <h2>Pin the numbers before drawing boxes</h2>
+        <p class="mini-heading">Functional</p>
+        <ul class="check-list">
+          <li>Shorten: given a long URL, return a short URL. The same long URL may or may not map to the same code (decide, and say so).</li>
+          <li>Redirect: given a short URL, send the browser to the long URL.</li>
+          <li>Codes are as short as possible, made of URL-safe characters, and never collide.</li>
+          <li>Highly available, low latency on redirect, and tolerant of abusive traffic.</li>
+        </ul>
+        <p class="mini-heading">Back-of-envelope</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Write QPS</td><td>100,000,000 / 86,400 s</td><td>about 1,160 per second</td></tr>
+            <tr><td>Read QPS (10:1)</td><td>1,160 x 10</td><td>about 11,600 per second</td></tr>
+            <tr><td>Peak read QPS</td><td>2x average as a safe default</td><td>about 23,000 per second</td></tr>
+            <tr><td>Records in 10 years</td><td>100M x 365 x 10</td><td>365 billion</td></tr>
+            <tr><td>Storage</td><td>365 x 10^9 x ~100 bytes</td><td>about 36.5 TB</td></tr>
+            <tr><td>Code length needed</td><td>62^6 = 5.7 x 10^10 (too small); 62^7 = 3.52 x 10^12</td><td>7 characters</td></tr>
+            <tr><td>Daily read volume</td><td>11,600 x 86,400</td><td>about 1 billion redirects a day</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><p><strong>Correction to the source notes:</strong> they quote 365 TB for ten years. With 365 billion records the figure only reaches 365 TB if each row is about 1 KB. A row is a 7-byte code, a long URL averaging a hundred-odd bytes, a timestamp and an owner id; 100 bytes per record gives 36.5 TB, and even a pessimistic 300 bytes with index overhead is about 110 TB. It is a ten-fold difference that decides whether you need a sharded cluster on day one or merely a replicated pair, so show your arithmetic in the interview.</p></div>
+        <p>The read side is the one that matters. About one billion redirects per day at roughly 100 bytes each is 100 GB of hot payload per day. Real traffic follows a power law (a few viral links take most clicks), so a cache holding the hottest 20% of a day, about 20 GB, fits comfortably in a single Redis node and gives you a very high hit ratio.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">API design</span>
+        <h2>Two endpoints, one important status code</h2>
+        <table class="data-table">
+          <thead><tr><th>Call</th><th>Request</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>Shorten</td><td><code>POST /api/v1/data/shorten</code> body <code>{"longUrl": "https://..."}</code></td><td><code>201</code> with the short URL (idempotent per long URL if you dedupe)</td></tr>
+            <tr><td>Redirect</td><td><code>GET /{shortCode}</code></td><td><code>301</code> or <code>302</code> with a <code>Location</code> header; <code>404</code> if unknown; <code>410</code> if expired</td></tr>
+          </tbody>
+        </table>
+        <p>Putting the code at the root path keeps the public URL as short as the domain permits. The redirect is the whole product, so it should be served by a thin stateless tier with nothing between it and the cache.</p>
+        <div class="diagram-box"><pre>
+ Browser                   Edge / LB            Redirect service            Cache         DB
+   |  GET /zn9edcu           |                       |                       |            |
+   |------------------------&gt;|---------------------&gt;|  GET zn9edcu          |            |
+   |                         |                       |----------------------&gt;|            |
+   |                         |                       |   hit: long URL        |            |
+   |                         |                       |&lt;----------------------|            |
+   |                         |                       |   (miss) SELECT ... WHERE code=?     |
+   |                         |                       |-------------------------------------&gt;|
+   |  302 Location: https://very-long...             |&lt;-------------------------------------|
+   |&lt;------------------------|&lt;----------------------|  populate cache, emit click event
+        </pre></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">301 vs 302</span>
+        <h2>The redirect status decides who gets the traffic</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>301 Moved Permanently</h4><ul><li>Browsers and intermediaries cache it, so repeat clicks never reach you.</li><li>Cuts server load and bandwidth for popular links.</li><li>Good when the link is truly immutable and you do not need per-click data.</li></ul></div>
+          <div class="trade-col cons"><h4>302 Found (temporary)</h4><ul><li>Every click comes back to your servers, so you can count it, geo-tag it and A/B it.</li><li>You can change or revoke the destination later and users will see it.</li><li>Costs more traffic; you must size the redirect tier for the full click rate.</li></ul></div>
+        </div>
+        <p>For a commercial shortener the answer is almost always 302 (or 307 when you want to preserve the HTTP method), because analytics and the ability to disable a malicious link are the product. A 301 is correct for an internal vanity-link service whose targets never change. Be aware that a 301 you shipped by mistake is effectively irreversible for clients that already cached it.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code generation</span>
+        <h2>Strategy A: unique id, then base62</h2>
+        <p>Each new row gets a globally unique integer (from a ticket server, a database sequence with range allocation, or a Snowflake-style generator as in chapter 7). The integer is written in base 62 using <code>[0-9a-zA-Z]</code>. Decoding is the reverse sum of digit times 62 to the power of its position. The notes' worked example, id 2,009,215,674,938, comes out as <code>zn9edcu</code>; the code below reproduces it, so the arithmetic is verified.</p>
+        <div class="diagram-box"><pre>
+ repeated division by 62, collecting remainders (least significant digit first):
+  2009215674938 / 62 =  32406704434  remainder 30 -> u
+    32406704434 / 62 =    522688781  remainder 12 -> c
+      522688781 / 62 =      8430464  remainder 13 -> d
+        8430464 / 62 =       135975  remainder 14 -> e
+         135975 / 62 =         2193  remainder  9 -> 9
+           2193 / 62 =           35  remainder 23 -> n
+             35 / 62 =            0  remainder 35 -> z
+ read the remainders bottom-up:  <span class="ok">zn9edcu</span>  (7 chars, since 62^6 &lt;= id &lt; 62^7)
+        </pre></div>
+        <p class="mini-heading">Properties</p>
+        <ul class="check-list">
+          <li>Collisions are impossible by construction, so no read-before-write is needed to guarantee uniqueness.</li>
+          <li>Length grows with the id: under 62^6 (about 56.8 billion) codes are six characters, then seven. Seven characters covers 3.52 trillion codes, roughly ten times the ten-year need of 365 billion.</li>
+          <li>Needs a distributed id source, and the id source becomes a dependency of the write path.</li>
+          <li>Codes are sequential, hence guessable. Anyone can walk <code>zn9edcu</code>, <code>zn9edcv</code>, ... and enumerate other people's links. For unlisted or private links that is a real leak.</li>
+        </ul>
+        <div class="insight-box"><p><strong>Hide the sequence without losing uniqueness.</strong> Multiply the id by a large constant coprime to 62^7 and take the result modulo 62^7 before encoding. Multiplication by a unit is a bijection on the residues, so uniqueness is preserved, the output looks random, and decoding uses the modular inverse. A Feistel network does the same job. Unlike truncating a hash, this cannot collide. If the links are security-sensitive, also add a random or signed component; obscurity alone is not authorization.</p></div>
+        <p class="mini-heading">Getting ids without a hot spot</p>
+        <p>A single counter row is a bottleneck and a single point of failure. The practical pattern is range leasing: a small coordination service (ZooKeeper, etcd, or one database row updated with <code>UPDATE ... SET next = next + 1000</code>) hands each app server a block of, say, 1,000 ids. The server mints codes from its block in memory and only returns to the coordinator when the block runs out. Coordination traffic drops by three orders of magnitude, and a crash merely wastes the unused remainder of a block, which is harmless given the code space. Flickr's ticket servers (two databases handing out odd and even ids) are the classic precursor.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code generation</span>
+        <h2>Strategy B: hash the URL and handle collisions</h2>
+        <p>Compute a hash such as CRC32, MD5 or SHA-1 of the long URL and keep the first seven characters of its base62 (or hex) form. The output is a fixed length and needs no id service. The problem is the pigeonhole principle: a truncated hash has far fewer bits than the digest.</p>
+        <p>CRC32 is only 32 bits, so its base62 form is about six characters and the collision rate is unacceptable at this scale. A truncated MD5 or SHA-1 can fill seven characters but still collides. The birthday arithmetic is unforgiving: once the table holds 10% of the 3.52 trillion code space (352 billion rows, which is where our ten-year plan ends), roughly one in ten new insertions hits an existing code, so the retry loop is a steady-state path, not an edge case.</p>
+        <div class="diagram-box"><pre>
+  longURL --hash--&gt; first 7 chars --&gt; <span class="hi">Bloom filter says "definitely new"?</span>
+                                         |yes                  |"maybe present"
+                                         v                     v
+                                   INSERT (code, long)    SELECT long WHERE code=?
+                                                                |
+                                           same long URL? <span class="ok">return it</span> | different? <span class="warn">salt + rehash</span>
+        </pre></div>
+        <p>Resolving collisions by appending a predefined string and rehashing works but costs a database lookup per attempt. A Bloom filter in front removes most of those lookups: if the filter says the code is absent, it is absent for certain, and you insert immediately. If it says "maybe present" you pay one read to disambiguate. Sizing is the usual rule: about 10 bits per element for a 1% false positive rate, so a filter over all 365 billion codes would be about 456 GB, which is why in practice you shard it or lean on the database's unique index and just retry on a duplicate-key error.</p>
+        <p>The cleanest correctness mechanism is not the filter at all, it is a <strong>unique constraint on the code column</strong> and an insert that retries with a salt on violation. The Bloom filter is an optimisation; the database is the arbiter. Two concurrent shortens of different URLs that hash to the same code cannot both succeed.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Which strategy should you pick</h2>
+        <table class="data-table">
+          <thead><tr><th>Dimension</th><th>Counter + base62</th><th>Hash + collision handling</th></tr></thead>
+          <tbody>
+            <tr><td>Code length</td><td>Grows with the id (6 then 7 chars)</td><td>Fixed</td></tr>
+            <tr><td>Needs an id generator</td><td>Yes</td><td>No</td></tr>
+            <tr><td>Collisions</td><td>Impossible</td><td>Frequent at scale; must retry</td></tr>
+            <tr><td>Write path cost</td><td>One insert</td><td>Hash, filter probe, maybe a read, insert, maybe retry</td></tr>
+            <tr><td>Guessable</td><td>Yes unless permuted</td><td>No, looks random</td></tr>
+            <tr><td>Same URL gives same code</td><td>Only with an extra lookup index</td><td>Naturally, if you do not salt</td></tr>
+            <tr><td>Custom aliases</td><td>Reserve in the same table</td><td>Same</td></tr>
+          </tbody>
+        </table>
+        <p>My default is counter plus a keyed permutation plus base62: no collisions, one write, constant-time encode, and the one genuine weakness (enumeration) is closed cheaply. Choose the hash route only when you cannot operate any central id source, or you want idempotent shortening of identical URLs for free.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Shorten and redirect flows</h2>
+        <div class="diagram-box"><pre>
+   WRITE (about 1.2K/s)                                         READ (about 12K/s, peak 23K/s)
+   client                                                       client
+     | POST longUrl                                               | GET /code
+     v                                                            v
+  [Rate limiter] -&gt; [API server] --1. lookup longUrl?--&gt; [DB / index]      [LB] -&gt; [Redirect server]
+                        | 2. new id (leased block)                             |  1. cache GET code
+                        | 3. base62(id) = code                                  |  2. miss: DB read replica
+                        | 4. INSERT (id, code, longUrl)                         |  3. fill cache, 302
+                        v                                                       v
+                    [DB primary] ---replicate--&gt; [replicas]  --&gt; [Redis]   [Kafka: click events -&gt; analytics]
+        </pre></div>
+        <p class="mini-heading">Shorten flow</p>
+        <ol>
+          <li>Check whether the long URL already exists (needs an index on the long URL or on its hash; skip this if you accept duplicates).</li>
+          <li>If it exists, return the stored code.</li>
+          <li>Otherwise take the next id, encode it, and persist the mapping.</li>
+        </ol>
+        <p class="mini-heading">Redirect flow</p>
+        <ol>
+          <li>Look up the code in the cache.</li>
+          <li>On a miss read the database (a replica is fine; links are immutable after creation), then populate the cache.</li>
+          <li>Return the redirect, and publish a click event to a queue off the critical path.</li>
+        </ol>
+        <p>Because the data is write-once, the cache can be a plain read-through LRU with a long TTL and almost no invalidation problem. The only invalidations are deletes, expiry and edits, and those are rare enough to handle with an explicit cache delete plus a short TTL as a safety net.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Data model</span>
+        <h2>Storage choice and sharding</h2>
+        <p>The access pattern is a pure point lookup by code. The schema is tiny: <code>code</code> (primary key), <code>long_url</code>, <code>created_at</code>, optional <code>expires_at</code> and <code>owner_id</code>. If you use strategy A the integer id can be the primary key and the code is derived, so no secondary index on the code is needed at all. A relational database is fine at 36 TB with sharding, but a wide-column or key-value store (Cassandra, DynamoDB) matches the workload better: no joins, no cross-row transactions, easy horizontal scale.</p>
+        <p>Shard by the code (or its hash), not by creation time. Range-sharding on a sequential id sends every new write to the newest shard, the classic hot-partition problem; hashing the code spreads both writes and the viral-link reads. See <a href="../../dynamodb-hot-partition-sharding.html">DynamoDB hot partition sharding</a> for what happens when one key is much hotter than the rest, which for a shortener is a single viral link: cache it, and consider replicating very hot keys in the cache tier.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Abuse, analytics, expiry and availability</h2>
+        <ul class="check-list">
+          <li><strong>Rate limiting.</strong> Limit shorten calls per IP and per API key, since otherwise one actor can exhaust the code space or host phishing at scale. Details in the <a href="./04-rate-limiter.html">rate limiter chapter</a>.</li>
+          <li><strong>Malicious destinations.</strong> A shortener hides where a link goes, which phishers love. Check submitted URLs against a safe-browsing style list, re-scan periodically, and keep the ability to disable a code instantly (another reason for 302).</li>
+          <li><strong>Analytics.</strong> Emit an event per redirect (code, timestamp, user agent, coarse geo, referrer) to a log such as Kafka, aggregate asynchronously. Never let the analytics write sit in the redirect latency path.</li>
+          <li><strong>Expiry.</strong> Store an optional expiry; enforce it at read time and reclaim rows in a background sweep. Do not recycle codes quickly, or stale links on printed material will point at someone else's content.</li>
+          <li><strong>Custom aliases.</strong> Share the same namespace, validate the alphabet, and use the unique constraint to arbitrate races. Reserve system words such as <code>api</code> and <code>admin</code>.</li>
+          <li><strong>Availability.</strong> The write tier can degrade; the read tier must not. Replicate across zones, keep a warm cache in each, and allow the redirect service to serve from cache if the database is down.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Hands-on</span>
+        <h2>Base62, counter shortener, hash shortener and LRU in one file</h2>
+        <p>This file implements both strategies end to end. It asserts the notes' base62 example, shows when 7 characters stop being enough, forces collisions by deliberately shrinking the hash code to 4 characters across 20,000 URLs, and verifies that retries still yield unique codes. The Bloom filter uses SHA-256 slices as its hash family, and the LRU uses a <code>Map</code>'s insertion order.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+const ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+export function encode62(n) {
+  let x = BigInt(n);
+  if (x === 0n) return '0';
+  let out = '';
+  while (x &gt; 0n) { out = ALPHABET[Number(x % 62n)] + out; x /= 62n; }
+  return out;
+}
+export function decode62(s) {
+  let x = 0n;
+  for (const ch of s) {
+    const d = ALPHABET.indexOf(ch);
+    if (d &lt; 0) throw new Error('bad char ' + ch);
+    x = x * 62n + BigInt(d);
+  }
+  return x;
+}
+
+// Bloom filter for the "hash + collision" strategy
+class Bloom {
+  constructor(bits = 1 &lt;&lt; 16, k = 4) { this.bits = new Uint8Array(bits &gt;&gt; 3); this.m = bits; this.k = k; }
+  #idx(s) {
+    const h = createHash('sha256').update(s).digest();
+    return Array.from({ length: this.k }, (_, i) =&gt; h.readUInt32BE(i * 4) % this.m);
+  }
+  add(s) { for (const i of this.#idx(s)) this.bits[i &gt;&gt; 3] |= 1 &lt;&lt; (i &amp; 7); }
+  has(s) { return this.#idx(s).every(i =&gt; this.bits[i &gt;&gt; 3] &amp; (1 &lt;&lt; (i &amp; 7))); }
+}
+
+// Strategy A: counter -&gt; base62 (permuted to avoid guessable sequence)
+export class CounterShortener {
+  constructor() { this.next = 1_000_000_000n; this.byShort = new Map(); this.byLong = new Map(); }
+  shorten(longUrl) {
+    if (this.byLong.has(longUrl)) return this.byLong.get(longUrl);
+    const id = this.next++;
+    const short = encode62(id);
+    this.byShort.set(short, longUrl); this.byLong.set(longUrl, short);
+    return short;
+  }
+  resolve(s) { return this.byShort.get(s); }
+}
+
+// Strategy B: hash prefix + salt-on-collision (DB is source of truth, bloom is a fast negative check)
+export class HashShortener {
+  constructor(len = 7) { this.len = len; this.db = new Map(); this.bloom = new Bloom(); this.dbLookups = 0; }
+  shorten(longUrl) {
+    for (let attempt = 0; ; attempt++) {
+      const digest = createHash('sha256').update(longUrl + (attempt ? '#' + attempt : '')).digest();
+      const short = encode62(BigInt('0x' + digest.subarray(0, 6).toString('hex'))).padStart(this.len, '0').slice(0, this.len);
+      if (!this.bloom.has(short)) { this.db.set(short, longUrl); this.bloom.add(short); return short; }
+      this.dbLookups++; // possible collision: confirm in DB
+      const existing = this.db.get(short);
+      if (existing === longUrl) return short; // same URL already stored
+      // true collision -&gt; retry with salt
+    }
+  }
+}
+
+// LRU cache for the redirect path
+export class LRU {
+  constructor(cap) { this.cap = cap; this.m = new Map(); }
+  get(k) { if (!this.m.has(k)) return undefined; const v = this.m.get(k); this.m.delete(k); this.m.set(k, v); return v; }
+  set(k, v) { this.m.delete(k); this.m.set(k, v); if (this.m.size &gt; this.cap) this.m.delete(this.m.keys().next().value); }
+}
+
+// ---- self test ----
+assert.equal(encode62(2009215674938n), 'zn9edcu');
+assert.equal(decode62('zn9edcu'), 2009215674938n);
+assert.equal(62n ** 7n, 3521614606208n);
+assert.equal(encode62(62n ** 7n - 1n).length, 7);
+assert.equal(encode62(62n ** 7n).length, 8);
+console.log('base62(2009215674938) =', encode62(2009215674938n));
+console.log('62^7 =', 62n ** 7n, ' 100M/day * 365 * 10 =', 100_000_000n * 3650n, 'urls -&gt;', encode62(100_000_000n * 3650n).length, 'chars');
+
+const c = new CounterShortener();
+const a = c.shorten('https://example.com/a'), b = c.shorten('https://example.com/b');
+assert.notEqual(a, b); assert.equal(c.shorten('https://example.com/a'), a);
+console.log('counter:', a, b, '-&gt;', c.resolve(a));
+
+const h = new HashShortener(4); // tiny length to force collisions
+const seen = new Set();
+for (let i = 0; i &lt; 20000; i++) seen.add(h.shorten('https://example.com/page/' + i));
+assert.equal(seen.size, 20000);
+console.log('hash(4 chars): 20000 urls, all unique codes:', seen.size, ', collision DB checks:', h.dbLookups);
+
+const cache = new LRU(2); cache.set('x', 1); cache.set('y', 2); cache.get('x'); cache.set('z', 3);
+assert.equal(cache.get('y'), undefined); assert.equal(cache.get('x'), 1);
+console.log('LRU ok');</code></pre>
+        <p class="code-caption">Run with <code>node shortener.mjs</code>. Prints <code>base62(2009215674938) = zn9edcu</code>, the 7-character capacity check (365 billion fits in 7 chars), two counter-issued codes, 20,000 unique 4-character hash codes with about 2,200 collision database checks, and "LRU ok". All assertions pass.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks and how you notice</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Id coordinator down</td><td>Writes fail</td><td>Leased blocks keep servers going for minutes; run the coordinator replicated</td></tr>
+            <tr><td>Cache cold start or flush</td><td>Database sees the whole read rate</td><td>Replicas, pre-warm top codes, request coalescing on a miss</td></tr>
+            <tr><td>Viral link</td><td>One cache key and one shard saturate</td><td>Local in-process cache for top-N, replicate hot key</td></tr>
+            <tr><td>Hash collision storm</td><td>Write latency climbs as retries multiply</td><td>Prefer strategy A; widen the code; unique constraint plus bounded retries</td></tr>
+            <tr><td>Cached 301 for a bad link</td><td>Takedown does not reach users</td><td>Use 302, or short cache-control max-age</td></tr>
+            <tr><td>Enumeration scraping</td><td>Private links leaked</td><td>Permute ids, per-IP limits, signed tokens for private links</td></tr>
+            <tr><td>Region outage</td><td>Redirects 5xx</td><td>Multi-region reads, DNS or anycast failover, async cross-region replication</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production gotchas</span>
+        <h2>Where the knees are</h2>
+        <ul class="check-list">
+          <li>Redirect tier scales linearly and statelessly; the first real limit is cache memory and network, not CPU.</li>
+          <li>The write path is 10x smaller than reads, so a modest primary with replicas carries it far; shard the database when storage, not QPS, forces you, around the tens of terabytes.</li>
+          <li>URL validation matters: reject non-http schemes (<code>javascript:</code>, <code>file:</code>), normalise, cap length, and block your own domain to prevent redirect loops.</li>
+          <li>Case-sensitive codes (<code>aB</code> vs <code>ab</code>) bite when someone reads the code aloud or the storage layer is case-insensitive. Decide up front; some services drop to base36 or remove look-alike characters (0/O, 1/l) to trade length for legibility.</li>
+          <li>Never reuse a deleted code immediately, and keep a tombstone so you can return 410 instead of silently redirecting somewhere new.</li>
+          <li>Time-to-first-byte of the redirect is the metric to watch; measure the 99th percentile including cache misses.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>State write QPS, read QPS, record count and storage with arithmetic, and justify 7 characters.</li>
+          <li>Choose 301 or 302 and give the reason (caching vs analytics and control).</li>
+          <li>Pick a code strategy, name its failure (collisions or guessability) and its fix.</li>
+          <li>Explain how uniqueness is enforced under concurrency (unique constraint, not just a filter).</li>
+          <li>Put a cache in front of reads, and shard by code hash not by time.</li>
+          <li>Cover rate limiting, malicious links, analytics off the hot path, expiry and availability.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why base62 and not base64?</summary><p>Standard base64 includes <code>+</code> and <code>/</code>, which have meaning in URLs and need escaping, and pads with <code>=</code>. URL-safe base64 swaps in <code>-</code> and <code>_</code> and works fine too; base62 is simply the largest purely alphanumeric alphabet, which avoids any encoding ambiguity and survives copy-paste, word-wrapping and voice dictation better.</p></details>
+        <details><summary>Should the same long URL always give the same short code?</summary><p>Not necessarily. Deduplication saves space and makes the call idempotent, but costs an index on the long URL and prevents per-user links (two people shortening the same page want separate click statistics). Many commercial services create a new code per request and dedupe only within an account.</p></details>
+        <details><summary>How do I stop people guessing other codes?</summary><p>Permute the id with a keyed bijection before encoding, or use random codes with a collision check. For genuinely private content do not rely on code secrecy at all: require authentication, or embed a signed token.</p></details>
+        <details><summary>What happens if two servers generate the same code?</summary><p>With leased id blocks it cannot happen because blocks are disjoint. With hashing it can; the unique constraint rejects the second insert and the writer retries with a salt. That is why the database, not the Bloom filter, is the source of truth.</p></details>
+        <details><summary>How would you add expiring links and click limits?</summary><p>Store <code>expires_at</code> and an optional remaining-clicks counter. Expiry is a read-time check plus a background delete. A click budget needs an atomic decrement (a Redis <code>DECR</code> or a conditional database update) and forces you onto a 302 so every click is observed.</p></details>
+        <details><summary>How do you scale the cache for a billion reads a day?</summary><p>One billion reads is only about 12K per second on average, trivial for Redis. Use a replicated cache for availability, consistent hashing if you outgrow one node, a small in-process cache for the hottest handful of codes, and coalesce simultaneous misses on the same key to avoid a stampede.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./07-unique-id-generator.html">Chapter 7: Design a Unique ID Generator</a> — the source of integers for strategy A.</li>
+          <li><a href="./09-web-crawler.html">Chapter 9: Design a Web Crawler</a> — next chapter; also leans on URL normalisation and Bloom filters.</li>
+          <li><a href="../../url-shortener-system-design.html">URL Shortener System Design</a> — the hub's standalone take on the same problem.</li>
+          <li><a href="../../system-design/caching.html">Caching</a> — read-through, TTL and stampede protection for the redirect path.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — hash versus range partitioning for the mapping table.</li>
+          <li><a href="../../system-design/rate-limiting.html">Rate Limiting</a> — protecting the shorten endpoint.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repository lists no additional resources specific to this chapter; the neighbouring unique-id chapter lists:</p>
+        <ul>
+          <li><a href="https://code.flickr.net/2010/02/08/ticket-servers-distributed-unique-primary-keys-on-the-cheap">Ticket Servers: Distributed Unique Primary Keys on the Cheap</a></li>
+          <li><a href="https://blog.twitter.com/engineering/en_us/a/2010/announcing-snowflake.html">Snowflake</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A URL shortener is a write-once key-value map with a hot read path. Mint codes from unique integers rendered in base62 (permute them if guessability matters), enforce uniqueness in the database, serve redirects from a read-through cache, and choose 302 when you want to keep control and analytics. Fix the storage arithmetic: 365 billion rows at about 100 bytes is roughly 36.5 TB, not 365 TB.</p>
+      </section>
+    </main>
+  </body>
+</html>

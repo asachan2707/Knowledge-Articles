@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Structuring 40 Million Documents Into an Agentic Knowledge Graph | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1600&h=700&fit=crop&auto=format&q=80"
+               alt="Network graph visualization of connected knowledge nodes" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Agents · AI · Data Engineering · Architecture · 40 min</span>
+          </div>
+        </figure>
+        <h1>Structuring 40 Million Documents Into an Agentic Knowledge Graph</h1>
+        <p class="summary">
+          A production blueprint for transforming 40 million unstructured documents into a traversable knowledge graph that AI agents can query with multi-hop reasoning. Covers the complete pipeline: semantic chunking, LLM-powered entity and relationship extraction, Neo4j schema design, GraphRAG hybrid retrieval, agentic tool design, incremental updates, and full cost model — built for a real company demo that scales to production.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: Agents · Data Engineering · Knowledge Graphs · Production AI</span>
+          <span class="meta-item" data-added="2026-09-03">Published: 2026-09-03</span>
+        </div>
+      </header>
+
+      <!-- SECTION 1: Lead + Core Idea -->
+      <section class="content-card">
+        <p class="lead">
+          Keyword search finds documents that contain words. A knowledge graph finds documents that contain meaning — and more importantly, it lets you traverse the relationships between meanings. When an AI agent asks "what caused the supply chain disruption that affected Q3 margins?", it needs a graph it can walk, not an index it can scan.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> A knowledge graph turns 40 million isolated documents into a connected semantic network where AI agents can answer multi-hop questions that no keyword search or flat vector store could resolve — because the answers are hidden in the relationships between entities, not in any single document.</p>
+        </div>
+      </section>
+
+      <!-- SECTION 2: Story -->
+      <section class="story-card">
+        <span class="section-label">Story · Why Elasticsearch fails at 40 million documents</span>
+        <p>
+          A legal firm has 40 million case documents — depositions, contracts, judgments, correspondence. Their current system: Elasticsearch with BM25 keyword search. A junior associate asks: "Show me all cases where a supplier agreement dispute led to a contract termination that was later reversed on appeal." Elasticsearch returns documents containing those words. None of them answer the question.
+        </p>
+        <p>
+          The question is fundamentally relational. It requires the system to understand that Supplier Agreement X is a type of contract, that Dispute Y is related to that agreement, that Termination Z resulted from that dispute, and that Appeal A reversed Termination Z. That's a four-hop graph traversal. No keyword search can do it. A vector search can find semantically similar sentences, but it cannot chain entity relationships across documents.
+        </p>
+        <p>
+          The solution: build a knowledge graph where these relationships are first-class citizens, then let agents traverse it with structured queries backed by an LLM reasoning layer.
+        </p>
+      </section>
+
+      <!-- SECTION 3: Architecture Overview -->
+      <section class="content-card">
+        <span class="section-label">Architecture · The six-component pipeline</span>
+        <h2>End-to-End Architecture</h2>
+        <p>Processing 40 million documents requires a pipeline that can run incrementally, recover from failures, and produce a consistent graph. The six components are:</p>
+        <div class="callout">
+          <p><strong>Pipeline:</strong> Raw Docs → Ingestion Layer → Document Processor → Entity Extractor → Relationship Extractor → Graph Writer → Neo4j → Agentic Query Interface</p>
+        </div>
+        <table>
+          <thead><tr><th>Component</th><th>Technology</th><th>Throughput</th><th>Key Concern</th></tr></thead>
+          <tbody>
+            <tr><td>Ingestion Layer</td><td>Kafka + S3</td><td>50K docs/hr</td><td>Deduplication, ordering</td></tr>
+            <tr><td>Document Processor</td><td>Node.js workers + pdfplumber</td><td>10K chunks/hr</td><td>Format normalization</td></tr>
+            <tr><td>Entity Extractor</td><td>spaCy + Claude Haiku</td><td>5K docs/hr</td><td>Disambiguation, dedup</td></tr>
+            <tr><td>Relationship Extractor</td><td>Claude Haiku batch API</td><td>2K docs/hr</td><td>Confidence scoring</td></tr>
+            <tr><td>Graph Writer</td><td>Neo4j Bulk Import</td><td>1M nodes/hr</td><td>MERGE idempotency</td></tr>
+            <tr><td>Query Interface</td><td>MCP server + Cypher</td><td>100 QPS</td><td>Multi-hop latency</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- SECTION 4: Document Ingestion -->
+      <section class="content-card">
+        <span class="section-label">Ingestion · Chunking strategies and deduplication</span>
+        <h2>Document Ingestion at Scale</h2>
+        <p>Before any entity extraction can happen, raw documents must be ingested, normalized, chunked, and deduplicated. At 40M documents, choices made here compound dramatically.</p>
+        <h3>Chunking Strategies</h3>
+        <ul>
+          <li><strong>Fixed-size (512 tokens):</strong> Fast, predictable, but cuts sentences mid-thought. Good for dense structured documents.</li>
+          <li><strong>Sentence-boundary:</strong> Preserves semantic units. Use NLTK or spaCy sentence tokenizer. 20% slower than fixed-size.</li>
+          <li><strong>Semantic chunking:</strong> Split when embedding similarity drops below threshold. Best quality, 3× slower, requires embedding pass before chunking.</li>
+          <li><strong>Recursive:</strong> Try large chunks first; if chunk embedding variance is high, split further. Best for mixed documents.</li>
+        </ul>
+        <p><strong>Decision at 40M scale:</strong> sentence-boundary chunking with a 512-token soft cap. Semantic chunking is too expensive at this volume for first-pass ingestion.</p>
+        <h3>Deduplication</h3>
+        <p>At 40M documents, 15–30% are near-duplicates (forwarded emails, revised drafts, mirrored filings). MinHash LSH detects near-duplicates in O(n) time with configurable Jaccard threshold.</p>
+        <span class="code-label">JavaScript Example — Document Chunking Pipeline</span>
+        <pre><code class="language-javascript">import Anthropic from '@anthropic-ai/sdk';
+
+class DocumentProcessor {
+  constructor() {
+    this.client = new Anthropic();
+    this.maxChunkTokens = 512;
+  }
+
+  // Sentence-boundary chunking with 512-token soft cap
+  chunkBySentence(text, metadata) {
+    const sentences = text.match(/[^.!?]+[.!?]+/g) ?? [text];
+    const chunks = [];
+    let current = '';
+    let tokenEstimate = 0;
+
+    for (const sentence of sentences) {
+      const sentenceTokens = Math.ceil(sentence.length / 4); // ~4 chars/token
+      if (tokenEstimate + sentenceTokens > this.maxChunkTokens && current) {
+        chunks.push({
+          text: current.trim(),
+          tokens: tokenEstimate,
+          metadata: { ...metadata, chunkIndex: chunks.length },
+        });
+        current = '';
+        tokenEstimate = 0;
+      }
+      current += sentence + ' ';
+      tokenEstimate += sentenceTokens;
+    }
+
+    if (current.trim()) {
+      chunks.push({
+        text: current.trim(),
+        tokens: tokenEstimate,
+        metadata: { ...metadata, chunkIndex: chunks.length },
+      });
+    }
+    return chunks;
+  }
+
+  // MinHash fingerprint for deduplication (simplified)
+  minHash(text, numHashes = 128) {
+    const shingles = new Set();
+    const words = text.toLowerCase().split(/\s+/);
+    for (let i = 0; i &lt; words.length - 2; i++) {
+      shingles.add(`${words[i]} ${words[i+1]} ${words[i+2]}`);
+    }
+    // In production: use a proper MinHash library (datasketch or similar)
+    return Array.from(shingles).slice(0, numHashes).map(s =>
+      s.split('').reduce((h, c) => (Math.imul(31, h) + c.charCodeAt(0)) | 0, 0)
+    );
+  }
+
+  jaccardSimilarity(hash1, hash2) {
+    let matches = 0;
+    for (let i = 0; i &lt; hash1.length; i++) {
+      if (hash1[i] === hash2[i]) matches++;
+    }
+    return matches / hash1.length;
+  }
+}
+
+// Usage
+const processor = new DocumentProcessor();
+const chunks = processor.chunkBySentence(documentText, { docId: 'doc-001', source: 's3://legal-docs/case-12345.pdf' });
+console.log(`Generated ${chunks.length} chunks from document`);</code></pre>
+      </section>
+
+      <!-- SECTION 5: Entity Extraction -->
+      <section class="content-card">
+        <span class="section-label">Entity Extraction · NER at 40M document scale</span>
+        <h2>Entity Extraction</h2>
+        <p>Entity extraction is the most expensive step. Every token of every document must be scanned for named entities. At 40M documents with average 2K tokens each, that's 80B tokens of NER — a decision that drives the entire cost model.</p>
+        <h3>Approach Comparison</h3>
+        <table>
+          <thead><tr><th>Approach</th><th>Accuracy</th><th>Cost/1M docs</th><th>Speed</th><th>Custom entities</th></tr></thead>
+          <tbody>
+            <tr><td>spaCy (en_core_web_lg)</td><td>86%</td><td>$12 (compute)</td><td>50K docs/hr</td><td>Requires retraining</td></tr>
+            <tr><td>Flair NER</td><td>92%</td><td>$40 (compute)</td><td>15K docs/hr</td><td>Requires retraining</td></tr>
+            <tr><td>Claude Haiku (batch)</td><td>96%</td><td>$800 (API)</td><td>5K docs/hr</td><td>Zero-shot, prompt-defined</td></tr>
+            <tr><td>Hybrid: spaCy + Haiku</td><td>94%</td><td>$120</td><td>20K docs/hr</td><td>Yes (LLM for edge cases)</td></tr>
+          </tbody>
+        </table>
+        <p><strong>Production decision:</strong> spaCy for standard NER (PERSON, ORG, GPE, DATE, MONEY), Claude Haiku batch API for domain-specific entities (CONTRACT_TYPE, LEGAL_CONCEPT, PRODUCT_CODE) and disambiguation. This hybrid cuts LLM costs by 85%.</p>
+        <span class="code-label">JavaScript Example — LLM Entity Extraction with Batching</span>
+        <pre><code class="language-javascript">import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+// Entity extraction prompt — zero-shot, structured output
+const ENTITY_EXTRACTION_PROMPT = (text) => `Extract all named entities from the following text.
+Return a JSON array of objects with fields: name, type, canonical_name, confidence (0-1).
+
+Entity types to extract:
+- PERSON: individuals
+- ORGANIZATION: companies, agencies, institutions
+- LOCATION: countries, cities, addresses
+- LEGAL_CONCEPT: laws, regulations, clauses
+- DATE: specific dates or date ranges
+- PRODUCT: named products or services
+- EVENT: named events
+
+Text:
+"""
+${text}
+"""
+
+Return ONLY valid JSON, no explanation.`;
+
+async function extractEntitiesBatch(chunks) {
+  // Use Anthropic's batch API for cost-efficient processing
+  const requests = chunks.map((chunk, i) => ({
+    custom_id: `chunk-${chunk.metadata.docId}-${i}`,
+    params: {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: ENTITY_EXTRACTION_PROMPT(chunk.text) }],
+    },
+  }));
+
+  const batch = await client.messages.batches.create({ requests });
+
+  // Poll for completion (in production: use webhook or async polling)
+  let batchResult = await client.messages.batches.retrieve(batch.id);
+  while (batchResult.processing_status !== 'ended') {
+    await new Promise(r => setTimeout(r, 5000));
+    batchResult = await client.messages.batches.retrieve(batch.id);
+  }
+
+  // Stream results
+  const entities = new Map(); // entity canonical_name → Entity node
+  for await (const result of client.messages.batches.results(batch.id)) {
+    if (result.result.type === 'succeeded') {
+      try {
+        const extracted = JSON.parse(result.result.message.content[0].text);
+        for (const entity of extracted) {
+          const key = `${entity.type}:${entity.canonical_name.toLowerCase()}`;
+          if (!entities.has(key)) entities.set(key, { ...entity, mentions: [] });
+          entities.get(key).mentions.push({ customId: result.custom_id, confidence: entity.confidence });
+        }
+      } catch (e) {
+        console.error('Parse error for', result.custom_id, e);
+      }
+    }
+  }
+  return entities;
+}</code></pre>
+      </section>
+
+      <!-- SECTION 6: Relationship Extraction -->
+      <section class="content-card">
+        <span class="section-label">Relationships · Extracting semantic edges</span>
+        <h2>Relationship Extraction</h2>
+        <p>Entities are the nodes. Relationships are the edges that make the graph valuable. A document that mentions both "Apple Inc." and "Tim Cook" without explicitly stating their relationship is useless for graph traversal. Relationship extraction infers those edges.</p>
+        <h3>Relationship Types</h3>
+        <ul>
+          <li><strong>CAUSES:</strong> Entity A caused/led to Entity B. (Directional, confidence-scored)</li>
+          <li><strong>INFLUENCES:</strong> Entity A influenced Entity B. (Weaker causal link)</li>
+          <li><strong>PART_OF:</strong> Entity A is a component of Entity B.</li>
+          <li><strong>PRECEDES:</strong> Entity A happened before Entity B. (Temporal)</li>
+          <li><strong>CONTRADICTS:</strong> Entity A contradicts/conflicts with Entity B.</li>
+          <li><strong>SUPPORTS:</strong> Entity A supports/corroborates Entity B.</li>
+          <li><strong>EMPLOYED_BY:</strong> Person A is employed by Organization B.</li>
+          <li><strong>OWNS:</strong> Entity A owns Entity B.</li>
+        </ul>
+        <p>Each relationship is extracted with a confidence score (0–1) and source document ID. Relationships with confidence &lt; 0.6 are stored but excluded from default graph traversal.</p>
+        <span class="code-label">JavaScript Example — Relationship Extraction</span>
+        <pre><code class="language-javascript">const RELATIONSHIP_PROMPT = (text, entities) => `Given this text and the identified entities, extract all relationships between entities.
+
+Entities found: ${JSON.stringify(entities.map(e => e.name))}
+
+For each relationship, return:
+- source: entity name
+- target: entity name
+- relation: one of [CAUSES, INFLUENCES, PART_OF, PRECEDES, CONTRADICTS, SUPPORTS, EMPLOYED_BY, OWNS, LOCATED_IN, OCCURRED_AT]
+- confidence: 0.0 to 1.0
+- evidence: the exact quote supporting this relationship (max 100 chars)
+
+Text: """${text}"""
+
+Return valid JSON array only.`;
+
+async function extractRelationships(client, chunk, entities) {
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: RELATIONSHIP_PROMPT(chunk.text, entities) }],
+  });
+
+  try {
+    const relationships = JSON.parse(response.content[0].text);
+    return relationships.filter(r => r.confidence >= 0.5).map(r => ({
+      ...r,
+      sourceDocId: chunk.metadata.docId,
+      extractedAt: new Date().toISOString(),
+    }));
+  } catch {
+    return [];
+  }
+}</code></pre>
+      </section>
+
+      <!-- SECTION 7: Graph Schema -->
+      <section class="content-card">
+        <span class="section-label">Schema · Neo4j graph design</span>
+        <h2>Knowledge Graph Schema Design</h2>
+        <p>The schema determines what questions the graph can answer. Design it around the queries agents will ask, not around document structure.</p>
+        <pre><code class="language-cypher">// Node types
+(:Document { id: UUID, title: String, source: String, date: DateTime,
+             docType: String, embedding: Float[], tokenCount: Int })
+
+(:Entity { id: UUID, name: String, type: String, canonicalName: String,
+           wikidataId: String, embedding: Float[] })
+
+(:Concept { id: UUID, name: String, description: String, embedding: Float[] })
+
+// Edge types
+(:Document)-[:MENTIONS { count: Int, positions: Int[] }]->(:Entity)
+(:Entity)-[:RELATED_TO { relationType: String, confidence: Float,
+                          sourceDocs: String[] }]->(:Entity)
+(:Entity)-[:CAUSES { confidence: Float, temporalContext: String }]->(:Entity)
+(:Document)-[:CITES { context: String }]->(:Document)
+(:Entity)-[:APPEARS_WITH { coOccurrenceCount: Int }]->(:Entity)
+
+// Indexes for performance
+CREATE INDEX entity_name FOR (e:Entity) ON (e.canonicalName);
+CREATE INDEX doc_date FOR (d:Document) ON (d.date);
+CREATE VECTOR INDEX entity_embedding FOR (e:Entity) ON (e.embedding)
+  OPTIONS { indexConfig: { dimensions: 1536, similarityFunction: 'cosine' } };</code></pre>
+        <h3>Graph Database Comparison at 40M Scale</h3>
+        <table>
+          <thead><tr><th>Database</th><th>Query language</th><th>Cloud managed</th><th>Vector support</th><th>Sharding</th><th>Best for</th></tr></thead>
+          <tbody>
+            <tr><td>Neo4j AuraDB</td><td>Cypher</td><td>Yes (AuraDB)</td><td>Yes (5.x+)</td><td>Fabric</td><td>Best tooling, production default</td></tr>
+            <tr><td>Amazon Neptune</td><td>SPARQL / Gremlin</td><td>Yes (managed)</td><td>Partial</td><td>Auto</td><td>AWS-native, RDF use cases</td></tr>
+            <tr><td>TigerGraph</td><td>GSQL</td><td>Yes (Cloud)</td><td>Yes</td><td>Native</td><td>Real-time analytics, telco</td></tr>
+            <tr><td>Memgraph</td><td>Cypher</td><td>Yes</td><td>Partial</td><td>Limited</td><td>In-memory speed, smaller graphs</td></tr>
+          </tbody>
+        </table>
+        <p><strong>Decision:</strong> Neo4j AuraDB Enterprise. Cypher is readable, tooling is mature, vector indexing is built-in from v5.x, and AuraDB removes operational overhead.</p>
+      </section>
+
+      <!-- SECTION 8: Neo4j Insertion -->
+      <section class="content-card">
+        <span class="section-label">Storage · Idempotent graph writes</span>
+        <h2>Graph Writer: Idempotent MERGE Operations</h2>
+        <p>At 40M documents with incremental updates, writes must be idempotent. MERGE in Cypher creates a node or relationship only if it doesn't already exist — critical for preventing duplicates during retries or re-ingestion.</p>
+        <span class="code-label">JavaScript Example — Neo4j Graph Insertion</span>
+        <pre><code class="language-javascript">import neo4j from 'neo4j-driver';
+
+const driver = neo4j.driver(
+  process.env.NEO4J_URI,
+  neo4j.auth.basic(process.env.NEO4J_USER, process.env.NEO4J_PASSWORD)
+);
+
+async function insertDocumentWithEntities(document, entities, relationships) {
+  const session = driver.session({ database: 'knowledge-graph' });
+  const tx = session.beginTransaction();
+
+  try {
+    // MERGE document node (idempotent)
+    await tx.run(`
+      MERGE (d:Document { id: $docId })
+      ON CREATE SET d.title = $title, d.source = $source,
+                    d.date = datetime($date), d.docType = $docType,
+                    d.embedding = $embedding, d.tokenCount = $tokenCount
+      ON MATCH SET d.tokenCount = $tokenCount  // update metadata on re-ingestion
+    `, { docId: document.id, title: document.title, source: document.source,
+         date: document.date, docType: document.docType,
+         embedding: document.embedding, tokenCount: document.tokenCount });
+
+    // MERGE entity nodes + MENTIONS edges
+    for (const entity of entities) {
+      await tx.run(`
+        MERGE (e:Entity { id: $entityId })
+        ON CREATE SET e.name = $name, e.type = $type,
+                      e.canonicalName = $canonicalName, e.wikidataId = $wikidataId
+        WITH e
+        MATCH (d:Document { id: $docId })
+        MERGE (d)-[m:MENTIONS]->(e)
+        ON CREATE SET m.count = 1, m.positions = $positions
+        ON MATCH SET m.count = m.count + 1
+      `, { entityId: entity.id, name: entity.name, type: entity.type,
+           canonicalName: entity.canonicalName, wikidataId: entity.wikidataId ?? '',
+           docId: document.id, positions: entity.positions });
+    }
+
+    // MERGE relationship edges
+    for (const rel of relationships) {
+      await tx.run(`
+        MATCH (src:Entity { canonicalName: $srcName })
+        MATCH (tgt:Entity { canonicalName: $tgtName })
+        MERGE (src)-[r:RELATED_TO { relationType: $relType }]->(tgt)
+        ON CREATE SET r.confidence = $confidence, r.sourceDocs = [$docId]
+        ON MATCH SET r.confidence = (r.confidence + $confidence) / 2.0,
+                     r.sourceDocs = r.sourceDocs + [$docId]
+      `, { srcName: rel.source, tgtName: rel.target, relType: rel.relation,
+           confidence: rel.confidence, docId: document.id });
+    }
+
+    await tx.commit();
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  } finally {
+    await session.close();
+  }
+}</code></pre>
+      </section>
+
+      <!-- SECTION 9: Agentic Querying -->
+      <section class="content-card">
+        <span class="section-label">Agents · Multi-hop graph traversal</span>
+        <h2>Agentic Querying: GraphRAG Pattern</h2>
+        <p>The knowledge graph becomes useful only when agents can traverse it dynamically. The GraphRAG pattern combines vector similarity search (to find entry points) with graph traversal (to find related entities and causal chains).</p>
+        <h3>Agent Tool Design</h3>
+        <p>An MCP server exposes the graph through four tools that agents can call:</p>
+        <ul>
+          <li><code>search_entities(query)</code> — vector search over entity embeddings to find starting nodes</li>
+          <li><code>get_entity_graph(entityId, depth)</code> — traverse relationships up to N hops from an entity</li>
+          <li><code>find_causal_chain(from, to)</code> — shortest path between two entities via CAUSES edges</li>
+          <li><code>find_documents(entities[])</code> — retrieve source documents that mention a set of entities</li>
+        </ul>
+        <span class="code-label">JavaScript Example — Agentic Graph Traversal</span>
+        <pre><code class="language-javascript">// MCP tool: multi-hop causal chain query
+async function findCausalChain(driver, fromEntity, toEntity, maxHops = 5) {
+  const session = driver.session();
+  try {
+    const result = await session.run(`
+      MATCH path = shortestPath(
+        (src:Entity { canonicalName: $from })-[:CAUSES|INFLUENCES*1..${maxHops}]->(tgt:Entity { canonicalName: $to })
+      )
+      RETURN [node in nodes(path) | { name: node.canonicalName, type: node.type }] AS chain,
+             [rel in relationships(path) | { type: type(rel), confidence: rel.confidence }] AS edges,
+             length(path) AS hops
+      ORDER BY hops ASC
+      LIMIT 5
+    `, { from: fromEntity, to: toEntity });
+
+    return result.records.map(r => ({
+      chain: r.get('chain'),
+      edges: r.get('edges'),
+      hops: r.get('hops').toNumber(),
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+// Vector search entry point (hybrid: vector + graph)
+async function graphRAGQuery(driver, client, userQuery, k = 5) {
+  // Step 1: embed the query
+  // (use text-embedding-3-small or similar)
+  const queryEmbedding = await embedText(userQuery);
+
+  // Step 2: vector search to find semantically close entities
+  const session = driver.session();
+  const vectorResult = await session.run(`
+    CALL db.index.vector.queryNodes('entity_embedding', $k, $embedding)
+    YIELD node, score
+    RETURN node.canonicalName AS name, node.type AS type, score
+    ORDER BY score DESC
+  `, { k, embedding: queryEmbedding });
+
+  const seedEntities = vectorResult.records.map(r => r.get('name'));
+
+  // Step 3: expand each seed entity 2 hops through the graph
+  const graphResult = await session.run(`
+    UNWIND $seeds AS seedName
+    MATCH (seed:Entity { canonicalName: seedName })
+    CALL apoc.path.subgraphNodes(seed, { maxLevel: 2, relationshipFilter: 'RELATED_TO|CAUSES' })
+    YIELD node
+    RETURN DISTINCT node.canonicalName AS name, node.type AS type
+    LIMIT 50
+  `, { seeds: seedEntities });
+
+  const expandedEntities = graphResult.records.map(r => r.get('name'));
+
+  // Step 4: retrieve source documents for expanded entity set
+  const docsResult = await session.run(`
+    MATCH (d:Document)-[:MENTIONS]->(e:Entity)
+    WHERE e.canonicalName IN $entities
+    RETURN d.id AS id, d.title AS title, d.source AS source, count(e) AS entityMatches
+    ORDER BY entityMatches DESC
+    LIMIT 10
+  `, { entities: expandedEntities });
+
+  await session.close();
+
+  // Step 5: LLM synthesis over retrieved documents
+  const docs = docsResult.records.map(r => ({ id: r.get('id'), title: r.get('title') }));
+  return { seedEntities, expandedEntities, relevantDocs: docs };
+}</code></pre>
+      </section>
+
+      <!-- SECTION 10: Production Concerns -->
+      <section class="content-card">
+        <span class="section-label">Production · Sharding, indexing, and incremental updates</span>
+        <h2>Production Concerns at 40M Scale</h2>
+        <h3>Sharding Strategy</h3>
+        <p>Neo4j Fabric allows splitting the graph across multiple databases by domain. For 40M documents, partition by document domain (legal, financial, technical) or by date range. Cross-partition queries are slower but manageable for multi-hop traversal.</p>
+        <h3>Index Design</h3>
+        <ul>
+          <li><strong>Full-text index on Entity.canonicalName:</strong> Fuzzy search entry points for agent queries.</li>
+          <li><strong>Vector index on Entity.embedding:</strong> Semantic search entry points (GraphRAG step 1).</li>
+          <li><strong>Composite index on Document(date, docType):</strong> Time-filtered document retrieval.</li>
+          <li><strong>Index on relationship confidence:</strong> Skip low-confidence edges in default traversal.</li>
+        </ul>
+        <h3>Incremental Updates</h3>
+        <p>New documents are processed through the same pipeline. MERGE operations ensure idempotency — re-ingesting a document updates metadata without creating duplicate nodes. Relationship confidence scores are averaged across all source documents, improving accuracy over time.</p>
+        <h3>Cost Model (40M documents)</h3>
+        <table>
+          <thead><tr><th>Step</th><th>Tool</th><th>Unit cost</th><th>Total (40M docs)</th></tr></thead>
+          <tbody>
+            <tr><td>Chunking + OCR</td><td>AWS Textract / pdfplumber</td><td>$0.0015/page</td><td>$60K</td></tr>
+            <tr><td>NER (spaCy, 90%)</td><td>EC2 compute</td><td>$0.0003/doc</td><td>$12K</td></tr>
+            <tr><td>NER (Haiku, 10%)</td><td>Claude Haiku batch</td><td>$0.003/doc</td><td>$12K</td></tr>
+            <tr><td>Relationship extraction</td><td>Claude Haiku batch</td><td>$0.005/doc</td><td>$200K</td></tr>
+            <tr><td>Embeddings</td><td>text-embedding-3-small</td><td>$0.00002/1K tokens</td><td>$8K</td></tr>
+            <tr><td>Graph storage (Neo4j AuraDB)</td><td>Per month</td><td>$1,200/mo</td><td>Ongoing</td></tr>
+            <tr><td><strong>Total ingestion</strong></td><td></td><td></td><td><strong>~$292K one-time</strong></td></tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          <p><strong>Cost optimization:</strong> Run relationship extraction only on documents with 3+ extracted entities. At 40M docs, ~40% have fewer than 3 entities — skipping them cuts relationship extraction costs by 40% (saves ~$80K).</p>
+        </div>
+      </section>
+
+      <!-- SECTION 11: Failure Modes -->
+      <section class="content-card">
+        <span class="section-label">Failure modes · What breaks at scale</span>
+        <h2>Failure Modes and Mitigations</h2>
+        <ul>
+          <li><strong>Entity disambiguation failure:</strong> "Apple" as tech company vs fruit vs New York record label. Mitigation: Wikidata ID lookup + context window disambiguation with LLM.</li>
+          <li><strong>Relationship hallucination:</strong> LLM confidently extracts a relationship that doesn't exist in text. Mitigation: require evidence quote, reject confidence &lt; 0.6, human audit sample of 1%.</li>
+          <li><strong>Graph drift:</strong> Entity canonical names change over time (company renaming, mergers). Mitigation: ALIAS edges linking old to new canonical name, never delete nodes.</li>
+          <li><strong>Traversal explosion:</strong> Multi-hop query on a highly-connected entity returns millions of paths. Mitigation: depth limit (5 hops max), confidence threshold filtering, LIMIT clauses in all Cypher queries.</li>
+          <li><strong>Ingestion lag:</strong> Kafka consumer falls behind during spikes. Mitigation: consumer group scaling, S3 as durable buffer, dead-letter topic for failed extractions.</li>
+        </ul>
+      </section>
+
+      <!-- SECTION 12: Related Topics -->
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./graphify-folder-knowledge-graph.html">Graphify: Turn Any Folder Into a Knowledge Graph</a> — Knowledge graph for code repositories to reduce LLM context overhead.</li>
+          <li><a href="./ai-agents-resume-after-failure.html">How to Build AI Agents That Resume After Failure</a> — Durable execution patterns for long-running agent pipelines like this one.</li>
+          <li><a href="./9-agentic-harness-architectures.html">9 Agentic Harness Architectures</a> — Multi-agent orchestration patterns for querying the knowledge graph.</li>
+        </ul>
+      </section>
+
+      <!-- Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist · Production readiness</span>
+        <h2>Production Readiness Checklist</h2>
+        <ul class="check-list">
+          <li>Deduplication pipeline (MinHash LSH) running before entity extraction</li>
+          <li>All graph writes use MERGE (not CREATE) for idempotency</li>
+          <li>Entity disambiguation against Wikidata for PERSON, ORG, GPE types</li>
+          <li>Relationship confidence threshold set (recommend &ge; 0.6 for traversal)</li>
+          <li>Vector index on Entity.embedding for GraphRAG entry-point search</li>
+          <li>Full-text index on Entity.canonicalName for fuzzy search</li>
+          <li>Dead-letter queue for failed extraction jobs</li>
+          <li>Traversal depth limit enforced (max 5 hops) in all agent tools</li>
+          <li>Graph partitioning plan defined (Neo4j Fabric or date-range splits)</li>
+          <li>Incremental update pipeline tested with re-ingestion of 1K documents</li>
+          <li>Cost model reviewed and LLM batch API configured for 50% cost reduction</li>
+          <li>Human audit sample (1%) of extracted relationships for quality baseline</li>
+        </ul>
+      </section>
+
+      <!-- FAQ -->
+      <section class="content-card">
+        <h2>FAQ</h2>
+        <details>
+          <summary>Why not just use a vector store with RAG?</summary>
+          <p>Vector stores answer "find me similar documents." Knowledge graphs answer "how did X lead to Y?" — causal chains, multi-hop relationships, and temporal sequences. For factual lookups, vector RAG is fine. For questions that require traversing entity relationships across documents, you need a graph. GraphRAG uses both: vectors for entry-point discovery, graph for traversal.</p>
+        </details>
+        <details>
+          <summary>Can we build this incrementally, or does it require all 40M docs upfront?</summary>
+          <p>Incremental is the correct approach. Start with a 100K-document pilot to validate extraction quality and graph schema. MERGE operations make re-ingestion safe — you can always add documents to the graph without rebuilding. The schema should be designed for incremental growth.</p>
+        </details>
+        <details>
+          <summary>How do we handle documents in multiple languages?</summary>
+          <p>Run language detection first (langdetect or fasttext). Route English documents to spaCy English pipeline. For other languages: multilingual spaCy models (xx_ent_wiki_sm), or route all non-English to Claude Haiku which handles 50+ languages natively. Canonical entity names should be normalized to English for cross-language entity resolution.</p>
+        </details>
+        <details>
+          <summary>What's the query latency for a 4-hop traversal on a 40M document graph?</summary>
+          <p>With proper indexing (entity name index, relationship confidence index), a 4-hop shortest-path query on a 100M+ node graph typically returns in 50–200ms on Neo4j AuraDB Enterprise. The bottleneck is usually the GraphRAG vector search step (20–50ms for HNSW ANN search) rather than the graph traversal. Total end-to-end agent response with LLM synthesis: 1–3 seconds.</p>
+        </details>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Building a knowledge graph from 40 million documents is a systems engineering problem, not just an NLP problem. The architecture decisions that determine success are: hybrid NER (spaCy + LLM) to control cost while maintaining accuracy; MERGE-based idempotent graph writes to enable safe incremental updates; a graph schema designed around agent query patterns rather than document structure; and the GraphRAG pattern — combining vector entry-point discovery with multi-hop graph traversal — to answer questions that no flat retrieval system can. The one-time ingestion cost (~$292K) is front-loaded; the ongoing query cost is negligible relative to the analytical value a connected knowledge graph delivers.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

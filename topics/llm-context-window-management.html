@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>The LLM Landscape Part 1: The Starter's Guide to Context Window Management | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Abstract neural network visualization representing transformer attention and context"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Fundamentals · Engineering · 12 min</span>
+          </div>
+        </figure>
+
+        <h1>The LLM Landscape Part 1: The Starter's Guide to Context Window Management</h1>
+        <p class="summary">
+          Every LLM has a finite context window — the total tokens it can read and reason over in one call. Understanding how tokens work, how attention degrades across long contexts, and which strategies to apply at scale is the foundational skill for building reliable, cost-efficient AI features.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: AI Engineering</span>
+          <span class="meta-item" data-added="2026-09-03">Published: 2026-09-03</span>
+        </div>
+      </header>
+
+      <!-- Lead section -->
+      <section class="content-card">
+        <p class="lead">
+          The context window is not just a technical constraint — it is the operating budget of every LLM interaction. Engineers who treat it as a simple character limit ship systems that silently degrade at scale. Engineers who understand the mechanics — tokenisation, quadratic attention cost, positional encoding, retrieval accuracy curves — ship systems that stay accurate, stay cheap, and scale predictably.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> A context window is the entire text the model can read before generating a single token. What goes in, in what order, and how much of it is relevant are the three levers that determine output quality, latency, and cost simultaneously.</p>
+        </div>
+      </section>
+
+      <!-- Story -->
+      <section class="story-card">
+        <span class="section-label">Story · Slack's internal AI search failure and recovery</span>
+        <p>
+          In 2023 Slack built a first-generation AI thread summariser that dumped entire channel histories into a single GPT-4 prompt. At first it worked brilliantly for short, focused threads. Then a power user summarised a 600-message engineering incident channel. The model returned confident-sounding prose that completely omitted the root cause — which appeared in messages 280–340, squarely in the middle of the context. No error, no warning; just a plausible hallucination presented as a summary.
+        </p>
+        <p>
+          The team had discovered the "lost in the middle" problem empirically. The fix was a two-stage pipeline: first cluster messages by semantic similarity (embedding + k-means), then build per-cluster mini-summaries, then summarise the summaries. Peak context per call dropped from 90k tokens to under 8k. Accuracy, as measured by human labellers checking for root-cause inclusion, jumped from 54% to 91%. Costs dropped 80%.
+        </p>
+        <p>
+          The lesson: more context is not always better. The architecture of what you put in the context matters as much as the size of the window.
+        </p>
+      </section>
+
+      <!-- Section 1: Tokens vs Characters -->
+      <section class="content-card">
+        <span class="section-label">Fundamentals · Tokens, Not Characters</span>
+        <h2>What a Token Actually Is</h2>
+        <p>
+          Models do not read characters or words — they read tokens. A token is a subword unit produced by a byte-pair encoding (BPE) or unigram language model tokeniser. OpenAI's cl100k_base (used by GPT-4o) has ~100,000 token types. Anthropic's tokeniser for Claude is similar in spirit. The key ratios to internalise:
+        </p>
+        <ul>
+          <li><strong>English prose:</strong> ~1.3 tokens per word, or roughly 750 words per 1,000 tokens.</li>
+          <li><strong>Dense code (Python/JS):</strong> ~1.5–2 tokens per word — indentation, brackets, and camelCase split differently.</li>
+          <li><strong>JSON / XML:</strong> 2–4x more tokens than equivalent prose — every brace, quote, and colon is its own token or split.</li>
+          <li><strong>Non-English text:</strong> CJK characters often cost 1–3 tokens each; agglutinative languages (Turkish, Finnish) can be 2–5x English cost.</li>
+        </ul>
+        <p>
+          Practical consequence: a 200-page PDF (~50,000 words) costs roughly 65,000 tokens. A 200k context window comfortably holds it — but only if you are using a model that has that window. GPT-4o at 128k holds about 160 pages of dense prose before truncation.
+        </p>
+        <div class="callout">
+          <p><strong>Rule of thumb:</strong> Estimate token count as <code>(character_count / 4)</code> for English prose. For JSON payloads or code, multiply by 1.5. For CJK, use <code>character_count * 1.5</code>.</p>
+        </div>
+      </section>
+
+      <!-- Section 2: Attention mechanism -->
+      <section class="content-card">
+        <span class="section-label">Architecture · How Attention Works Over Context</span>
+        <h2>Attention Is Quadratic — and That Is the Whole Problem</h2>
+        <p>
+          Transformer self-attention computes a score between every pair of tokens in the context. For a sequence of length <em>n</em>, that is O(n²) memory and O(n²) compute per layer. A 128k token context is not twice as expensive as 64k — it is four times as expensive per layer, then multiplied by the number of layers (32–96 in production models). This is why 1M-token Gemini 1.5 Pro requires Google's custom TPU infrastructure; naive GPU attention would OOM.
+        </p>
+        <p>
+          Several approximations have been shipped to production:
+        </p>
+        <ul>
+          <li><strong>FlashAttention (v1/v2/v3):</strong> Tiling the attention computation to SRAM rather than HBM; same asymptotic complexity, but 2–4x faster in wall-clock time and 5–10x less memory bandwidth. Used by almost every production serving stack.</li>
+          <li><strong>Sliding window attention (Mistral, Llama 3):</strong> Each token attends to only the last <em>w</em> tokens (e.g. 4,096). Fast, but loses global context — relevant for streaming generation, not global document QA.</li>
+          <li><strong>Grouped query attention (GQA):</strong> Multiple query heads share a single key/value head pair. Reduces KV cache memory by 4–8x; used by Llama 3, Mistral, Gemma.</li>
+          <li><strong>Ring attention / sequence parallelism:</strong> Distributes long sequences across devices. Required for 1M+ token inference at Google and at startups targeting long-document use cases.</li>
+        </ul>
+        <p>
+          For engineers building applications: you pay for the full context on every API call. Prompt caching (see below) is the primary lever for amortising that cost when the same system prompt is reused.
+        </p>
+      </section>
+
+      <!-- Section 3: Model landscape -->
+      <section class="content-card">
+        <span class="section-label">Landscape · Context Window Sizes Across Models (2025)</span>
+        <h2>Model Context Window Reference</h2>
+        <p>
+          Context window sizes as of mid-2025. Effective usable context is consistently lower than the advertised maximum due to the lost-in-the-middle effect, KV cache memory limits in self-hosted deployments, and per-request cost ceilings.
+        </p>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9rem; margin-top:1rem;">
+          <thead>
+            <tr style="border-bottom: 2px solid var(--border);">
+              <th style="text-align:left; padding:0.5rem;">Model</th>
+              <th style="text-align:right; padding:0.5rem;">Context Window</th>
+              <th style="text-align:right; padding:0.5rem;">Input cost / 1M tokens</th>
+              <th style="text-align:left; padding:0.5rem;">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">GPT-4o</td>
+              <td style="text-align:right; padding:0.5rem;">128k</td>
+              <td style="text-align:right; padding:0.5rem;">$2.50</td>
+              <td style="padding:0.5rem;">Prompt caching at 50% discount after 1,024 tokens</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Claude 3.5 Sonnet</td>
+              <td style="text-align:right; padding:0.5rem;">200k</td>
+              <td style="text-align:right; padding:0.5rem;">$3.00</td>
+              <td style="padding:0.5rem;">Prompt caching at 90% discount; strongest mid-context accuracy</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Gemini 1.5 Pro</td>
+              <td style="text-align:right; padding:0.5rem;">1M (2M preview)</td>
+              <td style="text-align:right; padding:0.5rem;">$1.25 (≤128k)</td>
+              <td style="padding:0.5rem;">Price tiers by context band; best for native long-doc tasks</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Gemini 2.0 Flash</td>
+              <td style="text-align:right; padding:0.5rem;">1M</td>
+              <td style="text-align:right; padding:0.5rem;">$0.10</td>
+              <td style="padding:0.5rem;">Best price/context ratio for throughput-heavy pipelines</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Llama 3.1 (70B/405B)</td>
+              <td style="text-align:right; padding:0.5rem;">128k</td>
+              <td style="text-align:right; padding:0.5rem;">Self-hosted</td>
+              <td style="padding:0.5rem;">Effective accuracy drops sharply beyond 60k in benchmarks</td>
+            </tr>
+            <tr>
+              <td style="padding:0.5rem;">Mistral Large 2</td>
+              <td style="text-align:right; padding:0.5rem;">128k</td>
+              <td style="text-align:right; padding:0.5rem;">$2.00</td>
+              <td style="padding:0.5rem;">Sliding window + grouped attention; fast but limited global recall</td>
+            </tr>
+          </tbody>
+        </table>
+        <p style="margin-top:1rem; font-size:0.85rem; color: var(--text-muted);">Prices approximate as of 2025 — always check provider pricing pages before budgeting production workloads.</p>
+      </section>
+
+      <!-- Section 4: Lost in the middle -->
+      <section class="content-card">
+        <span class="section-label">Research Finding · Lost in the Middle</span>
+        <h2>Why Putting Important Information in the Middle Kills Accuracy</h2>
+        <p>
+          Stanford and UC Berkeley researchers published "Lost in the Middle" (Liu et al., 2023) — a study showing that LLMs achieve highest retrieval accuracy for content at the very beginning or very end of a long context. Accuracy for content in the middle of a 20-document prompt dropped by 20–30 percentage points compared to the same document placed at position 0 or position 19.
+        </p>
+        <p>
+          The mechanism is positional encoding bias: models are trained predominantly on shorter sequences, so attention weights become noisier for distant positions. The first few hundred tokens also receive disproportionate weight due to how causal attention masks accumulate.
+        </p>
+        <p>
+          Production implications:
+        </p>
+        <ul>
+          <li><strong>Always put the most critical instructions at the top of the system prompt</strong>, not buried in the middle.</li>
+          <li><strong>Put the user query both at the start and end</strong> of a long document prompt when possible (query repetition pattern).</li>
+          <li>For multi-document retrieval, <strong>rank retrieved chunks by score and place the highest-scoring chunks first and last</strong> — not in random or chronological order.</li>
+          <li>For agents with tool outputs, <strong>truncate or summarise older tool results</strong> rather than accumulating all of them at the back of the context.</li>
+          <li>Claude 3.5 Sonnet has substantially better mid-context recall than GPT-4o in independent benchmarks — a legitimate reason to prefer it for long-document tasks.</li>
+        </ul>
+        <div class="callout">
+          <p><strong>Design rule:</strong> Treat the first 2,000 tokens and the last 2,000 tokens of any prompt as prime real estate. Anything critical that ends up in the middle should be either moved or duplicated at a boundary.</p>
+        </div>
+      </section>
+
+      <!-- Section 5: Context management strategies -->
+      <section class="content-card">
+        <span class="section-label">Strategies · Managing Context at Scale</span>
+        <h2>Five Practical Context Management Strategies</h2>
+
+        <h3>1. Sliding Window / Rolling Context</h3>
+        <p>
+          For chat applications with long histories: keep the system prompt fixed at the top, keep the last <em>k</em> message pairs verbatim, and discard everything older. The value of <em>k</em> depends on token budget — typically targeting 60–70% context fill to leave headroom for the model's output. This is the simplest strategy, appropriate when conversations are self-contained and do not reference early context frequently.
+        </p>
+
+        <h3>2. Hierarchical Summarisation</h3>
+        <p>
+          When rolling deletion loses critical earlier context: replace the oldest <em>n</em> messages with a running summary generated by a smaller, cheaper model (e.g. GPT-4o-mini at $0.15/1M tokens). The summary is prepended to the context after the system prompt. GitHub Copilot Chat uses a variant of this — the conversation "memory" is a sliding summary, not a raw transcript. Latency cost is an extra summary call every ~20 turns; compute cost is a small fraction of the main call.
+        </p>
+
+        <h3>3. RAG — Retrieval Augmented Generation</h3>
+        <p>
+          For knowledge bases, codebases, and document collections larger than ~50 pages: embed documents into a vector store (pgvector, Pinecone, Weaviate, Qdrant) and retrieve only the top-k relevant chunks per query. This decouples the size of the knowledge base from the context window entirely. The 50-page threshold is a heuristic: below it, shoving the whole document into a long-context model is simpler and often more accurate; above it, RAG wins on cost and scales infinitely.
+        </p>
+        <p>
+          RAG tradeoff to know: retrieval recall is not perfect. If the relevant chunk is not retrieved, the model does not know the answer — it cannot "look harder." For complex multi-hop questions, a naive single-stage RAG fails; you need HyDE (hypothetical document embeddings), multi-query expansion, or re-ranking with a cross-encoder.
+        </p>
+
+        <h3>4. Prompt Caching</h3>
+        <p>
+          Both Anthropic and OpenAI offer server-side caching of prompt prefixes. When the same system prompt + document appears at the start of every request, the KV cache from the first inference is reused on subsequent calls — you pay only for the new tokens added to the suffix.
+        </p>
+        <ul>
+          <li><strong>Anthropic cache_control:</strong> Mark a prefix with <code>"cache_control": {"type": "ephemeral"}</code>. Cache write cost = 1.25x base; cache read cost = 0.1x base (90% discount). Cache TTL = 5 minutes (extended with refreshes).</li>
+          <li><strong>OpenAI automatic caching:</strong> No explicit markup needed — OpenAI caches any prompt prefix longer than 1,024 tokens automatically at 50% off. Requires deterministic prefix (same tokens, same order).</li>
+          <li>For a 10k-token system prompt repeated across 1,000 requests, caching reduces that prefix cost by ~90% on Anthropic (from $30 to ~$3 plus a $3.75 write fee on first use). At scale this is a primary cost lever.</li>
+        </ul>
+
+        <h3>5. Context Compression</h3>
+        <p>
+          Before sending retrieved documents to the model, a smaller model (or a dedicated compression step) strips boilerplate, deduplicates repeated information, and rewrites dense sections into shorter forms while preserving factual content. LLMLingua (Microsoft Research) achieves 3–20x compression ratios with less than 5% accuracy degradation on many benchmarks. Selective sentence extraction using TF-IDF or BM25 scores is a simpler no-ML alternative that works well for structured documents.
+        </p>
+      </section>
+
+      <!-- Section 6: Code example -->
+      <section class="content-card">
+        <span class="section-label">Code · JavaScript</span>
+        <h2>Sliding Window Context Manager + Token Estimator</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">
+// Sliding window context manager for chat applications.
+// Keeps system prompt fixed, maintains a rolling window of recent turns,
+// and replaces oldest turns with a running summary when the window fills.
+
+const APPROX_CHARS_PER_TOKEN = 4; // English prose heuristic
+
+/**
+ * Estimate token count without a tokeniser API call.
+ * Use tiktoken or the model provider's count_tokens endpoint for exact counts.
+ */
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length / APPROX_CHARS_PER_TOKEN);
+}
+
+function estimateMessageTokens(message) {
+  // 4 tokens overhead per message (role, content delimiters) is a GPT-4 heuristic
+  return 4 + estimateTokens(message.content ?? '');
+}
+
+class SlidingWindowContextManager {
+  /**
+   * @param {string} systemPrompt  - Fixed system prompt (never trimmed)
+   * @param {number} maxContextTokens - Hard token limit (leave ~20% for output)
+   * @param {Function} summarise - async (messages) => string, a cheap model call
+   */
+  constructor({ systemPrompt, maxContextTokens = 100_000, summarise }) {
+    this.systemPrompt = systemPrompt;
+    this.maxContextTokens = maxContextTokens;
+    this.summarise = summarise;
+
+    this.systemTokens = estimateTokens(systemPrompt);
+    this.messages = [];       // { role, content }[]
+    this.summaryBlock = null; // accumulated summary string, injected after system prompt
+  }
+
+  get usedTokens() {
+    const summaryTokens = this.summaryBlock ? estimateTokens(this.summaryBlock) + 4 : 0;
+    const messageTokens = this.messages.reduce(
+      (acc, m) => acc + estimateMessageTokens(m), 0
+    );
+    return this.systemTokens + summaryTokens + messageTokens;
+  }
+
+  get availableTokens() {
+    return this.maxContextTokens - this.usedTokens;
+  }
+
+  async addMessage(role, content) {
+    this.messages.push({ role, content });
+
+    // Trim oldest turns if we exceed the budget.
+    // Summarise in batches of 6 turns (3 exchanges) for efficiency.
+    while (this.usedTokens > this.maxContextTokens && this.messages.length > 4) {
+      const batch = this.messages.splice(0, 6); // remove oldest 6 turns
+      const newSummary = await this.summarise(batch);
+
+      // Merge with existing summary
+      if (this.summaryBlock) {
+        this.summaryBlock = `${this.summaryBlock}\n\nMore recent context:\n${newSummary}`;
+      } else {
+        this.summaryBlock = `Earlier conversation summary:\n${newSummary}`;
+      }
+    }
+  }
+
+  /**
+   * Returns the messages array ready to send to the API.
+   * Injects the summary as a synthetic user/assistant exchange after the system prompt.
+   */
+  buildPrompt() {
+    const messages = [];
+
+    if (this.summaryBlock) {
+      messages.push({
+        role: 'user',
+        content: `[Context from earlier in this conversation]\n${this.summaryBlock}`
+      });
+      messages.push({
+        role: 'assistant',
+        content: 'Understood. I have that earlier context in mind.'
+      });
+    }
+
+    messages.push(...this.messages);
+    return messages;
+  }
+
+  stats() {
+    return {
+      usedTokens: this.usedTokens,
+      availableTokens: this.availableTokens,
+      fillPercent: ((this.usedTokens / this.maxContextTokens) * 100).toFixed(1),
+      messageCount: this.messages.length,
+      hasSummary: !!this.summaryBlock
+    };
+  }
+}
+
+// --- Usage example ---
+
+async function cheapSummariser(messages) {
+  // In production, call gpt-4o-mini or claude-haiku here.
+  // This stub returns a placeholder.
+  const text = messages.map(m => `${m.role}: ${m.content}`).join('\n');
+  return `[Summary of ${messages.length} messages — ${estimateTokens(text)} tokens compressed]`;
+}
+
+const ctx = new SlidingWindowContextManager({
+  systemPrompt: 'You are a helpful engineering assistant. Be concise and precise.',
+  maxContextTokens: 8_000,   // small limit to demonstrate trimming quickly
+  summarise: cheapSummariser,
+});
+
+// Simulate a conversation
+(async () => {
+  const turns = [
+    ['user', 'What is the time complexity of quicksort?'],
+    ['assistant', 'Average O(n log n), worst case O(n²) when pivot selection is poor.'],
+    ['user', 'How do we avoid the worst case?'],
+    ['assistant', 'Use median-of-three pivot or random pivot selection. Introsort switches to heapsort when recursion depth exceeds 2*log(n), guaranteeing O(n log n) in all cases.'],
+    ['user', 'What does Node.js use internally?'],
+    ['assistant', 'V8 uses Timsort for Array.prototype.sort — a hybrid merge/insertion sort with O(n log n) worst case.'],
+  ];
+
+  for (const [role, content] of turns) {
+    await ctx.addMessage(role, content);
+    console.log('After turn:', ctx.stats());
+  }
+
+  const prompt = ctx.buildPrompt();
+  console.log('\nFinal prompt structure:', prompt.map(m => ({
+    role: m.role,
+    tokens: estimateMessageTokens(m)
+  })));
+})();
+        </code></pre>
+        <p>
+          This pattern is production-ready for chat applications. For document QA, replace the sliding window with a RAG retrieval step and use the context manager only for the conversation history portion.
+        </p>
+      </section>
+
+      <!-- Section 7: Token budget management -->
+      <section class="content-card">
+        <span class="section-label">Operations · Token Budget Management</span>
+        <h2>Tracking and Controlling Token Spend in Production</h2>
+        <p>
+          Every LLM API response returns usage metadata. Log it. Without this data you are flying blind on cost attribution. Stripe's ML platform team tracks token usage per feature, per user cohort, and per model version in real-time to catch regressions the moment a prompt change inflates cost.
+        </p>
+        <h3>Key parameters to set on every API call</h3>
+        <ul>
+          <li><strong>max_tokens / max_completion_tokens:</strong> Always set this. Without it, a runaway generation can output 4,096 tokens when you expected 100. For classification tasks, set max_tokens=10. For summaries, 300–500. For code generation, 2,000–4,000.</li>
+          <li><strong>temperature:</strong> Does not affect token count directly but affects the need for retries. Lower temperature = more deterministic = fewer regeneration loops.</li>
+          <li><strong>stream:true:</strong> Start processing output earlier; abort early if you detect the model is going off-track. Netflix's content recommendation team uses streaming to cancel generations that exceed a quality threshold before they complete.</li>
+        </ul>
+        <h3>Cost estimation formula</h3>
+        <p>
+          For a feature sending N requests per day with an average input of I tokens and output of O tokens at price P_in / P_out per million tokens:
+        </p>
+        <pre style="background: var(--surface-2, #1e1e2e); padding: 1rem; border-radius: 6px; font-size: 0.85rem; overflow-x: auto;"><code>daily_cost = N * (I * P_in + O * P_out) / 1_000_000
+
+Example (GPT-4o, 10k req/day, 2k input tokens, 500 output tokens):
+= 10000 * (2000 * 2.50 + 500 * 10.00) / 1_000_000
+= 10000 * (5.00 + 5.00) / 1_000_000
+= $0.10 per day → $3/month
+
+Same workload on Claude 3.5 Haiku at $0.80 input / $4.00 output:
+= 10000 * (2000 * 0.80 + 500 * 4.00) / 1_000_000
+= 10000 * (1.60 + 2.00) / 1_000_000
+= $0.036 per day → $1.08/month</code></pre>
+      </section>
+
+      <!-- Section 8: Long context vs RAG decision -->
+      <section class="content-card">
+        <span class="section-label">Architecture Decision · Long Context vs RAG</span>
+        <h2>When to Use Long Context and When to Use RAG</h2>
+        <p>
+          The choice is not purely about document size. It is about retrieval pattern, latency budget, and how frequently the knowledge base changes.
+        </p>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9rem; margin-top:1rem;">
+          <thead>
+            <tr style="border-bottom: 2px solid var(--border);">
+              <th style="text-align:left; padding:0.5rem;">Factor</th>
+              <th style="text-align:left; padding:0.5rem;">Prefer Long Context</th>
+              <th style="text-align:left; padding:0.5rem;">Prefer RAG</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Document size</td>
+              <td style="padding:0.5rem;">Under ~50 pages / 60k tokens</td>
+              <td style="padding:0.5rem;">Over 50 pages; or unbounded corpora</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Query type</td>
+              <td style="padding:0.5rem;">Full-document analysis, holistic synthesis</td>
+              <td style="padding:0.5rem;">Factual lookup, targeted Q&amp;A</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Update frequency</td>
+              <td style="padding:0.5rem;">Static or infrequent updates</td>
+              <td style="padding:0.5rem;">Frequent updates — re-embed incrementally</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Latency budget</td>
+              <td style="padding:0.5rem;">Tolerant (&gt;5s acceptable)</td>
+              <td style="padding:0.5rem;">Tight (&lt;2s) — retrieval + small context is faster</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td style="padding:0.5rem;">Multi-doc reasoning</td>
+              <td style="padding:0.5rem;">Strong — model sees everything at once</td>
+              <td style="padding:0.5rem;">Weak for multi-hop unless pipeline is designed for it</td>
+            </tr>
+            <tr>
+              <td style="padding:0.5rem;">Cost at scale</td>
+              <td style="padding:0.5rem;">Expensive — full doc re-ingested every call</td>
+              <td style="padding:0.5rem;">Cheap — only retrieved chunks sent to model</td>
+            </tr>
+          </tbody>
+        </table>
+        <p style="margin-top:1rem;">
+          Google's NotebookLM uses long context (Gemini 1.5 Pro) because users explicitly upload bounded notebooks and expect holistic synthesis. Perplexity uses RAG because the web is unbounded and latency must stay under 2 seconds. Both decisions are correct given their constraints.
+        </p>
+      </section>
+
+      <!-- Section 9: Failure modes -->
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>How Context Window Mismanagement Breaks in Production</h2>
+        <ul>
+          <li>
+            <strong>Silent truncation:</strong> Most APIs truncate silently when input exceeds the context limit. The model receives a partial prompt and returns a confident answer based on incomplete information. Always validate token count before sending — never rely on the API to fail visibly.
+          </li>
+          <li>
+            <strong>Context poisoning:</strong> In multi-turn agents, a malicious or buggy tool response injected into the context can override instructions from earlier in the prompt. This is the primary vector for prompt injection in agentic pipelines. Sanitise tool output before appending to context.
+          </li>
+          <li>
+            <strong>KV cache invalidation (self-hosted):</strong> Changing any token before the cached prefix invalidates the entire cache. Adding a timestamp to a system prompt every request, or varying instruction wording, destroys cache hit rates and spikes cost.
+          </li>
+          <li>
+            <strong>Attention sink overflow:</strong> Very long contexts cause attention weights to concentrate on the first few tokens (the "sink") regardless of semantic relevance. On some models beyond 80% context fill, early-context instructions lose their weight and the model starts ignoring them.
+          </li>
+          <li>
+            <strong>Repeating context in tool loops:</strong> Agents that append full tool outputs to the context on every iteration hit the context ceiling within 5–10 turns for rich tool outputs. Implement a context budget check before every tool call addition.
+          </li>
+        </ul>
+      </section>
+
+      <!-- Section 10: Scaling constraints -->
+      <section class="content-card">
+        <span class="section-label">Production · Scaling Constraints and Gotchas</span>
+        <h2>What Nobody Tells You Until You Hit Production Scale</h2>
+        <ul>
+          <li>
+            <strong>Latency scales super-linearly with context:</strong> A 100k-token prompt does not take twice as long to process as a 50k prompt — it takes 3–4x as long due to attention compute. Time-to-first-token (TTFT) is the key latency metric for interactive applications; prefill cost dominates TTFT for long inputs.
+          </li>
+          <li>
+            <strong>Prompt caching has a minimum prefix length:</strong> OpenAI requires 1,024 tokens to enable automatic caching. Anthropic requires the cached block to be at least 1,024 tokens. Short system prompts do not cache — pad them or consolidate instructions if you want the discount.
+          </li>
+          <li>
+            <strong>Context window and max output tokens share the same limit on some models:</strong> On older OpenAI models, the combined input + output cannot exceed the context limit. On GPT-4o-mini, context limit is 128k but max output is 16k. Plan accordingly — a 120k token input leaves only 8k for output.
+          </li>
+          <li>
+            <strong>Embedding model context limits are even shorter:</strong> text-embedding-3-large has an 8,192 token limit. Chunking strategy for RAG must account for this — a "page" of 3,000 tokens might need splitting when including surrounding context for coherence.
+          </li>
+          <li>
+            <strong>Rate limits interact with context length:</strong> OpenAI rate limits are expressed in tokens per minute (TPM), not requests per minute. A single 100k-token request can consume more than 10% of a Tier-2 TPM quota in one shot.
+          </li>
+        </ul>
+      </section>
+
+      <!-- Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist · Context Window Management</span>
+        <h2>Production-Ready Context Management Checklist</h2>
+        <ul class="check-list">
+          <li>Estimate token count before every API call using a fast heuristic or tiktoken; never let the API truncate silently</li>
+          <li>Set <code>max_tokens</code> on every request — no exceptions</li>
+          <li>Log input tokens, output tokens, and cost per request to a metrics store</li>
+          <li>Place the most critical instructions in the first 1,000 tokens of the system prompt</li>
+          <li>Use the query-at-top-and-bottom pattern for any prompt exceeding 8k tokens</li>
+          <li>Enable prompt caching for any system prompt longer than 1,024 tokens that repeats across requests</li>
+          <li>Keep a stable, deterministic prefix for cached prompts — no timestamps, no request-specific IDs in the cached block</li>
+          <li>For knowledge base applications over ~50 pages, implement RAG rather than stuffing raw documents into context</li>
+          <li>In agentic loops, check remaining context budget before appending each tool result</li>
+          <li>Use a cheap model (GPT-4o-mini, Claude Haiku) for summarisation and compression steps</li>
+          <li>Sanitise all external tool output before injecting into context to prevent prompt injection</li>
+          <li>Benchmark your actual TTFT at target context lengths under load — do not assume latency scales linearly</li>
+        </ul>
+      </section>
+
+      <!-- FAQ -->
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Common Questions</h2>
+
+        <details>
+          <summary>Does a larger context window always mean better answers?</summary>
+          <p>No. More context increases noise, can confuse the model with contradictory information, increases latency, and increases cost. Use only what is necessary. The right amount of context is the minimum that gives the model enough information to answer correctly — not everything you could possibly include.</p>
+        </details>
+
+        <details>
+          <summary>When does RAG beat a 1M-token context window?</summary>
+          <p>Almost always for production latency and cost. A Gemini 1.5 Pro call with 500k tokens of context can take 30–60 seconds and cost $0.60+ per request. A RAG call retrieving the top-5 relevant chunks (2,000 tokens) costs under $0.005 and returns in under 2 seconds. Use the long-context window for tasks that genuinely require holistic document synthesis — contract analysis, code archaeology, research summarisation — not for lookup tasks.</p>
+        </details>
+
+        <details>
+          <summary>How does Anthropic's prompt caching actually work?</summary>
+          <p>When you mark a message block with <code>cache_control: {type: "ephemeral"}</code>, Anthropic's servers store the KV cache (the internal attention activations) for that prefix for 5 minutes. Subsequent requests with the identical prefix skip re-computation of that prefix. The first request pays 1.25x the normal input price to write the cache; subsequent hits pay 0.1x (90% off). The cache is scoped to your API key, not shared across accounts.</p>
+        </details>
+
+        <details>
+          <summary>What is the real effective context limit for Llama 3.1 128k?</summary>
+          <p>Independent benchmarks (RULER, HELMET) show Llama 3.1 70B maintains high accuracy up to about 32–64k tokens, with measurable degradation beyond that. The advertised 128k is a hardware limit, not a reliability guarantee. For production use cases requiring reliable retrieval beyond 64k tokens, GPT-4o or Claude 3.5 Sonnet are better choices.</p>
+        </details>
+
+        <details>
+          <summary>Should I use streaming for long-context prompts?</summary>
+          <p>Yes, for interactive applications. Streaming lets you display the first tokens as soon as they are generated rather than waiting for the full response. For a 100k-token prompt, prefill (reading the input) can take 5–15 seconds before a single output token appears — streaming makes this latency invisible to the user. For batch/offline pipelines, streaming adds complexity with no benefit.</p>
+        </details>
+      </section>
+
+      <!-- Related topics -->
+      <section class="content-card">
+        <span class="section-label">Related Topics</span>
+        <h2>Related Topics in This Hub</h2>
+        <ul>
+          <li><a href="8-llm-cost-optimization-techniques.html">8 LLM Cost Optimization Techniques: Cut API Spend by Up to 70%</a></li>
+          <li><a href="rag-production-complete-guide.html">RAG from Scratch to Production: Build, Scale, and Harden</a></li>
+          <li><a href="agent-memory-evals-guardrails.html">Agent Memory, Evals and Guardrails</a></li>
+          <li><a href="agentic-engineering-concepts.html">Agentic Engineering Concepts</a></li>
+        </ul>
+      </section>
+
+      <!-- Takeaways -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The context window is a finite, expensive buffer with non-uniform attention quality across its length. Production systems that ignore these mechanics silently degrade when conversations grow long, when documents hit the middle-context dead zone, or when token budgets are left unmonitored. The engineers who get this right are the ones who stop thinking "how big is the window?" and start thinking "what exactly goes in, in what order, and what can be summarised, cached, or retrieved instead?" — then measure the results.
+        </p>
+      </section>
+          <section class="content-card">
+        <h2>Related Reading</h2>
+        <ul>
+          <li><a href="./claude-foundation/05-working-memory.html">Claude Foundation: Working Memory</a> — the Academy&rsquo;s lost-in-the-middle and context-placement lessons, with a runnable context builder.</li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

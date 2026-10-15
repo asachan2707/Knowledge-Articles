@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Stock Exchange | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Created 2026-10-15 from liquidslr/system-design-notes ch.28. Covers scope and 43k/215k orders-per-second estimate, trading/market-data/reporting flows, sequencer-driven determinism, order book with per-level doubly linked lists and order map, price-time matching, FIX and REST APIs, L1/L2/L3 and candlesticks, single-server mmap design with pinned application loops, event sourcing, hot standby and Raft-style election, ring buffers and padding, multicast fairness, colocation, DDoS defence. Executed Node example (order book, sequencer, replay determinism, candles, throughput). Related: ch27 digital wallet, ch26 payment.</div>
+        <h1>Design a Stock Exchange</h1>
+        <p class="summary">Building a matching engine that is fair, deterministic and fast: sequencer, price-time order book, mmap event bus on one box, hot-standby replication, multicast market data.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">Chapter 28 of 28 · Part 6 Transactional Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">26 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Sequencer, price-time order book, determinism, mmap bus, hot standby, multicast fairness</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">LMAX Disruptor, Nasdaq ITCH/OUCH, FIX, Aeron, Raft, KDB, DPDK</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">An exchange has one job, matching buyers with sellers, and almost everything interesting about it follows from two demands that fight each other: the matching must be perfectly fair and perfectly deterministic, and it must happen in tens of microseconds. The result looks nothing like a typical web backend. It is a handful of single-threaded loops sharing memory on one beefy machine, fed by an ordered log, replicated by replaying that log.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Stamp every inbound order with a sequence number, feed a single-threaded matching engine from that sequence, make the engine a pure function of its input log, and you get determinism, replay-based recovery, hot-standby replication and fairness from one mechanism. Then strip everything else off the critical path.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known public design</span>
+        <h2>The Disruptor, ITCH and the one-box exchange</h2>
+        <p>Real venues are consistent with this chapter's shape. LMAX published its Disruptor (a pre-allocated lock-free ring buffer, with padding to keep hot counters on separate CPU cache lines) after building a retail FX exchange around a single-threaded business logic processor. Nasdaq distributes market data over the binary ITCH protocol and accepts orders through binary protocols like OUCH, and uses multicast feeds so that all subscribers see events together. Exchanges also sell colocation: racks in the same data centre with equal-length cables, because at this timescale the speed of light in fibre (about 200 km per millisecond, or 5 microseconds per kilometre) is a product feature. The chapter's design is a distillation of these public ideas.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scope &amp; Requirements</span>
+        <h2>What we are building, and how big it is</h2>
+        <p>Scope: stocks only; limit orders only; place and cancel (no replace); normal trading hours only (no pre- or post-market); clients see executions and the live order book. Scale: tens of thousands of concurrent users, around 100 symbols, and billions of orders per day. We need simple pre-trade risk checks (for example, at most one million shares of one symbol per user per day) and a funds check: money for open orders is held back until the order finishes.</p>
+        <table class="data-table">
+          <thead><tr><th>Non-functional</th><th>Target</th><th>Consequence</th></tr></thead>
+          <tbody>
+            <tr><td>Availability</td><td>99.99% (8.64 s of downtime per day)</td><td>Hot standbys and automated failover; no manual runbooks on the critical path</td></tr>
+            <tr><td>Fault tolerance</td><td>Fast recovery; bounded blast radius</td><td>Replicated sequenced log; practised failover</td></tr>
+            <tr><td>Latency</td><td>Round trip in the millisecond range, with attention to the 99th percentile and beyond</td><td>Tail latency matters more than average; no GC pauses on the critical path</td></tr>
+            <tr><td>Security</td><td>Accounts, KYC, DDoS protection</td><td>Public surfaces isolated from the matching core</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Back-of-envelope</p>
+        <ul>
+          <li>Trading hours 09:30 to 16:00 = 6.5 h = 23,400 s.</li>
+          <li>Average rate: 1,000,000,000 orders / 23,400 s = about 42,700, call it 43,000 orders/s.</li>
+          <li>Peak at 5x: about 215,000 orders/s. The open and close are far spikier than the mean, since overnight news is priced in at once.</li>
+          <li>Per symbol (if evenly spread): 43,000 / 100 = 430/s on average. But popularity is skewed; a handful of names may carry most flow, so plan capacity per hot symbol, not on the mean.</li>
+          <li>Each order is maybe 50 to 100 bytes on the wire after stripping to essentials; 215,000/s x 100 B = 21.5 MB/s, trivial for one machine's memory and a modest NIC. The problem is latency, not bandwidth.</li>
+        </ul>
+        <p>Takeaway: this is a small-to-medium exchange by throughput. A single well-engineered matching thread per symbol group can do millions of operations a second (the code below manages roughly 2.5M orders/s in plain JavaScript on one thread). What we must buy is determinism, fairness and recovery.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Business Knowledge 101</span>
+        <h2>The vocabulary you need on the whiteboard</h2>
+        <table class="data-table">
+          <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td>Broker</td><td>Intermediary between end users and the exchange (Robinhood, Fidelity). Retail users never talk to the exchange directly.</td></tr>
+            <tr><td>Institutional client</td><td>Trades large size via specialised software, often splitting orders to avoid moving the price; gets low-latency proprietary connectivity.</td></tr>
+            <tr><td>Limit order</td><td>Buy or sell at a stated price or better. May rest in the book, may fill partially.</td></tr>
+            <tr><td>Market order</td><td>No price; execute now against the best available. Out of scope here (and dangerous in thin books without protections).</td></tr>
+            <tr><td>Bid / Ask</td><td>Highest price a buyer will pay / lowest price a seller will accept. The gap is the spread. Orders cross, and trade, when bid &gt;= ask.</td></tr>
+            <tr><td>Fill / execution</td><td>The result of a match. One match yields two fills, one for the buy side and one for the sell side.</td></tr>
+            <tr><td>L1 / L2 / L3</td><td>Market data depth: L1 is best bid and ask with sizes; L2 adds more price levels with aggregate size per level; L3 adds individual-order queue detail at each level.</td></tr>
+            <tr><td>Candlestick</td><td>Open, high, low, close (plus volume) for a time interval.</td></tr>
+            <tr><td>FIX</td><td>Financial Information eXchange: the tag=value text protocol (fields separated by SOH) used between brokers and venues, e.g. <code>35=D</code> new order single, <code>55=MSFT</code> symbol, <code>54=1</code> buy.</td></tr>
+          </tbody>
+        </table>
+        <div class="diagram-box"><span class="hi">ORDER BOOK, L2 VIEW</span>
+        ASKS (sellers)           price   size
+                                 <span class="warn">102     10</span>
+                                 <span class="warn">101     10</span>   ◀ best ask
+        ───────── spread = 101 - 99 = 2 ticks ─────────
+                                 <span class="ok"> 99      7</span>   ◀ best bid
+                                 <span class="ok"> 98     25</span>
+        BIDS (buyers)
+
+  buy limit 102 x 12  →  consumes 101 (10) then 102 (2); book now: ask 102 x 8, bid 99 x 7</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-Level Design</span>
+        <h2>Three flows with very different latency budgets</h2>
+        <div class="diagram-box"><span class="hi">THE EXCHANGE, THREE FLOWS</span>
+  <span class="ok">TRADING (critical path, microseconds)</span>
+  broker/client ─▶ client gateway ─▶ order manager ─▶ sequencer ─▶ <span class="hi">matching engine</span>
+                   (auth, validate,   (risk checks,    (stamps      (order books,
+                    rate-limit,        funds check      seq ids)      emits fills)
+                    normalise)         via wallet)                      │
+                       ▲                                                │ fills (sequenced)
+                       └──────────── order manager ◀── sequencer ◀──────┘
+  <span class="note">MARKET DATA (M1..M3, near real time)</span>
+  matching engine ─▶ market data publisher ─▶ candles / books ─▶ data service ─▶ subscribers
+  <span class="dim">REPORTING (R1..R2, accuracy over speed)</span>
+  orders + fills ─▶ reporter ─▶ database ─▶ trade history, tax, compliance, settlement</div>
+        <p>The first flow is the only one that must be ruthlessly fast; the other two are consumers of its output and must never be allowed to slow it down.</p>
+
+        <p class="mini-heading">Trading flow, step by step</p>
+        <ol>
+          <li>The client places an order through a broker's interface; the broker forwards it to the exchange.</li>
+          <li><strong>Client gateway</strong>: authentication, validation, rate limiting, normalisation, then straight to the order manager. Keep it thin; it is on the hot path. Different gateways serve different client classes; colocated brokers get dedicated gateways.</li>
+          <li><strong>Order manager</strong>: runs risk checks against rules from the risk manager, verifies funds with the wallet and reserves them, then sends the order on. It also owns order state transitions and relays fills back out via the gateway.</li>
+          <li><strong>Sequencer</strong>: stamps each inbound order with a monotonically increasing sequence id (and likewise stamps outbound fills).</li>
+          <li><strong>Matching engine</strong>: maintains one order book per symbol, matches, and emits two fills per match. Its output is sequenced as well.</li>
+          <li>Fills flow back through the sequencer and order manager to the client.</li>
+        </ol>
+
+        <p class="mini-heading">Why the sequencer is the heart of determinism</p>
+        <p>Without a single agreed order of events, two replicas of the matching engine could process the same orders in different orders and produce different trades. The sequencer is a single writer that assigns that order, and it buys several things at once:</p>
+        <ul class="check-list">
+          <li><strong>Fairness / timeliness</strong>: arrival order at the sequencer defines priority; no later retroactive dispute.</li>
+          <li><strong>Fast recovery</strong>: the log of stamped events is the system's truth; a restarted or new engine replays it.</li>
+          <li><strong>Exactly-once</strong>: gaps and duplicates are detectable by sequence number; an engine expects <code>next_seq</code> and rejects anything else.</li>
+        </ul>
+        <p>Kafka could play this role, but a general broker adds network hops and disk-flush latency. Exchanges build a purpose-made sequencer in the same box or on a tight local network.</p>
+
+        <p class="mini-heading">Market data and reporting</p>
+        <p>The market data publisher consumes the fill stream and reconstructs order books and candlesticks, then hands them to a data service for subscribers; storage is an in-memory columnar store (the chapter names KDB) for real-time analytics, rolled into a historical database after the close. The reporter collects fields from orders and fills (client id, price, quantity, order type, filled quantity, remaining quantity) for trade history, tax, compliance and settlement. Reporting favours accuracy and completeness over latency.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">API &amp; Data Models</span>
+        <h2>Interfaces and the three kinds of data</h2>
+        <p>Brokers reach the exchange over REST at the gateway, while institutional clients use proprietary low-latency binary protocols (and FIX). The REST surface sketched in the chapter:</p>
+        <table class="data-table">
+          <thead><tr><th>Endpoint</th><th>Inputs</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td><code>POST /v1/order</code></td><td>symbol, side, price, orderType (limit only), quantity</td><td>id, creationTime, filledQuantity, remainingQuantity, status (new / canceled / filled), echoed inputs</td></tr>
+            <tr><td><code>GET /execution</code></td><td>symbol, optional orderId, startTime, endTime</td><td>list of executions: id, orderId, symbol, side, price, orderType, quantity</td></tr>
+            <tr><td><code>GET /marketdata/orderBook/L2</code></td><td>symbol, depth</td><td>bids and asks as price/size arrays</td></tr>
+            <tr><td><code>GET /marketdata/candles</code></td><td>symbol, resolution (seconds), startTime, endTime</td><td>open, close, high, low per window</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><strong>Prices are integers.</strong> Use integer ticks (price in the smallest increment) end to end. Floating point makes equality at a price level unreliable and breaks determinism across hardware. The chapter's candle response types are doubles for display; internally keep longs.</div>
+        <p class="mini-heading">Data types</p>
+        <ul>
+          <li><strong>Product / order / execution.</strong> Products (symbol metadata, display names, tick size) change rarely and serve the UI. Orders and executions are everywhere: processed in memory on the critical path and recovered from the sequencer log; written to a database by the reporter; forwarded to market data.</li>
+          <li><strong>Order book.</strong> The performance-critical structure; see below.</li>
+          <li><strong>Candlestick chart.</strong> Derived from the execution stream inside market data.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · The Order Book</span>
+        <h2>A data structure with five operations that must all be cheap</h2>
+        <p>The book needs: find the best bid/ask; add an order; cancel an arbitrary order; remove the oldest order at a price when it fills; and walk price levels in order (for depth and for sweeping a large order). It should also report total volume at a price in constant time.</p>
+        <p>The standard layout: per side, a map from price to a <strong>price level</strong>; each level has total volume and a FIFO queue of orders (a doubly linked list); a global map from order id to its list node; and cached pointers to best bid and best ask.</p>
+        <div class="diagram-box"><span class="hi">ORDER BOOK LAYOUT</span>
+   sellBook.levels                                    orderMap (id → node)
+     102 ─▶ [vol 10] ◀─▶ (s3 x10)                       s1 ──┐
+     101 ─▶ [vol 10] ◀─▶ (s1 x5) ◀─▶ (s2 x5)            s2 ──┼─ O(1) lookup, then O(1) unlink
+              ▲ head = oldest (matches first)            s3 ──┘   because node has prev + next
+              └ tail = newest (new orders appended here)
+   buyBook.levels
+      99 ─▶ [vol 7]  ◀─▶ (b1 x7)
+
+   place  : append to tail of level               O(1)  (+ level lookup)
+   match  : pop from head of best opposing level  O(1) per fill
+   cancel : orderMap[id] → unlink node            O(1)
+   best   : cached pointer                        O(1)</div>
+        <p>Complexity caveats the interviewer may probe: finding or creating a price <em>level</em> needs an ordered structure if price levels are sparse (balanced tree, skip list, or sorted array with binary search: O(log P) in the number of active price levels P). Real engines exploit that prices live on a tick grid near the market: an array indexed by tick offset gives O(1) level lookup with a moving window, and an occupancy bitmap makes "next non-empty level" a few instructions. Level insertion happens rarely compared to adds at existing levels, since order flow clusters near the touch.</p>
+        <p>The same structure is reused by the market data publisher to rebuild books from the fill stream, and by replicas. Memory layout matters too: allocate orders from a pre-sized pool and use integer indices instead of pointers where possible, so nothing allocates (or garbage-collects) while matching.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Matching</span>
+        <h2>Price-time priority, in words and in code</h2>
+        <p>For a limit order the engine proceeds like this. First check the sequence id equals the expected next value; if not, reject as out of order. Validate the order. Then dispatch on message type. A <strong>new buy</strong> is matched against the ask side; a <strong>new sell</strong> against the bid side. While the incoming order has remaining quantity and the best opposing level <em>crosses</em> its limit (best ask &lt;= buy price, or best bid &gt;= sell price), take the oldest order at that level, trade the smaller of the two remaining quantities at the <em>resting</em> order's price, emit a fill for each side, and remove the resting order if exhausted. When no more crossing liquidity exists, any leftover quantity rests in the book on its own side at its limit price. A <strong>cancel</strong> looks up the id in the order map; if absent the order already filled (or never existed) and the cancel is rejected; otherwise it is unlinked in O(1).</p>
+        <div class="insight-box"><strong>Price improvement:</strong> a buy limit of 102 matched against a resting ask at 101 trades at 101, the resting price. The aggressor gets a better price than the limit it set; the book's earlier participant is never worse off. That is why the trade price is taken from the maker, not the taker.</div>
+        <p>This is FIFO (price-time) matching, the most common rule for equities. Alternatives are pro-rata allocation (shares at a level split in proportion to size, used in some futures markets), and size-priority or hybrid models. The choice is a policy: it shapes market-maker behaviour.</p>
+        <p class="mini-heading">Features you would add next</p>
+        <ul class="check-list">
+          <li><strong>Time-in-force</strong>: IOC (fill what you can immediately, cancel the rest), FOK (fill completely or not at all), day, GTC.</li>
+          <li><strong>Market orders</strong>: sweep levels with no price bound, usually with a protection band.</li>
+          <li><strong>Self-trade prevention</strong>: do not match an account against itself (wash trades are illegal).</li>
+          <li><strong>Auctions</strong>: opening and closing crosses compute one price that maximises matched volume, instead of continuous matching.</li>
+          <li><strong>Circuit breakers / limit-up-limit-down</strong>: halt or band prices when moves are extreme.</li>
+          <li><strong>Replace/amend</strong>: usually cancel + new, losing time priority unless size only decreases.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Performance</span>
+        <h2>From tens of milliseconds to tens of microseconds</h2>
+        <p>Two levers: do less on the critical path, and make what remains cheaper. For the first, remove everything inessential, including logging; risk analytics, reporting and market data publication are consumers of the event stream. For the second, look at what a microservice split costs: each hop over the network is tens to hundreds of microseconds even on a good data-centre network, and the sequencer's disk writes add more. The microservice layout is therefore on the order of milliseconds end to end. The target is a hundred times better.</p>
+        <p class="mini-heading">Everything on one server, communicating through shared memory</p>
+        <p>Place the gateway, order manager, sequencer and matching engine as processes (or threads) on the same machine, linked by an event store in an <code>mmap</code>'d file. Memory mapping makes the file part of each process's address space, so a producer's append is visible to readers without a syscall per message. Put the file under <code>/dev/shm</code> (tmpfs) and there is no disk I/O at all on the hot path; persistence is handled asynchronously or by replication. Because the log is append-only with a single writer, readers just track their own read index. Compare an in-process queue or the Disruptor.</p>
+        <div class="diagram-box"><span class="hi">ONE SERVER, MMAP EVENT BUS</span>
+  ┌───────────────────────── host (cores pinned, NUMA-aware) ────────────────────────┐
+  │ [gateway]─▶┐                                                                     │
+  │            ▼                                                                     │
+  │      [order manager lib] ─▶ <span class="hi">[sequencer: single writer]</span> ─▶ /dev/shm/events.log (mmap)  │
+  │                                          ▲                │      │      │       │
+  │                           matching engine┘ reads, writes  ▼      ▼      ▼       │
+  │                                                      market data  reporter  risk │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+  <span class="dim">each consumer keeps its own read cursor; nobody locks anybody</span></div>
+        <p class="mini-heading">Application loop pinned to a core</p>
+        <p>Each critical component runs a busy-spinning loop (read next event, process, write results) on a dedicated CPU core, pinned so the scheduler never migrates or preempts it. No context switches, no blocking, and no locks, since each piece of state has exactly one owner thread. Interrupts and housekeeping get steered onto other cores. You burn a core at 100% by design to remove variance.</p>
+        <p class="mini-heading">Event sourcing and the order manager as a library</p>
+        <p>As in the <a href="./27-digital-wallet.html">digital wallet chapter</a>, store immutable transitions rather than current state. Every component subscribes to the event store and derives what it needs. The order manager's logic (state transitions of orders) is packaged as a shared library embedded in each component, which avoids extra calls for "what is the state of order X". Event flow in the converged design: the external world speaks FIX to the gateway; the order manager receives a new-order event, validates it, adds it to internal state and passes it to the matching core; a match produces an order-filled event onto the bus; whoever cares consumes it. The sequencer is no longer a store; it is a single writer that gives events their order before they hit the shared event store.</p>
+        <div class="warn-box"><strong>Tail latency killers:</strong> garbage collection pauses (use off-heap or pre-allocated memory, or a non-GC language), page faults on first touch (pre-fault and lock memory), cache-line false sharing, NUMA cross-socket access, interrupt storms, lock contention, kernel network stack (kernel-bypass such as DPDK or Solarflare OpenOnload at the extreme), and CPU frequency scaling. Measure p99, p99.9 and p99.99, not the mean.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Availability</span>
+        <h2>High availability and fault tolerance</h2>
+        <p>99.99% availability allows 8.64 seconds of downtime per day. Single points of failure must therefore have an already-running replacement, and failure detection must be automatic and fast.</p>
+        <ul class="check-list">
+          <li><strong>Stateless components</strong> (gateways) scale horizontally behind a load balancer; losing one costs nothing.</li>
+          <li><strong>Stateful components</strong> (order manager, sequencer, matching engine) run as a primary with hot standbys. The standbys consume exactly the same sequenced event stream and build identical state, but only the primary publishes outbound events. On failover a standby simply starts publishing. This is deterministic state-machine replication.</li>
+          <li><strong>Detection</strong> by heartbeats between primary and standby, with lease or timeout thresholds tuned against false positives (a false failover is itself an incident).</li>
+          <li><strong>Within one box</strong> this protects against process failure; to survive host failure, run an entire second server as a hot or warm replica, with the event store replicated across hosts over a fast reliable transport (reliable UDP / an Aeron-style protocol, to avoid TCP head-of-line blocking).</li>
+        </ul>
+        <p class="mini-heading">Beyond a single data centre</p>
+        <p>If even the replicas fail (a bug that hits primary and standby alike, a datacentre loss) you need cross-site replication and decisions made in advance: when and how do we fail over, who becomes leader among the backups (use a consensus-based election such as Raft, with terms to fence out a stale leader), what recovery time (RTO) do we promise, which functions must come back first, and can we run degraded (for instance, accept cancels before new orders)?</p>
+        <div class="diagram-box"><span class="hi">LEADER ELECTION WITH TERMS</span>
+  term 1: A=<span class="ok">leader</span>  B,C followers        A heartbeats → B,C
+  A dies  ✖  B times out, becomes candidate in term 2, requests votes
+  term 2: B=<span class="ok">leader</span> (votes from C + self = majority)    A returns, sees term 2 &gt; 1, <span class="warn">steps down</span>
+  every replicated entry carries its term; a stale leader's writes are rejected</div>
+        <p>Loss tolerance sets backup frequency: for an exchange the acceptable data loss is effectively zero, so replicate synchronously (a majority acknowledges before an event counts as committed) and back up often. Pragmatic advice from the notes also holds: failover manually at first, until you understand the failure modes; use chaos engineering to find the bugs that hit primary and replica identically.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Determinism</span>
+        <h2>Functional versus latency determinism</h2>
+        <p><strong>Functional determinism</strong>: given the same ordered input, every replica produces the same output. This is what the sequencer buys, and it means wall-clock time of arrival does not matter to the logic; only the sequence does. Timestamps used for reports are taken from the stamped event, never read by the engine. Rules: no reading the clock, no random numbers, no iteration over hash tables with unspecified order, no floating point, and no threads inside the matching path.</p>
+        <p><strong>Latency determinism</strong>: the same order should take about the same time every time. It is monitored via high percentiles (p99, p99.99). Variance comes from GC, scheduling, cache misses, and queueing behind slow consumers; a spike unfairly delays some participants.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Market Data</span>
+        <h2>Publisher optimisations, fair distribution, multicast, colocation</h2>
+        <ul class="check-list">
+          <li><strong>Bounded candlesticks.</strong> A candle series per symbol per resolution grows without bound, so keep a limited window in memory (a pre-allocated ring buffer) and push older candles to disk or the historical store. Fine resolutions are heavier, so the exchange can reasonably charge for finer granularity.</li>
+          <li><strong>Ring buffer.</strong> Fixed-size circular queue, head joined to tail, pre-allocated so there is no allocation at runtime; a single producer and consumers with their own cursors can be lock-free. <strong>Padding</strong> places the sequence counters on their own 64-byte cache lines, preventing false sharing, where two cores writing different variables in the same line keep invalidating each other.</li>
+          <li><strong>Fairness of distribution.</strong> If one subscriber receives a trade print before another, that is exploitable information. Distribute through <strong>multicast</strong> (one packet to many hosts, switch replicates) so all receive within nearly the same instant, rather than unicasting one copy per subscriber in a loop where the last in line is always last. Unicast is one-to-one; broadcast goes to every host on a subnet; multicast goes to subscribed hosts across subnets.</li>
+          <li><strong>Reliability on top of UDP.</strong> Multicast is UDP, which drops packets. Add sequence numbers so receivers detect gaps and a retransmission channel (or snapshot replay channel) to repair them, as real feeds do with A/B redundant lines.</li>
+          <li><strong>Colocation.</strong> Brokers rent rack space in the exchange's data centre so their trading engines connect over short, equal-length cables. It is a premium service and a fairness question; exchanges equalise cable lengths.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Security</span>
+        <h2>Network security for an internet-facing exchange</h2>
+        <p>Brokers connect over private links, but public market-data and web surfaces exist and attract denial-of-service attacks. Defences: isolate public services and data from the private trading network so an attack on one cannot degrade matching; front rarely changing data with a cache; design URLs to be cacheable (<code>/data/recent</code> caches far better than <code>/data?from=123&amp;to=456</code> because the latter has unbounded key space); maintain allowlists and blocklists; apply rate limits per client (see <a href="../../system-design/rate-limiting.html">rate limiting</a>); and keep KYC and account management as a separate service with its own protections.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Design decisions compared</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Choice here</th><th>Alternative</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>Topology</td><td>Single big host, shared memory bus</td><td>Microservices over network</td><td>10-100x lower latency; fewer failure seams. Cost: scale-up ceiling and bigger blast radius per box</td></tr>
+            <tr><td>Concurrency</td><td>Single-threaded loops per component</td><td>Multi-threaded with locks</td><td>Determinism and no contention; scale by partitioning symbols across engines</td></tr>
+            <tr><td>Ordering</td><td>Custom sequencer (single writer)</td><td>Kafka</td><td>Latency; Kafka remains fine for non-critical consumers</td></tr>
+            <tr><td>Replication</td><td>Replicate sequenced inputs, replay</td><td>Replicate state</td><td>Smaller, simpler, verifiable; any replica can be rebuilt</td></tr>
+            <tr><td>Matching rule</td><td>FIFO price-time</td><td>Pro-rata</td><td>Rewards early liquidity; simpler to reason about and audit</td></tr>
+            <tr><td>Market data transport</td><td>Multicast over UDP + retransmit</td><td>TCP fan-out</td><td>Simultaneous delivery vs guaranteed delivery; solved with gap repair</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>One-box exchange</h4><ul><li>Microsecond latency, fewer moving parts</li><li>Simple mental model: log in, log out</li><li>Easy deterministic testing: replay the day</li></ul></div>
+          <div class="trade-col cons"><h4>One-box exchange</h4><ul><li>Vertical scale ceiling</li><li>Needs hot standbys and cross-site replication</li><li>Specialist skills in CPU, memory and NIC tuning</li></ul></div>
+        </div>
+        <p>The chapter notes the modern counter-trend: newer venues lean on cloud infrastructure, and some crypto and decentralised venues use automated market makers (AMMs) that price against a liquidity pool via a formula such as constant product (x times y equals k), so no order book is maintained at all. That trades price quality and capital efficiency for permissionless simplicity.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>An order book and matching engine with a sequencer and replay</h2>
+        <p>The program implements per-price FIFO levels as doubly linked lists, an order-id map for O(1) cancel, a sorted level index, price-time matching that sweeps crossing levels and trades at the resting price, a single-writer sequencer, out-of-order rejection, an L2 view, candlesticks, a replay check proving two engines fed the same log agree exactly, and a 200,000-order throughput smoke test. Executed; assertions pass.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Matching engine: price-time priority order book (per-level doubly linked lists + order map),
+// a sequencer that stamps every inbound event, deterministic replay, L2 view and 1-minute candles.
+import assert from 'node:assert/strict';
+
+class Node { constructor(o) { this.o = o; this.prev = null; this.next = null; this.level = null; } }
+class Level {                                    // FIFO queue of resting orders at one price
+  head = null; tail = null; volume = 0;
+  constructor(price) { this.price = price; }
+  push(n) { n.level = this; n.prev = this.tail; if (this.tail) this.tail.next = n; else this.head = n; this.tail = n; this.volume += n.o.qty; }
+  unlink(n) {                                    // O(1) thanks to prev/next pointers
+    if (n.prev) n.prev.next = n.next; else this.head = n.next;
+    if (n.next) n.next.prev = n.prev; else this.tail = n.prev;
+    this.volume -= n.o.qty; n.level = null;
+  }
+}
+class Side {                                     // one side of the book: price -&gt; Level, plus sorted price list
+  levels = new Map(); prices = [];               // prices sorted ascending (bids read from the end, asks from the front)
+  constructor(isBid) { this.isBid = isBid; }
+  best() { return this.prices.length ? this.levels.get(this.isBid ? this.prices.at(-1) : this.prices[0]) : null; }
+  level(p) {
+    let l = this.levels.get(p);
+    if (!l) { l = new Level(p); this.levels.set(p, l); let lo = 0, hi = this.prices.length; while (lo &lt; hi) { const m = (lo + hi) &gt;&gt; 1; this.prices[m] &lt; p ? lo = m + 1 : hi = m; } this.prices.splice(lo, 0, p); }
+    return l;
+  }
+  drop(l) { if (l.head) return; this.levels.delete(l.price); this.prices.splice(this.prices.indexOf(l.price), 1); }
+}
+class OrderBook {
+  bids = new Side(true); asks = new Side(false); byId = new Map();
+  nextSeq = 1; fills = [];
+  handle(ev) {                                   // ev = { seq, type: 'NEW'|'CANCEL', ... }
+    if (ev.seq !== this.nextSeq) return { error: 'OUT_OF_ORDER', expected: this.nextSeq };
+    this.nextSeq++;
+    if (ev.type === 'CANCEL') {
+      const n = this.byId.get(ev.id);
+      if (!n) return { error: 'CANNOT_CANCEL_ALREADY_MATCHED_OR_UNKNOWN' };
+      const side = n.o.side === 'B' ? this.bids : this.asks, lvl = n.level;
+      lvl.unlink(n); side.drop(lvl); this.byId.delete(ev.id); return { canceled: ev.id };
+    }
+    if (!(ev.qty &gt; 0) || !Number.isInteger(ev.price) || ev.price &lt;= 0) return { error: 'INVALID_ORDER' };
+    const o = { id: ev.id, side: ev.side, price: ev.price, qty: ev.qty, seq: ev.seq, ts: ev.ts };
+    const opp = o.side === 'B' ? this.asks : this.bids, mine = o.side === 'B' ? this.bids : this.asks;
+    while (o.qty &gt; 0) {
+      const lvl = opp.best();
+      if (!lvl || (o.side === 'B' ? lvl.price &gt; o.price : lvl.price &lt; o.price)) break;   // no longer crosses
+      const rest = lvl.head, q = Math.min(rest.o.qty, o.qty);                          // oldest first (time priority)
+      rest.o.qty -= q; lvl.volume -= q; o.qty -= q;
+      this.fills.push({ seq: ev.seq, price: lvl.price, qty: q, taker: o.id, maker: rest.o.id, ts: ev.ts }); // trade at RESTING price
+      if (rest.o.qty === 0) { lvl.unlink(rest); this.byId.delete(rest.o.id); opp.drop(lvl); }
+    }
+    if (o.qty &gt; 0) { const n = new Node(o); mine.level(o.price).push(n); this.byId.set(o.id, n); }
+    return { ok: true };
+  }
+  l2(depth) {
+    const take = (s, rev) =&gt; (rev ? [...s.prices].reverse() : s.prices).slice(0, depth).map(p =&gt; [p, s.levels.get(p).volume]);
+    return { bids: take(this.bids, true), asks: take(this.asks, false) };
+  }
+}
+// Sequencer: single writer that stamps order of arrival; the stamped log IS the source of truth.
+class Sequencer { seq = 0; log = []; stamp(e) { const s = { ...e, seq: ++this.seq }; this.log.push(s); return s; } }
+function candles(fills, bucketMs) {
+  const m = new Map();
+  for (const f of fills) {
+    const k = Math.floor(f.ts / bucketMs) * bucketMs, c = m.get(k);
+    if (!c) m.set(k, { t: k, open: f.price, high: f.price, low: f.price, close: f.price, vol: f.qty });
+    else { c.high = Math.max(c.high, f.price); c.low = Math.min(c.low, f.price); c.close = f.price; c.vol += f.qty; }
+  }
+  return [...m.values()];
+}
+
+// ------------- self-test -------------
+const seqr = new Sequencer(), book = new OrderBook();
+const send = (e) =&gt; book.handle(seqr.stamp(e));
+send({ type: 'NEW', id: 's1', side: 'S', price: 101, qty: 5, ts: 1000 });
+send({ type: 'NEW', id: 's2', side: 'S', price: 101, qty: 5, ts: 1001 });  // behind s1 at the same price
+send({ type: 'NEW', id: 's3', side: 'S', price: 102, qty: 10, ts: 1002 });
+send({ type: 'NEW', id: 'b1', side: 'B', price: 99, qty: 7, ts: 1003 });
+console.log('L2 before :', JSON.stringify(book.l2(3)));
+send({ type: 'NEW', id: 'b2', side: 'B', price: 102, qty: 12, ts: 61000 });  // sweeps 101 (10) then 102 (2)
+console.log('fills     :', book.fills.map(f =&gt; `${f.maker}-&gt;${f.taker} ${f.qty}@${f.price}`).join(' | '));
+assert.deepEqual(book.fills.map(f =&gt; [f.maker, f.qty, f.price]), [['s1', 5, 101], ['s2', 5, 101], ['s3', 2, 102]]); // FIFO
+assert.deepEqual(send({ type: 'CANCEL', id: 'b1' }), { canceled: 'b1' });
+assert.ok(send({ type: 'CANCEL', id: 's1' }).error);                       // already fully matched
+console.log('L2 after  :', JSON.stringify(book.l2(3)));
+assert.deepEqual(book.l2(3), { bids: [], asks: [[102, 8]] });
+assert.equal(book.handle({ seq: 99, type: 'NEW' }).error, 'OUT_OF_ORDER');
+console.log('candles   :', JSON.stringify(candles(book.fills, 60000)));
+
+// determinism: replaying the sequenced log into a fresh book yields byte-identical fills
+const replica = new OrderBook(); for (const e of seqr.log) replica.handle(e);
+assert.equal(JSON.stringify(replica.fills), JSON.stringify(book.fills));
+assert.deepEqual(replica.l2(5), book.l2(5));
+
+// throughput smoke test (random limit orders around 10_000 ticks)
+const big = new OrderBook(), sq = new Sequencer(); let x = 12345; const rnd = () =&gt; (x = (x * 1103515245 + 12345) &amp; 0x7fffffff) / 0x7fffffff;
+const N = 200_000, t0 = performance.now();
+for (let i = 0; i &lt; N; i++) big.handle(sq.stamp({ type: 'NEW', id: 'o' + i, side: rnd() &lt; .5 ? 'B' : 'S', price: 10000 + Math.floor(rnd() * 40) - 20, qty: 1 + Math.floor(rnd() * 100), ts: i }));
+const ms = performance.now() - t0;
+console.log(`replayed ${N} orders -&gt; ${big.fills.length} fills, ${(N / ms * 1000 / 1e6).toFixed(2)}M orders/s in one JS thread`);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the L2 book before and after a sweeping buy, the three fills (s1 5@101, s2 5@101, s3 2@102, FIFO order), the one-minute candle (open 101, high 102, low 101, close 102, volume 12), then a throughput line (about 2 to 3 million orders/s on one thread; varies by machine) and "all assertions passed".</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What goes wrong, and how the design absorbs it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Impact</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>Matching engine process crash</td><td>Trading halts for that symbol set</td><td>Hot standby (already caught up from the same log) starts publishing; target is within the daily 8.64 s budget</td></tr>
+            <tr><td>Host or rack loss</td><td>Whole box gone</td><td>Warm replica host with reliable-UDP replicated event store; Raft-style election picks the new leader</td></tr>
+            <tr><td>Both primary and standby crash on the same input (a bug)</td><td>Correlated failure</td><td>Chaos and replay testing; ability to skip or quarantine a poison event under strict procedure; manual failover early on</td></tr>
+            <tr><td>Sequence gap or duplicate</td><td>Divergent replicas if ignored</td><td>Engine expects <code>next_seq</code>; request retransmit, reject out-of-order</td></tr>
+            <tr><td>Split brain (two primaries publish)</td><td>Conflicting fills</td><td>Terms and leases; only the elected leader's outbound events are accepted downstream</td></tr>
+            <tr><td>Slow consumer (reporter, market data)</td><td>Back-pressure on shared log</td><td>Independent cursors; consumers may fall behind without slowing the writer; bounded ring buffers with explicit gap handling</td></tr>
+            <tr><td>Multicast loss</td><td>Subscriber book diverges</td><td>Sequence numbers, retransmit channel, periodic snapshots</td></tr>
+            <tr><td>Latency spike (GC, interrupt)</td><td>Unfair delay</td><td>Pre-allocated memory, pinned cores, p99.99 alerting</td></tr>
+            <tr><td>Funds reservation leak</td><td>Buying power stuck</td><td>Release on cancel/fill events; reconcile reserved totals vs open orders</td></tr>
+            <tr><td>DDoS on public APIs</td><td>Market data site down</td><td>Isolation, caching, rate limits; trading network unaffected</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling &amp; Production Gotchas</span>
+        <h2>Where the single box stops, and traps in the details</h2>
+        <ul class="check-list">
+          <li><strong>Scale axis is partition-by-symbol.</strong> A symbol's book needs a single writer, but different symbols are independent, so shard symbols across engines (each its own sequencer stream and pinned core). Cross-symbol features (portfolio risk, index orders) require a separate aggregation path.</li>
+          <li><strong>Risk and funds checks are before the sequencer, not inside the match.</strong> Keep matching free of I/O. Pre-trade risk reads in-memory limits updated by events; the wallet interaction is a reservation made earlier, released by cancel and fill events.</li>
+          <li><strong>Cancel races.</strong> A cancel and a fill for the same order can cross; the sequencer order decides, and a cancel for a filled order is a normal reject, not an error.</li>
+          <li><strong>Clock discipline.</strong> Regulation requires accurate timestamps (PTP / GPS-disciplined clocks, microsecond-level accuracy for many regimes). Timestamps are metadata; sequence ids are logic.</li>
+          <li><strong>Recovery speed.</strong> Replay the day's events from the last snapshot; snapshot the books periodically so a restart replays minutes, not hours.</li>
+          <li><strong>Testing.</strong> Record production event logs and replay them against new builds, diffing every output. This is the exchange equivalent of golden-master testing, and event sourcing makes it nearly free.</li>
+          <li><strong>Regulatory outputs.</strong> Audit trails, best-execution and market-surveillance feeds, and end-of-day settlement files are products of the reporter; build them from the immutable log, not from mutable tables.</li>
+          <li><strong>Market open/close bursts</strong> are the real sizing event: capacity-plan for the first seconds of the day, not for the mean.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Before you sign off on the design</h2>
+        <ul class="check-list">
+          <li>Single sequencer stamps all inbound orders and outbound fills; engines enforce expected sequence</li>
+          <li>Matching engine is a pure function of the ordered input; no clock, randomness, floats, or locks</li>
+          <li>Order book gives O(1) add, cancel, best price and head-of-level removal</li>
+          <li>Prices and quantities are integers; trade price is the resting order's price</li>
+          <li>Critical path stripped: no logging, no database, no network hops beyond the bus</li>
+          <li>Hot standby consumes identical event stream; only the leader publishes</li>
+          <li>Leader election with terms; documented RTO and RPO; practised failover</li>
+          <li>Multicast market data with gap repair; equal-opportunity delivery</li>
+          <li>Reporting and market data are off the critical path and can lag safely</li>
+          <li>Replay-based regression tests and p99.99 latency monitoring</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why run everything on one server instead of microservices?</summary><p>Because the requirement is tens of microseconds. A network hop between services costs tens to hundreds of microseconds on its own; a disk write for a sequencer costs more. Shared memory and pinned loops remove both. Reliability is recovered by replicating the event stream to standby hosts rather than by splitting the pipeline across machines.</p></details>
+        <details><summary>How does a standby stay exactly in sync with the primary?</summary><p>It does not copy state. It consumes the same sequenced input log and runs the same deterministic engine, so it reaches the same state. Only the leader emits outbound events. Failover is "start publishing", not "rebuild".</p></details>
+        <details><summary>How do you cancel an order in O(1)?</summary><p>An order-id to node map plus a doubly linked list at each price level. The map gives the node; the node's prev and next pointers allow unlinking without scanning. If the level becomes empty it is removed from the price index.</p></details>
+        <details><summary>How do you guarantee fairness among subscribers receiving market data?</summary><p>Multicast distribution so every subscriber's copy is replicated by the network in parallel, equal-length cabling for colocated clients, sequence numbers with retransmission for loss, and no privileged side channel to the matching core.</p></details>
+        <details><summary>How would you scale to thousands of symbols?</summary><p>Partition by symbol. Each partition has its own sequencer, matching engine and event stream on a pinned core; the order router sends each order to the owning partition. Add hosts as needed. Hot symbols may deserve a dedicated core and host.</p></details>
+        <details><summary>What would you do about market orders and auctions?</summary><p>Market orders are matched by sweeping opposing levels with a protection price band and IOC semantics. Auctions collect orders during a call period and then compute a single price that maximises executed volume, filling by priority at that price. Both are additions to the engine's input handling; the sequencing and determinism machinery is unchanged.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./27-digital-wallet.html">Previous: Chapter 27, Digital Wallet</a> — event sourcing and Raft replication explained in full; the exchange reuses them.</li>
+          <li><a href="./26-payment-system.html">Chapter 26, Payment System</a> — the settlement and funds side that sits behind trading.</li>
+          <li><a href="../../system-design/message-queue.html">Message queues</a> — log-based messaging, and why a custom sequencer beats a general broker here.</li>
+          <li><a href="../../system-design/rate-limiting.html">Rate limiting</a> — gateway protection against floods and abusive clients.</li>
+          <li><a href="../../system-design/consistency-models.html">Consistency models</a> — linearizable ordering versus eventual market-data views.</li>
+          <li><a href="../../real-time-leaderboard-system-design.html">Real-time leaderboard</a> — another ordered-structure-under-heavy-update problem.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repository lists no additional resources for this chapter. The notes' pseudocode for the match loop looks only at the order's exact price level and takes a minimum against the order's total rather than remaining quantity; the version on this page sweeps all crossing levels and uses remaining quantity.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>An exchange is a deterministic function over a totally ordered log. Get the ordering right (one sequencer), keep the function pure and single-threaded, put everything on the shortest possible path, and replication, recovery, auditing and fairness all fall out of replaying the same events. Everything else is kept off the hot path.</p>
+      </section>
+
+    </main>
+  </body>
+</html>

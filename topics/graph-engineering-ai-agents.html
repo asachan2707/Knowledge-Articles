@@ -566,6 +566,138 @@ export async function runHiringWorkflow(candidateId) {
         </p>
       </section>
 
+      <!-- ─── AT SCALE: 82M EDGES ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Agentic Graph Engineering at Scale: 82.8 Million Edges</h2>
+        <p>
+          Graph engineering applied to vulnerability detection across a large codebase demonstrates
+          what the "Collective Intelligence" tier (multiple agents via graphs) unlocks that a single
+          agent cannot: exact path traversal across 82.8 million edges to catch hidden exposures.
+        </p>
+
+        <h3>Three Intelligence Tiers</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.9rem;margin:1rem 0">
+          <thead><tr style="background:#f1f5f9"><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Tier</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Description</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Scale Ceiling</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Model Intelligence</strong></td><td style="padding:.55rem .8rem">Single model within one context window</td><td style="padding:.55rem .8rem">Context window tokens</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Individual Intelligence</strong></td><td style="padding:.55rem .8rem">Wraps model with agent loop capabilities</td><td style="padding:.55rem .8rem">Single session duration</td></tr>
+            <tr><td style="padding:.55rem .8rem"><strong>Collective Intelligence</strong></td><td style="padding:.55rem .8rem">Distributes work across multiple agents via graphs</td><td style="padding:.55rem .8rem">Horizontally scalable</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Compressed Sparse Row (CSR) for Large Graphs</h3>
+        <p>BFS across 82.8M edges requires memory-efficient graph representation. CSR stores the
+        adjacency list as two flat arrays — no object overhead per edge.</p>
+
+        <pre><code class="language-javascript">// CSR (Compressed Sparse Row) graph for BFS at scale
+class CSRGraph {
+  constructor(nodeCount, edges) {
+    this.nodeCount = nodeCount;
+    // Build CSR: row_ptr and col_idx arrays
+    const degree = new Int32Array(nodeCount);
+    edges.forEach(([u]) => degree[u]++);
+
+    this.rowPtr = new Int32Array(nodeCount + 1);
+    for (let i = 0; i < nodeCount; i++) {
+      this.rowPtr[i + 1] = this.rowPtr[i] + degree[i];
+    }
+
+    this.colIdx = new Int32Array(this.rowPtr[nodeCount]);
+    const pos = new Int32Array(nodeCount);
+    edges.forEach(([u, v]) => {
+      this.colIdx[this.rowPtr[u] + pos[u]++] = v;
+    });
+  }
+
+  // Get all neighbors of node u — O(degree(u)), no allocation
+  neighbors(u) {
+    return this.colIdx.subarray(this.rowPtr[u], this.rowPtr[u + 1]);
+  }
+
+  // BFS for vulnerability path detection
+  bfsPath(source, target) {
+    const visited = new Uint8Array(this.nodeCount);
+    const parent  = new Int32Array(this.nodeCount).fill(-1);
+    const queue   = [source];
+    visited[source] = 1;
+
+    while (queue.length > 0) {
+      const node = queue.shift();
+      if (node === target) return this.reconstructPath(parent, source, target);
+
+      for (const neighbor of this.neighbors(node)) {
+        if (!visited[neighbor]) {
+          visited[neighbor] = 1;
+          parent[neighbor]  = node;
+          queue.push(neighbor);
+        }
+      }
+    }
+    return null; // No path found
+  }
+
+  reconstructPath(parent, source, target) {
+    const path = [];
+    let curr = target;
+    while (curr !== -1) { path.unshift(curr); curr = parent[curr]; }
+    return path[0] === source ? path : null;
+  }
+}
+
+// Vulnerability detection: find exposure path in dependency graph
+class VulnerabilityDetector {
+  constructor(graph, nodeLabels) {
+    this.graph  = graph;
+    this.labels = nodeLabels; // node index → { type, name, cve? }
+  }
+
+  findExposurePaths(vulnerableNodeIds, exposedEntryPoints) {
+    const findings = [];
+
+    for (const entryPoint of exposedEntryPoints) {
+      for (const vulnNode of vulnerableNodeIds) {
+        const path = this.graph.bfsPath(entryPoint, vulnNode);
+        if (path) {
+          findings.push({
+            entryPoint:    this.labels[entryPoint]?.name,
+            vulnerability: this.labels[vulnNode]?.cve,
+            pathLength:    path.length,
+            exactPath:     path.map(n => this.labels[n]?.name).join(" → ")
+          });
+        }
+      }
+    }
+
+    return findings.sort((a, b) => a.pathLength - b.pathLength);
+  }
+}
+
+// Usage (simulated small graph for illustration)
+const graph = new CSRGraph(6, [[0,1],[1,2],[2,3],[0,4],[4,5],[5,3]]);
+const detector = new VulnerabilityDetector(graph, {
+  0: { name: "API endpoint" },
+  1: { name: "auth middleware" },
+  2: { name: "session store" },
+  3: { name: "CVE-2026-9999 (SQL injection in ORM)" },
+  4: { name: "file upload handler" },
+  5: { name: "temp file processor" }
+});
+
+const findings = detector.findExposurePaths([3], [0]);
+findings.forEach(f => {
+  console.log(`Exposure: ${f.entryPoint} → ${f.vulnerability}`);
+  console.log(`Path: ${f.exactPath}`);
+  console.log(`Hops: ${f.pathLength - 1}`);
+});</code></pre>
+
+        <h3>Three Graph Types for Agentic Systems</h3>
+        <ul class="takeaways">
+          <li><strong>Task graph:</strong> What to do — nodes are tasks, edges are dependencies. A node cannot execute until all its predecessors complete.</li>
+          <li><strong>Capability graph:</strong> Who does it — maps tasks to agents based on capabilities, availability, and cost. Enables dynamic agent assignment.</li>
+          <li><strong>Run graph:</strong> What happened — the execution trace. Every edge traversed, every node state recorded. Makes debugging O(1): traverse the run graph to find the failure node.</li>
+        </ul>
+      </section>
+
     </main>
   </body>
 </html>

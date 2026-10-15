@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube / Video Streaming Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Reading guide for six YouTube/video resources of the System Design Interview Handbook. Read: High Scalability YouTube Architecture, Facebook live video, Netflix encoding at scale, Netflix shot-based encoding. Not read: the YouTube 2012 talk (video) and Egnyte transcoding (fetch failed, 404). Covers sharding metadata, CDN head/tail, request coalescing, chunked parallel encoding, shot collation and checkpoints. Includes an executed Node example. Related: chapter 14, YouTube pipeline, CDN. Created 2026-10-15 from the Additional Resources section of liquidslr/system-design-notes. Read time about 13 min.</div>
+        <h1>YouTube and Video Streaming: Reading Guide</h1>
+        <p class="summary">Reading guide to six video resources: early YouTube, Facebook live video, Netflix chunked and shot-based encoding; one video and one dead link flagged unread.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 14</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">13 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Metadata sharding, CDN head vs tail, request coalescing, chunked and shot-based encoding</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">YouTube, Facebook Live, Netflix, HLS, RTMP</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">The six resources behind Chapter 14 span almost twenty years of video engineering, from a 2008 account of a startup keeping a Python and MySQL site alive, to Netflix's modern parallel encoding pipeline. One is a video I could not watch, and one article could not be fetched. Read in chronological order they tell one story: as scale grows, the bottleneck moves from the database, to the disks serving small files, to the encoder farm, to the edge. The chapter's answer, upload then transcode into many renditions then serve through a CDN, is the stable shape; the resources show how each box got engineered.</p>
+        <div class="callout"><p><strong>Core idea:</strong> video systems split into three pipelines with different constraints: metadata (small, relational, shardable), processing (huge CPU, parallelisable by cutting video into independent units), and delivery (bandwidth, caching, and protecting the origin from herds).</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Reading order</span>
+        <h2>The Six Resources at a Glance</h2>
+        <table class="data-table">
+          <thead><tr><th>Resource</th><th>Read?</th><th>Pipeline</th><th>Priority</th></tr></thead>
+          <tbody>
+            <tr><td>YouTube Architecture (High Scalability)</td><td>Yes</td><td>Metadata, serving, thumbnails</td><td>Read for history and principles</td></tr>
+            <tr><td>YouTube scalability 2012</td><td>Video, not read in full</td><td>Unknown to me beyond title</td><td>Watch if time allows</td></tr>
+            <tr><td>Transcoding Videos at Scale (Egnyte)</td><td>Fetch failed</td><td>Processing</td><td>Check manually</td></tr>
+            <tr><td>Facebook Video Broadcasting</td><td>Yes</td><td>Live delivery</td><td>Read in full</td></tr>
+            <tr><td>Netflix Video Encoding at Scale</td><td>Yes</td><td>Processing</td><td>Read in full</td></tr>
+            <tr><td>Netflix Shot based encoding</td><td>Yes</td><td>Processing</td><td>Read in full</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>Honesty note:</strong> the YouTube 2012 link is a video and could not be read here; I rely only on its title and make no claims about its content. The Egnyte article returned a redirect and then HTTP 404, so I describe it only from its title and say so below.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 1</span>
+        <h2>YouTube Architecture</h2>
+        <h3>What it is</h3>
+        <p>A High Scalability post by Todd Hoff, published in March 2008, compiling what YouTube engineers had said in public talks about the site's stack and growth. The page's own timeline mentions roughly thirty million views per day in early 2006 and a hundred million by mid-2006, and a small team: a few sysadmins, scalability architects, developers, network engineers and one DBA.</p>
+
+        <h3>Core ideas</h3>
+        <ul class="check-list">
+          <li><strong>Stack.</strong> Python application servers behind Apache, MySQL for metadata, lighttpd for video bytes (Apache was too heavy for that), a hardware load balancer for static content. The page stresses that Python was rarely the bottleneck because the code mostly waits on remote calls, and that CPU-heavy parts were pushed to C extensions.</li>
+          <li><strong>Database evolution.</strong> The path is a classic: one server, then a master with read replicas, then partitioning, then sharding by user. Replica lag was the pain point (single-threaded replication applying writes serially on weaker machines). Splitting video-watching traffic into its own pool bought time; assigning users to shards cut hardware by about 30 percent and eliminated lag, per the post.</li>
+          <li><strong>Serving video.</strong> Popular content goes to a CDN and is served mostly from memory. The long tail, videos watched a handful of times a day, comes from YouTube's own machines and means random disk reads and poor cache efficiency; they tuned RAID and memory for it. Each video lives on a small cluster for throughput and fault tolerance.</li>
+          <li><strong>Thumbnails.</strong> Many tiny files per video (several each, dozens per page) overwhelmed filesystem directories and caches; the fix was to move them into Google's Bigtable, which packs small objects and has multi-level caching. The post reports a dramatic drop in requests per second under Squid before the fix.</li>
+          <li><strong>Lessons.</strong> Stall for time with cheap tricks, prioritise essentials, outsource battles like CDN, keep things simple so you can re-architect, shard to isolate resources, and iterate on bottlenecks constantly.</li>
+        </ul>
+
+        <h3>What is still true, and what is dated</h3>
+        <p><strong>True:</strong> head versus long-tail serving is still the central caching problem; small-object storage as a distinct problem still appears (S3-style systems, thumbnails and manifests); shard by user for the metadata. <strong>Dated:</strong> the specific software (Squid, lighttpd, Apache, psyco), the single-digit data-centre footprint, and the manual disk tuning. Today's concerns, adaptive streaming, multi-codec ladders, DRM and recommendation, are barely visible.</p>
+        <h3>Connection to Chapter 14</h3>
+        <p>The chapter's "metadata DB plus blob storage plus CDN" separation is already present; so is the idea that popular and long-tail videos need different caching policies. The post is the origin story of why you do not put video bytes in the metadata database.</p>
+        <p class="source-link">Original: <a href="http://highscalability.com/youtube-architecture" target="_blank" rel="noopener">YouTube Architecture</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 2</span>
+        <h2>YouTube scalability 2012</h2>
+        <p>This is a video, not read in full. I could not extract its content and will not guess what the speaker says. From the title alone: it is a talk about YouTube's scalability, dated 2012, so it should be four years newer than the High Scalability post above. A good use of it is to compare against the 2008 article: note what changed in the data layer and serving layer, and treat anything you take from it as your own notes rather than something I have verified.</p>
+        <p class="source-link">Original: <a href="https://www.youtube.com/watch?v=w5WVu624fY8" target="_blank" rel="noopener">YouTube scalability 2012</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 3</span>
+        <h2>Transcoding Videos at Scale</h2>
+        <div class="warn-box"><p><strong>Fetch failed.</strong> The Egnyte engineering blog URL as listed redirected to another URL that returned HTTP 404 when I tried it. I therefore did not read this article and I am not describing its contents. From the title and publisher (Egnyte is a file-sharing and content-collaboration vendor) it is presumably a practical transcoding write-up from a non-hyperscale company, which is a useful contrast to Netflix: what do you do when you cannot build a bespoke encoder farm? Check the link in a browser; if it is dead, the Wayback Machine may have it.</p></div>
+        <h3>Connection to Chapter 14</h3>
+        <p>The chapter's transcoding section (DAG of tasks, preprocessor, task scheduler, resource manager, workers) is the pattern any such article would implement; use the Netflix pair below for a verified, detailed version.</p>
+        <p class="source-link">Original: <a href="https://www.egnyte.com/blog/2018/12/transcoding-how-we-serve-videos-at-scale/" target="_blank" rel="noopener">Transcoding Videos at Scale</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 4</span>
+        <h2>Facebook Video Broadcasting</h2>
+        <h3>What it is</h3>
+        <p>An engineering post from Facebook (December 2015) titled "Under the hood: Broadcasting live video to millions". It covers two launches: live video for verified public figures, where the problem was surviving enormous simultaneous audiences, and live video for ordinary users on mobile, where the problem was latency.</p>
+        <h3>Core ideas</h3>
+        <ul class="check-list">
+          <li><strong>Thundering herd.</strong> A celebrity broadcast sends millions of viewers to the same few seconds of video. Clients never talk to the stream server directly; they hit edge caches, then an origin cache layer, and only then the stream server. The video is cut into short HLS segments (three seconds in the post), and over 98 percent of segment requests are answered at the edge.</li>
+          <li><strong>Request coalescing.</strong> Even 1.8 percent leaking through is huge at this scale, and in live video many viewers ask for the same <em>not yet cached</em> segment simultaneously. So the edge treats the first request as a miss and queues the others behind it; when the response arrives they are all served from cache. The same trick applies at the origin tier for requests from multiple edges.</li>
+          <li><strong>Lower latency with RTMP.</strong> For small interactive audiences they wanted a couple of seconds of delay. Push-based RTMP with small chunks (about 64 ms of video at 500 kbps) cut lag roughly 5x compared with 3-second pull segments, but needs a custom proxy tier since the CDN ecosystem is built around HTTP.</li>
+        </ul>
+        <h3>Still true, or dated</h3>
+        <p>Coalescing is evergreen and appears in nginx (cache lock), Varnish (request coalescing), CDNs ("collapsed forwarding"), and application caches (singleflight). The latency trade-off is also current: low-latency HLS and DASH extensions, and WebRTC, aim at the same gap. The specific choice of RTMP for viewer delivery is largely obsolete, since browsers dropped Flash.</p>
+        <h3>Connection to Chapter 14</h3>
+        <p>The chapter focuses on on-demand video and CDN costs; this is the live counterpart. It makes the chapter's "popular video on CDN, long-tail from origin" idea dynamic: every live segment is simultaneously brand-new and extremely popular.</p>
+        <p class="source-link">Original: <a href="https://engineering.fb.com/ios/under-the-hood-broadcasting-live-video-to-millions/" target="_blank" rel="noopener">Facebook Video Broadcasting</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 5</span>
+        <h2>Netflix Video Encoding at Scale</h2>
+        <h3>What it is</h3>
+        <p>A 2015 Netflix Tech Blog post on the media pipeline that ingests studio masters and produces the encoded streams members watch. It is a description of an architecture, not an encoding algorithm.</p>
+        <h3>Core ideas</h3>
+        <ul class="check-list">
+          <li><strong>Inspect before encoding.</strong> Sources that fail checks are rejected and redelivered instead of repaired. The reasoning is operational: fixes are often partial, errors should surface early, and the pipeline stays simple. Inspection itself is chunked and parallel and generates fingerprints for later comparison.</li>
+          <li><strong>Chunked parallel encoding.</strong> Work is split into small independent tasks on commodity cloud instances, including spot-priced capacity. If an instance disappears, little work is lost and the task is rescheduled. Previously a 1080p title could take days; the post reports hours and a goal of 30 minutes.</li>
+          <li><strong>Verify every chunk, then the assembly.</strong> Each finished chunk is checked as soon as it completes, an assembler stitches chunks, and the final stream's spatial and temporal fingerprints are compared to the source to catch dropped, duplicated or reordered frames. Quality metrics are computed per output.</li>
+          <li><strong>Wide ladder.</strong> Multiple codec profiles and bitrates from about 100 kbps to 16 Mbps so clients can adapt.</li>
+        </ul>
+        <h3>Still true, or dated</h3>
+        <p>The pattern (split, parallelise, verify, assemble; use preemptible capacity; fail fast on bad input) is the standard design for any transcoding service. The codec list is dated: it names VC-1 and H.264 profiles and HEVC, with no AV1. The post is also light on how chunk boundaries are chosen, a question readers ask in the comments.</p>
+        <h3>Connection to Chapter 14</h3>
+        <p>This is the chapter's transcoding DAG in production form. It supports the chapter's claims that videos are split into GOP-aligned segments for parallel processing and that a message queue plus workers is the right decomposition, and adds: automated validation as a first-class stage.</p>
+        <p class="source-link">Original: <a href="https://netflixtechblog.com/high-quality-video-encoding-at-scale-d159db052746" target="_blank" rel="noopener">Netflix Video Encoding at Scale</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 6</span>
+        <h2>Netflix Shot based encoding</h2>
+        <h3>What it is</h3>
+        <p>A March 2018 Netflix post announcing "optimized shot-based encodes". It builds on per-title encoding by tuning compression at the granularity of individual shots, using a framework called the Dynamic Optimizer, with Netflix's perceptual quality metric VMAF as the objective.</p>
+        <h3>Core ideas</h3>
+        <ul class="check-list">
+          <li><strong>Why shots.</strong> A shot is a continuous camera take; its complexity is roughly homogeneous, so a good bitrate for a static dialogue shot is wasteful for an action shot and starved for the reverse. Optimising per shot saves bits at equal quality.</li>
+          <li><strong>Results as reported.</strong> At a VMAF target of 80, the optimised AVC encodes use under half the bits of the earlier per-title baseline, and VP9 under a third. Against the mobile encodes savings are in the range of 17 to 30 percent. At cellular-like bitrates the quality scores for example frames were far higher. A/B tests showed fewer rebuffers and more viewing under data caps.</li>
+          <li><strong>The scale problem.</strong> Shots average about four seconds, so a one-hour episode goes from about twenty chunks to about 900 encode units. That flooded the messaging layer between instances. They did not redesign it; they added <strong>collation</strong> (group consecutive shots back into roughly three-minute chunks) and <strong>checkpoints</strong> (save each finished shot so a retry resumes mid-chunk).</li>
+          <li><strong>What it does not say.</strong> It does not explain how shots are detected, nor what constraints apply when stitching shots with independently chosen settings, so do not read those into it.</li>
+        </ul>
+        <h3>Still true, or dated</h3>
+        <p>Content-adaptive encoding is now mainstream; the idea that average bitrate is the wrong control and quality should be the target has survived. The shot granularity trick has been extended in later Netflix work that I did not read here. The codecs named (AVC, VP9) are dated relative to AV1.</p>
+        <h3>Connection to Chapter 14</h3>
+        <p>The chapter asks "how do you split a video for parallel transcode?" The default answer is fixed-length GOP segments; this post shows a better boundary (shots) and, importantly, the operational pattern needed to keep task count manageable (collation) and failure cost bounded (checkpointing). Both appear in the code below.</p>
+        <p class="source-link">Original: <a href="https://netflixtechblog.com/optimized-shot-based-encodes-now-streaming-4b9464204830" target="_blank" rel="noopener">Netflix Shot based encoding</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Synthesis</span>
+        <h2>How the Resources Fit Together</h2>
+        <div class="diagram-box"><pre>
+   upload --> inspect --> split (GOP / shot) --> parallel encode --> verify --> assemble
+                                                                          |
+                                      metadata DB (sharded by user)  <----+
+                                                                          v
+                    origin store --> origin cache --> edge cache --> player (adaptive bitrate)
+                                         ^ request coalescing protects each tier
+        </pre></div>
+        <table class="data-table">
+          <thead><tr><th>Layer</th><th>Resource</th><th>Takeaway</th></tr></thead>
+          <tbody>
+            <tr><td>Metadata</td><td>YouTube Architecture</td><td>Replica lag forces sharding by user</td></tr>
+            <tr><td>Processing</td><td>Netflix x2</td><td>Smaller independent units + verification + checkpoints</td></tr>
+            <tr><td>Delivery</td><td>Facebook, YouTube</td><td>Protect origin with layered caches and coalescing; head versus tail policies</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Reading order</p>
+        <ol>
+          <li>YouTube Architecture for the baseline.</li>
+          <li>Netflix Video Encoding at Scale, then Shot based encoding (same pipeline, finer granularity).</li>
+          <li>Facebook Video Broadcasting for delivery and the live variant.</li>
+          <li>Skip the two videos and the Egnyte link unless you want extra colour; I could not verify them.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Shot Collation with Checkpoints, and Request Coalescing</h2>
+        <p>Part one builds about nine hundred synthetic shots averaging four seconds, collates them into roughly three-minute chunks, and simulates losing an encoder mid-chunk: with checkpointing the retry redoes only the unfinished shots. Part two puts ten thousand concurrent viewers on one uncached segment and shows a coalescing edge makes exactly one origin request.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Part 1: shot-based planning. Collate consecutive shots into ~TARGET-second chunks; checkpoint finished shots.
+function collate(shots, target) {
+  const chunks = []; let cur = [], len = 0;
+  for (const s of shots) {
+    cur.push(s); len += s.dur;
+    if (len &gt;= target) { chunks.push(cur); cur = []; len = 0; }
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks;
+}
+// deterministic pseudo-random shot lengths averaging ~4 s over a 1-hour title
+let x = 12345; const rnd = () =&gt; ((x = (x * 1103515245 + 12345) &amp; 0x7fffffff) / 0x7fffffff);
+const shots = []; let t = 0, id = 0;
+while (t &lt; 3600) { const dur = Math.min(0.5 + rnd() * 7, 3600 - t); shots.push({ id: id++, dur }); t += dur; }
+const chunks = collate(shots, 180);
+console.log(`shots=${shots.length} chunks=${chunks.length} avgShot=${(3600 / shots.length).toFixed(1)}s`);
+console.assert(chunks.flat().length === shots.length);
+// worker dies on the 7th shot of chunk 3; with checkpoints only the remainder re-runs
+const done = new Set(); let encodeCalls = 0;
+function runChunk(chunk, dieAt) {
+  for (let i = 0; i &lt; chunk.length; i++) {
+    if (done.has(chunk[i].id)) continue;          // checkpointed earlier
+    if (i === dieAt) throw new Error("instance lost");
+    encodeCalls++; done.add(chunk[i].id);
+  }
+}
+try { runChunk(chunks[3], 6); } catch { /* retry elsewhere */ }
+const before = encodeCalls; runChunk(chunks[3]);
+console.log(`first attempt did ${before} shots, retry did ${encodeCalls - before} (chunk has ${chunks[3].length})`);
+console.assert(encodeCalls === chunks[3].length &amp;&amp; before === 6);
+
+// Part 2: request coalescing at a cache (the live-video thundering-herd defence).
+class Edge {
+  constructor(origin) { this.origin = origin; this.cache = new Map(); this.inflight = new Map(); }
+  async get(seg) {
+    if (this.cache.has(seg)) return this.cache.get(seg);
+    if (this.inflight.has(seg)) return this.inflight.get(seg);   // queue behind the first miss
+    const p = this.origin(seg).then((v) =&gt; { this.cache.set(seg, v); this.inflight.delete(seg); return v; });
+    this.inflight.set(seg, p); return p;
+  }
+}
+let originHits = 0;
+const origin = async (seg) =&gt; { originHits++; await new Promise((r) =&gt; setTimeout(r, 20)); return `bytes:${seg}`; };
+const edge = new Edge(origin);
+const viewers = await Promise.all(Array.from({ length: 10000 }, () =&gt; edge.get("seg-001.ts")));
+console.log(`10000 simultaneous viewers -&gt; origin requests: ${originHits}`);
+console.assert(originHits === 1 &amp;&amp; viewers.every((v) =&gt; v === "bytes:seg-001.ts"));</code></pre>
+        <p class="code-caption">Executed with Node 24. Prints 901 shots into 20 chunks, "first attempt did 6 shots, retry did 42 (chunk has 48)", and "10000 simultaneous viewers -> origin requests: 1". Shot lengths come from a seeded generator, so output is reproducible.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Build exercise</span>
+        <h2>What to Build</h2>
+        <ul class="check-list">
+          <li>Add a cost model: each shot has a complexity; give each chunk a fixed overhead per message and show the break-even where collation beats per-shot tasks.</li>
+          <li>Give the edge a TTL and a second tier (origin cache) and measure origin load with and without coalescing under a Zipf request pattern.</li>
+          <li>Implement a bitrate ladder chooser: given a throughput trace, pick the highest rendition below 80 percent of measured throughput, with hysteresis, and count rebuffers.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Reading Checklist</h2>
+        <ul class="check-list">
+          <li>I can state, for each resource, the one problem it solves and the one number or mechanism that proves it.</li>
+          <li>I know which resources I read in full and which I only know by title.</li>
+          <li>I can map each resource to the handbook chapter section it extends.</li>
+          <li>I have run the code example and changed one parameter to see its behaviour change.</li>
+        </ul>
+      </section>
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul><li><a href="../chapters/14-youtube-video-streaming.html">Chapter 14: YouTube Video Streaming</a> — the chapter these resources extend.</li><li><a href="../../youtube-video-processing-pipeline.html">YouTube Video Processing Pipeline</a> — a deeper look at the processing DAG.</li><li><a href="../../system-design/cdn.html">CDN</a> — the delivery layer in the Facebook and YouTube posts.</li><li><a href="../../system-design/caching.html">Caching</a> — request coalescing and tiered caches.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Resources listed in the “Additonal Resources” section of <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu). Summaries are in my own words and are not a substitute for the originals:</p>
+        <ul><li><a href="http://highscalability.com/youtube-architecture" target="_blank" rel="noopener">YouTube Architecture</a> — http://highscalability.com/youtube-architecture</li><li><a href="https://www.youtube.com/watch?v=w5WVu624fY8" target="_blank" rel="noopener">YouTube scalability 2012</a> — https://www.youtube.com/watch?v=w5WVu624fY8</li><li><a href="https://www.egnyte.com/blog/2018/12/transcoding-how-we-serve-videos-at-scale/" target="_blank" rel="noopener">Transcoding Videos at Scale</a> — https://www.egnyte.com/blog/2018/12/transcoding-how-we-serve-videos-at-scale/</li><li><a href="https://engineering.fb.com/ios/under-the-hood-broadcasting-live-video-to-millions/" target="_blank" rel="noopener">Facebook Video Broadcasting</a> — https://engineering.fb.com/ios/under-the-hood-broadcasting-live-video-to-millions/</li><li><a href="https://netflixtechblog.com/high-quality-video-encoding-at-scale-d159db052746" target="_blank" rel="noopener">Netflix Video Encoding at Scale</a> — https://netflixtechblog.com/high-quality-video-encoding-at-scale-d159db052746</li><li><a href="https://netflixtechblog.com/optimized-shot-based-encodes-now-streaming-4b9464204830" target="_blank" rel="noopener">Netflix Shot based encoding</a> — https://netflixtechblog.com/optimized-shot-based-encodes-now-streaming-4b9464204830</li></ul>
+      </section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>Video systems are three pipelines: metadata (shard by user), processing (cut into small independent units, verify, checkpoint) and delivery (tiered caches with request coalescing). Each resource shows one of them breaking at scale and how it was bounded.</p></section>
+    </main>
+  </body>
+</html>

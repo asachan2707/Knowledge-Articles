@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a News Feed System | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 11 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.11 (Alex Xu Vol 1). Covers news feed design for 10M DAU: publish and retrieve flows, fanout on write vs read vs hybrid (celebrity problem), fanout workers with message queue, five cache layers, capped feed lists of post ids, hydration, pagination, ranking extensions, failure modes. Includes an executed Node.js hybrid fanout simulation. About 20 min read. Related: instagram-notification-fanout, caching, message-queue, sharding, notification system chapter, chat system chapter.</div>
+        <h1>Design a News Feed System</h1>
+        <p class="summary">A news feed is a read-heavy, personalised view over a social graph. The central decision is where to pay the cost of assembling it: when someone posts (fanout on write), when someone reads (fanout on read), or both (hybrid).</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">11 of 28 · Part 3 Product Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">15 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Fanout on write vs read, hybrid for celebrities, capped id lists, layered caches</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Twitter timelines, Facebook TAO and Memcache, Instagram, Redis, Kafka</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">When you open a social app, the first screen is a list of recent posts from people you follow. Building it sounds like one query: take everyone I follow, get their latest posts, sort by time. At 10 million daily users with hundreds of connections each, that query is the most expensive thing in the product. It touches the social graph, many authors' post lists and several counters, and users expect it in a couple of hundred milliseconds. The news feed system exists to precompute and cache enough of that work that reading stays cheap, without making writing unaffordable.</p>
+        <div class="callout"><p><strong>Core idea:</strong> the feed is a materialised view. You can maintain it eagerly at write time (cheap reads, expensive writes) or build it lazily at read time (cheap writes, expensive reads). Real systems blend the two based on how many followers an author has.</p></div>
+      </section>
+
+      <section class="story-card">
+        <h2>A public anchor: Twitter's timeline</h2>
+        <p>Twitter engineers have described in public talks the same tension this chapter teaches. The home timeline was served from a per-user Redis list of tweet ids, filled by a fanout service when someone tweeted (push). That made reading fast, but accounts with tens of millions of followers made a single tweet turn into tens of millions of writes, so for the very largest accounts the system skips the fanout and merges their tweets into the reader's timeline at request time (pull). That hybrid is exactly the design target here, and it is why interview answers that stop at "just push to all followers" lose points.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>Scope and back-of-envelope numbers</h2>
+        <p>Scope: web and mobile clients; users publish posts (text, images, video) and read a feed of friends' posts; ordering is reverse chronological for simplicity (ranking comes later); a user may have up to 5,000 friends; 10 million daily active users.</p>
+        <p>The source gives no read or write rates, so state assumptions explicitly, which is what a good interview answer does:</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Assumption</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Feed reads</td><td>10 M DAU x 5 opens/day</td><td>50 M/day = 50,000,000 / 86,400 ≈ 580/s average; at 5x peak ≈ 2,900/s</td></tr>
+            <tr><td>Posts</td><td>0.2 posts per DAU per day</td><td>2 M/day ≈ 23/s</td></tr>
+            <tr><td>Fanout per post</td><td>200 friends average</td><td>2 M x 200 = 400 M feed inserts/day ≈ 4,600/s</td></tr>
+            <tr><td>Worst-case single post</td><td>5,000 friends (the cap)</td><td>5,000 inserts; a true celebrity with 10 M followers would be 10 M inserts</td></tr>
+            <tr><td>Feed cache</td><td>500 post ids x 8 B per active user</td><td>4 KB x 10 M = 40 GB raw; with sorted-set or list overhead (say 5-10x) roughly 200-400 GB, spread over a sharded cache cluster</td></tr>
+          </tbody>
+        </table>
+        <p>Takeaways: reads outnumber posts by 25 to 1 in this model, which favours pushing work to write time. But the 5,000-friend cap in the stated scope is an interesting twist: with a hard cap, even the worst fanout is bounded, so pure fanout on write is defensible. The hybrid appears when you relax that assumption (follower models like Twitter's, where a follower count has no ceiling).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-Level Design</span>
+        <h2>Two flows and two APIs</h2>
+        <p>The design splits into feed publishing (write path) and news feed building (read path). The APIs are minimal.</p>
+        <table class="data-table">
+          <thead><tr><th>API</th><th>Request</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Publish</td><td><code>POST /v1/me/feed</code> with content and auth token</td><td>Return 201 quickly; the fanout is asynchronous.</td></tr>
+            <tr><td>Retrieve</td><td><code>GET /v1/me/feed</code> with auth token</td><td>Add <code>?limit=&amp;cursor=</code>; return an opaque cursor, not an offset.</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Publishing flow</p>
+        <div class="diagram-box"><pre>
+ Client --> <span class="hi">Load balancer</span> --> <span class="hi">Web servers</span> (authn, rate limit, validate)
+                                    |
+                 +------------------+-------------------+
+                 v                  v                   v
+          <span class="step">Post service</span>      <span class="step">Fanout service</span>     <span class="step">Notification service</span>
+        (post DB + cache)   (writes into friends'   (push/badge to friends)
+                             feed caches)
+</pre></div>
+        <p>The web tier authenticates and enforces rate limits to stop spam bursts. The post service persists the post to the database and warms the content cache. The fanout service delivers the post id to friends' feeds. The notification service tells interested friends (see the Notification System chapter).</p>
+        <p class="mini-heading">Feed building flow</p>
+        <div class="diagram-box"><pre>
+ Client --> LB --> Web servers --> <span class="hi">News feed service</span>
+                                      | 1 read post ids      <span class="dim">(news feed cache)</span>
+                                      | 2 hydrate post+user  <span class="dim">(content cache -> post DB, user cache -> user DB)</span>
+                                      | 3 attach counters/actions <span class="dim">(counter + action caches)</span>
+                                      v
+                               JSON feed -> client (and media URLs -> CDN)
+</pre></div>
+        <p>The feed service fetches an ordered list of post ids for the viewer, then hydrates each id into a renderable object by looking up content, author profile and engagement counts. The two-step "ids then hydrate" shape is the key to memory efficiency: you cache the small thing (ids) per user and the big thing (post bodies) once, shared by everyone.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Fanout</span>
+        <h2>Fanout on write, fanout on read, or both</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Fanout on write (push) - pros</h4><ul><li>Feed is precomputed, so reads are one cache lookup</li><li>New posts appear in friends' feeds almost immediately</li><li>Read latency is predictable and flat</li></ul></div>
+          <div class="trade-col cons"><h4>Fanout on write - cons</h4><ul><li>Hot key / celebrity: one post becomes millions of writes</li><li>Wastes work on inactive users who never open the app</li><li>Write amplification and delayed visibility for the last followers</li></ul></div>
+        </div>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Fanout on read (pull) - pros</h4><ul><li>Writes are O(1); no wasted work for inactive users</li><li>No hotspot at publish time</li><li>Easy to change ranking or filters per read</li></ul></div>
+          <div class="trade-col cons"><h4>Fanout on read - cons</h4><ul><li>Read must query every followed author, then merge and sort</li><li>Latency grows with the number of followees</li><li>Heavy, spiky load on post stores at peak reading times</li></ul></div>
+        </div>
+        <p class="mini-heading">Hybrid</p>
+        <p>Push for ordinary authors, pull for high-follower authors. When a viewer requests their feed, the service reads the precomputed list and merges the recent posts of the celebrities that viewer follows, which are cheap to fetch because those authors' recent posts sit in a hot cache shared by millions of readers. A second hybrid axis is activity: skip fanning out to users who have not logged in for a long time, and rebuild their feed on demand when they return. Consistent hashing across cache nodes smooths hotspots on the storage side.</p>
+        <div class="insight-box"><strong>Pick the threshold with data.</strong> The celebrity cutoff is a cost model, not a magic number: compare the write cost of fanning out (followers x cost per insert, wasted on inactive followers) with the extra read cost of a merge (expected readers x cost per merge). Typical systems choose a follower threshold in the thousands to hundreds of thousands and tune it from metrics.</div>
+        <p class="mini-heading">The fanout service step by step</p>
+        <div class="diagram-box"><pre>
+ new post (author A, post_id P)
+    |
+    v
+ <span class="step">1</span> fetch A's friend ids        <span class="dim">(graph DB / social graph cache)</span>
+ <span class="step">2</span> filter via user settings    <span class="dim">(muted, blocked, close-friends-only, inactive)</span>
+ <span class="step">3</span> enqueue {P, [friend ids]}   <span class="dim">(message queue, chunked ~ hundreds per message)</span>
+ <span class="step">4</span> fanout workers consume
+ <span class="step">5</span> for each friend: LPUSH/ZADD P into feed list, trim to max N
+    <span class="dim">cache stores (post_id, user_id) pairs only - no bodies</span>
+</pre></div>
+        <p>Details that matter: chunk the friend list so a single huge post becomes many small queue messages that parallelise across workers; make inserts idempotent (a sorted set keyed by post id makes a replayed insert harmless, a plain list would double it); cap each feed at a fixed length, say a few hundred to a thousand entries, since users rarely scroll deeper and older items can be rebuilt from the database by a slow path; and give the post author's own visibility priority over fanout completion so the author sees their post immediately (read-your-writes).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Retrieval and Caching</span>
+        <h2>Five cache layers</h2>
+        <table class="data-table">
+          <thead><tr><th>Layer</th><th>Holds</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>News feed cache</td><td>Per-user ordered post ids</td><td>Capped; the primary read structure. A Redis sorted set (score = timestamp or snowflake id) or list.</td></tr>
+            <tr><td>Content cache</td><td>Post bodies and metadata</td><td>Hot tier for popular posts, normal tier for the rest; TTL plus invalidation on edit or delete.</td></tr>
+            <tr><td>Social graph cache</td><td>Follow / friend edges</td><td>Backed by a graph or sharded relational store; read heavily by fanout.</td></tr>
+            <tr><td>Action cache</td><td>Whether this viewer liked, replied or shared</td><td>Per-viewer, small; drives UI state.</td></tr>
+            <tr><td>Counter cache</td><td>Likes, comments, shares, follower counts</td><td>Approximate is fine; use increments and periodic flush, not row updates per like.</td></tr>
+          </tbody>
+        </table>
+        <p>Design notes beyond the layers themselves. Hydration is a fan-in: fetching 20 posts means 20 content lookups, 20 author lookups and counters; use batched multi-get, and a request-coalescing cache (singleflight) so a viral post does not stampede the database on a miss. Facebook's published Memcache and TAO papers describe the same layering: a read-through cache in front of a sharded graph store, with leases to avoid thundering herds and cross-region invalidation. Media bytes never flow through this tier; they are served from object storage via a CDN.</p>
+        <p class="mini-heading">Pagination</p>
+        <p>Offset pagination breaks on a live feed, because new posts shift offsets and users see repeats or gaps. Use a cursor containing the last seen post id or score; the next page is "items older than this". Because ids are time-sortable (Snowflake-style, see Chapter 7), the id is itself a good cursor. On the first page also return a "newest id", so the client can poll cheaply for "N new posts" without rebuilding the list.</p>
+        <p class="mini-heading">Cold start and cache loss</p>
+        <p>If a user's feed list is missing (eviction, new device, long absence), rebuild it through the pull path: query followed authors' recent posts, merge, write back to cache, and serve. This rebuild path doubles as your disaster recovery for the whole cache tier, so it must be safe under load: rate-limit rebuilds and serve a degraded, shorter feed first.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Beyond Chronological</span>
+        <h2>Ranking, ads and other real-world extensions</h2>
+        <p>The chapter's assumption of reverse-chronological order keeps the data structure trivially simple, because the feed list is already sorted. Real products rank. The usual structure is two stages: candidate generation (take the capped id list plus pulled celebrity posts plus recommended items, a few hundred candidates) followed by a scoring model that orders them using features such as author affinity, recency, post type and predicted engagement. Cached id lists remain valuable as the candidate source; ranking is done on read, so it can use fresh signals and be changed without rewriting caches. Ads are blended in at this stage as well.</p>
+        <p>Other features sit on the same skeleton: deletion and privacy changes require removing post ids from feeds lazily (filter at hydration time, since a deleted or blocked post simply fails to hydrate) rather than scrubbing millions of lists; unfollow does not rewrite history eagerly either; and edits just update the content cache entry because feeds hold ids.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling</span>
+        <h2>Scaling levers from the notes, with the missing depth</h2>
+        <ul>
+          <li><strong>Database scaling:</strong> shard posts by post id or by author with a time component; shard the graph by user id; use read replicas for hydration misses. Beware that sharding by author concentrates celebrity reads.</li>
+          <li><strong>Stateless web tier:</strong> any web node can serve any request because session state lives in tokens and caches.</li>
+          <li><strong>Cache everything hot:</strong> the layered cache above, with hit rate per layer as a first-class metric.</li>
+          <li><strong>Reliability:</strong> consistent hashing for cache and worker distribution so node churn moves only a small share of keys; message queues so fanout survives spikes and worker crashes, with at-least-once delivery and idempotent inserts.</li>
+          <li><strong>Monitoring:</strong> track QPS and latency percentiles for publish and read, fanout lag (time from publish to last feed insert), queue depth and age, cache hit rate by layer, and rebuild rate. Fanout lag is the metric that tells you the celebrity threshold is wrong.</li>
+          <li><strong>Geography:</strong> place read replicas and feed caches near users; accept eventual consistency across regions, and keep a user pinned to a home region for writes.</li>
+        </ul>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Choice</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>What the feed cache stores</td><td>Post ids only</td><td>Small, immutable, bodies shared across all viewers.</td></tr>
+            <tr><td>Cache structure</td><td>Sorted set vs list</td><td>Sorted set gives idempotent inserts and score-based cursors; list is smaller and faster for pure append and trim.</td></tr>
+            <tr><td>Feed length cap</td><td>Hundreds to ~1,000</td><td>Memory bound; deeper pages use the slow path.</td></tr>
+            <tr><td>Inactive users</td><td>Skip fanout, rebuild on login</td><td>Avoids paying for writes nobody reads.</td></tr>
+            <tr><td>Deletes</td><td>Lazy filter at hydration</td><td>No mass cache rewrites.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Hybrid fanout in forty lines</h2>
+        <p>This simulation holds a follower graph, a capped per-user feed list of post ids, a mute setting honoured at fanout time, and a follower-count threshold that switches an author from push to pull. Reads merge the cached list with celebrity posts and sort newest first. Assertions verify that celebrity posts cost zero fanout writes, that muting works and that the cap holds.</p>
+        <span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">import assert from 'node:assert/strict';
+
+// Hybrid fanout news feed: push for normal authors, pull for celebrities, capped per-user feed lists.
+class FeedSystem {
+  constructor({ celebrityThreshold = 3, feedCap = 5 } = {}) {
+    this.thr = celebrityThreshold; this.cap = feedCap;
+    this.followers = new Map();   // author -&gt; Set(follower)   (social graph)
+    this.following = new Map();   // user -&gt; Set(author)
+    this.posts = new Map();       // postId -&gt; {id, author, ts, text}  (content store)
+    this.byAuthor = new Map();    // author -&gt; postIds newest-first
+    this.feeds = new Map();       // user -&gt; [postId...] newest-first, capped (feed cache)
+    this.muted = new Map();       // user -&gt; Set(author)
+    this.nextId = 1; this.fanoutWrites = 0;
+  }
+  follow(u, a) {
+    (this.followers.get(a) ?? this.followers.set(a, new Set()).get(a)).add(u);
+    (this.following.get(u) ?? this.following.set(u, new Set()).get(u)).add(a);
+  }
+  mute(u, a) { (this.muted.get(u) ?? this.muted.set(u, new Set()).get(u)).add(a); }
+  isCelebrity(a) { return (this.followers.get(a)?.size ?? 0) &gt;= this.thr; }
+  publish(author, text, ts) {
+    const id = this.nextId++;
+    this.posts.set(id, { id, author, ts, text });
+    (this.byAuthor.get(author) ?? this.byAuthor.set(author, []).get(author)).unshift(id);
+    if (this.isCelebrity(author)) return id;            // pull model: no fanout
+    for (const f of this.followers.get(author) ?? []) {  // push model
+      if (this.muted.get(f)?.has(author)) continue;
+      const feed = this.feeds.get(f) ?? this.feeds.set(f, []).get(f);
+      feed.unshift(id); if (feed.length &gt; this.cap) feed.length = this.cap;
+      this.fanoutWrites++;
+    }
+    return id;
+  }
+  read(user, limit = 5) {
+    const ids = [...(this.feeds.get(user) ?? [])];
+    for (const a of this.following.get(user) ?? [])       // merge celebrity posts at read time
+      if (this.isCelebrity(a) &amp;&amp; !this.muted.get(user)?.has(a)) ids.push(...(this.byAuthor.get(a) ?? []).slice(0, limit));
+    return [...new Set(ids)].map(i =&gt; this.posts.get(i)).sort((x, y) =&gt; y.ts - x.ts || y.id - x.id)
+      .slice(0, limit).map(p =&gt; `${p.author}:${p.text}`);
+  }
+}
+
+const s = new FeedSystem({ celebrityThreshold: 3, feedCap: 3 });
+s.follow('bob', 'alice'); s.follow('carol', 'alice');            // alice: 2 followers -&gt; push
+['bob', 'carol', 'dave'].forEach(u =&gt; s.follow(u, 'star'));       // star: 3 followers -&gt; pull
+s.mute('carol', 'alice');
+s.publish('alice', 'a1', 1);
+s.publish('star', 's1', 2);
+s.publish('alice', 'a2', 3);
+assert.equal(s.fanoutWrites, 2);                                  // only bob got a1,a2; star not fanned out
+assert.deepEqual(s.read('bob'), ['alice:a2', 'star:s1', 'alice:a1']);
+assert.deepEqual(s.read('carol'), ['star:s1']);                   // muted alice
+assert.deepEqual(s.read('dave'), ['star:s1']);
+for (let i = 0; i &lt; 6; i++) s.publish('alice', 'x' + i, 10 + i);   // cap check
+assert.equal(s.feeds.get('bob').length, 3);
+console.log('bob:', s.read('bob', 4).join(' | '));
+console.log('fanout writes:', s.fanoutWrites, '(celebrity posts cost 0 writes)');</code></pre>
+        <p class="code-caption">Prints bob's merged feed (<code>alice:x5 | alice:x4 | alice:x3 | star:s1</code>) and the total fanout write count (8), with celebrity posts costing none. Executed with Node 20+.</p>
+        <p>Production differences: the Maps become Redis and a graph store, fanout is chunked onto Kafka, the threshold is dynamic, the celebrity merge reads from a hot cache instead of the author list, and hydration happens in a separate batch step.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What breaks and how to contain it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Effect</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Celebrity posts under push</td><td>Queue floods, fanout lag of minutes</td><td>Hybrid threshold, separate queue for big authors, chunking.</td></tr>
+            <tr><td>Feed cache node dies</td><td>Mass cache misses, DB spike</td><td>Consistent hashing, replicas, rebuild rate limit, degrade to shorter feeds.</td></tr>
+            <tr><td>Fanout worker crash mid-batch</td><td>Partial delivery</td><td>At-least-once queue, idempotent inserts, resume by chunk.</td></tr>
+            <tr><td>Viral post cache miss</td><td>Thundering herd on one DB row</td><td>Request coalescing, leases, hot-key replication.</td></tr>
+            <tr><td>Stale graph in fanout</td><td>Post sent to someone who unfollowed or blocked</td><td>Re-check block and privacy at hydration, not just fanout.</td></tr>
+            <tr><td>Counter drift</td><td>Likes shown inconsistently</td><td>Accept approximate counters, reconcile asynchronously.</td></tr>
+            <tr><td>Deleted post still visible</td><td>Privacy risk</td><td>Hydration treats missing or tombstoned posts as absent; purge content cache on delete.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Production Gotchas</span>
+        <h2>Things that bite after launch</h2>
+        <ul>
+          <li><strong>Follower counts follow a power law.</strong> The mean is useless for capacity planning; plan for the tail and monitor the top authors' fanout cost.</li>
+          <li><strong>Read-your-writes.</strong> An author who does not see their own post immediately assumes failure and re-posts. Insert into the author's own feed synchronously, and fan out to the rest asynchronously.</li>
+          <li><strong>Ordering across shards.</strong> Sorting on server-local timestamps can reorder posts under clock skew; use sortable ids or a hybrid logical clock.</li>
+          <li><strong>Unbounded lists.</strong> A missing trim is a slow memory leak that shows up weeks later as evictions of unrelated keys.</li>
+          <li><strong>Re-fanout storms.</strong> Backfilling after an outage by replaying every post can double the load; throttle and prioritise recent posts.</li>
+          <li><strong>Privacy and blocking</strong> must be evaluated at read time too; caches are copies and copies drift.</li>
+          <li><strong>Experiment hygiene.</strong> When ranking changes, keep the candidate cache independent so A/B tests do not require rebuilding it.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview and design review checklist</h2>
+        <ul class="check-list">
+          <li>Numbers stated: 10 M DAU, read and write rates, fanout cost, cache size.</li>
+          <li>Two flows drawn separately: publish and build.</li>
+          <li>Fanout on write vs read compared, hybrid explained with the celebrity case.</li>
+          <li>Fanout through a queue with chunked, idempotent worker inserts.</li>
+          <li>Cache stores ids only and is capped; hydration reads layered caches.</li>
+          <li>Five cache layers named: feed, content, social graph, action, counter.</li>
+          <li>Cursor pagination, read-your-writes, lazy deletes.</li>
+          <li>Cold-start rebuild path, rate limited.</li>
+          <li>Sharding, replication, stateless web tier, consistent hashing.</li>
+          <li>Metrics: fanout lag, hit rate per layer, QPS and tail latency.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why store only post ids in the feed cache?</summary><p>Ids are small and never change, so you can hold hundreds per user cheaply, and edits or deletions touch a single shared content entry rather than millions of feed copies. The price is an extra hydration round trip, which batch reads make cheap.</p></details>
+        <details><summary>How do you handle a user following thousands of accounts, or a very active poster?</summary><p>The first drives pull cost and is bounded by a follow limit or by treating heavy followees as pull sources; the second is handled by fanout rate limits and chunked, lower-priority queue messages. Both are why the system needs per-author and per-viewer caps.</p></details>
+        <details><summary>What if the cache is wiped completely?</summary><p>Serve through the pull path: for each viewer on demand, read followed authors' recent posts, merge, and repopulate. Protect the database with rate-limited rebuilds and request coalescing, and prioritise active users first.</p></details>
+        <details><summary>Does fanout on write guarantee every follower sees the post?</summary><p>Eventually, at-least-once, not instantly. Fanout lag for a large audience can be seconds to minutes, and partially delivered batches resume after a crash. Idempotent inserts make the retries safe.</p></details>
+        <details><summary>How would you add ranking without breaking the design?</summary><p>Keep the capped id list as candidate generation, add a read-time scoring service that reorders a few hundred candidates, and store engagement features in a separate low-latency feature store. Fanout and caches are unchanged.</p></details>
+        <details><summary>How is this different from the chat system's fanout?</summary><p>A feed is read-optimised, tolerant of seconds of lag, and shared posts live once with many pointers. Chat requires per-message delivery with tight ordering and acknowledgements to online devices, so its fanout is toward live connections, not passive caches.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./10-notification-system.html">Chapter 10: Design a Notification System</a> — previous chapter; the publish flow triggers it.</li>
+          <li><a href="./12-chat-system.html">Chapter 12: Design a Chat System</a> — next chapter; fanout toward live connections.</li>
+          <li><a href="./07-unique-id-generator.html">Chapter 7: Unique ID Generator</a> — time-sortable ids used as feed cursors.</li>
+          <li><a href="../../instagram-notification-fanout.html">Instagram Notification Fanout</a> — the same push-versus-pull fanout trade-off in practice.</li>
+          <li><a href="../../system-design/caching.html">Caching</a> — read-through layers, invalidation and stampede protection.</li>
+          <li><a href="../../system-design/message-queue.html">Message Queues</a> — buffering the fanout workload.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — partitioning posts and the social graph.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — distributing cache keys with minimal movement.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repository lists no additional resources specific to this chapter.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Decide where to spend the work. Because reads dominate, precompute capped lists of post ids at write time through a queue-fed fanout service, but exempt the few authors whose follower counts would make that ruinous and merge their posts at read time. Cache ids separately from content, filter privacy and deletes at hydration, and watch fanout lag as your early-warning signal.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Consistent Hashing: From the Ring to Maglev — Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>.diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}</style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Resource guide created 2026-10-15 from liquidslr/system-design-notes Additional Resources (Consistent Hashing). Tom White post read; CS168, Cassandra and Maglev PDFs could not be extracted and Discord link redirected to an index, noted on page. Compares mod-N, ring with vnodes, jump hash, bounded loads, Maglev tables. JavaScript example executed with node. About 12 minute read. Related: chapter 05-consistent-hashing, chapter 06-key-value-store.</div>
+        <h1>Consistent Hashing: From the Ring to Maglev — Reading Guide</h1>
+        <p class="summary">A reading guide to five consistent hashing resources (White, CS168, Cassandra, Discord, Maglev) with commentary, a runnable ring, jump hash, bounded loads and Maglev table.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapters 5, 6</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">12 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">ring, vnodes, jump hash, bounded loads, Maglev hashing</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Cassandra, Dynamo, Maglev, memcached/ketama, Discord</span></div>
+        </div>
+      </header>
+<section class="content-card"><p class="lead">Five resources, and they form a ladder: a hands-on blog post that explains the ring, a university lecture that explains why it works, two production systems (Cassandra, Discord) that use it for data and process placement, and Google's Maglev, which shows that for load balancers the right question is not "how do I minimise movement" but "how do I keep every connection on its backend".</p>
+<div class="callout"><p><strong>Core idea:</strong> consistent hashing is a family of techniques for assigning keys to a changing set of nodes with bounded disruption. The ring is one member. Which member you choose depends on whether you value minimal movement, perfect balance, lookup speed, or per-flow stickiness.</p></div></section>
+<section class="content-card"><span class="section-label">How to use this guide</span><h2>Reading order and what was actually read</h2>
+<p>I fetched the Tom White post and read it. The three PDFs (the CS168 lecture, the Cassandra paper, Maglev) came back as compressed binary that could not be extracted, and the Discord URL redirected to a blog index rather than the article, so for those I rely only on well-known content of the papers and say plainly where I am not quoting the page. Treat the per-resource claims below accordingly.</p>
+<table class="data-table"><thead><tr><th>Resource</th><th>Read?</th><th>Order</th></tr></thead><tbody>
+<tr><td>Consistent Hashing (Tom White)</td><td>Read fully</td><td>1</td></tr>
+<tr><td>CS168 lecture</td><td>Read the load-balance sections; skim the proofs</td><td>2</td></tr>
+<tr><td>Apache Cassandra paper</td><td>Read the partitioning and membership sections</td><td>4</td></tr>
+<tr><td>Scaling Discord</td><td>Skim for the process-placement idea</td><td>5</td></tr>
+<tr><td>Google Maglev</td><td>Read the hashing section; skim the packet-processing section</td><td>3</td></tr></tbody></table></section>
+<section class="content-card"><span class="section-label">Resource 1</span><h2>Consistent Hashing</h2>
+
+<p class="mini-heading">What it is</p>
+<p>A 2007 blog post by Tom White (author of <em>Hadoop: The Definitive Guide</em>), with a small Java implementation. It is a clear, code-first explanation.</p>
+<p class="mini-heading">Ideas it presents</p>
+<ul class="check-list"><li><strong>The problem with mod-N:</strong> placing an object on cache <code>hash(o) mod n</code> reshuffles almost everything when <em>n</em> changes, so the origin gets flooded. My simulation: growing from 10 to 11 nodes moves about 91% of keys.</li>
+<li><strong>The ring:</strong> hash both nodes and objects into one circular number space; an object belongs to the first node clockwise. Add a node and it takes a slice from its neighbour; lose one and its keys fall to the next.</li>
+<li><strong>Hash quality matters:</strong> naive built-in hash codes cluster; use a well-mixing function (the post uses MD5, chosen for dispersion, not security).</li>
+<li><strong>Replicas (virtual nodes):</strong> one point per node gives wildly uneven arcs. Hash <code>node + suffix</code> many times. The author's experiment showed spread falling as replicas grow, reaching roughly 5 to 10 percent deviation at one to two hundred replicas.</li>
+<li><strong>Data structure:</strong> a sorted map; lookup is a "first key greater or equal, else wrap to first" query, so O(log V) for V total points.</li></ul>
+<div class="diagram-box">            <span class="dim">hash space 0 ... 2^32, wraps</span>
+         n2#1 <span class="hi">●</span>       <span class="ok">k1</span>           ● n1#0
+      ●  n1#2        <span class="ok">k2</span>      ● n3#1
+        <span class="dim">key goes to the next point clockwise</span>
+        <span class="dim">k1 -> n1#0 -> owner n1</span></div>
+<p class="mini-heading">Senior commentary</p>
+<p>My own runs back the post's claim, and show why you must not trust a single point per node: with 1 point per node the busiest of ten nodes held 2.2 times the average; with 10, 1.43 times; with 150, 1.14 times. The cost is memory (V = nodes times vnodes entries to hold and sort) and slower topology changes. Also note the post mentions memcached clients: that is the pattern where <em>only the client</em> knows the ring and servers are oblivious, which is the cheapest deployment of the idea.</p>
+<div class="insight-box"><strong>Dated:</strong> the post stops at plain vnodes. Since then we have jump consistent hash (Lamping and Veach, Google, 2014: no memory, perfect balance, but buckets must be numbered 0..N-1 and you can only add or remove at the end), rendezvous hashing, and bounded-load variants. The core ring idea is still what Cassandra, Dynamo and many caches use.</div>
+<p class="mini-heading">Connection</p>
+<p>This is the whole spine of <a href="../chapters/05-consistent-hashing.html">chapter 5</a> and the <a href="../../system-design/consistent-hashing.html">hub page</a>. The chapter's "vnodes fix imbalance" step is exactly the experiment here.</p>
+
+<p><a href="https://tom-e-white.com/2007/11/consistent-hashing.html" target="_blank" rel="noopener">Consistent Hashing ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 2</span><h2>CS168: Introduction and Consistent Hashing:</h2>
+
+<p class="mini-heading">What it is</p>
+<p>Lecture notes from Stanford's CS168 course, "The Modern Algorithmic Toolbox" (spring 2016), taught by Tim Roughgarden and Gregory Valiant. Lecture 1 introduces the course and consistent hashing as the first tool. This is the academic counterpart of the blog post.</p>
+<p class="mini-heading">What to take from it</p>
+<p>The lecture frames consistent hashing as a design problem with two goals at once: spread keys evenly, and change little when the node set changes. From the standard treatment (Karger et al., 1997) the points worth knowing are:</p>
+<ul class="check-list"><li>Balance is a <em>probabilistic</em> statement. With random placement and a single point per server, the biggest arc is about log n times larger than the average, which is why virtual copies are needed. With about log n copies per server the maximum load is within a constant factor of average with high probability.</li>
+<li>Movement is the opposite of mod-N: adding the n-th server moves roughly 1/n of the keys, which is the optimum, because the new server must receive at least that much.</li>
+<li>Replication is a natural extension: store each item on the next several distinct servers clockwise.</li></ul>
+<div class="warn-box"><strong>Reading note:</strong> the PDF text could not be extracted by my fetcher, so the points above are the standard results, not a summary of that specific document's wording or examples. Read it yourself for the proofs and the author's presentation.</div>
+<p class="mini-heading">Senior commentary</p>
+<p>The theory tells you the asymptotics but not the constants you live with. The practical lesson is to measure: simulate your key distribution against your vnode count before choosing. The "log n" result also explains why systems that started with 1 token per node (early Cassandra) later moved to 256 vnodes per node by default, and why later versions reduced that default again: more vnodes improves balance but makes repair, streaming and range queries more expensive.</p>
+<p class="mini-heading">Connection</p>
+<p>It supplies the "why" behind the chapter's claim that vnodes give balance. Use it to answer the interview follow-up "how many virtual nodes, and why".</p>
+<div class="warn-box"><strong>Reading note:</strong> Binary PDF; content not extracted. The summary reflects the standard theory.</div>
+<p><a href="http://theory.stanford.edu/~tim/s16/l/l1.pdf" target="_blank" rel="noopener">CS168: Introduction and Consistent Hashing: ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 3</span><h2>Google Maglev</h2>
+
+<p class="mini-heading">What it is</p>
+<p>"Maglev: A Fast and Reliable Software Network Load Balancer" (Eisenbud et al., NSDI 2016). It describes the L4 load balancer that fronts Google services, running as software on commodity Linux machines instead of dedicated hardware.</p>
+<p class="mini-heading">Mechanisms, from the paper as I know it</p>
+<ul class="check-list"><li><strong>Scale out with ECMP:</strong> routers spread packets across many Maglev machines using equal-cost multipath. Any machine can take any packet, so no single machine is a bottleneck.</li>
+<li><strong>Kernel bypass packet path:</strong> the paper describes a user-space networking path to reach line-rate packet processing without per-packet system calls.</li>
+<li><strong>Flow-based backend choice:</strong> hash the connection five-tuple, look up a backend in a table.</li>
+<li><strong>Connection tracking:</strong> each machine remembers recent flows locally. That is a cache, not the source of truth; if routing shifts a flow to another Maglev machine, the consistent hash table should pick the same backend.</li>
+<li><strong>Maglev hashing:</strong> a lookup table of prime size M. Each backend has its own pseudo-random permutation of slots (an offset and a skip derived from its name). Backends take turns claiming their next unclaimed preferred slot until the table is full. Lookup is one array read: <code>table[hash(flow) mod M]</code>.</li></ul>
+<div class="diagram-box">backend  preference order (offset + i*skip) mod M
+<span class="hi">be0</span>      3 7 4 1 ...
+<span class="ok">be1</span>      0 2 4 6 ...
+round 1: be0 takes 3, be1 takes 0, be2 takes ...
+round 2: ...continue until every slot owned</div>
+<p class="mini-heading">Senior commentary</p>
+<p>This is the instructive counterpoint to the ring. Maglev hashing gives near-perfect balance (my simulation of 10 backends and 65,537 slots: every backend holds 6,553 or 6,554 slots) and O(1) lookup, in exchange for a table rebuild when backends change and <em>slightly more</em> churn than the ideal. In my run, removing one of ten backends reassigned only 0.4% of the surviving backends' slots, though the paper trades a little disruption for the balance. A rebuild is fine when the backend set changes rarely, as it does in a data centre, and not fine for a database with thousands of dynamic partitions.</p>
+<p>Also note the philosophy: consistent hashing here is a <em>safety net</em> for connection tracking, not the main mechanism. This is how you design when a wrongly-routed packet means a broken TCP connection.</p>
+<p class="mini-heading">Still true versus dated</p>
+<p>The architecture (ECMP, software forwarding, flow hashing) is standard, and Maglev hashing was reused by Envoy and Katran-style load balancers. Specific throughput numbers in the paper are of 2016 hardware, so do not quote them as current.</p>
+<p class="mini-heading">Connection</p>
+<p>Extends <a href="../chapters/05-consistent-hashing.html">chapter 5</a> toward <a href="../../system-design/load-balancing.html">load balancing</a>, and previews why "minimal disruption" is not the only goal.</p>
+<div class="warn-box"><strong>Reading note:</strong> Binary PDF; content not extracted. Statements are from general knowledge of the paper; check numbers before citing.</div>
+<p><a href="https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/44824.pdf" target="_blank" rel="noopener">Google Maglev ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 4</span><h2>Apache Cassandra</h2>
+
+<p class="mini-heading">What it is</p>
+<p>"Cassandra: A Decentralized Structured Storage System" by Avinash Lakshman and Prashant Malik (LADIS 2009), written at Facebook where the system powered inbox search. The repo link points to this paper. It is short, about six pages.</p>
+<p class="mini-heading">Ideas</p>
+<ul class="check-list"><li><strong>Partitioning:</strong> an order-preserving or random hash of the row key places it on a ring. Each node has a position, and the ring owner and following nodes hold the replicas.</li>
+<li><strong>Replication:</strong> a coordinator forwards writes to N replicas; policies can be rack-aware or datacenter-aware.</li>
+<li><strong>Membership and failure detection:</strong> a gossip protocol spreads cluster state, and an accrual failure detector produces a suspicion level instead of a binary up/down.</li>
+<li><strong>Storage engine:</strong> commit log, in-memory table, immutable on-disk files merged by compaction, a lineage borrowed from Bigtable.</li>
+<li><strong>Lessons the authors note:</strong> the original ring placement was uneven, and they discuss moving nodes along the ring to rebalance, which later evolved into virtual nodes.</li></ul>
+<p class="mini-heading">Senior commentary</p>
+<p>The page I could actually fetch about modern Cassandra (the DataStax 3.0 architecture overview) confirms what survived: peer nodes with no primary, gossip, a partitioner that hashes the primary key into a token (Murmur3 by default), replication factor per datacenter, snitches for topology, and the commit log to memtable to SSTable write path. What changed is the placement: vnodes via <code>num_tokens</code> replaced one-token-per-node and manual rebalancing. If you only read one section, read how a key's token selects the replica set, because that is consistent hashing applied to a database.</p>
+<div class="warn-box"><strong>Reading note:</strong> the paper's text could not be extracted by my fetcher. Details above are from general knowledge of the paper plus the readable DataStax architecture page, which I did read and which is flagged as an archived, unmaintained 3.0 version.</div>
+<p class="mini-heading">Connection</p>
+<p>Chapter 5's "data movement on rebalance" meets <a href="../chapters/06-key-value-store.html">chapter 6</a>'s replication. See the in-depth <a href="../../cassandra.html">Cassandra hub page</a>.</p>
+
+<p><a href="http://www.cs.cornell.edu/Projects/ladis2009/papers/Lakshman-ladis2009.PDF" target="_blank" rel="noopener">Apache Cassandra ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 5</span><h2>Scaling Discord</h2>
+
+<p class="mini-heading">What it is</p>
+<p>A Discord engineering blog post on scaling their Elixir/Erlang-based real-time services (the URL slug says "scaling elixir"). The old blog.discord.com address now redirects, and when I followed it I received the blog index, not the article. I therefore do not summarise the post's specifics or numbers.</p>
+<p class="mini-heading">What I can say responsibly</p>
+<p>Real-time chat platforms in the Erlang family assign each "room" (a Discord server is called a guild) to one long-lived process, and a routing layer must find which node owns it. A consistent hash ring over the node list is the natural answer: any node can compute the owner locally, and membership changes move only a slice of rooms. That is why this link sits in the consistent hashing group. This is a different use from the others: the thing being placed is not data but <em>live state with a single owner</em>, so moving it is far more disruptive than moving a cached key, and you want the slowest possible churn.</p>
+<div class="insight-box"><strong>Interview angle:</strong> distinguish "placement of data" (can be re-fetched, copy in background) from "placement of actors" (state must be handed off or rebuilt, ordering must be preserved). Rings serve both, but the operational cost differs.</div>
+<p class="mini-heading">Connection</p>
+<p>Pairs with <a href="../chapters/12-chat-system.html">the chat system chapter</a> and the <a href="../../discord-presence-system-design.html">Discord presence page</a> in this hub.</p>
+<div class="warn-box"><strong>Reading note:</strong> Article body not retrieved; no claims from the post are made.</div>
+<p><a href="https://blog.discord.com/scaling-elixir-f9b8e1e7c29b" target="_blank" rel="noopener">Scaling Discord ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Synthesis</span><h2>How the resources fit together</h2>
+<table class="data-table"><thead><tr><th>Technique</th><th>Memory</th><th>Lookup</th><th>Balance</th><th>Movement on change</th><th>Best for</th></tr></thead><tbody>
+<tr><td>mod N</td><td>none</td><td>O(1)</td><td>perfect</td><td>about (N-1)/N of keys</td><td>static sets only</td></tr>
+<tr><td>Ring plus vnodes</td><td>nodes x vnodes</td><td>O(log V)</td><td>depends on vnodes (1.14x at 150 in my run)</td><td>near 1/N</td><td>Caches, KV stores</td></tr>
+<tr><td>Jump hash</td><td>none</td><td>O(log N)</td><td>almost perfect</td><td>1/N, but only end-of-range changes</td><td>Numbered shards</td></tr>
+<tr><td>Bounded loads</td><td>ring plus counters</td><td>O(log V) plus probing</td><td>hard cap (c times average)</td><td>slightly above 1/N</td><td>Hot-spot-prone caches</td></tr>
+<tr><td>Maglev table</td><td>M slots (prime)</td><td>O(1)</td><td>within one slot</td><td>small, not minimal</td><td>Load balancers</td></tr></tbody></table>
+<p><strong>Read White first</strong> to get the picture, then the Maglev paper because it is the one that changes how you think. Skim Cassandra for its vnode and gossip story. Treat Discord as a pointer, not a source, until you can read the article itself. Use the CS168 notes when an interviewer asks "can you prove it?".</p>
+<ul class="check-list"><li>Always say which of balance, movement, speed and stickiness you are optimising.</li><li>Hash with a good mixing function; never the language default.</li><li>Test vnode count against real key skew, not uniform keys.</li><li>Hot keys are a different problem; hashing spreads keys, not requests to one key.</li></ul></section>
+<section class="content-card"><span class="section-label">Code</span><h2>Runnable example</h2><span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">import { createHash } from 'node:crypto';
+const h32 = s =&gt; createHash('md5').update(s).digest().readUInt32BE(0);
+
+class Ring {
+  constructor(vnodes = 150) { this.v = vnodes; this.pts = []; this.nodes = new Set(); }
+  add(n) { this.nodes.add(n); for (let i = 0; i &lt; this.v; i++) this.pts.push([h32(`${n}#${i}`), n]); this.pts.sort((a, b) =&gt; a[0] - b[0]); }
+  remove(n) { this.nodes.delete(n); this.pts = this.pts.filter(p =&gt; p[1] !== n); }
+  _idx(k) { const x = h32(k); let lo = 0, hi = this.pts.length; while (lo &lt; hi) { const m = (lo + hi) &gt;&gt; 1; if (this.pts[m][0] &lt; x) lo = m + 1; else hi = m; } return lo % this.pts.length; }
+  get(k) { return this.pts[this._idx(k)][1]; }
+  // bounded loads (Mirrokni et al.): cap = ceil(c * avg); walk clockwise past full nodes
+  getBounded(k, load, cap) { let i = this._idx(k); for (let s = 0; s &lt; this.pts.length; s++, i = (i + 1) % this.pts.length) { const n = this.pts[i][1]; if ((load.get(n) ?? 0) &lt; cap) return n; } throw new Error('full'); }
+}
+
+// Jump consistent hash (Lamping &amp; Veach) using BigInt for 64-bit math
+function jump(key, buckets) {
+  let k = BigInt(key) &amp; 0xffffffffffffffffn, b = -1n, j = 0n;
+  while (j &lt; BigInt(buckets)) { b = j; k = (k * 2862933555777941757n + 1n) &amp; 0xffffffffffffffffn; j = BigInt(Math.floor(Number(b + 1n) * (2 ** 31 / Number((k &gt;&gt; 33n) + 1n)))); }
+  return Number(b);
+}
+
+const keys = Array.from({ length: 20000 }, (_, i) =&gt; `key-${i}`);
+const spread = r =&gt; { const m = new Map(); for (const k of keys) m.set(r.get(k), (m.get(r.get(k)) ?? 0) + 1); const v = [...m.values()]; const avg = keys.length / r.nodes.size; return (Math.max(...v) / avg).toFixed(2); };
+
+for (const v of [1, 10, 150]) {
+  const r = new Ring(v); for (let i = 0; i &lt; 10; i++) r.add(`n${i}`);
+  console.log(`vnodes=${v}: max/avg load = ${spread(r)}`);
+}
+const r = new Ring(150); for (let i = 0; i &lt; 10; i++) r.add(`n${i}`);
+const before = new Map(keys.map(k =&gt; [k, r.get(k)])); r.add('n10');
+const moved = keys.filter(k =&gt; r.get(k) !== before.get(k)).length;
+console.log(`ring add 11th node: moved ${(100 * moved / keys.length).toFixed(1)}% (ideal 9.1%), mod-N would move ~${(100 * (1 - 1 / 11)).toFixed(0)}%`);
+console.assert(moved / keys.length &lt; 0.15 &amp;&amp; moved / keys.length &gt; 0.04);
+
+const mod = keys.filter(k =&gt; h32(k) % 10 !== h32(k) % 11).length;
+console.log(`mod-N 10-&gt;11 actually moved ${(100 * mod / keys.length).toFixed(1)}%`);
+
+let jm = 0; for (let i = 0; i &lt; 20000; i++) if (jump(i, 10) !== jump(i, 11)) jm++;
+console.log(`jump hash 10-&gt;11 moved ${(100 * jm / 20000).toFixed(1)}%`);
+
+const r10 = new Ring(150); for (let i = 0; i &lt; 10; i++) r10.add(`n${i}`);
+const unb = new Map(); for (const k of keys) unb.set(r10.get(k), (unb.get(r10.get(k)) ?? 0) + 1);
+const load = new Map(); const cap = Math.ceil(1.05 * keys.length / 10);
+for (const k of keys) { const n = r10.getBounded(k, load, cap); load.set(n, (load.get(n) ?? 0) + 1); }
+console.log(`max load: plain ring = ${Math.max(...unb.values())}, bounded (c=1.05) = ${Math.max(...load.values())}, cap = ${cap}`);
+console.assert(Math.max(...load.values()) &lt;= cap);
+
+// Maglev table: each backend walks its own permutation of slots; backends take turns claiming free slots.
+function maglev(backends, M = 65537) {              // M must be prime
+  const perm = backends.map(b =&gt; ({ off: h32(b + ':off') % M, skip: (h32(b + ':skip') % (M - 1)) + 1, next: 0 }));
+  const table = new Array(M).fill(-1); let filled = 0;
+  while (true) for (let i = 0; i &lt; backends.length; i++) {
+    let c; do { c = (perm[i].off + perm[i].next * perm[i].skip) % M; perm[i].next++; } while (table[c] &gt;= 0);
+    table[c] = i; if (++filled === M) return table;
+  }
+}
+const names = Array.from({ length: 10 }, (_, i) =&gt; `be${i}`);
+const t1 = maglev(names), t2 = maglev(names.slice(0, 9));
+const slots = new Array(10).fill(0); t1.forEach(i =&gt; slots[i]++);
+let churn = 0; for (let s = 0; s &lt; t1.length; s++) if (t1[s] !== 9 &amp;&amp; t1[s] !== t2[s]) churn++;
+console.log(`maglev slots per backend: min ${Math.min(...slots)} max ${Math.max(...slots)}; surviving-slot churn after removing be9: ${(100 * churn / t1.length).toFixed(1)}%`);
+console.assert(Math.max(...slots) - Math.min(...slots) &lt;= 1);</code></pre>
+<p class="code-caption">Prints the max-to-average load for 1, 10 and 150 vnodes, keys moved by adding a node (ring about 8.5 percent versus mod-N about 91 percent), jump hash movement, a bounded-load cap being honoured, and a Maglev table with near-equal slot counts. Executed with node; asserts pass.</p></section>
+<section class="content-card"><span class="section-label">Exercise</span><h2>What to build</h2>
+ <ol><li>Extend the ring with weights so a node with twice the capacity gets twice the vnodes; verify the share ratio.</li><li>Add replica placement: for each key, return the next three <em>distinct</em> nodes clockwise, skipping vnodes of the same node and, optionally, the same rack.</li><li>Rebuild the Maglev table with 100 backends and measure how much of the table changes for one removal across several table sizes.</li><li>Write a test that proves the bounded-load variant never exceeds ceil(c x average) even while a node is being removed.</li></ol>
+</section>
+<section class="content-card takeaways"><h2>Key Takeaway</h2><p>The ring is the default, but it is not the idea. The idea is a deterministic mapping with bounded disruption, and every resource here picks a different point on the trade-off between balance, movement, speed and stickiness. Know all four corners.</p></section>
+      <section class="content-card"><span class="section-label">FAQ · Common Questions</span><h2>Frequently Asked Questions</h2>
+<details><summary>How many virtual nodes should I use?</summary><p>Enough that the max-to-average load fits your tolerance. In my simulation 150 per node gave about 1.14 times the average; Cassandra historically defaulted to 256 and later reduced it. More vnodes means better balance but costlier repair and bigger routing tables.</p></details>
+<details><summary>Why not just use mod N with a big prime?</summary><p>The modulus still changes when N changes. Pre-sharding into many fixed logical partitions (like Redis Cluster 16384 slots) is a good alternative: partitions map to nodes via a table you move explicitly.</p></details>
+<details><summary>When is jump hash better than a ring?</summary><p>When buckets are numbered contiguously and only grow or shrink at the end, for example sharded storage replicas. It cannot remove an arbitrary node.</p></details>
+<details><summary>How does a hot key interact with consistent hashing?</summary><p>It does not help: all requests for one key still land on one node. Use replication for reads, key splitting, or local caching.</p></details>
+<details><summary>Why does Maglev use a table instead of a ring?</summary><p>Lookup speed and balance. Packet forwarding needs a single memory read per packet, and the backend set rarely changes.</p></details>
+</section>
+      <section class="content-card"><h2>Related Topics</h2><ul><li><a href="../chapters/05-consistent-hashing.html">Chapter 5: Consistent Hashing</a> — the chapter these resources extend.</li><li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — hub page.</li><li><a href="../../system-design/sharding.html">Sharding</a> — where partition placement matters.</li><li><a href="../../system-design/load-balancing.html">Load Balancing</a> — the Maglev use case.</li><li><a href="../../cassandra.html">Cassandra</a> — a ring-based store in depth.</li></ul></section>
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the "Additonal Resources" list in <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a>, a companion to study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu. The commentary is original; follow the links to read the primary sources.</p><ul><li><a href="https://tom-e-white.com/2007/11/consistent-hashing.html" target="_blank" rel="noopener">Consistent Hashing</a> — https://tom-e-white.com/2007/11/consistent-hashing.html</li><li><a href="http://theory.stanford.edu/~tim/s16/l/l1.pdf" target="_blank" rel="noopener">CS168: Introduction and Consistent Hashing:</a> — http://theory.stanford.edu/~tim/s16/l/l1.pdf</li><li><a href="http://www.cs.cornell.edu/Projects/ladis2009/papers/Lakshman-ladis2009.PDF" target="_blank" rel="noopener">Apache Cassandra</a> — http://www.cs.cornell.edu/Projects/ladis2009/papers/Lakshman-ladis2009.PDF</li><li><a href="https://blog.discord.com/scaling-elixir-f9b8e1e7c29b" target="_blank" rel="noopener">Scaling Discord</a> — https://blog.discord.com/scaling-elixir-f9b8e1e7c29b</li><li><a href="https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/44824.pdf" target="_blank" rel="noopener">Google Maglev</a> — https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/44824.pdf</li></ul></section>
+    </main>
+  </body>
+</html>

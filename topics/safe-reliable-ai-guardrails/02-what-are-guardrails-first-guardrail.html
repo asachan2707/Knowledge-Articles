@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>What Are Guardrails &amp; Building Your First Guardrail | Guardrails Course</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Safe and Reliable AI via Guardrails</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=1600&h=700&fit=crop&auto=format&q=80" alt="Laptop with code and notes" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">Guardrails Course · 2 of 7 · Lessons 3–4 · ~6 min</span></div>
+        </figure>
+        <h1>What Are Guardrails &amp; Building Your First Guardrail</h1>
+        <p class="summary">Guardrails as input and output checks around an LLM call, the technique menu (rules, ML models, LLM judges), and a first working validator and guard that stops a secret-project leak.</p>
+        <div class="article-meta">
+          <span class="meta-item">Source: <a href="https://www.deeplearning.ai/courses/safe-and-reliable-ai-via-guardrails" target="_blank" rel="noopener">DeepLearning.AI × GuardrailsAI</a> (<a href="https://learn.deeplearning.ai/courses/safe-and-reliable-ai-via-guardrails/lesson/wdss7/what-are-guardrails" target="_blank" rel="noopener">L3</a> · <a href="https://learn.deeplearning.ai/courses/safe-and-reliable-ai-via-guardrails/lesson/ph1aa/building-your-first-guardrail" target="_blank" rel="noopener">L4</a>)</span>
+          <span class="meta-item">Instructor: Shreya Rajpal (GuardrailsAI) · Domain: AI Safety · Guardrails</span>
+        </div>
+      </header>
+      <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Child 02. Covers L3 What are guardrails and L4 Building your first guardrail (Project Colosseum). Definitions of validator, guard, input/output guard, on_fail, Guardrails server. Runnable mini-core in JS with four on_fail policies.</div>
+
+      <section class="content-card">
+        <p class="lead">A guardrail is a small, boring, testable function placed on the edge of a non-deterministic system. That is its value.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Validator = check; Guard = runtime and policy; input and output guards bracket the model.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 3</span>
+        <h2>What are guardrails</h2>
+        <p>The lesson defines guardrails as <strong>secondary checks or validations that ensure the inputs or outputs of an LLM call are as expected</strong>, ranging from format checks to hallucination and jailbreak detection. In a standard RAG pipeline there are two attachment points:</p><ul><li><strong>Input guard</strong> — runs before the prompt reaches the LLM: PII present? off-topic? jailbreak attempt?</li><li><strong>Output guard</strong> — runs after the LLM responds: hallucination? unsafe content? still on topic?</li></ul><h3>Ways to implement a check</h3><table><thead><tr><th>Technique</th><th>Good for</th><th>Cost / risk</th></tr></thead><tbody><tr><td>Rules and regex</td><td>Formats, known tokens, checksums</td><td>Cheap, deterministic; brittle to paraphrase</td></tr><tr><td>Fine-tuned ML models (NER, toxicity)</td><td>Entities, profanity, classification</td><td>Small model latency; needs hosting</td></tr><tr><td>Secondary LLM call as judge</td><td>Subtle alignment, scoring</td><td>Slow, stochastic, rate-limited, data leaves your boundary</td></tr><tr><td>Hybrid cascade</td><td>Most real systems</td><td>Order cheap-to-expensive</td></tr></tbody></table><h3>Why bother: the three benefits named in the lesson</h3><ul><li><strong>Explicit verification</strong> of hard constraints such as “no PII leaves”.</li><li><strong>Measurable</strong> undesirable behaviour: a validator yields pass/fail you can count.</li><li><strong>Containment</strong> of cascading errors in multi-step apps — “drawing a bounding box around what that AI model can do”.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Lesson 4</span>
+        <h2>Building your first guardrail</h2>
+        <p>Setup uses the OpenAI SDK and Guardrails AI (<code>Guard</code>, <code>OnFailAction</code>, <code>Validator</code>). The RAG bot is seeded with pizzeria docs and told not to discuss <strong>Project Colosseum</strong>, a confidential product effort. Asked directly, the unguarded bot still leaks details about crust ratios.</p><ul><li><strong>Validator</strong> — the logic. A custom class checks whether the text contains “Colosseum” and returns a fail result with an error message (and optionally a fix value such as “I’m sorry I can’t answer questions about Project Colosseum”).</li><li><strong>Guard</strong> — the application-level runtime. It passes data to one or more validators and applies the <code>on_fail</code> action; <code>exception</code> blocks the request.</li><li><strong>Input vs output guard</strong> — the same validator can sit on either side.</li><li><strong>Guardrails server</strong> — exposes OpenAI-compatible endpoints, so an app can swap its base URL to go through the guard and deploy it as a service.</li><li><strong>Result:</strong> the same query now fails with “validation failed … Colosseum detected”.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Validator, Guard and on_fail policies</h2>
+        <p>A dependency-free mini core (<code>Validator</code> result, <code>Guard</code>, <code>exception / fix / filter / noop</code>) mirroring the Guardrails AI vocabulary. The same validator is run under four policies.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// ── Mini guardrails core (mirrors the Guardrails AI vocabulary: Validator, Guard, on_fail) ──
+class ValidationError extends Error {}
+const pass = () =&gt; ({ outcome: &#x27;pass&#x27; });
+const fail = (errorMessage, fixValue) =&gt; ({ outcome: &#x27;fail&#x27;, errorMessage, fixValue });
+
+class Guard {
+  constructor(name = &#x27;guard&#x27;) { this.name = name; this.rules = []; this.log = []; }
+  use(validator, onFail = &#x27;exception&#x27;) { this.rules.push({ validator, onFail }); return this; }
+  validate(text) {
+    let cur = text;
+    for (const { validator, onFail } of this.rules) {
+      const r = validator.validate(cur);
+      this.log.push({ validator: validator.constructor.name, outcome: r.outcome, onFail });
+      if (r.outcome === &#x27;pass&#x27;) continue;
+      if (onFail === &#x27;exception&#x27;) throw new ValidationError(`Validation failed for ${this.name}: ${r.errorMessage}`);
+      if (onFail === &#x27;fix&#x27; &amp;&amp; r.fixValue !== undefined) cur = r.fixValue;   // replace and continue
+      else if (onFail === &#x27;filter&#x27;) return null;                              // drop the whole value
+      // &#x27;noop&#x27;: record the failure, keep the value
+    }
+    return cur;
+  }
+}
+
+// Validator = the check. Guard = the runtime that applies validators and on_fail policy.
+class BannedTopicKeyword {
+  constructor(keyword) { this.keyword = keyword.toLowerCase(); }
+  validate(text) {
+    return text.toLowerCase().includes(this.keyword)
+      ? fail(`${this.keyword[0].toUpperCase() + this.keyword.slice(1)} detected`, `I&#x27;m sorry I can&#x27;t answer questions about Project ${this.keyword[0].toUpperCase() + this.keyword.slice(1)}`)
+      : pass();
+  }
+}
+
+// The &quot;unguarded&quot; RAG bot leaks the secret when asked.
+const unguardedBot = q =&gt; /colosseum/i.test(q) ? &#x27;Project Colosseum uses a 70/30 hydration crust ratio.&#x27; : &#x27;We open at 11am.&#x27;;
+
+function guardedBot(onFail) {
+  const inputGuard = new Guard(&#x27;input&#x27;).use(new BannedTopicKeyword(&#x27;Colosseum&#x27;), onFail);
+  return q =&gt; {
+    const safe = inputGuard.validate(q);
+    if (safe === null) return &#x27;[request dropped by guard]&#x27;;   // on_fail=filter
+    if (safe !== q) return safe;                               // on_fail=fix: the fix value IS the reply
+    return unguardedBot(q);
+  };
+}
+
+console.log(&#x27;unguarded       :&#x27;, unguardedBot(&#x27;Tell me about Project Colosseum&#x27;));
+try { guardedBot(&#x27;exception&#x27;)(&#x27;Tell me about Project Colosseum&#x27;); }
+catch (e) { console.log(&#x27;on_fail=exception:&#x27;, e.message); }
+console.log(&#x27;on_fail=fix      :&#x27;, guardedBot(&#x27;fix&#x27;)(&#x27;Tell me about Project Colosseum&#x27;));
+console.log(&#x27;on_fail=noop     :&#x27;, guardedBot(&#x27;noop&#x27;)(&#x27;Tell me about Project Colosseum&#x27;), &#x27;(violation only logged)&#x27;);
+console.log(&#x27;on_fail=filter   :&#x27;, guardedBot(&#x27;filter&#x27;)(&#x27;Tell me about Project Colosseum&#x27;));
+console.log(&#x27;benign question  :&#x27;, guardedBot(&#x27;exception&#x27;)(&#x27;When do you open?&#x27;));</code></pre>
+        <span class="code-label">Output (ran under Node.js)</span>
+        <pre><code>unguarded       : Project Colosseum uses a 70/30 hydration crust ratio.
+on_fail=exception: Validation failed for input: Colosseum detected
+on_fail=fix      : I&#x27;m sorry I can&#x27;t answer questions about Project Colosseum
+on_fail=noop     : Project Colosseum uses a 70/30 hydration crust ratio. (violation only logged)
+on_fail=filter   : [request dropped by guard]
+benign question  : We open at 11am.</code></pre>
+      </section><p class="note"><em>Scope note: the course teaches this in Python with the Guardrails AI framework and downloadable models. This page re-implements the same <strong>shape</strong> in dependency-free JavaScript with deterministic stand-ins for the models, so every line runs here. Lesson details come from the public lesson pages (video transcripts were not available verbatim); the graded quiz needs sign-in and is not covered.</em></p>
+      <section class="content-card">
+        <span class="section-label">Senior notes</span>
+        <h2>Design facts worth keeping</h2>
+        <ul><li><strong>Choose on_fail per risk.</strong> Exception for secrets and compliance, fix for formatting, filter when dropping is acceptable, noop (log-only) while you tune a new rule on live traffic.</li><li><strong>A keyword guard is the floor, not the ceiling.</strong> “C0losseum” or a paraphrase defeats it; later lessons replace string matching with models.</li><li><strong>Guards are middleware.</strong> Keeping them behind an OpenAI-compatible endpoint means any client in any language gets them without code changes.</li><li><strong>Log every outcome.</strong> The guard’s <code>log</code> is the dataset for tuning thresholds later.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">YouTube</span>
+        <h2>Watch &amp; Learn</h2>
+        <ul><li><a href="https://www.youtube.com/results?search_query=LLM+guardrails+explained+input+output+validation" target="_blank" rel="noopener">LLM guardrails explained</a> <em>(YouTube search)</em> — Overview talks on input and output validation.</li><li><a href="https://www.youtube.com/results?search_query=guardrails+ai+open+source+validators+hub" target="_blank" rel="noopener">Guardrails AI validators and hub</a> <em>(YouTube search)</em> — Walkthroughs of the open-source framework used in the course.</li></ul>
+        <p class="note"><em>The course videos live inside the DeepLearning.AI player and have no public YouTube link. Entries with a direct video link were verified earlier via YouTube’s oEmbed endpoint; entries marked “YouTube search” open a search for the named talk or topic, because exact video IDs could not be verified from here and are not guessed.</em></p>
+      </section>
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Frequently Asked Questions</h2>
+        <h3>Validator or guard — which one do I write?</h3>
+        <p>Write validators (the check). Guards are configuration: which validators, in which order, with which on_fail.</p>
+        <h3>Why an exception instead of returning a refusal?</h3>
+        <p>Exceptions make failure explicit and let the app decide the user experience; silent substitutions hide incidents.</p>
+      </section>
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Start with a simple deterministic validator, wire it through a guard with an explicit failure policy, and measure it. Sophistication comes after the plumbing.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>Course Navigation</h2>
+        <ul><li>Previous: <a href="./01-introduction-and-failure-modes.html">Introduction &amp; Failure Modes in RAG</a></li><li>Up: <a href="./index.html">Safe and Reliable AI via Guardrails — course hub</a></li><li>Next: <a href="./03-hallucination-detection-nli.html">Hallucination Detection with NLI</a></li></ul>
+      </section>
+    </main>
+  </body>
+</html>

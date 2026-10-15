@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Key-Value Stores: Dynamo, Bigtable and Cassandra — Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>.diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}</style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Resource guide created 2026-10-15 from liquidslr/system-design-notes Additional Resources (Key-Value Store). Vogels post and DataStax Cassandra page read; Dynamo and Bigtable PDFs not extractable, noted on page; two YouTube talks marked as not read. Covers partitioning, quorum, vector clocks, hinted handoff, Merkle trees, LSM storage. JavaScript example executed with node. About 12 minute read. Related: chapter 06-key-value-store, consistent-hashing guide.</div>
+        <h1>Key-Value Stores: Dynamo, Bigtable and Cassandra — Reading Guide</h1>
+        <p class="summary">A reading guide to the Dynamo and Bigtable papers, Cassandra architecture and two DynamoDB talks, with commentary, a runnable quorum and vector clock demo, and an exercise.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 6</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">10 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">quorum, vector clocks, hinted handoff, LSM tree</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Dynamo, DynamoDB, Cassandra, Bigtable, HBase</span></div>
+        </div>
+      </header>
+<section class="content-card"><p class="lead">Six resources about key-value stores that describe two lineages. The <em>Dynamo lineage</em> (Dynamo paper, Vogels' announcement, Cassandra, and the DynamoDB talks) is about availability, partitioning and tunable consistency. The <em>Bigtable lineage</em> is about sorted storage, tablets and the log-structured write path. Cassandra famously borrows from both. Chapter 6 compresses them into one design; this guide un-compresses them.</p>
+<div class="callout"><p><strong>Core idea:</strong> a distributed KV store is two independent decisions: <em>how data is placed and replicated</em> (Dynamo's contribution) and <em>how a single node stores and finds bytes</em> (Bigtable's contribution). Confusing the two is the most common interview mistake.</p></div></section>
+<section class="content-card"><span class="section-label">How to use this guide</span><h2>What was read and in what order</h2>
+<p>Fetching worked for Vogels' blog post and the DataStax architecture page. The Dynamo and Bigtable PDFs came back as unextractable binary, so for them I rely on the well-known content of the papers (Vogels' post also summarises Dynamo and I did read that). The two YouTube links are video, not read in full; I describe only what the titles say.</p>
+<table class="data-table"><thead><tr><th>Resource</th><th>Read?</th><th>Priority</th></tr></thead><tbody>
+<tr><td>Amazon Dynamo (paper)</td><td>Read sections 3 to 6 closely</td><td>1: essential</td></tr>
+<tr><td>Amazon Dynamo DB Internals (Vogels)</td><td>Read in 5 minutes</td><td>1: context</td></tr>
+<tr><td>Google BigTable Architecture</td><td>Skim data model; read tablet and SSTable sections</td><td>2</td></tr>
+<tr><td>Cassandra Architecture</td><td>Read, it is short</td><td>2</td></tr>
+<tr><td>Two DynamoDB videos</td><td>Optional, watch only for DynamoDB-the-service</td><td>3: skip for chapter 6</td></tr></tbody></table></section>
+<section class="content-card"><span class="section-label">Resource 1</span><h2>Amazon Dynamo</h2>
+
+<p class="mini-heading">What it is</p>
+<p>"Dynamo: Amazon's Highly Available Key-value Store" (DeCandia et al., SOSP 2007). It is the single most influential KV paper and the blueprint for the chapter's replication, versioning and failure-handling sections.</p>
+<p class="mini-heading">Mechanisms</p>
+<table class="data-table"><thead><tr><th>Problem</th><th>Dynamo's answer</th><th>Chapter 6 name</th></tr></thead><tbody>
+<tr><td>Spread data, grow incrementally</td><td>Consistent hashing with virtual nodes</td><td>Data partition</td></tr>
+<tr><td>Survive node loss</td><td>Replicate each key on N successive nodes (a "preference list")</td><td>Data replication</td></tr>
+<tr><td>Tune consistency vs latency</td><td>Quorum parameters N, R, W; typical setting 3, 2, 2</td><td>Consistency</td></tr>
+<tr><td>Accept writes during partitions</td><td>Sloppy quorum plus hinted handoff</td><td>Temporary failure handling</td></tr>
+<tr><td>Detect concurrent updates</td><td>Vector clocks; client or application reconciles</td><td>Inconsistency resolution</td></tr>
+<tr><td>Repair permanent divergence</td><td>Anti-entropy with Merkle trees</td><td>Permanent failure handling</td></tr>
+<tr><td>Know who is alive</td><td>Gossip-based membership</td><td>Failure detection</td></tr></tbody></table>
+<p class="mini-heading">Numbers and lessons worth remembering</p>
+<ul class="check-list"><li>Targets are expressed in the 99.9th percentile (the Dynamo SLA was around 300 ms), not averages.</li>
+<li>The paper reports that 99.94% of shopping-cart reads returned a single version, so conflicts are rare in practice, and they must still be handled.</li>
+<li>Partitioning moved from random tokens to fixed equal-size partitions, which improved balance and made bootstrapping and archival easier.</li>
+<li>Client-driven coordination (the client knows the ring and goes straight to a replica) cut tail latency by tens of milliseconds at the 99.9th percentile.</li>
+<li>The authors state the design suits a few hundred nodes; they say thousands would be hard because every node tracks full routing state.</li></ul>
+<div class="diagram-box">client --put(k,v,ctx)--> coordinator (first in preference list)
+                          |-> replica 1  <span class="ok">ack</span>
+                          |-> replica 2  <span class="ok">ack</span>     W=2: success
+                          |-> replica 3  <span class="warn">down</span> -> hint stored on node 4
+read: ask N, wait R, <span class="hi">return all causally-latest versions</span>, repair stale ones</div>
+<p class="mini-heading">Senior commentary</p>
+<p>Three things people get wrong. First, R plus W greater than N is <em>not</em> linearizability; sloppy quorums, concurrent writes and clock-free versioning mean you can still read stale data. Second, vector clocks grow; Dynamo truncates old entries, accepting some loss of precision. Many successors (Riak early on, then Cassandra) moved to timestamps with last-write-wins because pushing merge logic onto developers proved unpopular. Third, "always writeable" is a product decision (a lost cart item is cheaper than a failed checkout), not a universal good.</p>
+<div class="insight-box"><strong>Dated:</strong> Dynamo's own successors dropped several parts. Amazon's DynamoDB service is a different system (see below), and the paper's gossip full-membership model does not scale to thousands. <strong>Still true:</strong> the vocabulary and trade-offs, which every Dynamo-style system reuses.</div>
+<p class="mini-heading">Connection</p>
+<p>Map one-to-one onto <a href="../chapters/06-key-value-store.html">chapter 6</a>, and revisit the <a href="../../system-design/cap-theorem.html">CAP theorem</a> and <a href="../../system-design/consistency-models.html">consistency models</a> pages. The code below implements the quorum and vector clock parts.</p>
+<div class="warn-box"><strong>Reading note:</strong> The PDF text could not be extracted by my fetcher. The table and numbers are from my reading of Vogels' summary post (fetched) and general knowledge of the paper.</div>
+<p><a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf" target="_blank" rel="noopener">Amazon Dynamo ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 2</span><h2>Cassandra Architecture</h2>
+
+<p class="mini-heading">What it is</p>
+<p>The introduction to the architecture section in DataStax's archived documentation for Cassandra 3.0. I read this page. It is explicitly marked as no longer maintained.</p>
+<p class="mini-heading">Content</p>
+<ul class="check-list"><li><strong>Peer-to-peer:</strong> every node is equal; any node a client contacts becomes the coordinator for that request.</li>
+<li><strong>Write path:</strong> append to a commit log (durability), update an in-memory memtable, later flush to immutable SSTables; compaction merges SSTables and drops data covered by tombstones.</li>
+<li><strong>Token-based placement:</strong> a partitioner (Murmur3 by default) hashes the primary key to a token; the replica set follows from the token and the replication strategy.</li>
+<li><strong>Replication factor per datacenter</strong> with no primary replica; NetworkTopologyStrategy is the recommended choice.</li>
+<li><strong>Gossip</strong> shares state; <strong>snitches</strong> teach the cluster where racks and datacenters are; a dynamic snitch steers reads toward better-performing replicas.</li>
+<li><strong>Repair mechanisms</strong> reconcile replicas.</li></ul>
+<p class="mini-heading">Senior commentary</p>
+<p>Cassandra is the proof that you can fuse the two lineages. The ring and quorum story is Dynamo; the commit-log, memtable and SSTable story is Bigtable. The tombstone detail is a real production hazard: deletes are writes, and a read must merge many SSTables, so wide partitions with heavy deletes (the "queue in Cassandra" anti-pattern) degrade badly. Gossip plus a snitch also means topology is configuration you must get right; an incorrect rack mapping silently ruins replica placement.</p>
+<p class="mini-heading">Still true versus dated</p>
+<p>Concepts hold in later versions. Version-specific defaults, tooling names and the DSE-specific parts have moved; verify against the current Apache documentation.</p>
+<p class="mini-heading">Connection</p>
+<p>Concrete answer to "so how would you build chapter 6?" See the <a href="../../cassandra.html">Cassandra topic page</a> and the <a href="../../dynamodb-hot-partition-sharding.html">DynamoDB hot partition page</a> for the failure mode when key choice defeats the hash.</p>
+
+<p><a href="https://docs.datastax.com/en/archived/cassandra/3.0/cassandra/architecture/archIntro.html" target="_blank" rel="noopener">Cassandra Architecture ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 3</span><h2>Google BigTable Architecture</h2>
+
+<p class="mini-heading">What it is</p>
+<p>"Bigtable: A Distributed Storage System for Structured Data" (Chang et al., OSDI 2006), the sorted, wide-column store that inspired HBase and, for its storage engine, Cassandra.</p>
+<p class="mini-heading">Ideas</p>
+<ul class="check-list"><li><strong>Data model:</strong> a sparse, sorted, multi-dimensional map from (row key, column key, timestamp) to bytes. Column families group columns; single-row operations are atomic.</li>
+<li><strong>Tablets:</strong> contiguous row ranges are the unit of distribution; a tablet server hosts many tablets and splits them when they grow.</li>
+<li><strong>Storage:</strong> writes go to a commit log and an in-memory sorted memtable; the memtable is flushed to immutable, indexed SSTable files on a distributed file system; periodic compaction merges them.</li>
+<li><strong>Coordination:</strong> a lock service (Chubby) elects the one active master and tracks tablet-server liveness; the master assigns tablets, but clients read and write against tablet servers directly, so the master is not a data bottleneck.</li></ul>
+<div class="diagram-box">write -> <span class="hi">commit log</span> (sequential, durable)
+      -> <span class="ok">memtable</span> (sorted, in RAM)  --flush--> <span class="step">SSTable 1</span>, <span class="step">SSTable 2</span> ...
+read  -> memtable + SSTables (bloom filter skips most) -> merge newest wins
+compaction merges SSTables, drops overwritten and deleted cells</div>
+<p class="mini-heading">Senior commentary</p>
+<p>The KV chapter's "write path" and "read path" with bloom filters is this paper, nearly verbatim. The strategic difference from Dynamo: Bigtable is <em>consistent</em> (one server owns a tablet at a time, coordinated through the lock service) and sorted, so range scans are cheap; Dynamo is available and hashed, so scans are impossible but writes never block. Pick by access pattern: sorted keys for time series and scans, hashed keys for point lookups and extreme availability.</p>
+<div class="insight-box">The design of storing data on a distributed file system and keeping servers stateless over it is the origin of today's disaggregated storage designs; the trade is a network hop per read in exchange for fast recovery.</div>
+<p class="mini-heading">Connection</p>
+<p><a href="../chapters/06-key-value-store.html">Chapter 6</a>'s single-node storage section, and the LSM tree discussion in many later chapters.</p>
+<div class="warn-box"><strong>Reading note:</strong> Binary PDF; content not extracted. Summary reflects the well-known design of the paper.</div>
+<p><a href="https://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf" target="_blank" rel="noopener">Google BigTable Architecture ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 4</span><h2>Amazon Dynamo DB Internals</h2>
+
+<p class="mini-heading">What it is</p>
+<p>Werner Vogels' October 2007 blog post announcing the Dynamo paper. Despite the title in the repo, it is about the <em>Dynamo paper</em>, not the DynamoDB service that launched in 2012. I read this page.</p>
+<p class="mini-heading">Content</p>
+<p>It frames the problem: constant component failure at Amazon's scale, services that mostly need primary-key access, and relational databases that favour consistency over availability and are hard to scale out. It lists the techniques (consistent hashing, vector clocks, quorum, hinted handoff, Merkle trees, gossip) and says Dynamo was among the first production systems to combine them. It reproduces the paper, and stresses that Dynamo was an internal building block, with the shopping cart as the canonical example.</p>
+<p class="mini-heading">Commentary</p>
+<p>Read it as the "why" memo: the paper's argument is about business requirements first. A good interview answer states the requirement ("never reject a cart write") before the mechanism.</p>
+<div class="warn-box"><strong>Naming trap:</strong> Dynamo (2007 paper, internal) and DynamoDB (2012, managed service) share a heritage but differ in design. Public descriptions of DynamoDB (including a USENIX ATC 2022 paper) describe single-leader replication per partition, not leaderless quorums and vector clocks. Do not describe DynamoDB with the Dynamo paper's mechanisms.</div>
+
+<p><a href="https://www.allthingsdistributed.com/2007/10/amazons_dynamo.html" target="_blank" rel="noopener">Amazon Dynamo DB Internals ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 5</span><h2>Design Patterns in Amazon Dynamo DB</h2>
+
+<p><strong>Video, not read in full.</strong> From the title this is a conference talk about data-modelling patterns for the DynamoDB service. I did not watch it and make no claims about its content.</p>
+<p>What it is relevant for: the service-side question "how do I model access patterns on a partitioned KV store" (partition key choice, avoiding hot partitions, secondary indexes). That connects to the <a href="../../dynamodb-hot-partition-sharding.html">hot partition page</a>, not to the leaderless design in chapter 6. Watch it if you will use DynamoDB; skip it for interview preparation on chapter 6.</p>
+
+<p><a href="https://www.youtube.com/watch?v=HaEPXoXVf2k" target="_blank" rel="noopener">Design Patterns in Amazon Dynamo DB ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 6</span><h2>Internals of Amazon Dynamo DB</h2>
+
+<p><strong>Video, not read in full.</strong> From the title it covers the internals of the DynamoDB service. I did not watch it. If you do, compare what it says about replication and request routing with the Dynamo paper, and note every difference; that exercise is worth more than either source alone.</p>
+
+<p><a href="https://www.youtube.com/watch?v=yvBR71D0nAQ" target="_blank" rel="noopener">Internals of Amazon Dynamo DB ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Synthesis</span><h2>How the resources fit together</h2>
+<table class="data-table"><thead><tr><th>Dimension</th><th>Dynamo</th><th>Bigtable</th><th>Cassandra</th></tr></thead><tbody>
+<tr><td>Placement</td><td>Hash ring, vnodes</td><td>Sorted tablets, master assigns</td><td>Hash ring, vnodes (token)</td></tr>
+<tr><td>Replication</td><td>N successor nodes, leaderless</td><td>By the underlying file system</td><td>Leaderless, RF per DC</td></tr>
+<tr><td>Consistency</td><td>Tunable, eventual, siblings</td><td>Strong per row</td><td>Tunable per query</td></tr>
+<tr><td>Conflict handling</td><td>Vector clocks, app merge</td><td>None needed</td><td>Timestamps, last write wins</td></tr>
+<tr><td>Single-node storage</td><td>Pluggable (BerkeleyDB etc.)</td><td>Memtable plus SSTables</td><td>Memtable plus SSTables</td></tr>
+<tr><td>Range scans</td><td>No</td><td>Yes</td><td>Within a partition</td></tr></tbody></table>
+<p>Read Dynamo, then Bigtable, then the Cassandra page, which shows the fusion. Skip the videos unless you need the service. The Vogels post is a ten minute orientation.</p>
+<ul class="check-list"><li>Always state N, R and W and what they buy; R plus W greater than N reduces staleness, not eliminates it.</li><li>Say how conflicts are detected and who resolves them.</li><li>Explain delete semantics (tombstones) and compaction.</li><li>Name the failure types: transient (hinted handoff) versus permanent (anti-entropy).</li></ul></section>
+<section class="content-card"><span class="section-label">Code</span><h2>Runnable example</h2><span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Dynamo-style N=3, R=2, W=2 with vector clocks, hinted-style sloppy failure and read repair.
+const vcInc = (vc, n) =&gt; ({ ...vc, [n]: (vc[n] ?? 0) + 1 });
+const vcLeq = (a, b) =&gt; Object.keys(a).every(k =&gt; a[k] &lt;= (b[k] ?? 0));
+const vcMerge = (a, b) =&gt; { const o = { ...a }; for (const k in b) o[k] = Math.max(o[k] ?? 0, b[k]); return o; };
+
+class Replica { constructor(id){ this.id = id; this.up = true; this.data = new Map(); }
+  put(k, ver) { if (!this.up) throw new Error('down'); const cur = this.data.get(k) ?? [];
+    const kept = cur.filter(c =&gt; !vcLeq(c.vc, ver.vc));           // drop versions dominated by new one
+    if (!kept.some(c =&gt; vcLeq(ver.vc, c.vc))) kept.push(ver);      // add unless already dominated
+    this.data.set(k, kept); }
+  get(k) { if (!this.up) throw new Error('down'); return this.data.get(k) ?? []; } }
+
+class Coordinator {
+  constructor(reps, { N = 3, R = 2, W = 2 } = {}) { this.reps = reps; this.N = N; this.R = R; this.W = W; }
+  put(k, value, ctx = {}, coord = this.reps[0].id) {
+    const ver = { value, vc: vcInc(ctx, coord) }; let acks = 0;
+    for (const r of this.reps.slice(0, this.N)) { try { r.put(k, ver); acks++; } catch {} }
+    if (acks &lt; this.W) throw new Error(`write quorum failed (${acks}/${this.W})`);
+    return ver.vc;
+  }
+  get(k) {
+    let resp = 0, all = [];
+    for (const r of this.reps.slice(0, this.N)) { try { all.push(...r.get(k)); resp++; } catch {} }
+    if (resp &lt; this.R) throw new Error('read quorum failed');
+    const uniq = []; for (const v of all) { if (uniq.some(u =&gt; vcLeq(v.vc, u.vc))) continue;
+      for (let i = uniq.length - 1; i &gt;= 0; i--) if (vcLeq(uniq[i].vc, v.vc)) uniq.splice(i, 1); uniq.push(v); }
+    for (const r of this.reps) if (r.up) for (const v of uniq) r.put(k, v);   // read repair
+    return uniq;
+  }
+}
+
+const reps = ['A', 'B', 'C'].map(id =&gt; new Replica(id)); const c = new Coordinator(reps);
+const ctx1 = c.put('cart', ['book'], {}, 'A');
+reps[2].up = false;                                       // C down: W=2 still met
+const ctx2 = c.put('cart', ['book', 'pen'], ctx1, 'A');
+console.log('after C down, read:', JSON.stringify(c.get('cart').map(v =&gt; v.value)));
+reps[2].up = true; reps[1].up = false;
+// two clients write concurrently from the same context via different coordinators
+c.put('cart', ['book', 'pen', 'mug'], ctx2, 'A');
+c.put('cart', ['book', 'pen', 'hat'], ctx2, 'C');       // concurrent sibling
+reps[1].up = true;
+const siblings = c.get('cart');
+console.log('siblings:', JSON.stringify(siblings.map(v =&gt; v.value)));
+console.assert(siblings.length === 2);
+const merged = [...new Set(siblings.flatMap(s =&gt; s.value))];
+const ctx = siblings.map(s =&gt; s.vc).reduce(vcMerge, {});
+c.put('cart', merged, ctx, 'B');
+const fin = c.get('cart'); console.log('after semantic merge:', JSON.stringify(fin.map(v =&gt; v.value)));
+console.assert(fin.length === 1 &amp;&amp; fin[0].value.length === 4);
+reps[0].up = reps[1].up = false;
+try { c.put('cart', ['x'], ctx, 'C'); } catch (e) { console.log('2 replicas down -&gt;', e.message); }</code></pre>
+<p class="code-caption">Prints a read after one replica is down, two concurrent writes becoming siblings, a semantic merge collapsing them into one version, and a write failing when only one replica is up. Executed with node; asserts pass.</p></section>
+<section class="content-card"><span class="section-label">Exercise</span><h2>What to build</h2>
+ <ol><li>Add hinted handoff: when a replica is down, store the write on a fallback node with the intended owner, and replay it on recovery. Write a test showing the replay.</li><li>Add a Merkle-tree comparison between two replicas that finds differing keys with O(log n) hash comparisons.</li><li>Add a toggle between vector clocks and last-write-wins, and write a test where LWW silently loses a concurrent update.</li><li>Extend the replica with a memtable that flushes to sorted runs and a read that merges them, with tombstones.</li></ol>
+</section>
+<section class="content-card takeaways"><h2>Key Takeaway</h2><p>Learn the KV store as a menu of independent choices: placement, replication, conflict handling, storage engine. Dynamo supplied the first three, Bigtable the fourth, and Cassandra shows they combine. Be able to defend each choice against the requirement that motivated it.</p></section>
+      <section class="content-card"><span class="section-label">FAQ · Common Questions</span><h2>Frequently Asked Questions</h2>
+<details><summary>Does R + W > N guarantee strong consistency?</summary><p>No. With sloppy quorums, concurrent writes and no global ordering you can still read stale or conflicting data. It narrows the window; it does not close it.</p></details>
+<details><summary>Why vector clocks instead of timestamps?</summary><p>Timestamps need synchronised clocks and silently drop one concurrent write. Vector clocks detect concurrency so nothing is lost, at the cost of metadata and client merge logic.</p></details>
+<details><summary>Is DynamoDB the same as Dynamo?</summary><p>No. Same company and heritage, different design. The managed service is described publicly as using a leader per partition, not leaderless quorum.</p></details>
+<details><summary>How do deletes work in an LSM-based store?</summary><p>A delete writes a tombstone marker; compaction later removes both the marker and the covered data, after a grace period so replicas can learn of the delete.</p></details>
+<details><summary>When would you pick a Bigtable-style store over Dynamo-style?</summary><p>When you need ordered scans and per-row strong consistency, such as time series or lookups by key prefix, and can accept less availability under partition.</p></details>
+</section>
+      <section class="content-card"><h2>Related Topics</h2><ul><li><a href="../chapters/06-key-value-store.html">Chapter 6: Design a Key-Value Store</a> — the chapter these resources underpin.</li><li><a href="../../system-design/cap-theorem.html">CAP Theorem</a> — the availability vs consistency framing.</li><li><a href="../../system-design/consistency-models.html">Consistency Models</a> — what quorum reads really give you.</li><li><a href="consistent-hashing.html">Consistent Hashing resource guide</a> — the placement layer.</li><li><a href="../../cassandra.html">Cassandra</a> — the hybrid in depth.</li></ul></section>
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the "Additonal Resources" list in <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a>, a companion to study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu. The commentary is original; follow the links to read the primary sources.</p><ul><li><a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf" target="_blank" rel="noopener">Amazon Dynamo</a> — https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf</li><li><a href="https://docs.datastax.com/en/archived/cassandra/3.0/cassandra/architecture/archIntro.html" target="_blank" rel="noopener">Cassandra Architecture</a> — https://docs.datastax.com/en/archived/cassandra/3.0/cassandra/architecture/archIntro.html</li><li><a href="https://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf" target="_blank" rel="noopener">Google BigTable Architecture</a> — https://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf</li><li><a href="https://www.allthingsdistributed.com/2007/10/amazons_dynamo.html" target="_blank" rel="noopener">Amazon Dynamo DB Internals</a> — https://www.allthingsdistributed.com/2007/10/amazons_dynamo.html</li><li><a href="https://www.youtube.com/watch?v=HaEPXoXVf2k" target="_blank" rel="noopener">Design Patterns in Amazon Dynamo DB</a> — https://www.youtube.com/watch?v=HaEPXoXVf2k</li><li><a href="https://www.youtube.com/watch?v=yvBR71D0nAQ" target="_blank" rel="noopener">Internals of Amazon Dynamo DB</a> — https://www.youtube.com/watch?v=yvBR71D0nAQ</li></ul></section>
+    </main>
+  </body>
+</html>

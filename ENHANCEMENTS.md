@@ -161,3 +161,28 @@ to include a step:
 | 4 | Sync 32 missing topics into graph | Medium | High — graph is incomplete |
 | 5 | Update `/add-topic` skill to require graph entry | Low | High — prevents future drift |
 | 6 | Chat widget agent URL via `<meta>` tag | Low | Low (local-only for now) |
+
+---
+
+## Merges Performed
+
+### 2026-10-13 — Medium batch (16 URLs)
+
+Merged into existing pages (dedup-check verdict: MERGE):
+
+| Source article | Merged into |
+|---|---|
+| The Beginner's Guide to Learning Agentic AI | `beginners-guide-agentic-ai.html` |
+| AI Engineer Roadmap 2026: Zero to Hired; How I Learned AI Engineering | `agentic-ai-engineer-roadmap.html` |
+| AI Agents (06): Agent Skills | `best-claude-skills.html` |
+| Agentic AI Design Patterns: 10 Architectures | `agentic-engineering-concepts.html` |
+| RAG Pipeline for Millions of Documents; Build a RAG App with Python | `rag-production-complete-guide.html` (also corrected an unsupported "<5% hallucination at 10M+" claim) |
+
+Created as new pages (dedup-check verdict: CREATE NEW):
+- `okf-plus-rag-agent-architecture.html` (OKF + RAG; RAG vs OKF contributed framing only)
+- `delayed-job-scheduler-system-design.html`
+
+Deferred — Medium member-only, body not retrievable (not written from memory):
+32 MCP Servers; MCP vs REST vs CLI; Spec-Driven Development with Claude Code (target: `spec-driven-development-claude.html`);
+12 Claude & ChatGPT Power Words (target: `chatgpt-prompt-shortcuts-visual-guide.html`); LangChain4j vs Embabel;
+RAG Chunking That Works + Semantic Chunking Pipelines (planned single page); From LLM to Knowledge Engine (local RAG).

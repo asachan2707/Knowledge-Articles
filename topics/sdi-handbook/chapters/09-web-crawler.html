@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Web Crawler | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 9 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.09. Covers a search-engine web crawler: capacity math (1B pages per month, about 400 QPS, 30 PB over 5 years), the component pipeline (seed URLs, frontier, DNS, downloader, parser, content-seen, URL filter, URL-seen), the two-tier URL frontier for priority and politeness, robots.txt, freshness, spider traps, duplicate detection with hashes and simhash, JavaScript rendering and robustness. Includes an executed Node.js example (normalisation, robots rules, politeness frontier, simhash). Read time about 18 minutes. Related: 08 URL shortener, 10 notification system, consistent hashing, message queue.</div>
+        <h1>Design a Web Crawler</h1>
+        <p class="summary">A crawler is a graph traversal over the public web that must be fast, but above all polite and robust. The core component is the URL frontier, which has to prioritise important pages while guaranteeing that no single host is hammered.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">9 of 28 · Part 3 Product Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">17 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">URL frontier, politeness, robots.txt, URL-seen filter, content-seen, spider traps</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Googlebot, Common Crawl, Heritrix, Mercator, Bloom filters, simhash</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every search engine begins with a crawler. Before anything can be indexed or ranked, someone has to fetch billions of pages from servers they do not control, without knocking those servers over, without falling into infinite loops, and without storing the same content twice. Crawlers also serve web archiving, data mining and brand-monitoring jobs, but the search-index case sets the hardest requirements.</p>
+        <div class="callout"><p><strong>Core idea:</strong> the web is a directed graph, and crawling is breadth-first search with two twists. The queue is not a simple FIFO: it is a two-level structure that orders work by importance and spaces out requests per host. And two membership tests, "have I seen this URL" and "have I seen this content", keep the traversal finite.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known design</span>
+        <h2>Mercator and its descendants</h2>
+        <p>The published design that most crawler architectures descend from is Mercator, the crawler built at Compaq/AltaVista and described in the late 1990s. Its blueprint will look familiar after this chapter: a frontier that is really two sets of queues (priority "front" queues feeding per-host "back" queues), a fetch stage with a DNS cache, a duplicate-content fingerprint check, and a URL-seen set kept mostly on disk with an in-memory cache in front. Open-source crawlers such as Heritrix (used by the Internet Archive) and Apache Nutch follow the same structure, and Common Crawl publishes monthly snapshots of this kind of output. The notes' diagram is a modernised Mercator.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and estimates</span>
+        <h2>Scope and numbers</h2>
+        <p class="mini-heading">What we are building</p>
+        <ul class="check-list">
+          <li>Purpose: feed a search index. HTML only; images and video are an extension.</li>
+          <li>Volume: 1 billion pages per month.</li>
+          <li>Detect new and changed pages; ignore duplicate content.</li>
+          <li>Retain crawled data for 5 years.</li>
+          <li>Four qualities to defend: scalability, robustness, politeness, extensibility.</li>
+        </ul>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Average QPS</td><td>10^9 / (30 x 86,400 s = 2.59M s)</td><td>about 386, call it 400 pages/s</td></tr>
+            <tr><td>Peak QPS</td><td>2 x average</td><td>about 800 pages/s</td></tr>
+            <tr><td>Monthly storage</td><td>10^9 pages x ~500 KB average</td><td>about 500 TB</td></tr>
+            <tr><td>Five-year storage</td><td>500 TB x 12 x 5</td><td>about 30 PB (about 43 PB if you plan for 70% disk utilisation)</td></tr>
+            <tr><td>Download bandwidth</td><td>400 pages/s x 500 KB</td><td>about 200 MB/s, or 1.6 Gbit/s average</td></tr>
+            <tr><td>URL-seen set</td><td>10 billion URLs x ~10 bits (1% false-positive Bloom filter)</td><td>about 12 GB</td></tr>
+          </tbody>
+        </table>
+        <p>Two things stand out. Bandwidth and storage are large but ordinary; the 400 QPS is modest. What makes it hard is that 400 fetches per second are spread over millions of independent hosts you must not overload, with unreliable latency, hostile pages and an unbounded link graph. Also note the 500 KB average is generous for HTML alone, because it is skewed by large pages; compression (gzip or zstd) typically cuts stored HTML by well over half, so the real figure is likely lower, but plan for the upper estimate.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>The pipeline</h2>
+        <div class="diagram-box"><pre>
+  Seed URLs --&gt; <span class="hi">URL Frontier</span> --&gt; HTML Downloader --&gt; Content Parser --&gt; <span class="warn">Content Seen?</span> --yes--&gt; drop
+                    ^            |   ^  (DNS Resolver + cache)   | valid HTML        | no
+                    |            |   |                           v                   v
+                    |            |   +-- robots.txt cache      Content Storage   URL Extractor
+                    |            v                                                   |
+                    |       (fetch results)                                          v
+                    |                                                           URL Filter
+                    |                                                  (blacklist, scheme, length)
+                    |                                                                |
+                    +---------------- new URLs ----------- <span class="warn">URL Seen?</span> &lt;---------+
+                                                          (Bloom filter / hash set + URL Storage)
+        </pre></div>
+        <table class="data-table">
+          <thead><tr><th>Component</th><th>Job</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Seed URLs</td><td>Starting points</td><td>Pick well-connected, high-quality sites; split by locality (countries) or topic (sports, health) so the crawl reaches different regions of the graph quickly</td></tr>
+            <tr><td>URL Frontier</td><td>Holds URLs to fetch and decides which is next</td><td>The heart of the system; see below</td></tr>
+            <tr><td>HTML Downloader</td><td>HTTP fetch with timeouts and robots.txt compliance</td><td>Pool of workers; async I/O</td></tr>
+            <tr><td>DNS Resolver</td><td>Hostname to IP</td><td>A synchronous resolver is a classic bottleneck; cache and parallelise</td></tr>
+            <tr><td>Content Parser</td><td>Validate and parse HTML</td><td>Drop malformed or truncated pages; keep this out of the fetch workers so a hostile page cannot stall downloads</td></tr>
+            <tr><td>Content Seen?</td><td>Duplicate content check</td><td>Compare fingerprints, not bodies</td></tr>
+            <tr><td>Content Storage</td><td>Persist pages</td><td>Mostly disk/object storage; hot pages in memory</td></tr>
+            <tr><td>URL Extractor / Filter</td><td>Pull links, make absolute, drop unwanted</td><td>Filter by scheme, extension, blacklist, length</td></tr>
+            <tr><td>URL Seen?</td><td>Prevent re-enqueueing</td><td>Bloom filter or hash set over normalised URLs</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Workflow</p>
+        <ol>
+          <li>Seed URLs enter the frontier.</li>
+          <li>The downloader takes URLs from the frontier, resolves DNS and fetches.</li>
+          <li>The parser validates the page; content-seen checks its fingerprint.</li>
+          <li>New content is stored and its links extracted.</li>
+          <li>Links pass the filter, then URL-seen, and the survivors return to the frontier.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Traversal</span>
+        <h2>BFS, not DFS, and why plain BFS is not enough</h2>
+        <p>Depth-first search on the web can descend arbitrarily deep into one site's link structure (or a generated trap) before returning, which is both slow to cover the graph and unfair to other hosts. Breadth-first with a FIFO queue is the natural default. But a pure FIFO has two flaws on the real web: it ignores that pages differ wildly in value, and because a page tends to link many URLs on its own host, FIFO order releases bursts of same-host URLs back-to-back, which is exactly the traffic pattern that gets crawlers banned.</p>
+        <p>The fix is to make the frontier smarter, not to abandon BFS.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The URL frontier</span>
+        <h2>Two tiers: priority in front, politeness behind</h2>
+        <div class="diagram-box"><pre>
+   incoming URLs
+        |
+   [ Prioritizer ] -- score by PageRank-like signal, domain authority, change rate
+        |
+   +----+-----+-----+            FRONT queues f1..fn  (<span class="hi">priority</span>)
+   | f1 | f2  | ... | fn         selector picks f_i with probability biased to high priority
+   +----+-----+-----+
+        |   (route by host)
+   [ Back-queue router ] -- mapping table: host -&gt; back queue
+        |
+   +----+-----+-----+            BACK queues b1..bm  (<span class="ok">politeness</span>)
+   | b1 | b2  | ... | bm         each queue holds URLs of ONE host at a time
+   +----+-----+-----+
+        |    |           |
+     worker1 worker2 ... workerM   one worker per back queue, sleeps between fetches
+        </pre></div>
+        <p class="mini-heading">Politeness</p>
+        <p>The rule: at most one in-flight request per host, with a gap between consecutive requests. Implement it by routing all URLs of a host into one FIFO back queue (the mapping table records host to queue), assigning each queue to one worker, and having that worker wait out a delay before taking the next URL. A common refinement, used in Mercator, keeps a heap keyed by "earliest time this host may be hit again" so the scheduler always picks the host that is ready soonest, which keeps workers busy even when many hosts are cooling down. Honour the site's <code>Crawl-delay</code> if given (Google ignores that directive, but many crawlers respect it), and adapt dynamically: back off when latency or 5xx rates rise, since the server's response time is a good signal of its load.</p>
+        <p class="mini-heading">Priority</p>
+        <p>The prioritizer assigns each URL a score from signals such as a PageRank estimate, the domain's observed quality, how often the page changes, and depth from a seed. URLs land in front queues f1..fn, one per priority band. The selector draws from the higher bands more often but never starves the lower ones, because a strictly highest-first policy would leave the long tail forever uncrawled. The front queues decide <em>what matters</em>; the back queues decide <em>when it is safe</em>.</p>
+        <p class="mini-heading">Freshness</p>
+        <p>A crawl is never finished; pages change. Recrawl using the page's own history: a news front page may change every few minutes, an archived article never. Estimate each page's change rate from past visits (if it changed in 4 of the last 5 fetches, revisit soon) and use HTTP validators (<code>ETag</code>, <code>If-Modified-Since</code>) so an unchanged page costs a 304 rather than 500 KB. Prioritise recrawls by importance times staleness, otherwise the cheap, frequently changing pages crowd out discovery of new ones.</p>
+        <p class="mini-heading">Storage of the frontier</p>
+        <p>The frontier holds hundreds of millions of URLs, too many for memory, but it needs low-latency dequeue. The standard split is a disk-backed queue with a small in-memory buffer at the head and tail of each queue: workers read and write the memory buffers and a background process spills and refills from disk in batches. Sequential disk I/O keeps that cheap.</p>
+        <div class="insight-box"><p><strong>Politeness is a correctness property, not a nicety.</strong> A mis-bucketed URL (for example, treating <code>www.example.com</code> and <code>example.com</code> as different hosts, or ignoring that many hostnames share one IP) lets you send parallel requests to one machine. Key politeness on the registered domain and, where cheap to know, the resolved IP.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">HTML Downloader</span>
+        <h2>Fetching fast without being rude or fragile</h2>
+        <ul class="check-list">
+          <li><strong>robots.txt.</strong> Before fetching from a host, retrieve and cache its <code>/robots.txt</code> (refresh periodically, for example daily) and obey <code>Disallow</code> and <code>Allow</code> rules, using the longest matching path. Treat a 4xx as "no restrictions" and a persistent 5xx as "stay away for now", which is what Google's documented behaviour does.</li>
+          <li><strong>DNS cache.</strong> DNS lookups can take tens to hundreds of milliseconds and many resolvers serialise requests. Keep an in-process map of host to IP with a TTL, refresh in the background, and use an asynchronous resolver.</li>
+          <li><strong>Distribute.</strong> Run many crawler servers, assign hosts to servers by hashing the host, and place crawlers near the content (regional data centres) to cut latency and cross-ocean bandwidth. See <a href="../../system-design/consistent-hashing.html">consistent hashing</a> so adding a server remaps only a fraction of hosts.</li>
+          <li><strong>Short timeouts.</strong> Set connect, first-byte and total timeouts, and cap response size. A slow host should cost you a few seconds of one worker, not a thread forever; count repeated timeouts and deprioritise the host.</li>
+          <li><strong>Be identifiable.</strong> Send a descriptive User-Agent with a contact URL, and honour requests to stop.</li>
+          <li><strong>Conditional GET and compression.</strong> Send <code>Accept-Encoding: gzip</code> and validators to save bandwidth on both sides.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Dedup</span>
+        <h2>Two membership tests keep the crawl finite</h2>
+        <p class="mini-heading">URL seen</p>
+        <p>Without it, any cycle in the link graph (and the web is full of them) loops forever. Normalise first, since otherwise the same page appears under many spellings: lowercase the host, drop the fragment, remove default ports, sort query parameters, collapse duplicate slashes and trailing slashes, resolve relative paths. Then test membership in a Bloom filter (a miss is definitive; a hit has a small chance of being wrong, which here means a rare page is skipped, an acceptable loss) or an exact hash set of 64-bit URL fingerprints on disk with a memory cache. Strip tracking parameters (<code>utm_*</code>) per site rules where safe.</p>
+        <p class="mini-heading">Content seen</p>
+        <p>Many distinct URLs serve identical bodies: mirrors, session-id variants, print views. Comparing page text directly is far too costly, so store a fingerprint per page: a cryptographic or 64-bit hash for exact duplicates, and a locality-sensitive hash like <strong>simhash</strong> for near-duplicates, where two pages that differ by a banner or timestamp land within a few bits of Hamming distance. The code below implements simhash on three-word shingles and shows a near-duplicate scoring distance 0 against an unrelated page at 31.</p>
+        <div class="warn-box"><p><strong>Exact-hash trap:</strong> a hash of the full HTML fails on near-duplicates, since any dynamic fragment (a timestamp, a rotating ad id) changes it. Hash the extracted main text, not the raw markup, for the exact-match test.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Hostile web</span>
+        <h2>Spider traps, noise and dynamic pages</h2>
+        <ul class="check-list">
+          <li><strong>Spider traps.</strong> Infinite link structures: a calendar that links to the next month forever, a relative link bug producing <code>/a/a/a/a/...</code>, session ids in URLs that make every visit a new URL. Defences: cap URL length (say 2,000 characters), cap path depth, cap the number of pages per host or per directory pattern, detect repeating path segments, and flag hosts whose URL count explodes without new content. A person can then whitelist or blacklist the offender; fully automatic trap detection is an unsolved problem.</li>
+          <li><strong>Data noise.</strong> Advertising, boilerplate navigation, spam and auto-generated pages add storage cost and pollute the index. Filter by content quality signals and exclude known spam domains.</li>
+          <li><strong>Server-side rendering.</strong> Many modern sites build their content in the browser with JavaScript, so the raw HTML contains almost nothing. Rendering every page in a headless browser costs orders of magnitude more CPU than a plain fetch, so do it selectively: render only pages that look like empty shells, in a separate, lower-throughput pool. Google documents this as its "rendering" stage following crawl.</li>
+          <li><strong>Malformed and malicious content.</strong> Parsers must tolerate broken HTML, enormous documents, decompression bombs and zip links. Sandbox parsing, set size limits, and never execute fetched content on the fetch workers.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Robustness and extensibility</span>
+        <h2>Surviving failure, and adding new content types</h2>
+        <ul class="check-list">
+          <li><strong>Consistent hashing</strong> of hosts across crawler servers spreads load and means a server failure remaps only its share.</li>
+          <li><strong>Checkpoint the frontier</strong> and the URL-seen set periodically so a crashed crawler resumes rather than restarting. A message queue between stages decouples them and absorbs bursts (<a href="../../system-design/message-queue.html">message queues</a>).</li>
+          <li><strong>Handle exceptions per URL.</strong> One bad page must never crash a worker; catch, record, move on, and count failures per host.</li>
+          <li><strong>Validate data</strong> at every stage boundary (status codes, MIME type, encoding, size).</li>
+          <li><strong>Extensibility.</strong> Treat the pipeline as pluggable stages after the parser: a PNG downloader, a web monitor that checks for copyright or trademark misuse, a link-graph exporter for PageRank. Each module reads from the same stream of fetched pages and is added without touching the fetch core.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Design decisions at a glance</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>My pick</th></tr></thead>
+          <tbody>
+            <tr><td>Traversal</td><td>BFS with priority</td><td>DFS</td><td>BFS with a scored frontier</td></tr>
+            <tr><td>URL-seen</td><td>Bloom filter (small, false positives skip pages)</td><td>Exact set on disk (accurate, slower, bigger)</td><td>Bloom in memory plus exact for high-value hosts</td></tr>
+            <tr><td>Content dedup</td><td>Exact hash</td><td>Simhash / shingling</td><td>Both: exact is cheap, simhash catches near-dups</td></tr>
+            <tr><td>Worker model</td><td>Thread per host queue</td><td>Async I/O event loop</td><td>Async; thread per queue wastes memory at thousands of hosts</td></tr>
+            <tr><td>JS pages</td><td>Render everything</td><td>Render selectively</td><td>Selective</td></tr>
+            <tr><td>Partitioning</td><td>By URL hash</td><td>By host hash</td><td>By host: politeness state and robots cache stay local</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Partition by host</h4><ul><li>All rate state for a host lives on one server.</li><li>robots.txt and DNS cache locality.</li><li>Easy to enforce one-request-at-a-time.</li></ul></div>
+          <div class="trade-col cons"><h4>Cost of partition by host</h4><ul><li>Extracted links must be forwarded to the owner server of each target host.</li><li>A giant host (a large social site) is a hot partition.</li><li>Rebalancing moves politeness state.</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Hands-on</span>
+        <h2>Normalisation, robots rules, a politeness frontier and simhash</h2>
+        <p>The script crawls a tiny simulated web with a virtual clock. It normalises URLs, applies <code>robots.txt</code> with longest-match semantics and a <code>Crawl-delay</code> of two seconds for one host, uses a two-tier frontier (priority in front, per-host queues behind), caps depth to stop a trap, deduplicates by content hash, and finishes with a simhash demonstration. Assertions verify that the delay was honoured, the private path never fetched, and equivalent URLs collapsed.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+// ---- URL normalization (dedup key) ----
+export function normalize(raw) {
+  const u = new URL(raw);
+  u.hash = '';
+  u.hostname = u.hostname.toLowerCase();
+  if ((u.protocol === 'http:' &amp;&amp; u.port === '80') || (u.protocol === 'https:' &amp;&amp; u.port === '443')) u.port = '';
+  u.searchParams.sort();
+  let p = u.pathname.replace(/\/{2,}/g, '/');
+  if (p.length &gt; 1 &amp;&amp; p.endsWith('/')) p = p.slice(0, -1);
+  u.pathname = p;
+  return u.toString();
+}
+
+// ---- robots.txt (minimal: longest-match Allow/Disallow for one agent group) ----
+export function parseRobots(text, agent = '*') {
+  const rules = []; let applies = false, delay = 0;
+  for (const line of text.split('\n').map(l =&gt; l.split('#')[0].trim()).filter(Boolean)) {
+    const [k, ...r] = line.split(':'); const key = k.toLowerCase(), val = r.join(':').trim();
+    if (key === 'user-agent') applies = val === '*' || val === agent;
+    else if (applies &amp;&amp; key === 'disallow' &amp;&amp; val) rules.push({ allow: false, path: val });
+    else if (applies &amp;&amp; key === 'allow' &amp;&amp; val) rules.push({ allow: true, path: val });
+    else if (applies &amp;&amp; key === 'crawl-delay') delay = Number(val) * 1000;
+  }
+  return { delay, allowed(path) {
+    let best = null;
+    for (const r of rules) if (path.startsWith(r.path) &amp;&amp; (!best || r.path.length &gt; best.path.length)) best = r;
+    return best ? best.allow : true;
+  } };
+}
+
+// ---- URL frontier: prioritizer (front queues) + politeness (back queues per host) ----
+export class Frontier {
+  constructor({ priorities = 3, defaultDelay = 1000, now = () =&gt; Date.now() } = {}) {
+    this.front = Array.from({ length: priorities }, () =&gt; []);
+    this.back = new Map();      // host -&gt; FIFO of urls
+    this.nextOk = new Map();    // host -&gt; earliest next fetch time
+    this.delays = new Map();    // host -&gt; crawl-delay override
+    this.defaultDelay = defaultDelay; this.now = now;
+  }
+  add(url, priority = 1) { this.front[Math.min(priority, this.front.length - 1)].push(url); }
+  setDelay(host, ms) { this.delays.set(host, ms); }
+  // move from front queues (high priority first, biased) into per-host back queues
+  #refill() {
+    for (const q of this.front) {
+      while (q.length) { const url = q.shift(); const h = new URL(url).host;
+        if (!this.back.has(h)) this.back.set(h, []); this.back.get(h).push(url); }
+    }
+  }
+  // returns {url} when some host is ready, or {waitMs} when all hosts are cooling down, or null if empty
+  next() {
+    this.#refill();
+    let minWait = Infinity;
+    for (const [host, q] of this.back) {
+      if (!q.length) continue;
+      const wait = (this.nextOk.get(host) ?? 0) - this.now();
+      if (wait &lt;= 0) {
+        this.nextOk.set(host, this.now() + (this.delays.get(host) ?? this.defaultDelay));
+        return { url: q.shift() };
+      }
+      minWait = Math.min(minWait, wait);
+    }
+    return minWait === Infinity ? null : { waitMs: minWait };
+  }
+}
+
+// ---- content-seen: exact hash + simhash for near-duplicates ----
+export const contentHash = t =&gt; createHash('sha256').update(t).digest('hex');
+export function simhash(text) {
+  const v = new Array(64).fill(0);
+  const words = text.toLowerCase().match(/\w+/g) ?? [];
+  for (let i = 0; i + 2 &lt; words.length + 1; i++) {                  // 3-word shingles
+    const sh = words.slice(i, i + 3).join(' ');
+    const h = createHash('md5').update(sh).digest().readBigUInt64BE(0);
+    for (let b = 0; b &lt; 64; b++) v[b] += (h &gt;&gt; BigInt(b)) &amp; 1n ? 1 : -1;
+  }
+  return v.reduce((acc, x, b) =&gt; (x &gt; 0 ? acc | (1n &lt;&lt; BigInt(b)) : acc), 0n);
+}
+export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x &amp; 1n); x &gt;&gt;= 1n; } return n; }
+
+// ---- simulated web + crawl loop ----
+const web = {
+  'http://a.com/': ['http://a.com/x', 'http://a.com/y', 'http://b.com/', 'http://a.com/private/secret'],
+  'http://a.com/x': ['http://a.com/', 'http://b.com/p?b=2&amp;a=1'],
+  'http://a.com/y': ['http://a.com/x/'],
+  'http://b.com/': ['http://b.com/p?a=1&amp;b=2', 'http://b.com/trap/1'],
+  'http://b.com/p?a=1&amp;b=2': [],
+  'http://b.com/trap/1': ['http://b.com/trap/1/1'], 'http://b.com/trap/1/1': ['http://b.com/trap/1/1/1'],
+  'http://b.com/trap/1/1/1': ['http://b.com/trap/1/1/1/1'],
+};
+const robots = { 'a.com': parseRobots('User-agent: *\nDisallow: /private\nCrawl-delay: 2'), 'b.com': parseRobots('User-agent: *\nAllow: /') };
+
+let clock = 0; const log = [];
+const fr = new Frontier({ defaultDelay: 500, now: () =&gt; clock });
+fr.setDelay('a.com', robots['a.com'].delay);
+const seenUrls = new Set(), seenContent = new Set(); const MAX_DEPTH = 3;
+const depth = new Map();
+const seed = normalize('http://a.com/'); fr.add(seed, 0); seenUrls.add(seed); depth.set(seed, 0);
+for (let guard = 0; guard &lt; 100;) {
+  const r = fr.next(); guard++;
+  if (!r) break;
+  if (r.waitMs) { clock += r.waitMs; continue; }
+  const url = r.url; const u = new URL(url);
+  if (!robots[u.hostname]?.allowed(u.pathname)) { log.push(`t=${clock} SKIP robots ${url}`); continue; }
+  const links = web[url] ?? web[url.replace(/\/$/, '')] ?? []; // simulated fetch
+  const body = JSON.stringify(links);
+  log.push(`t=${clock} FETCH ${url}`);
+  const ch = contentHash(body);
+  if (seenContent.has(ch)) { log.push(`t=${clock} DUP-CONTENT ${url}`); continue; }
+  seenContent.add(ch);
+  for (const l of links) {
+    const n = normalize(l);
+    if (seenUrls.has(n)) continue;
+    seenUrls.add(n); const d = depth.get(url) + 1; depth.set(n, d);
+    if (d &gt; MAX_DEPTH) { log.push(`t=${clock} TRAP-LIMIT depth ${d} ${n}`); continue; }
+    fr.add(n, d === 1 ? 0 : 1);
+  }
+}
+console.log(log.join('\n'));
+const fetches = log.filter(l =&gt; l.includes('FETCH'));
+const aTimes = fetches.filter(l =&gt; l.includes('a.com')).map(l =&gt; +l.match(/t=(\d+)/)[1]);
+for (let i = 1; i &lt; aTimes.length; i++) assert.ok(aTimes[i] - aTimes[i - 1] &gt;= 2000, 'a.com crawl-delay respected');
+assert.ok(!fetches.some(l =&gt; l.includes('/private')));
+assert.equal(normalize('HTTP://B.com:80/p/?b=2&amp;a=1#frag'), 'http://b.com/p?a=1&amp;b=2');
+assert.equal(fetches.filter(l =&gt; l.includes('b.com/p')).length, 1);
+assert.ok(log.some(l =&gt; l.includes('TRAP-LIMIT')));
+
+const d1 = simhash('the quick brown fox jumps over the lazy dog near the river bank today'),
+      d2 = simhash('the quick brown fox jumps over the lazy dog near the river bank today!'),
+      d3 = simhash('completely different text about distributed systems and crawling billions of pages');
+console.log('simhash hamming near-dup:', hamming(d1, d2), ' unrelated:', hamming(d1, d3));
+assert.ok(hamming(d1, d2) &lt;= 3 &amp;&amp; hamming(d1, d3) &gt; 10);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Run with <code>node crawler.mjs</code>. Prints a timestamped fetch log (a.com fetched at t=0, 2000, 4000 respecting its 2-second delay; b.com every 500 ms; a robots skip for /private/secret; a depth limit stopping the trap), then "simhash hamming near-dup: 0  unrelated: 31" and "all assertions passed".</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Hammering a small site</td><td>IP bans, abuse complaints</td><td>Per-host back queue, delay, adaptive back-off on latency</td></tr>
+            <tr><td>Spider trap</td><td>Frontier grows without new content</td><td>URL and depth caps, per-host page budgets, alert on frontier growth rate</td></tr>
+            <tr><td>DNS resolver stall</td><td>Throughput collapses</td><td>Async resolver, cache, multiple upstream resolvers</td></tr>
+            <tr><td>Frontier lost on crash</td><td>Re-crawl from seeds, duplicate work</td><td>Persist queues and checkpoint the seen-set</td></tr>
+            <tr><td>Bloom filter saturation</td><td>False-positive rate rises, pages silently skipped</td><td>Size for the final count, rotate filters per crawl epoch</td></tr>
+            <tr><td>Slow host in worker pool</td><td>Workers blocked</td><td>Hard timeouts, per-host concurrency 1, penalise slow hosts</td></tr>
+            <tr><td>Giant response or decompression bomb</td><td>Memory exhaustion</td><td>Streaming fetch with size cap, limit decompression ratio</td></tr>
+            <tr><td>Stale index</td><td>Search shows dead pages</td><td>Change-rate-driven recrawl, treat 404/410 as a removal signal</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production gotchas</span>
+        <h2>Where it hurts at scale</h2>
+        <ul class="check-list">
+          <li>The crawl is I/O bound, not CPU bound, until you add parsing and rendering; size fetchers by concurrent connections, parsers by CPU.</li>
+          <li>The URL-seen set grows with every discovered URL, not every fetched page. Discovery outpaces fetching by a large factor, so cap or sample links from low-value pages.</li>
+          <li>Hostnames lie: wildcard DNS makes infinite subdomains. Limit subdomains per registered domain.</li>
+          <li>Character encodings and redirect chains (limit to a handful of hops) account for many silent losses; record the final URL and canonical link element.</li>
+          <li>Respect <code>noindex</code>, <code>nofollow</code> and the legal environment (terms of use, privacy law) per jurisdiction. Keep an operator-facing abuse contact and a way to blocklist a domain instantly.</li>
+          <li>Store raw responses compressed in large append-only container files (WARC is the archiving standard) rather than one object per page, to avoid small-file overhead at billions of pages.</li>
+          <li>Shard storage and the URL database by host; use replication for durability. Collect crawl metrics (pages per second per host, error rate, queue depth, duplicate ratio) to tune the whole system.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Estimate: 400 QPS average, 800 peak, 500 TB per month, 30 PB over five years.</li>
+          <li>Draw the pipeline and explain each component briefly.</li>
+          <li>Explain BFS and the two-tier frontier: priority front queues, politeness back queues.</li>
+          <li>Cover robots.txt, DNS caching, timeouts and geographic distribution.</li>
+          <li>Describe URL-seen (normalise, Bloom filter) and content-seen (hash, simhash).</li>
+          <li>Name spider traps and your limits, and describe JavaScript rendering.</li>
+          <li>Close with sharding by host, checkpointing, extensibility and monitoring.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not simply use a single FIFO queue?</summary><p>It cannot express priority, and it produces bursts of same-host requests since linked pages cluster by host. The two-tier frontier separates the two concerns cleanly.</p></details>
+        <details><summary>How do you decide the delay between requests to a host?</summary><p>Start from the robots.txt <code>Crawl-delay</code> if present, else a default of a second or more, and scale by the measured response time of the host (a common heuristic is a multiple of the last fetch time). Back off further on errors or timeouts.</p></details>
+        <details><summary>A Bloom filter can skip pages. Is that acceptable?</summary><p>Usually yes: with a 1% false-positive rate you miss about one new URL in a hundred in that epoch, and most are re-discovered via other links or the next crawl. For critical hosts keep an exact set. The benefit is memory: roughly 12 GB for 10 billion URLs versus over 100 GB for exact 8-byte fingerprints.</p></details>
+        <details><summary>How do you detect that a page changed?</summary><p>Conditional GET with <code>ETag</code> or <code>Last-Modified</code> is the first, cheap signal. If the server does not support it, compare the content fingerprint with the stored one. Record the change history to drive recrawl frequency.</p></details>
+        <details><summary>How would you crawl a site that is entirely JavaScript?</summary><p>Detect an empty shell (very little text, a root div and script tags), send it to a separate rendering pool running a headless browser, set a strict time and resource budget, and extract links from the rendered DOM. It is expensive, so do it for a small fraction of pages.</p></details>
+        <details><summary>How do you scale the crawl past one data centre?</summary><p>Partition hosts across regional crawler clusters by consistent hash on the host; forward discovered URLs to the owning cluster through a queue; keep content storage regional and replicate only the index inputs. Because politeness state is per host, partitioning by host keeps it local.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./08-url-shortener.html">Chapter 8: Design a URL Shortener</a> — previous chapter; another system built on URL handling and Bloom filters.</li>
+          <li><a href="./10-notification-system.html">Chapter 10: Design a Notification System</a> — next chapter; also queue-and-worker driven against third-party endpoints.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — assigning hosts to crawler servers.</li>
+          <li><a href="../../system-design/message-queue.html">Message Queues</a> — decoupling fetch, parse and extract stages.</li>
+          <li><a href="../../elasticsearch.html">Elasticsearch</a> — the kind of index a crawler feeds.</li>
+          <li><a href="../../system-design/rate-limiting.html">Rate Limiting</a> — the same idea, applied outward as per-host politeness.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. Additional resources listed in the repository for this chapter:</p>
+        <ul>
+          <li><a href="http://infolab.stanford.edu/~olston/publications/crawling_survey.pdf">Web Crawling</a></li>
+          <li><a href="https://developers.google.com/search/docs/guides/dynamic-rendering">Google Dynamic Rendering</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A crawler is BFS over the web with a smart queue. Build the frontier as priority queues feeding one-host-per-queue back queues, obey robots.txt, filter URLs and content twice (normalised URL-seen, fingerprinted content-seen), and defend against traps with hard limits. Shard by host so politeness state stays local, checkpoint everything, and keep the pipeline pluggable.</p>
+      </section>
+    </main>
+  </body>
+</html>

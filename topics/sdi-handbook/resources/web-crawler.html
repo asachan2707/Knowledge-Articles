@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Crawling: Survey and Dynamic Rendering — Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>.diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}</style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Resource guide created 2026-10-15 from liquidslr/system-design-notes Additional Resources (Web Crawler). Google dynamic rendering page read (notes it is a deprecated workaround); crawling survey PDF not extractable, flagged on page. Covers frontier, per-host politeness, URL normalisation, dedup, spider traps, freshness, rendering tier. JavaScript example executed with node. About 10 minute read. Related: chapter 09-web-crawler.</div>
+        <h1>Web Crawling: Survey and Dynamic Rendering — Reading Guide</h1>
+        <p class="summary">A reading guide to the Olston and Najork crawling survey and Google dynamic rendering, covering frontier, politeness, dedup and JS rendering, with a runnable polite crawler frontier.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 9</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">9 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">frontier, politeness, dedup, rendering</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Googlebot, Mercator-style crawlers, headless Chrome</span></div>
+        </div>
+      </header>
+<section class="content-card"><p class="lead">Two resources, from opposite ends of the crawling problem. The Olston and Najork survey is the academic map of the whole discipline: frontier, politeness, deduplication, freshness, traps. Google's dynamic rendering page is a snapshot of one specific modern pain: the content you want is not in the HTML, it is produced by JavaScript, and someone has to run the browser.</p>
+<div class="callout"><p><strong>Core idea:</strong> a crawler is a scheduler with a conscience. The fetching is easy; deciding <em>what to fetch next, how often, and how politely</em>, while never doing the same work twice, is the engineering.</p></div></section>
+<section class="content-card"><span class="section-label">How to use this guide</span><h2>What was read</h2>
+<p>I fetched the Google page and read it. The survey PDF came back as unextractable binary, so my description of it is based on the well-known structure of the survey and on standard crawler design; I mark that on the page. Neither resource is long to skim, but the survey is a 100-plus page monograph, so read selectively.</p>
+<table class="data-table"><thead><tr><th>Resource</th><th>Read?</th><th>Advice</th></tr></thead><tbody><tr><td>Web Crawling (survey)</td><td>Not extractable; relied on known structure</td><td>Read the architecture, politeness and duplicate-detection sections; skim ordering and refresh theory</td></tr><tr><td>Google Dynamic Rendering</td><td>Read fully</td><td>Ten minutes; read for the concept and the deprecation</td></tr></tbody></table></section>
+<section class="content-card"><span class="section-label">Resource 1</span><h2>Web Crawling</h2>
+
+<p class="mini-heading">What it is</p>
+<p>"Web Crawling" by Christopher Olston and Marc Najork, published in <em>Foundations and Trends in Information Retrieval</em> (2010). It is a survey of crawler techniques from the research literature and of the engineering of large crawlers.</p>
+<div class="warn-box"><strong>Reading note:</strong> my fetcher could not extract this PDF, so the points below are the standard topics of the survey and of crawler design, not a summary of its exact text. No quotes or numbers are taken from it.</div>
+<p class="mini-heading">The core loop</p>
+<div class="diagram-box"><span class="hi">seed URLs</span> -> <span class="ok">URL frontier</span> -> fetcher (DNS, robots.txt, HTTP) -> content store
+                  ^                                          |
+                  |                      parser: extract links + text
+                  |                                          |
+                  +---- URL filter / "seen?" test <----------+
+                         <span class="dim">normalise, dedupe, prioritise, assign to host queue</span></div>
+<p class="mini-heading">Ideas to extract</p>
+<ul class="check-list"><li><strong>The frontier is the brain.</strong> It has two jobs that pull in opposite directions: prioritise (important and stale pages first) and be polite (one host gets a request at a time, with a delay). The classic design uses front queues for priority feeding back queues, one per host, with a heap keyed on "next allowed time". My code does the simplest version of this.</li>
+<li><strong>Politeness:</strong> obey <code>robots.txt</code>, cap concurrent connections per host, honour crawl delay, and back off on slow responses or 429s. Politeness is also self-interest, since hosts block aggressive crawlers.</li>
+<li><strong>URL normalisation and "seen" test:</strong> lower-case host, remove fragments, resolve relative paths, canonicalise query parameters. A Bloom filter or hash set answers "have I queued this?"; at web scale this is a large distributed structure.</li>
+<li><strong>Content duplication:</strong> exact duplicates by hashing the body; near-duplicates by shingling and similarity sketches (MinHash or SimHash). Mirror sites and boilerplate pages are common.</li>
+<li><strong>Spider traps:</strong> calendars, session IDs in URLs, infinite redirects and query-parameter permutations. Defences: URL length and depth caps, per-host page budgets, pattern detection.</li>
+<li><strong>Freshness:</strong> pages change at different rates. Re-crawl scheduling is an optimisation problem: spend limited fetches where they raise the freshness of the index the most, which is not always the pages that change most often.</li>
+<li><strong>Distribution:</strong> partition by host (not by URL) across crawler nodes, so politeness is enforced locally, using consistent hashing; exchange discovered links between nodes in batches.</li></ul>
+<p class="mini-heading">Senior commentary</p>
+<p>The pragmatic lesson of every real crawler is that the hard parts are not in the happy path. DNS resolution becomes a bottleneck, so you cache it and run your own resolver. robots.txt must be cached with a refresh policy and treated as mandatory. Long-tail hosts are slow, so you need short timeouts and concurrency by hundreds or thousands of in-flight requests per node, not per thread. And you must be able to <em>stop</em>: a kill switch by host or by pattern matters the first time you annoy a site's operators.</p>
+<div class="insight-box"><strong>Still true:</strong> architecture, politeness, deduplication, trap handling. <strong>Dated:</strong> assumptions that most content is static HTML, and the era-specific scale and storage numbers. Modern crawlers also care about JavaScript rendering, structured data, canonical tags and sitemaps, which the page below picks up.</div>
+<p class="mini-heading">Connection</p>
+<p>Everything in <a href="../chapters/09-web-crawler.html">chapter 9</a> (DNS resolver, URL storage, priority/politeness queues, content seen) is a node in the diagram above. The distribution point links to <a href="consistent-hashing.html">consistent hashing</a>.</p>
+
+<p><a href="http://infolab.stanford.edu/~olston/publications/crawling_survey.pdf" target="_blank" rel="noopener">Web Crawling ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 2</span><h2>Google Dynamic Rendering</h2>
+
+<p class="mini-heading">What it is</p>
+<p>A page in Google Search Central documentation. I read it. It describes a workaround and now presents it as a past practice rather than a recommendation.</p>
+<p class="mini-heading">The idea</p>
+<p>Many sites build the page in the browser: the initial HTML is a shell and JavaScript fetches and inserts the content. A crawler that does not run JavaScript sees an empty shell. Dynamic rendering means the server detects a crawler (typically through the user agent) and sends it a pre-rendered, JavaScript-free HTML version, produced by a separate rendering service, while ordinary users keep getting the client-side app.</p>
+<p class="mini-heading">What the page says</p>
+<ul class="check-list"><li>Google Search can process JavaScript, but there are limitations, and other search engines may not process it at all.</li>
+<li>Dynamic rendering is described as a workaround, not a long-term solution; Google points developers to server-side rendering, static rendering, or hydration instead.</li>
+<li>It adds complexity and resource cost (a rendering server to run and keep in sync).</li>
+<li>Google generally does not treat it as cloaking as long as the crawler and users receive similar content; serving substantially different content (the page's example is a cat page for users and a dog page for the crawler) is cloaking.</li></ul>
+<p class="mini-heading">Senior commentary</p>
+<p>For a crawler designer this is the other side of the table. Your options are: fetch raw HTML only (fast, cheap, misses client-rendered content), or add a rendering stage using a headless browser (accurate, perhaps ten to a hundred times more expensive per page in CPU and time). The usual pattern is tiered: fetch raw HTML, detect pages that look like empty shells (very little text, a single root element, a heavy script bundle), and send only those to a rendering pool, with strict timeouts, resource blocking and per-host budgets. Rendering is also where you meet infinite scroll, lazy loading, service workers and anti-bot systems.</p>
+<div class="warn-box"><strong>Operational gotcha:</strong> the rendering pool executes untrusted code from the whole internet. Isolate it (containers or microVMs, no access to internal networks, tight egress rules) or you have built an SSRF launchpad.</div>
+<p class="mini-heading">Still true versus dated</p>
+<p>The need to deal with JavaScript content is permanent; the specific technique is described by Google as outdated, so do not propose dynamic rendering for new sites in an interview. Do propose it as a crawler-side rendering stage.</p>
+<p class="mini-heading">Connection</p>
+<p>Chapter 9's "server-side rendering" bullet in the problem-areas section, and the idea of a pluggable extraction module.</p>
+
+<p><a href="https://developers.google.com/search/docs/guides/dynamic-rendering" target="_blank" rel="noopener">Google Dynamic Rendering ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Synthesis</span><h2>How the resources fit together</h2>
+<p>The survey tells you how to <em>decide and schedule</em>; the Google page tells you what to do when <em>fetching is not enough</em>. A modern crawler adds a branch to the diagram: after the fetch, classify the response, and for shell-like pages route to a render pool whose output (the rendered DOM) rejoins the parse step.</p>
+<table class="data-table"><thead><tr><th>Concern</th><th>Design response</th><th>Failure if ignored</th></tr></thead><tbody>
+<tr><td>Politeness</td><td>Per-host queue with next-allowed time</td><td>Blocked IPs, complaints</td></tr>
+<tr><td>Priority</td><td>Score by freshness, importance, depth</td><td>Index full of junk</td></tr>
+<tr><td>Dedup</td><td>URL normalisation, Bloom filter, content hash, SimHash</td><td>Wasted fetches, duplicate index entries</td></tr>
+<tr><td>Traps</td><td>Depth and budget caps per host</td><td>Infinite crawl</td></tr>
+<tr><td>JS content</td><td>Tiered rendering</td><td>Empty pages indexed</td></tr>
+<tr><td>Scale-out</td><td>Partition by host</td><td>Politeness violated across nodes</td></tr></tbody></table>
+<p><strong>Reading order:</strong> chapter 9 first, then the survey's architecture section, then the Google page, then the survey's freshness and duplicate sections as depth.</p>
+<ul class="check-list"><li>Say "frontier" and describe both priority and politeness.</li><li>Always mention robots.txt and a per-host rate limit.</li><li>Explain how you detect duplicates at the URL and content level.</li><li>Mention JavaScript rendering as a costed, optional stage.</li></ul></section>
+<section class="content-card"><span class="section-label">Numbers</span><h2>Back-of-envelope arithmetic</h2>
+ <ul class="check-list"><li><strong>Fetch rate:</strong> 1 billion pages per month is about 1,000,000,000 / 2,592,000 s, roughly 386 pages per second on average. Plan for peaks of two to three times that.</li><li><strong>Bandwidth:</strong> at an average page of 100 KB, 386 pages per second is about 39 MB/s, about 310 Mbit/s of ingress, before compression.</li><li><strong>Storage:</strong> 1 billion pages at 100 KB is 100 TB per month raw; compression and dropping duplicates commonly bring this down severalfold.</li><li><strong>Politeness limits throughput per host:</strong> with a one second delay, a host yields at most 1 page per second per crawler; 386 pages per second therefore needs at least 386 distinct hosts in flight at all times. That, not CPU, is why large crawls need broad host diversity.</li><li><strong>Rendering cost:</strong> if 10 percent of pages need rendering at 2 CPU-seconds each, that is 39 pages/s x 2 = about 78 cores kept busy, more than the fetch tier itself.</li></ul>
+</section>
+<section class="content-card"><span class="section-label">Code</span><h2>Runnable example</h2><span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Polite crawler frontier: per-host queues, crawl-delay, priority, URL dedup, simulated clock.
+class Frontier {
+  constructor({ delayMs = 1000 } = {}) { this.delay = delayMs; this.hosts = new Map(); this.seen = new Set(); }
+  norm(u) { const x = new URL(u); x.hash = ''; x.hostname = x.hostname.toLowerCase(); if (x.pathname.length &gt; 1 &amp;&amp; x.pathname.endsWith('/')) x.pathname = x.pathname.slice(0, -1); return x.href; }
+  add(u, prio = 5) { const n = this.norm(u); if (this.seen.has(n)) return false; this.seen.add(n);
+    const h = new URL(n).host; if (!this.hosts.has(h)) this.hosts.set(h, { q: [], nextOk: 0 });
+    const hq = this.hosts.get(h); hq.q.push({ n, prio }); hq.q.sort((a, b) =&gt; a.prio - b.prio); return true; }
+  next(now) {                         // pick the ready host with the best head priority
+    let best = null;
+    for (const [h, hq] of this.hosts) if (hq.q.length &amp;&amp; hq.nextOk &lt;= now &amp;&amp; (!best || hq.q[0].prio &lt; best.hq.q[0].prio)) best = { h, hq };
+    if (!best) return null; const item = best.hq.q.shift(); best.hq.nextOk = now + this.delay; return item.n;
+  }
+  pending() { let c = 0; for (const hq of this.hosts.values()) c += hq.q.length; return c; }
+}
+const web = {
+  'https://a.com/': ['https://a.com/x', 'https://a.com/y/', 'https://b.com/', 'https://A.com/x#frag'],
+  'https://a.com/x': ['https://a.com/y', 'https://c.com/'], 'https://a.com/y': [], 'https://b.com/': ['https://a.com/'], 'https://c.com/': [],
+};
+const f = new Frontier({ delayMs: 1000 }); f.add('https://a.com/', 1);
+let now = 0; const fetched = [];
+while (f.pending()) {
+  const u = f.next(now);
+  if (!u) { now += 100; continue; }
+  fetched.push(`${now}ms ${u}`);
+  for (const l of web[u] ?? []) f.add(l, u.includes('a.com') ? 5 : 3);
+}
+console.log(fetched.join('\n'));
+const aTimes = fetched.filter(s =&gt; s.includes('a.com')).map(s =&gt; parseInt(s));
+console.assert(aTimes.every((t, i) =&gt; i === 0 || t - aTimes[i - 1] &gt;= 1000), 'politeness violated');
+console.assert(new Set(fetched.map(s =&gt; s.split(' ')[1])).size === fetched.length, 'duplicates');
+console.log('pages:', fetched.length, '- a.com gaps &gt;= 1000ms:', true);</code></pre>
+<p class="code-caption">Prints the order in which pages are fetched with the simulated time; the output shows two pages fetched at once from different hosts, a one-second gap on the same host, and normalisation removing duplicate URLs. Executed with node; asserts pass.</p></section>
+<section class="content-card"><span class="section-label">Exercise</span><h2>What to build</h2>
+ <ol><li>Replace the linear scan in <code>next()</code> with a min-heap keyed on the host\'s next-allowed time.</li><li>Add robots.txt support: a per-host cache with TTL and a parser for allow and disallow rules.</li><li>Add a Bloom filter in front of the seen set and measure its false-positive rate at different sizes.</li><li>Add a shell-page detector (text-to-markup ratio) and route flagged pages to a stub render queue with a concurrency cap.</li></ol>
+</section>
+<section class="content-card takeaways"><h2>Key Takeaway</h2><p>A crawler is mostly a frontier: priority, politeness and duplicate suppression. The fetch loop is trivial, and the modern complication is content that needs a browser. Design for host diversity, make rendering a costed optional stage, and never forget the kill switch.</p></section>
+      <section class="content-card"><span class="section-label">FAQ · Common Questions</span><h2>Frequently Asked Questions</h2>
+<details><summary>Why partition crawler nodes by host?</summary><p>So all URLs of one host go to one node, which can enforce politeness locally without cross-node coordination.</p></details>
+<details><summary>Bloom filter or hash set for seen URLs?</summary><p>A Bloom filter is compact and fast but has false positives, so a few new URLs are skipped. At web scale that is usually acceptable; keep an exact store for important sources.</p></details>
+<details><summary>How do you detect near-duplicate pages?</summary><p>Shingle the text and compare sketches (MinHash or SimHash). Exact duplicates are found cheaply by hashing the normalised body.</p></details>
+<details><summary>Is dynamic rendering what I should propose in an interview?</summary><p>No for site owners: Google recommends server-side rendering, static rendering or hydration. For a crawler, propose a rendering tier for pages that look like empty shells.</p></details>
+<details><summary>How do you avoid spider traps?</summary><p>Depth limits, per-host page budgets, URL length caps, and pattern detection for calendars and session IDs, plus monitoring for hosts that generate huge numbers of unique URLs.</p></details>
+</section>
+      <section class="content-card"><h2>Related Topics</h2><ul><li><a href="../chapters/09-web-crawler.html">Chapter 9: Design a Web Crawler</a> — the chapter these resources extend.</li><li><a href="consistent-hashing.html">Consistent Hashing resource guide</a> — partitioning hosts across crawler nodes.</li><li><a href="rate-limiting.html">Rate Limiting resource guide</a> — per-host politeness is a rate limiter.</li><li><a href="../../elasticsearch.html">Elasticsearch</a> — the index a crawler typically feeds.</li><li><a href="../../system-design/caching.html">Caching</a> — DNS and robots.txt caches.</li></ul></section>
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the "Additonal Resources" list in <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a>, a companion to study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu. The commentary is original; follow the links to read the primary sources.</p><ul><li><a href="http://infolab.stanford.edu/~olston/publications/crawling_survey.pdf" target="_blank" rel="noopener">Web Crawling</a> — http://infolab.stanford.edu/~olston/publications/crawling_survey.pdf</li><li><a href="https://developers.google.com/search/docs/guides/dynamic-rendering" target="_blank" rel="noopener">Google Dynamic Rendering</a> — https://developers.google.com/search/docs/guides/dynamic-rendering</li></ul></section>
+    </main>
+  </body>
+</html>

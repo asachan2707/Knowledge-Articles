@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How I Build AI Projects From Scratch | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .phase-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .85rem; margin: 1rem 0; }
+      .phase-card { border: 1px solid var(--border); border-radius: 10px; padding: .9rem 1rem; }
+      .phase-card .phase-num { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #64748b; margin-bottom: .25rem; }
+      .phase-card h4 { margin: 0 0 .3rem; font-family: Arial, Helvetica, sans-serif; font-size: .93rem; color: #0f766e; }
+      .phase-card p  { margin: 0; font-size: .84rem; color: var(--muted); }
+      .insight-box { background: #fdf4ff; border-left: 4px solid #a855f7; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+      .mistake-box { background: #fef2f2; border-left: 4px solid #ef4444; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1461749280684-dccba630e2f6?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Developer building a project on laptop"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">AI · Projects · Engineering · 15 min</span>
+          </div>
+        </figure>
+
+        <h1>How I Build AI Projects From Scratch</h1>
+        <p class="summary">
+          A practitioner's methodology for taking an AI project from idea to production — the
+          phase sequence, common mistakes to avoid, the minimal stack that lets you move fast,
+          and the mental models that separate projects that ship from ones that stall.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Domain</span><span class="meta-value">AI Engineering · Project Methodology · Practical</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Node.js · Anthropic SDK · JavaScript</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Minimal agent scaffold, eval loop, cost tracking</span></div>
+        </div>
+      </header>
+
+      <!-- ─── SECTION 1: THE PHASE SEQUENCE ─────────────────────────────── -->
+      <section class="content-card">
+        <h2>The Phase Sequence</h2>
+        <p class="lead">
+          Every AI project I build follows the same phase sequence — not because it's a fixed
+          methodology, but because skipping any phase consistently causes the next phase to fail.
+        </p>
+
+        <div class="phase-grid">
+          <div class="phase-card">
+            <div class="phase-num">Phase 1</div>
+            <h4>Define the task precisely</h4>
+            <p>Write the task in one sentence. If you can't, the scope is wrong. Define what "correct" looks like before writing code.</p>
+          </div>
+          <div class="phase-card">
+            <div class="phase-num">Phase 2</div>
+            <h4>Build the minimal prompt first</h4>
+            <p>One model call, hard-coded inputs. Does it produce the right shape of output? If not, fix this before adding infrastructure.</p>
+          </div>
+          <div class="phase-card">
+            <div class="phase-num">Phase 3</div>
+            <h4>Add tool use incrementally</h4>
+            <p>Each tool is a new failure mode. Add one at a time. Verify each tool call works before adding the next.</p>
+          </div>
+          <div class="phase-card">
+            <div class="phase-num">Phase 4</div>
+            <h4>Build a minimal eval set</h4>
+            <p>5-10 examples you evaluate manually. Define scoring before running evals — don't score post-hoc to confirm what you want.</p>
+          </div>
+          <div class="phase-card">
+            <div class="phase-num">Phase 5</div>
+            <h4>Add memory and state</h4>
+            <p>Only after the stateless case works. Add the simplest memory that solves your problem: buffer window before vector store.</p>
+          </div>
+          <div class="phase-card">
+            <div class="phase-num">Phase 6</div>
+            <h4>Instrument before scaling</h4>
+            <p>Log every model call with input, output, latency, and cost. You cannot optimize what you cannot measure.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── SECTION 2: THE MINIMAL SCAFFOLD ───────────────────────────── -->
+      <section class="content-card">
+        <h2>The Minimal AI Project Scaffold</h2>
+        <p>
+          Start with the smallest thing that lets you evaluate quality. No framework, no abstraction,
+          no retrieval pipeline. Just a model call, a tool definition, and an eval loop.
+        </p>
+
+        <pre><code class="language-javascript">import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic(); // ANTHROPIC_API_KEY from env
+
+// Step 1: Define the task — one sentence
+const TASK = "Extract structured invoice data from raw text";
+
+// Step 2: Define what correct output looks like
+const EXPECTED_SCHEMA = {
+  invoiceNumber: "string",
+  vendor:        "string",
+  amount:        "number",
+  dueDate:       "ISO date string",
+  lineItems:     "array of { description, quantity, unitPrice }"
+};
+
+// Step 3: Minimal prompt — no framework, just a clear prompt + schema
+async function extractInvoice(rawText) {
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 2048,
+    messages: [{
+      role: "user",
+      content: `Extract structured invoice data from the following text.
+Return a JSON object matching exactly this schema: ${JSON.stringify(EXPECTED_SCHEMA, null, 2)}
+
+Invoice text:
+${rawText}
+
+Return only the JSON object, no explanation.`
+    }]
+  });
+
+  const text = response.content[0].text.trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: "parse_failed", raw: text };
+  }
+}
+
+// Step 4: Minimal eval set — define scoring first
+const evalSet = [
+  {
+    input: "Invoice #INV-2026-001\nVendor: Acme Corp\nTotal: $1,250.00\nDue: 2026-10-15\n1x Widget @ $1,250.00",
+    expected: { invoiceNumber: "INV-2026-001", vendor: "Acme Corp", amount: 1250, dueDate: "2026-10-15" }
+  },
+  {
+    input: "BILL TO: TechStart LLC\n#: 4422\nAmount Due: $8,500 USD\nPayment Due: October 30th, 2026",
+    expected: { invoiceNumber: "4422", vendor: "TechStart LLC", amount: 8500, dueDate: "2026-10-30" }
+  }
+];
+
+async function runEval() {
+  let passed = 0;
+  const results = [];
+
+  for (const example of evalSet) {
+    const result = await extractInvoice(example.input);
+    const score = scoreResult(result, example.expected);
+    results.push({ ...score, input: example.input.substring(0, 50) });
+    if (score.correct) passed++;
+  }
+
+  console.log(`\nEval Results: ${passed}/${evalSet.length} passed`);
+  console.table(results);
+  return passed / evalSet.length;
+}
+
+function scoreResult(actual, expected) {
+  const checks = Object.entries(expected).map(([key, val]) => ({
+    field:   key,
+    expected: val,
+    actual:   actual[key],
+    ok:       String(actual[key]).toLowerCase() === String(val).toLowerCase()
+  }));
+
+  return {
+    correct: checks.every(c => c.ok),
+    score:   checks.filter(c => c.ok).length / checks.length,
+    details: checks
+  };
+}
+
+runEval();</code></pre>
+      </section>
+
+      <!-- ─── SECTION 3: ADDING TOOLS ───────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Adding Tools Incrementally</h2>
+        <p>
+          Tools are the largest source of AI project failures. Each tool adds: a new prompt path,
+          a new failure mode, and new latency. Add them one at a time and verify each before adding
+          the next.
+        </p>
+
+        <pre><code class="language-javascript">// Tool-augmented agent with explicit error handling per tool
+const tools = [
+  {
+    name: "search_invoice_database",
+    description: "Search the invoice database by vendor name or invoice number",
+    input_schema: {
+      type: "object",
+      properties: {
+        query:     { type: "string", description: "Vendor name or invoice number to search for" },
+        date_from: { type: "string", description: "ISO date string for start of search range (optional)" },
+        date_to:   { type: "string", description: "ISO date string for end of search range (optional)" }
+      },
+      required: ["query"]
+    }
+  }
+];
+
+async function runAgentWithTools(userMessage, maxIterations = 5) {
+  const messages = [{ role: "user", content: userMessage }];
+  let iterations = 0;
+  let totalCost = 0;
+
+  while (iterations < maxIterations) {
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 4096,
+      tools,
+      messages
+    });
+
+    // Track cost on every call
+    totalCost += estimateCost(response.usage);
+
+    // Agent is done — return final response
+    if (response.stop_reason === "end_turn") {
+      const textContent = response.content.find(c => c.type === "text");
+      return { answer: textContent?.text, iterations, totalCost };
+    }
+
+    // Handle tool calls
+    if (response.stop_reason === "tool_use") {
+      messages.push({ role: "assistant", content: response.content });
+
+      const toolResults = await Promise.all(
+        response.content
+          .filter(c => c.type === "tool_use")
+          .map(async toolCall => {
+            const result = await executeTool(toolCall.name, toolCall.input);
+            return {
+              type: "tool_result",
+              tool_use_id: toolCall.id,
+              content: JSON.stringify(result)
+            };
+          })
+      );
+
+      messages.push({ role: "user", content: toolResults });
+      iterations++;
+    }
+  }
+
+  return { answer: "Max iterations reached", iterations, totalCost };
+}
+
+function executeTool(name, input) {
+  if (name === "search_invoice_database") {
+    // Real implementation calls your DB
+    return { results: [], totalFound: 0, searchTime: "12ms" };
+  }
+  throw new Error(`Unknown tool: ${name}`);
+}
+
+function estimateCost(usage) {
+  // claude-sonnet-4-6 pricing (approximate)
+  const INPUT_COST  = 3 / 1_000_000;   // $3 per 1M input tokens
+  const OUTPUT_COST = 15 / 1_000_000;  // $15 per 1M output tokens
+  return usage.input_tokens * INPUT_COST + usage.output_tokens * OUTPUT_COST;
+}</code></pre>
+      </section>
+
+      <!-- ─── SECTION 4: OBSERVABILITY FIRST ────────────────────────────── -->
+      <section class="content-card">
+        <h2>Instrument Before Scaling</h2>
+        <p>
+          You cannot improve what you cannot measure. Add basic instrumentation before you have
+          any scale problems — retrofitting it later is painful.
+        </p>
+
+        <pre><code class="language-javascript">// Minimal AI call logger — wrap every model call
+class AICallLogger {
+  constructor(client, logger) {
+    this.client = client;
+    this.logger = logger;
+  }
+
+  async create(params) {
+    const start = Date.now();
+    const callId = crypto.randomUUID().substring(0, 8);
+
+    try {
+      const response = await this.client.messages.create(params);
+      const latencyMs = Date.now() - start;
+
+      this.logger.log({
+        event:        "ai_call",
+        callId,
+        model:        params.model,
+        inputTokens:  response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        latencyMs,
+        stopReason:   response.stop_reason,
+        cost:         this._estimateCost(response.usage, params.model),
+        toolCalls:    response.content.filter(c => c.type === "tool_use").map(c => c.name)
+      });
+
+      return response;
+    } catch (err) {
+      this.logger.error({ event: "ai_call_failed", callId, error: err.message, latencyMs: Date.now() - start });
+      throw err;
+    }
+  }
+
+  _estimateCost(usage, model) {
+    const rates = {
+      "claude-sonnet-4-6": { input: 3, output: 15 },
+      "claude-haiku-4-5-20251001": { input: 0.25, output: 1.25 }
+    };
+    const r = rates[model] ?? { input: 3, output: 15 };
+    return ((usage.input_tokens * r.input) + (usage.output_tokens * r.output)) / 1_000_000;
+  }
+}
+
+// Usage
+const loggedClient = new AICallLogger(new Anthropic(), console);
+// Use loggedClient.create() everywhere instead of client.messages.create()</code></pre>
+      </section>
+
+      <!-- ─── SECTION 5: COMMON MISTAKES ────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Common Mistakes That Stall Projects</h2>
+
+        <div class="mistake-box">
+          <strong>Mistake 1: Building infrastructure before verifying the core prompt works.</strong>
+          Adding RAG, caching, and a database before testing whether a simple prompt produces
+          the right output. Fix: prove the prompt works on 5 examples first.
+        </div>
+
+        <div class="mistake-box">
+          <strong>Mistake 2: Defining scoring criteria after seeing results.</strong>
+          Post-hoc scoring criteria always favor the model's output style. Fix: write the eval
+          rubric before running any evals — treat it like a test spec.
+        </div>
+
+        <div class="mistake-box">
+          <strong>Mistake 3: Adding all tools at once.</strong>
+          5 tools, 4 of which have subtle bugs in their implementations — you'll spend 3 days
+          debugging which tool is wrong. Fix: one tool at a time, verify each in isolation.
+        </div>
+
+        <div class="mistake-box">
+          <strong>Mistake 4: No cost tracking.</strong>
+          Discovering at invoice time that a batch job cost $400 instead of $4. Fix:
+          instrument every call with token counts and estimated cost from day one.
+        </div>
+
+        <div class="insight-box">
+          <strong>The most important rule:</strong> Always know what "correct" looks like before
+          you write any code. An AI project without a defined correctness criterion is an art
+          project. That's fine if that's what you intend — but if you intend to ship, you need
+          a measurable definition of success.
+        </div>
+      </section>
+
+      <!-- ─── KEY TAKEAWAY ─────────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          AI projects stall for the same reasons as any project: unclear scope, no success
+          criterion, and building infrastructure before proving the core concept. The phase
+          sequence (define → prompt → tools → eval → memory → instrument) forces you to earn
+          each layer of complexity. Start with the minimal scaffold: one prompt, one model call,
+          5 hand-evaluated examples. Everything else builds on whether that scaffold works.
+          Instrument from day one — token costs and latency are invisible without logging, and
+          they will surprise you at scale.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

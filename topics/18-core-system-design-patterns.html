@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>18 Core System Design Patterns Explained in 20 Minutes | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Server infrastructure network diagram with glowing connections" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Patterns · Architecture · 20 min</span>
+          </div>
+        </figure>
+        <h1>18 Core System Design Patterns Explained in 20 Minutes</h1>
+        <p class="summary">
+          CQRS, Event Sourcing, Saga, Circuit Breaker, Bulkhead, Strangler Fig, Sidecar, Ambassador,
+          Anti-Corruption Layer, BFF, Outbox, Inbox, 2PC, Read Replica, Cache patterns, Fanout,
+          Competing Consumers, and Leader Election — every pattern explained from the production failure
+          that motivated it, with when-to-use and when-NOT-to-use guidance and real company examples.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Architecture · Distributed Systems</span>
+          <span class="meta-item">Credit: Deep-concept · Medium</span>
+          <span class="meta-item" data-added="2026-09-03">Published: 2026-09-03</span>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">
+          Distributed systems fail in patterned ways: writes split across services lose atomicity,
+          slow dependencies cascade, traffic spikes corrupt shared state, and legacy boundaries leak
+          poison. These 18 patterns are the canonical vocabulary for describing — and solving —
+          those failure modes. Learning them as a vocabulary, not as a checklist, is what separates
+          architects from engineers who read books about architecture.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Each pattern here was extracted from a real production
+          incident at scale. The pattern name is shorthand for a context, a force, and a resolution.
+          You cannot apply a pattern correctly unless you understand the force it resolves.</p>
+        </div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Story · The Great Migration at Shopify</span>
+        <p>
+          In 2020, Shopify ran a multi-year migration from a Rails monolith to a pod-based architecture.
+          Within that effort they touched nearly every pattern in this list. They used the <strong>Strangler Fig</strong>
+          to route traffic incrementally. They deployed the <strong>Sidecar</strong> pattern via Envoy for
+          mTLS between pods. The <strong>Anti-Corruption Layer</strong> protected new domain models from
+          legacy data shapes. The <strong>Outbox Pattern</strong> ensured order events reached Kafka
+          atomically. The <strong>CQRS</strong> model gave their storefront read path its own optimised
+          read replicas. One migration. Eighteen patterns. The ones they skipped cost them production
+          incidents to relearn.
+        </p>
+      </section>
+
+      <!-- GROUP 1: DATA PATTERNS -->
+      <section class="content-card">
+        <h2>Group 1 — Data Consistency Patterns</h2>
+        <span class="section-label">Patterns 1–3 · CQRS, Event Sourcing, Saga</span>
+
+        <h3>1. CQRS — Command Query Responsibility Segregation</h3>
+        <p>
+          <strong>Problem:</strong> A single data model tries to serve both writes (complex business
+          rules, validation, constraints) and reads (denormalised projections, aggregations, sorting).
+          Under load, read contention slows writes; write-optimised schemas make reads ugly.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Split the model. Commands mutate state through a write model
+          validated by domain logic. Queries read from a separate, purpose-built read model — often
+          a different database engine entirely (Postgres writes, Elasticsearch reads). The two sides
+          stay in sync via events or replication.
+        </p>
+        <p>
+          <strong>When to use:</strong> High-read, lower-write systems with complex read projections.
+          DDD-heavy domains. Systems where reads and writes have different latency SLAs.
+        </p>
+        <p>
+          <strong>When NOT to use:</strong> Simple CRUD apps. Small teams — the operational overhead
+          (two schemas, sync lag, eventual consistency) outweighs the gains. Do not start with CQRS;
+          extract to it when the pain is concrete.
+        </p>
+        <p>
+          <strong>Failure modes:</strong> Read model lag causes stale reads. Sync failures leave read
+          model permanently diverged. Schema migrations must update both sides.
+        </p>
+        <p>
+          <strong>Real example:</strong> Microsoft Azure's CosmosDB was designed with CQRS at its
+          change feed, where the change feed acts as the event stream powering downstream read
+          projections. LinkedIn's activity feed similarly separates write ingestion from read fan-out.
+        </p>
+
+        <span class="code-label">JavaScript Example — CQRS Read Model Rebuild</span>
+        <pre><code class="language-javascript">// cqrs-read-model.js — Command side writes events; read side projects them
+class OrderWriteRepository {
+  constructor(db, eventBus) {
+    this.db = db;
+    this.eventBus = eventBus;
+  }
+
+  async placeOrder(command) {
+    const { userId, items, totalCents } = command;
+    // Validate domain rules
+    if (!items.length) throw new Error('Order must have items');
+    if (totalCents <= 0) throw new Error('Total must be positive');
+
+    const result = await this.db.query(
+      `INSERT INTO orders (user_id, total_cents, status, created_at)
+       VALUES ($1, $2, 'pending', NOW()) RETURNING id`,
+      [userId, totalCents]
+    );
+    const orderId = result.rows[0].id;
+
+    // Emit domain event — write model does NOT care about read projections
+    await this.eventBus.emit('order.placed', {
+      orderId, userId, items, totalCents, timestamp: Date.now()
+    });
+    return orderId;
+  }
+}
+
+// Read side: subscribes to events, maintains its own projection
+class OrderReadProjection {
+  constructor(readDb) {
+    this.readDb = readDb;
+  }
+
+  // Idempotent — can be replayed to rebuild from scratch
+  async handleOrderPlaced(event) {
+    const { orderId, userId, items, totalCents, timestamp } = event;
+    await this.readDb.query(
+      `INSERT INTO order_summaries
+         (order_id, user_id, item_count, total_cents, status, placed_at)
+       VALUES ($1, $2, $3, $4, 'pending', $5)
+       ON CONFLICT (order_id) DO NOTHING`,
+      [orderId, userId, items.length, totalCents, new Date(timestamp)]
+    );
+  }
+
+  async getOrdersByUser(userId) {
+    // Fast, denormalised read — no joins, no domain logic
+    const { rows } = await this.readDb.query(
+      `SELECT * FROM order_summaries WHERE user_id = $1 ORDER BY placed_at DESC`,
+      [userId]
+    );
+    return rows;
+  }
+}</code></pre>
+
+        <h3>2. Event Sourcing</h3>
+        <p>
+          <strong>Problem:</strong> You lose the history of how an entity reached its current state.
+          Audit trails are hard. Debugging production state bugs requires time-travel.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Instead of storing current state, store an append-only log of
+          events. Current state is derived by replaying events. The event log is the source of truth.
+        </p>
+        <p>
+          <strong>When to use:</strong> Audit-heavy domains (finance, healthcare, legal). Systems
+          that need temporal queries ("what was the state at T-minus-3 days?"). Pairs naturally
+          with CQRS — events power read-model projections.
+        </p>
+        <p>
+          <strong>When NOT to use:</strong> Simple CRUD with no audit requirements. Systems where
+          events are not meaningful domain facts. Event stores require snapshots as event counts
+          grow — neglecting this causes O(n) replay costs.
+        </p>
+        <p>
+          <strong>Failure modes:</strong> Event schema evolution is painful — you cannot change
+          a past event. Snapshot strategies must be planned upfront. Replay performance degrades
+          without periodic snapshots (every N events).
+        </p>
+        <p>
+          <strong>Real example:</strong> Axon Framework (used by ING Bank) centers their core
+          banking platform on Event Sourcing, giving them full transactional audit and the ability
+          to rebuild any account state from the event log.
+        </p>
+
+        <h3>3. Saga Pattern</h3>
+        <p>
+          <strong>Problem:</strong> A business transaction spans multiple services. You cannot use
+          a database transaction across service boundaries. If step 3 of 5 fails, steps 1–2 must
+          be compensated.
+        </p>
+        <p>
+          <strong>Two variants:</strong>
+        </p>
+        <p>
+          <strong>Choreography Saga:</strong> Each service listens for events and decides its own
+          next action, publishing its own result event. No central coordinator. Pros: loose coupling,
+          no single point of failure. Cons: flow is implicit, debugging distributed state is hard.
+        </p>
+        <p>
+          <strong>Orchestration Saga:</strong> A central Saga Orchestrator sends commands to services
+          and reacts to their responses. Flow is explicit. Pros: visible, debuggable, testable.
+          Cons: orchestrator becomes a coupling point; must itself be fault-tolerant.
+        </p>
+        <p>
+          <strong>When NOT to use:</strong> If you can accomplish the transaction within a single
+          service boundary, do not introduce a Saga. The compensating transaction model only works
+          if all participants implement idempotent compensations.
+        </p>
+        <p>
+          <strong>Real example:</strong> Uber uses orchestrated Sagas for trip lifecycle management.
+          Booking a trip involves driver assignment, price locking, notification dispatch, and
+          payment authorization — each service has a compensating action if any step fails.
+        </p>
+      </section>
+
+      <!-- GROUP 2: RESILIENCE PATTERNS -->
+      <section class="content-card">
+        <h2>Group 2 — Resilience Patterns</h2>
+        <span class="section-label">Patterns 4–6 · Circuit Breaker, Bulkhead, Strangler Fig</span>
+
+        <h3>4. Circuit Breaker</h3>
+        <p>
+          <strong>Problem:</strong> A slow or failing downstream dependency causes cascading failure.
+          Every caller waits on timeouts, exhausting thread pools and connection pools across the
+          entire call chain.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> A state machine with three states. <strong>Closed:</strong>
+          calls flow normally; failures are counted. <strong>Open:</strong> calls fail immediately
+          (fast fail) after a failure threshold is crossed; no downstream call is made.
+          <strong>Half-Open:</strong> after a timeout, a probe request is allowed through; if it
+          succeeds, the breaker closes; if it fails, it re-opens.
+        </p>
+        <p>
+          <strong>Parameters to tune:</strong> failure threshold (e.g. 50% of last 10 requests),
+          open-state timeout (e.g. 30s), probe request count in half-open. Wrong thresholds cause
+          either false positives (breaker trips on normal blips) or false negatives (breaker never
+          trips before cascade).
+        </p>
+        <p>
+          <strong>Real example:</strong> Netflix's Hystrix library popularised this pattern for
+          their microservices mesh. Every service-to-service call was wrapped in a circuit breaker
+          with fallbacks, enabling graceful degradation at scale.
+        </p>
+
+        <span class="code-label">JavaScript Example — Circuit Breaker</span>
+        <pre><code class="language-javascript">// circuit-breaker.js — production-grade state machine
+class CircuitBreaker {
+  constructor(fn, options = {}) {
+    this.fn = fn;
+    this.failureThreshold = options.failureThreshold ?? 5;
+    this.successThreshold = options.successThreshold ?? 2;
+    this.timeout = options.timeout ?? 30_000; // ms before half-open probe
+    this.state = 'CLOSED';
+    this.failureCount = 0;
+    this.successCount = 0;
+    this.nextAttempt = Date.now();
+  }
+
+  async call(...args) {
+    if (this.state === 'OPEN') {
+      if (Date.now() < this.nextAttempt) {
+        throw new Error(`CircuitBreaker OPEN — fast-fail (retry after ${new Date(this.nextAttempt).toISOString()})`);
+      }
+      // Transition to half-open for probe
+      this.state = 'HALF_OPEN';
+    }
+
+    try {
+      const result = await this.fn(...args);
+      this._onSuccess();
+      return result;
+    } catch (err) {
+      this._onFailure();
+      throw err;
+    }
+  }
+
+  _onSuccess() {
+    this.failureCount = 0;
+    if (this.state === 'HALF_OPEN') {
+      this.successCount++;
+      if (this.successCount >= this.successThreshold) {
+        this.successCount = 0;
+        this.state = 'CLOSED';
+        console.log('CircuitBreaker: HALF_OPEN -> CLOSED');
+      }
+    }
+  }
+
+  _onFailure() {
+    this.failureCount++;
+    this.successCount = 0;
+    if (this.state === 'HALF_OPEN' || this.failureCount >= this.failureThreshold) {
+      this.state = 'OPEN';
+      this.nextAttempt = Date.now() + this.timeout;
+      console.warn(`CircuitBreaker: OPEN — next probe at ${new Date(this.nextAttempt).toISOString()}`);
+    }
+  }
+}
+
+// Usage
+const breaker = new CircuitBreaker(
+  (userId) => fetch(`https://payment-service/users/${userId}`).then(r => r.json()),
+  { failureThreshold: 3, timeout: 15_000 }
+);
+
+async function getPaymentProfile(userId) {
+  try {
+    return await breaker.call(userId);
+  } catch (err) {
+    // Fallback: return cached profile or default
+    return { userId, paymentMethod: 'unknown', cached: true };
+  }
+}</code></pre>
+
+        <h3>5. Bulkhead</h3>
+        <p>
+          <strong>Problem:</strong> A surge of traffic to one feature (e.g. search) exhausts the
+          shared thread pool, starving unrelated features (e.g. checkout). One slow tenant degrades
+          all tenants.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Partition resources (thread pools, connection pools, queues)
+          into isolated compartments per service, tenant, or criticality tier. A failure in one
+          bulkhead cannot propagate to another. Named after ship bulkheads that contain flooding
+          to a single compartment.
+        </p>
+        <p>
+          <strong>When to use:</strong> Multi-tenant SaaS platforms. Systems with mixed-criticality
+          workloads (payment path must not share resources with analytics).
+        </p>
+        <p>
+          <strong>Real example:</strong> AWS isolates different services and customer accounts using
+          bulkhead principles via separate queue groups and per-tenant resource limits in their
+          SQS and DynamoDB capacity management.
+        </p>
+
+        <h3>6. Strangler Fig</h3>
+        <p>
+          <strong>Problem:</strong> You need to replace a monolith incrementally without a risky
+          big-bang rewrite. You cannot take the system down; the new system must coexist.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Route all traffic through a facade (reverse proxy, API gateway).
+          Migrate individual capabilities one by one to the new system; redirect routing for each
+          capability as it goes live. The monolith "strangles" as more routes are redirected.
+          Remove the monolith when all routes are migrated.
+        </p>
+        <p>
+          <strong>Key discipline:</strong> The facade must not leak monolith internals. Data migration
+          is the hard part — the Anti-Corruption Layer (Pattern 9) protects the new system from
+          legacy data shapes during the transition.
+        </p>
+        <p>
+          <strong>Real example:</strong> Shopify, as described above. Also Amazon — their Services
+          Initiative (circa 2002) used Strangler Fig semantics, incrementally peeling services from
+          their retail monolith over a decade.
+        </p>
+      </section>
+
+      <!-- GROUP 3: SERVICE MESH PATTERNS -->
+      <section class="content-card">
+        <h2>Group 3 — Service Mesh &amp; Integration Patterns</h2>
+        <span class="section-label">Patterns 7–10 · Sidecar, Ambassador, ACL, BFF</span>
+
+        <h3>7. Sidecar</h3>
+        <p>
+          <strong>Problem:</strong> Cross-cutting concerns (mTLS, logging, metrics, service discovery,
+          retries) are duplicated across every service, each in a different language.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Deploy a helper container alongside each service container in
+          the same pod (Kubernetes) or on the same host. The sidecar handles cross-cutting concerns;
+          the main container focuses on business logic. Communication is local (localhost or Unix socket),
+          so latency is sub-millisecond.
+        </p>
+        <p>
+          <strong>Real example:</strong> Envoy Proxy as a sidecar in Istio service mesh. Lyft open-sourced
+          Envoy after building it as the sidecar foundation for their microservices migration. Every
+          Lyft service gets mTLS, distributed tracing, and circuit-breaking without a single line of
+          application code.
+        </p>
+
+        <h3>8. Ambassador</h3>
+        <p>
+          <strong>Problem:</strong> A service needs to communicate with complex external systems
+          (load-balanced clusters, services requiring retries, connection pools). The application
+          should not own that complexity.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Deploy an ambassador container (a specialised sidecar) that
+          acts as an out-of-process proxy for the external system. The app calls localhost; the
+          ambassador handles routing, retries, circuit-breaking, and protocol translation.
+        </p>
+        <p>
+          <strong>Distinction from Sidecar:</strong> The Sidecar augments your service's own
+          behavior. The Ambassador proxies outbound calls to external dependencies.
+        </p>
+        <p>
+          <strong>Real example:</strong> Microsoft's Azure Redis Ambassador pattern — app containers
+          connect to a local Redis ambassador that manages connection pooling and failover to Redis
+          clusters, shielding app code from Redis Cluster topology changes.
+        </p>
+
+        <h3>9. Anti-Corruption Layer (ACL)</h3>
+        <p>
+          <strong>Problem:</strong> A new domain model must integrate with a legacy system that uses
+          a different domain language, data format, and semantics. Direct integration pollutes the
+          new model with legacy concepts.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Insert a translation layer at the boundary. The ACL translates
+          between the new domain model (clean, bounded context) and the legacy system's model. The
+          ACL owns the mapping logic; neither side knows about the other's internals.
+        </p>
+        <p>
+          <strong>Failure mode:</strong> ACLs tend to accumulate logic over time as the legacy system
+          changes. They must be tested at the contract level, not just unit-tested, otherwise
+          upstream legacy changes silently break translations.
+        </p>
+        <p>
+          <strong>Real example:</strong> When Booking.com migrated from a PHP monolith to bounded
+          contexts, ACLs translated legacy inventory structs into clean domain value objects,
+          preventing legacy naming conventions from bleeding into the new hotel inventory domain.
+        </p>
+
+        <h3>10. Backends for Frontends (BFF)</h3>
+        <p>
+          <strong>Problem:</strong> A single generic API must serve mobile (slow networks, battery
+          constraints, small screen, different data needs) and web (bandwidth-rich, different UX flows)
+          and third-party partners (different auth, different payloads). One backend cannot optimise
+          for all clients.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Create a dedicated backend per frontend type. Each BFF
+          aggregates downstream services, shapes payloads, and enforces auth models specific to its
+          client. The BFF is owned by the frontend team.
+        </p>
+        <p>
+          <strong>Failure mode:</strong> BFFs accumulate business logic that should live in downstream
+          services. They become coupled to UI implementation details. Keep BFFs thin — aggregation
+          and shaping, not business rules.
+        </p>
+        <p>
+          <strong>Real example:</strong> SoundCloud's architecture blog (2014) documented their
+          transition to BFF: one backend for the iOS app, one for Android, one for the web player,
+          each owned by the respective frontend team.
+        </p>
+      </section>
+
+      <!-- GROUP 4: MESSAGING RELIABILITY PATTERNS -->
+      <section class="content-card">
+        <h2>Group 4 — Messaging Reliability Patterns</h2>
+        <span class="section-label">Patterns 11–13 · Outbox, Inbox, Two-Phase Commit</span>
+
+        <h3>11. Outbox Pattern</h3>
+        <p>
+          <strong>Problem:</strong> Writing to a database and publishing to a message broker must
+          be atomic — but they are two separate systems. A crash between them causes lost events
+          (if publish fails after DB write) or phantom events (if publish succeeds before DB write
+          commits then rolls back).
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Write the event to an <code>outbox</code> table in the same
+          database transaction as the business data. A separate relay process reads the outbox and
+          publishes to the broker, marking events published only after confirmation. Debezium (CDC)
+          or a polling relay both work.
+        </p>
+        <p>
+          <strong>Guarantee:</strong> At-least-once delivery. Consumers must be idempotent.
+        </p>
+        <p>
+          <strong>Real example:</strong> Stripe's payment processing uses the Outbox pattern to
+          ensure that a charge event is never lost between their database commit and Kafka publish,
+          preventing double-charge confusion in their webhook fanout system.
+        </p>
+
+        <span class="code-label">JavaScript Example — Outbox Pattern</span>
+        <pre><code class="language-javascript">// outbox-pattern.js — atomic write + relay
+async function processPaymentWithOutbox(pgClient, payment) {
+  await pgClient.query('BEGIN');
+  try {
+    // 1. Write business fact
+    const { rows } = await pgClient.query(
+      `INSERT INTO payments (user_id, amount_cents, status, idempotency_key)
+       VALUES ($1, $2, 'captured', $3)
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
+      [payment.userId, payment.amountCents, payment.idempotencyKey]
+    );
+    if (!rows.length) {
+      await pgClient.query('ROLLBACK');
+      return null; // duplicate — already processed
+    }
+    const paymentId = rows[0].id;
+
+    // 2. Write event to outbox — same transaction
+    await pgClient.query(
+      `INSERT INTO outbox_events
+         (aggregate_id, event_type, payload, status, created_at)
+       VALUES ($1, 'payment.captured', $2, 'pending', NOW())`,
+      [paymentId, JSON.stringify({ paymentId, ...payment })]
+    );
+
+    await pgClient.query('COMMIT');
+    return paymentId;
+  } catch (err) {
+    await pgClient.query('ROLLBACK');
+    throw err;
+  }
+}
+
+// Relay — runs every 100ms on a dedicated process
+async function relayOutboxToKafka(pgPool, kafka) {
+  const producer = kafka.producer();
+  await producer.connect();
+
+  const { rows } = await pgPool.query(
+    `SELECT id, aggregate_id, event_type, payload
+     FROM outbox_events
+     WHERE status = 'pending'
+     ORDER BY created_at
+     LIMIT 50
+     FOR UPDATE SKIP LOCKED`  // prevents double-processing across relay replicas
+  );
+
+  for (const row of rows) {
+    await producer.send({
+      topic: row.event_type,
+      messages: [{ key: row.aggregate_id.toString(), value: row.payload }]
+    });
+    await pgPool.query(
+      `UPDATE outbox_events SET status = 'published', published_at = NOW()
+       WHERE id = $1`,
+      [row.id]
+    );
+  }
+  await producer.disconnect();
+}</code></pre>
+
+        <h3>12. Inbox Pattern</h3>
+        <p>
+          <strong>Problem:</strong> Consuming a message and processing it must be idempotent. Message
+          brokers guarantee at-least-once delivery — your consumer will receive duplicate messages.
+          Processing a payment twice, shipping an order twice, or deducting inventory twice are
+          catastrophic.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> The consumer writes the message ID to an <code>inbox</code> table
+          before processing. If the message ID already exists, it is a duplicate — skip processing.
+          The inbox check and business processing happen in the same database transaction.
+        </p>
+        <p>
+          <strong>Outbox vs Inbox:</strong> Outbox ensures reliable publish (producer side). Inbox
+          ensures idempotent consume (consumer side). They are complementary, not alternatives.
+        </p>
+        <p>
+          <strong>Real example:</strong> Shopify's order pipeline uses inbox deduplication on their
+          inventory reservation consumer — a duplicate "reserve inventory" message must not
+          double-decrement stock.
+        </p>
+
+        <h3>13. Two-Phase Commit (2PC)</h3>
+        <p>
+          <strong>Problem:</strong> You need a true atomic transaction across multiple databases
+          or services. Either all participants commit or all abort.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Phase 1 (Prepare): the coordinator asks all participants to
+          prepare and vote. Phase 2 (Commit/Abort): if all vote yes, coordinator sends commit;
+          if any vote no, coordinator sends abort.
+        </p>
+        <p>
+          <strong>Blocking hazard:</strong> If the coordinator crashes after Phase 1 but before
+          Phase 2, participants are blocked — they have voted but cannot proceed without the
+          coordinator's final decision. This is the fundamental flaw of 2PC.
+        </p>
+        <p>
+          <strong>When NOT to use:</strong> Almost never in microservices. Use the Saga pattern
+          instead. 2PC is appropriate for relational database clusters where the coordinator and
+          participants share a failure domain (e.g. XA transactions in a bank's core system
+          within a single data center).
+        </p>
+        <p>
+          <strong>Real example:</strong> Google Spanner uses a form of 2PC backed by Paxos groups
+          for distributed transactions, but the coordinator itself is replicated — eliminating the
+          blocking failure mode that makes vanilla 2PC dangerous.
+        </p>
+      </section>
+
+      <!-- GROUP 5: READ SCALING PATTERNS -->
+      <section class="content-card">
+        <h2>Group 5 — Read Scaling Patterns</h2>
+        <span class="section-label">Patterns 14–15 · Read Replica, Cache Patterns</span>
+
+        <h3>14. Read Replica</h3>
+        <p>
+          <strong>Problem:</strong> Read traffic saturates the primary database. Analytics queries
+          compete with OLTP writes for the same I/O and CPU.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> The primary handles all writes. Replicas receive asynchronous
+          log replication (WAL streaming in Postgres, binlog in MySQL). Application reads are
+          directed to replicas. Replication lag means replicas may serve stale data.
+        </p>
+        <p>
+          <strong>Replication lag is a first-class concern:</strong> A write followed immediately
+          by a read may not see the write if routed to a replica. Mitigate with read-your-writes
+          consistency (route reads to primary for a short window after a write, or use session
+          consistency tokens).
+        </p>
+        <p>
+          <strong>Real example:</strong> GitHub uses read replicas extensively for their repository
+          browsing path. Most reads (file tree, commit history, blame) are served from replicas;
+          writes (commits, PR merges) go to the primary. They document replication lag monitoring
+          as a core SRE responsibility.
+        </p>
+
+        <h3>15. Cache-Aside / Read-Through / Write-Through</h3>
+        <p>
+          <strong>Cache-Aside (Lazy Loading):</strong> Application checks cache first. On miss,
+          application fetches from DB, writes to cache, returns result. Cache population is
+          application-driven. Pros: only requested data is cached. Cons: cold start, cache and DB
+          can diverge if DB updates happen outside the app.
+        </p>
+        <p>
+          <strong>Read-Through:</strong> Application always reads from cache. On miss, the cache
+          layer (not the application) fetches from DB and populates itself. Pros: simpler application
+          code. Cons: requires a cache that supports read-through semantics (e.g. Redis with
+          a cache module, AWS ElastiCache with write-through cluster mode).
+        </p>
+        <p>
+          <strong>Write-Through:</strong> On every write, the application writes to the cache AND
+          the DB synchronously (or the cache writes through to the DB). Cache is always fresh.
+          Cons: write latency doubles; data that is never read is also cached (wasted memory).
+        </p>
+        <p>
+          <strong>Write-Behind (Write-Back):</strong> Write to cache only; the cache asynchronously
+          flushes to DB. Lowest write latency; highest risk of data loss if cache fails before flush.
+        </p>
+        <p>
+          <strong>Real example:</strong> Twitter's Flock system (social graph service) uses
+          Cache-Aside with Redis. The social graph is too large to fit in RAM; most edges are cold.
+          Cache-Aside means only hot edges (followed accounts of active users) ever enter cache.
+        </p>
+      </section>
+
+      <!-- GROUP 6: MESSAGING TOPOLOGY PATTERNS -->
+      <section class="content-card">
+        <h2>Group 6 — Messaging Topology Patterns</h2>
+        <span class="section-label">Patterns 16–18 · Fanout, Competing Consumers, Leader Election</span>
+
+        <h3>16. Fanout Pattern</h3>
+        <p>
+          <strong>Problem:</strong> A single event must trigger actions in many downstream services
+          (notification, analytics, audit, billing). Publishing directly to each service couples
+          the producer to all consumers and doesn't scale.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> The producer publishes to one topic or exchange. A fanout
+          mechanism (Kafka with multiple consumer groups, SNS topic with multiple SQS queue
+          subscriptions, RabbitMQ fanout exchange) delivers a copy to every subscriber independently.
+          Consumers are fully decoupled from the producer and from each other.
+        </p>
+        <p>
+          <strong>Failure mode:</strong> If one consumer falls behind (slow consumer), its queue
+          fills up. With Kafka, a slow consumer group does not affect other consumer groups.
+          With shared queues, it does. The slow consumer must be backpressure-handled separately.
+        </p>
+        <p>
+          <strong>Real example:</strong> AWS SNS+SQS fanout is the canonical implementation.
+          When an S3 object upload event is published to SNS, it fans out to SQS queues for
+          thumbnail generation, virus scanning, and metadata indexing — each independently scaled.
+        </p>
+
+        <h3>17. Competing Consumers</h3>
+        <p>
+          <strong>Problem:</strong> A single queue receives more messages than one consumer can
+          process. You need horizontal scale on the consumer side without processing a message twice.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Multiple consumer instances all subscribe to the same queue.
+          The broker delivers each message to exactly one consumer (competing, not broadcasting).
+          Consumers are stateless and interchangeable. Scale by adding consumer instances.
+        </p>
+        <p>
+          <strong>Distinction from Fanout:</strong> Fanout delivers every message to every consumer.
+          Competing Consumers delivers each message to exactly one of a pool of consumers.
+        </p>
+        <p>
+          <strong>Failure mode:</strong> A consumer that processes a message but crashes before
+          acknowledging it will cause the broker to redeliver the message to another consumer.
+          Consumers must be idempotent (use the Inbox pattern). Message ordering is not guaranteed
+          across competing consumers — if ordering matters, use partition-keyed delivery (Kafka
+          partition by key).
+        </p>
+        <p>
+          <strong>Real example:</strong> Netflix's stream processing uses Competing Consumers
+          extensively via Kafka consumer groups. Video encoding jobs are distributed across a pool
+          of encoding worker pods; each pod races to claim the next job from the Kafka topic.
+        </p>
+
+        <h3>18. Leader Election</h3>
+        <p>
+          <strong>Problem:</strong> A distributed system needs exactly one node to perform a
+          privileged action at a time (database primary, scheduled job runner, shard coordinator,
+          outbox relay). Multiple nodes performing the same privileged action causes data corruption.
+        </p>
+        <p>
+          <strong>Mechanism:</strong> Nodes compete for a distributed lock. The winner is the leader
+          and performs the privileged action. The lock has a TTL (lease); if the leader crashes, the
+          lock expires and a new election occurs. Implementations: ZooKeeper ephemeral nodes, etcd
+          leader election, Postgres advisory locks, Redis SETNX with TTL.
+        </p>
+        <p>
+          <strong>Failure modes:</strong> The leader suffers a GC pause longer than the TTL —
+          the lock expires and a new leader is elected while the old leader is still running.
+          Two leaders are active simultaneously (split-brain). Mitigate with fencing tokens: each
+          lease generation has a monotonically increasing token; the storage layer rejects writes
+          with stale tokens.
+        </p>
+        <p>
+          <strong>Real example:</strong> Kubernetes uses etcd for leader election of its controller
+          manager, scheduler, and cloud controller. Each component writes a lease object; only the
+          holder of the lease becomes active. etcd's linearizable writes ensure only one node wins.
+        </p>
+      </section>
+
+      <!-- FAILURE MODES SUMMARY -->
+      <section class="content-card">
+        <h2>Cross-Pattern Failure Mode Reference</h2>
+        <span class="section-label">Anti-Patterns · What goes wrong in production</span>
+        <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border)">
+              <th style="text-align:left;padding:8px 4px">Pattern</th>
+              <th style="text-align:left;padding:8px 4px">Most Common Production Failure</th>
+              <th style="text-align:left;padding:8px 4px">Mitigation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">CQRS</td><td style="padding:6px 4px">Read model diverges silently from write model</td><td style="padding:6px 4px">Replay test + lag monitoring</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Event Sourcing</td><td style="padding:6px 4px">Replay time grows unbounded (no snapshots)</td><td style="padding:6px 4px">Snapshot every N events</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Saga</td><td style="padding:6px 4px">Compensation fails midway — stuck saga</td><td style="padding:6px 4px">Dead-letter saga state, manual intervention path</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Circuit Breaker</td><td style="padding:6px 4px">GC pause trips breaker on healthy service</td><td style="padding:6px 4px">Tune thresholds per p99 latency, not avg</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Outbox</td><td style="padding:6px 4px">Relay falls behind — outbox table bloats</td><td style="padding:6px 4px">Monitor outbox lag, alert on unpublished age</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">2PC</td><td style="padding:6px 4px">Coordinator crashes after Prepare — participants block forever</td><td style="padding:6px 4px">Use Saga instead; avoid 2PC in microservices</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Read Replica</td><td style="padding:6px 4px">Stale read after write (replication lag)</td><td style="padding:6px 4px">Read-your-writes consistency for mutation owners</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Cache-Aside</td><td style="padding:6px 4px">Cache stampede on cold start / TTL expiry</td><td style="padding:6px 4px">Probabilistic early expiry, distributed locks</td></tr>
+            <tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 4px">Leader Election</td><td style="padding:6px 4px">GC pause causes split-brain (two leaders)</td><td style="padding:6px 4px">Fencing tokens on storage writes</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- PRACTICAL CHECKLIST -->
+      <section class="content-card">
+        <h2>Pattern Selection Checklist</h2>
+        <span class="section-label">Practical · Before picking a pattern</span>
+        <ul class="check-list">
+          <li>Identify the specific failure mode first — never pick a pattern by name before naming the problem it solves.</li>
+          <li>CQRS: only if reads and writes have meaningfully different models or scaling requirements. Start with a single model.</li>
+          <li>Event Sourcing: only if you need temporal audit or event-driven projections. The operational cost is real.</li>
+          <li>Saga (Orchestration): prefer over choreography when you need debuggable, testable distributed transaction flow.</li>
+          <li>Circuit Breaker: always wrap synchronous service-to-service calls in production. Tune thresholds on p99 latency, not averages.</li>
+          <li>Bulkhead: identify your critical paths (checkout, payment) and isolate their resource pools from non-critical paths (search, analytics).</li>
+          <li>Outbox: every service that writes to a DB AND publishes to a broker needs this pattern. No exceptions.</li>
+          <li>Inbox: every consumer that has side effects (writes, charges, sends) must deduplicate. Check idempotency key in the same transaction as the business effect.</li>
+          <li>2PC: do not use in microservices. Use Saga with compensating transactions instead.</li>
+          <li>Leader Election: use fencing tokens. A TTL alone is not sufficient against GC pauses or network partitions.</li>
+          <li>BFF: keep BFFs thin — aggregation and payload shaping only. Business rules belong in domain services.</li>
+          <li>Strangler Fig: invest in the facade/proxy upfront. Data migration is harder than routing migration.</li>
+        </ul>
+      </section>
+
+      <!-- FAQ -->
+      <section class="content-card">
+        <h2>FAQ</h2>
+        <details>
+          <summary>CQRS vs Read Replica — what is the difference?</summary>
+          <p>
+            A Read Replica is a copy of the same data model, kept in sync via database replication.
+            A CQRS read model is a purpose-built projection with a different shape, potentially on a
+            different database engine. Read Replicas are simpler and synchronised automatically;
+            CQRS read models are richer but require explicit sync via events.
+          </p>
+        </details>
+        <details>
+          <summary>When should I choose Choreography Saga over Orchestration Saga?</summary>
+          <p>
+            Choreography works well for simple, linear flows with few services. As the number of
+            participants grows or the flow has branching logic, choreography becomes undebuggable.
+            Use orchestration whenever you need to reason about the overall transaction state. Most
+            production systems at scale (Uber, Airbnb) gravitate toward orchestration.
+          </p>
+        </details>
+        <details>
+          <summary>Is the Sidecar the same as a service mesh?</summary>
+          <p>
+            The Sidecar is the pattern. A service mesh (Istio, Linkerd, Consul Connect) is an
+            implementation of that pattern at platform scale. A service mesh deploys sidecars
+            automatically and provides a control plane for configuring them uniformly.
+          </p>
+        </details>
+        <details>
+          <summary>Why is 2PC considered harmful in microservices?</summary>
+          <p>
+            Because it requires all participants to hold locks until the coordinator completes Phase 2.
+            If the coordinator crashes, participants are blocked indefinitely — this is the blocking
+            failure mode. In a distributed system where nodes fail independently, this guarantee
+            cannot be reliably maintained. The Saga pattern replaces 2PC with compensating transactions
+            at the cost of eventual (not immediate) consistency.
+          </p>
+        </details>
+        <details>
+          <summary>Can I combine Event Sourcing and CQRS?</summary>
+          <p>
+            Yes — this is the canonical combination. The event store is the write model. Every event
+            written to the store is also published to downstream projectors that maintain CQRS read
+            models. The event stream serves as the bridge between the two sides. Greg Young, who
+            formalised CQRS, originally presented Event Sourcing as its natural companion.
+          </p>
+        </details>
+        <details>
+          <summary>What is the difference between Outbox and Transactional Messaging?</summary>
+          <p>
+            Transactional messaging is the general requirement: a message must be published
+            if-and-only-if a transaction commits. The Outbox Pattern is the specific implementation:
+            write to an outbox table in the same transaction, relay asynchronously. Kafka Transactions
+            (via the transactional producer API) are an alternative when both writer and broker support
+            transactional semantics.
+          </p>
+        </details>
+      </section>
+
+      <!-- RELATED TOPICS -->
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <span class="section-label">Deep dives on overlapping subjects</span>
+        <ul>
+          <li>
+            <a href="microservices-architecture-patterns.html">Microservices Architecture Patterns</a>
+            — covers Saga, Circuit Breaker, API Gateway, and service decomposition strategies
+            with broader context on microservices design principles.
+          </li>
+          <li>
+            <a href="5-backend-system-design-patterns.html">5 Backend System Design Patterns Every Engineer Should Know</a>
+            — deep-dives into Outbox, Saga, Cache-Aside, Idempotency, and CQRS with full JavaScript
+            implementations and the Black Friday failure scenario.
+          </li>
+          <li>
+            <a href="event-driven-architecture-guide.html">Event-Driven Architecture for Microservices: Complete Guide</a>
+            — the full guide to EDA patterns, brokers, delivery guarantees, consumer groups, and replay in production.
+          </li>
+          <li>
+            <a href="microservice-failure-circuit-breaker-resilience.html">Circuit Breakers and Resilience in Microservices</a>
+            — focused deep dive on Circuit Breaker, Bulkhead, and resilience engineering at scale.
+          </li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          These 18 patterns form a complete vocabulary for distributed systems design. The most important
+          discipline is knowing when NOT to use each one — CQRS is not a default architecture, 2PC does
+          not belong in microservices, Event Sourcing is not a free audit log. Every pattern carries an
+          operational tax. The senior engineer's job is to identify the specific production failure mode
+          first, then reach for the lightest pattern that resolves it. A system that thoughtfully applies
+          five of these patterns in the right places will outperform one that blindly applies all eighteen.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

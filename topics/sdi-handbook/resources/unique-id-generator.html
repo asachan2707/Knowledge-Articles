@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Unique ID Generation: Ticket Servers and Snowflake — Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>.diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}</style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Resource guide created 2026-10-15 from liquidslr/system-design-notes Additional Resources (Unique-ID Generator). Flickr ticket server post read; Twitter Snowflake post returned 403, noted on page. Covers REPLACE INTO odd/even servers, block allocation, 41/10/12 bit layout, clock rewind and worker lease hazards. JavaScript example executed with node. About 9 minute read. Related: chapter 07-unique-id-generator.</div>
+        <h1>Unique ID Generation: Ticket Servers and Snowflake — Reading Guide</h1>
+        <p class="summary">A reading guide to Flickr ticket servers and Twitter Snowflake, with commentary on clocks, worker IDs and trade-offs, plus a runnable ticket server and Snowflake generator.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 7</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">9 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">ticket server, snowflake, clock skew, worker lease</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Flickr, Twitter Snowflake, UUIDv7, ULID</span></div>
+        </div>
+      </header>
+<section class="content-card"><p class="lead">Two resources, two philosophies. Flickr's ticket servers say: a database you already operate can hand out sequential integers, so do the dumbest thing that works. Twitter's Snowflake says: nothing in the request path should call a central server, so pack time, machine and sequence into one 64-bit number. Almost every ID scheme you will meet is one of these two with variations.</p>
+<div class="callout"><p><strong>Core idea:</strong> "unique" is cheap; "unique, sortable, compact, available and without coordination on the hot path" is the real requirement. The two resources show the two cheapest ways to meet different subsets of it.</p></div></section>
+<section class="content-card"><span class="section-label">How to use this guide</span><h2>What was read</h2>
+<p>I fetched and read the Flickr article. The Twitter blog URL redirected to blog.x.com and then returned HTTP 403, so I could not read the announcement itself. For Snowflake I use the widely documented bit layout and design, and flag that below.</p>
+<table class="data-table"><thead><tr><th>Resource</th><th>Read?</th><th>Time</th></tr></thead><tbody><tr><td>Ticket Servers (Flickr)</td><td>Read fully</td><td>8 min</td></tr><tr><td>Snowflake (Twitter)</td><td>Read the layout; skip the rest of the original post</td><td>10 min</td></tr></tbody></table></section>
+<section class="content-card"><span class="section-label">Resource 1</span><h2>Ticket Servers: Distributed Unique Primary Keys on the Cheap</h2>
+
+<p class="mini-heading">What it is</p>
+<p>A February 2010 Flickr engineering post explaining how they generate primary keys for a database that is sharded across many MySQL servers. I read the page.</p>
+<p class="mini-heading">The problem as the post frames it</p>
+<p>Flickr shards across master-master pairs of MySQL servers. Plain auto-increment columns collide when the same table lives on several shards, and when rows move between shards. Random GUIDs are large and index poorly in MySQL; sequential integers are small, cache-friendly and handy for debugging. The post also dismisses a Dynamo-style consistent-hashing store as a poor fit for a database tuned for fast random reads.</p>
+<p class="mini-heading">The mechanism</p>
+<p>A dedicated "ticket" database contains tables that hold a single row. A table has an auto-increment <code>id</code> and a <code>stub</code> column with a unique index. To get a new ID: run <code>REPLACE INTO Tickets64 (stub) VALUES ('a')</code> and then <code>SELECT LAST_INSERT_ID()</code>. <code>REPLACE</code> deletes the old row sharing the unique key and inserts a new one; the table never grows, but the auto-increment counter keeps rising. The two statements run on one connection, so concurrent clients each see their own last-insert id.</p>
+<p>To avoid a single point of failure, Flickr runs two ticket servers, one configured to produce odd numbers and the other even (auto-increment increment 2, with offsets 1 and 2). Clients round-robin. If one dies, the other carries all traffic. They explicitly avoid replication or locking between the two because it would hurt performance. They keep separate tables for different object types so busy types do not inflate counts of rare ones, and the post notes that the two servers drift apart by a few hundred thousand, which "hurts no one".</p>
+<div class="diagram-box">app --REPLACE INTO Tickets64--> <span class="hi">ticket server A</span> (1,3,5,7 ...)
+app --REPLACE INTO Tickets64--> <span class="ok">ticket server B</span> (2,4,6,8 ...)
+        round-robin; if one is down, use the other
+        <span class="dim">ids: small integers, roughly increasing, but not strictly ordered across servers</span></div>
+<p class="mini-heading">Senior commentary</p>
+<ul class="check-list"><li><strong>Strengths:</strong> trivially simple to operate for a MySQL shop; compact, index-friendly IDs; gaps are not a problem.</li>
+<li><strong>Costs:</strong> a network round trip per ID unless you batch; ticket servers are a dependency on every insert path; two servers give availability but not strict ordering, since A and B drift.</li>
+<li><strong>Standard fix:</strong> allocate IDs in blocks (a "hi/lo" scheme). The app asks for a block of, say, 1,000 numbers and uses them locally, cutting the round trips by three orders of magnitude at the cost of gaps when the app restarts.</li>
+<li><strong>Odd/even does not scale past two:</strong> with N servers you set the increment to N, and changing N later requires care to avoid overlaps.</li></ul>
+<p class="mini-heading">Still true versus dated</p>
+<p>The pattern is alive: database sequences, Redis <code>INCR</code>, and block allocation in ORM libraries are all ticket servers. The dated bit is MySQL <code>REPLACE</code> as the mechanism, and the worry about GUIDs; time-ordered UUIDs (UUIDv7, ULID) now give compact-enough, index-friendly keys with no server.</p>
+<p class="mini-heading">Connection</p>
+<p>It is approach 2 ("multi-master replication") in <a href="../chapters/07-unique-id-generator.html">chapter 7</a>, in its production form. The URL-shortener design also needs unique IDs; see the <a href="../../url-shortener-system-design.html">URL shortener page</a>.</p>
+
+<p><a href="https://code.flickr.net/2010/02/08/ticket-servers-distributed-unique-primary-keys-on-the-cheap" target="_blank" rel="noopener">Ticket Servers: Distributed Unique Primary Keys on the Cheap ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 2</span><h2>Snowflake</h2>
+
+<p class="mini-heading">What it is</p>
+<p>Twitter's 2010 announcement of Snowflake, a network service for generating unique IDs at high scale, built when Twitter was moving from a single MySQL database to Cassandra-based storage that had no built-in sequence feature. The project repository was later archived.</p>
+<div class="warn-box"><strong>Reading note:</strong> the page returned HTTP 403 to my fetcher, so the description below is the widely documented design, not a reading of the post.</div>
+<p class="mini-heading">The design</p>
+<div class="diagram-box"><span class="dim">1 bit    41 bits                    10 bits            12 bits</span>
+ 0  |  <span class="hi">milliseconds since custom epoch</span> | <span class="ok">worker / datacenter id</span> | <span class="step">per-ms sequence</span>
+<span class="dim">sign    ~69.7 years of range       1,024 machines     4,096 ids per ms per machine</span></div>
+<ul class="check-list"><li>IDs are 64-bit integers, so they fit a signed long in nearly every language (and a JavaScript double only if you are careful; JSON consumers often need the ID as a string).</li>
+<li>IDs are roughly time-sortable (k-ordered). Two IDs from different machines in the same millisecond have no defined order; one machine's IDs are strictly increasing.</li>
+<li>Each machine needs a unique worker ID. Twitter's service used ZooKeeper to coordinate worker identity, not to issue IDs per request.</li>
+<li>If the sequence for a millisecond overflows (more than 4,096), the generator waits for the next millisecond.</li></ul>
+<p class="mini-heading">Senior commentary</p>
+<p>The design is a tiny distributed system with one hard assumption: <strong>the clock must not go backwards.</strong> NTP step adjustments, VM migration and leap-second handling can all rewind time; a naive generator then re-issues old timestamps and duplicates IDs. The correct behaviour is to refuse (or wait) when the clock is behind the last issued timestamp; my example throws, which makes an outage visible instead of silently duplicating IDs. The second hazard is worker-ID reuse: if two live processes get the same worker ID (a bad rollout, container restart without lease expiry) you get collisions. Worker ID allocation therefore needs a lease with a fencing property.</p>
+<p>Throughput is 4,096 IDs per millisecond per worker, about 4.1 million per second, which is far more than almost any single service needs. The epoch choice matters: the 41-bit field lasts roughly 69.7 years from <em>your</em> epoch, so set it close to launch.</p>
+<div class="insight-box"><strong>Variants:</strong> Instagram shard-ID layouts embed a logical shard ID instead of a machine ID; Sonyflake trades sequence bits for a longer lifespan; UUIDv7 and ULID embed a millisecond timestamp plus randomness, trading the 64-bit size for zero coordination.</div>
+<p class="mini-heading">Connection</p>
+<p>It is the chapter 7 final design: compare the layout with the bit-allocation exercise in <a href="../chapters/07-unique-id-generator.html">chapter 7</a>. Clock skew also relates to the discussion in <a href="../../system-design/consistency-models.html">consistency models</a>.</p>
+
+<p><a href="https://blog.twitter.com/engineering/en_us/a/2010/announcing-snowflake.html" target="_blank" rel="noopener">Snowflake ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Numbers</span><h2>Back-of-envelope arithmetic</h2>
+ <ul class="check-list"><li><strong>Snowflake lifetime:</strong> 2^41 ms is about 2.2 trillion ms; divided by 31.56 billion ms per year that is about 69.7 years from the chosen epoch.</li><li><strong>Per-worker rate:</strong> 2^12 = 4,096 IDs per millisecond, so 4,096,000 per second per worker. A fleet of 1,024 workers could in theory issue over 4 billion IDs per second, which is why the layout is rarely the bottleneck.</li><li><strong>Ticket server rate:</strong> one MySQL <code>REPLACE</code> plus <code>LAST_INSERT_ID</code> is bounded by one database's write throughput, so a service writing 50,000 rows per second would need block allocation: at 1,000 IDs per block that is 50 block requests per second.</li><li><strong>Gap cost:</strong> with blocks of 1,000 and 100 app servers each restarting once a day, you waste at most about 100,000 IDs per day out of a 64-bit space: irrelevant, but visible if someone expects IDs to be gapless.</li></ul>
+<p>Two practical conclusions follow. The bit layout is almost never the limit; the operational controls around it are. And a ticket server needs no cleverness to survive huge growth, only batching.</p>
+</section>
+<section class="content-card"><span class="section-label">Failure modes</span><h2>What goes wrong in production</h2>
+ <table class="data-table"><thead><tr><th>Failure</th><th>Scheme</th><th>Symptom</th><th>Mitigation</th></tr></thead><tbody>
+<tr><td>Clock steps backwards</td><td>Snowflake</td><td>Duplicate or out-of-order IDs</td><td>Refuse until time catches up; persist last timestamp</td></tr>
+<tr><td>Two processes share a worker ID</td><td>Snowflake</td><td>Collisions within a millisecond</td><td>Leases with expiry and fencing</td></tr>
+<tr><td>Ticket server down</td><td>Ticket</td><td>Inserts blocked or half capacity</td><td>Second server, client block cache</td></tr>
+<tr><td>Servers drift apart</td><td>Odd/even tickets</td><td>Skewed parity, not strict ordering</td><td>Accept it, or move to a time-based scheme</td></tr>
+<tr><td>ID exposed publicly</td><td>Both</td><td>Leaks volume or creation time</td><td>Use opaque public IDs mapped internally</td></tr></tbody></table>
+</section>
+<section class="content-card"><span class="section-label">Synthesis</span><h2>How the resources fit together</h2>
+<table class="data-table"><thead><tr><th>Property</th><th>Ticket server</th><th>Snowflake</th><th>UUIDv4</th><th>UUIDv7 / ULID</th></tr></thead><tbody>
+<tr><td>Size</td><td>32 or 64 bit</td><td>64 bit</td><td>128 bit</td><td>128 bit</td></tr>
+<tr><td>Central dependency per ID</td><td>Yes (or per block)</td><td>No (only for worker id)</td><td>No</td><td>No</td></tr>
+<tr><td>Sortable by time</td><td>Roughly</td><td>Yes (k-ordered)</td><td>No</td><td>Yes</td></tr>
+<tr><td>Failure to watch</td><td>Server down, drift</td><td>Clock rewind, worker id clash</td><td>Index fragmentation</td><td>Millisecond ties across hosts</td></tr>
+<tr><td>Best for</td><td>Small shops on RDBMS</td><td>High-volume 64-bit keys</td><td>Opaque tokens</td><td>Modern table keys</td></tr></tbody></table>
+<p><strong>Reading order:</strong> Flickr first (shortest and most clearly argued), then Snowflake; then chapter 7 to see both framed as interview options. Read both because they answer the same question with opposite trade-offs: coordinate once (a tiny, simple service) or never (a clever layout).</p>
+<ul class="check-list"><li>State the requirements first: ordering, size, rate, whether IDs are exposed to users.</li><li>Decide what happens on clock regression.</li><li>Decide how worker IDs are leased and recycled.</li><li>Remember that sortable IDs leak creation time and volume; do not use them where that is sensitive.</li></ul></section>
+<section class="content-card"><span class="section-label">Code</span><h2>Runnable example</h2><span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Flickr-style ticket servers (odd/even) vs Snowflake-style 64-bit ids.
+class TicketServer { constructor(offset, inc = 2) { this.next = offset; this.inc = inc; this.up = true; }
+  ticket() { if (!this.up) throw new Error('down'); const v = this.next; this.next += this.inc; return v; } }
+class Tickets { constructor(servers) { this.s = servers; this.i = 0; }
+  get() { for (let t = 0; t &lt; this.s.length; t++) { const sv = this.s[this.i++ % this.s.length]; try { return sv.ticket(); } catch {} } throw new Error('all down'); } }
+const a = new TicketServer(1), b = new TicketServer(2), tk = new Tickets([a, b]);
+const ids = [tk.get(), tk.get(), tk.get(), tk.get()]; b.up = false; ids.push(tk.get(), tk.get());
+console.log('ticket ids (even server down for last two):', ids.join(','));
+
+const EPOCH = 1288834974657n;                      // Twitter epoch (ms)
+class Snowflake {
+  constructor(workerId, now = () =&gt; BigInt(Date.now())) { if (workerId &lt; 0 || workerId &gt; 1023) throw new Error('worker'); this.w = BigInt(workerId); this.now = now; this.last = -1n; this.seq = 0n; }
+  next() {
+    let t = this.now();
+    if (t &lt; this.last) throw new Error(`clock moved back ${this.last - t}ms`);
+    if (t === this.last) { this.seq = (this.seq + 1n) &amp; 4095n; if (this.seq === 0n) { while (t &lt;= this.last) t = this.now(); } } else this.seq = 0n;
+    this.last = t; return ((t - EPOCH) &lt;&lt; 22n) | (this.w &lt;&lt; 12n) | this.seq;
+  }
+}
+const decode = id =&gt; ({ ms: Number(id &gt;&gt; 22n) + Number(EPOCH), worker: Number((id &gt;&gt; 12n) &amp; 1023n), seq: Number(id &amp; 4095n) });
+let fake = 1700000000000n; const sf = new Snowflake(7, () =&gt; fake);
+const out = [sf.next(), sf.next(), (fake++, sf.next())];
+console.log(out.map(String).join(' '));
+console.log(JSON.stringify(decode(out[2])));
+console.assert(out[0] &lt; out[1] &amp;&amp; out[1] &lt; out[2] &amp;&amp; decode(out[2]).worker === 7 &amp;&amp; decode(out[1]).seq === 1);
+const real = new Snowflake(1); const set = new Set(); for (let i = 0; i &lt; 100000; i++) set.add(real.next());
+console.log('100k unique ids:', set.size === 100000);
+fake -= 5n; try { sf.next(); } catch (e) { console.log('guard:', e.message); }
+console.log('max sustained per worker:', 4096 * 1000, 'ids/s; timestamp bits last ~', (2 ** 41 / 31557600000).toFixed(1), 'years');</code></pre>
+<p class="code-caption">Prints ticket IDs from an odd/even pair with one server down, three Snowflake IDs with a decoded fields, a check that 100,000 IDs are unique, and the clock-rewind guard firing. Executed with node; asserts pass.</p></section>
+<section class="content-card"><span class="section-label">Exercise</span><h2>What to build</h2>
+ <ol><li>Add block allocation to the ticket client (grab 100 IDs per call) and compare the number of server calls.</li><li>Persist the Snowflake generator's last timestamp and refuse to start if the wall clock is behind it.</li><li>Implement a worker-ID lease with an expiry, and a test that two live workers can never hold the same ID.</li><li>Write a UUIDv7 generator from the spec and measure how often two IDs generated in the same millisecond sort in creation order.</li></ol>
+</section>
+<section class="content-card takeaways"><h2>Key Takeaway</h2><p>Pick between "one tiny coordinator" and "no coordinator plus clock discipline", and be explicit about the failure each one introduces. The interesting engineering is never the bit layout; it is clock rewinds, worker-ID leases and what happens when the coordinator is down.</p></section>
+      <section class="content-card"><span class="section-label">FAQ · Common Questions</span><h2>Frequently Asked Questions</h2>
+<details><summary>Why not use UUIDs?</summary><p>They are 128 bits, random UUIDv4 values fragment B-tree indexes, and they carry no order. Time-ordered variants fix the last two at the cost of the first.</p></details>
+<details><summary>What if the clock goes backwards?</summary><p>Reject or wait until the clock passes the last issued timestamp, and alert. Never emit IDs with an older timestamp and a fresh sequence; that is how duplicates appear.</p></details>
+<details><summary>How are worker IDs assigned safely?</summary><p>Through a lease from a coordination service such as ZooKeeper or etcd, with expiry and, ideally, a fencing token, so a restarted process cannot share an ID with a ghost of itself.</p></details>
+<details><summary>Is Snowflake strictly ordered?</summary><p>Only within a single worker. Across workers IDs are roughly ordered by millisecond; for causal ordering you need a logical clock or a log.</p></details>
+<details><summary>Can I give IDs to JavaScript clients?</summary><p>Not as numbers: a 64-bit integer exceeds the 53-bit safe range of a double. Send them as strings.</p></details>
+</section>
+      <section class="content-card"><h2>Related Topics</h2><ul><li><a href="../chapters/07-unique-id-generator.html">Chapter 7: Design a Unique ID Generator</a> — the chapter these resources feed.</li><li><a href="../../url-shortener-system-design.html">URL Shortener</a> — a downstream consumer of ID generation.</li><li><a href="../../system-design/sharding.html">Sharding</a> — why globally unique keys are needed.</li><li><a href="../../system-design/idempotency.html">Idempotency</a> — IDs as idempotency keys.</li></ul></section>
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the "Additonal Resources" list in <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a>, a companion to study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu. The commentary is original; follow the links to read the primary sources.</p><ul><li><a href="https://code.flickr.net/2010/02/08/ticket-servers-distributed-unique-primary-keys-on-the-cheap" target="_blank" rel="noopener">Ticket Servers: Distributed Unique Primary Keys on the Cheap</a> — https://code.flickr.net/2010/02/08/ticket-servers-distributed-unique-primary-keys-on-the-cheap</li><li><a href="https://blog.twitter.com/engineering/en_us/a/2010/announcing-snowflake.html" target="_blank" rel="noopener">Snowflake</a> — https://blog.twitter.com/engineering/en_us/a/2010/announcing-snowflake.html</li></ul></section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design Nearby Friends | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 17 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.17. Covers a real-time Nearby Friends feature: sizing (10 M concurrent, 334 K location updates/s, about 14 M fan-out messages/s, 200 GB of pub/sub state, 140+ Redis nodes), WebSocket plus Redis pub/sub fan-out, Redis location cache with TTL, Cassandra location history, API and data model, sharding the pub/sub tier with a consistent hash ring and service discovery, scaling operations, friends add/remove, whale users, geohash channels for nearby strangers, and Erlang as an alternative. Includes an executed Node.js example (hash ring with virtual nodes, pub/sub shards, WebSocket-server fan-out with distance filtering and TTL presence). About 19 min read. Related: ch16 Proximity Service, discord-presence-system-design, websockets, pub-sub, consistent-hashing.</div>
+        <h1>Design Nearby Friends</h1>
+        <p class="summary">Proximity search over points that move every thirty seconds. Where the last chapter's index could be rebuilt nightly, this one has hundreds of thousands of writes per second and a fan-out problem, so the design shifts from indexes to messaging.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">17 of 28 · Part 4 Geo Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">19 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Pub/sub fan-out, per-user channels, consistent-hash sharding, presence TTL</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Redis pub/sub, ZooKeeper/etcd, Cassandra, Erlang/BEAM, WhatsApp, Discord</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">"Show me which friends are within five miles, live." Notice what is absent: nobody asked to search a map. The geometry is a one-line distance formula between two known people. The hard part is that every person's position changes constantly and every change must reach a few dozen others quickly, which makes this a messaging system wearing a location costume.</p>
+        <div class="callout"><p><strong>Core idea:</strong> give every user a pub/sub channel carrying their location. Each connected user subscribes to the channels of their friends. A location update is one publish, delivered to whichever WebSocket servers hold subscribers, which compute the distance and forward only when it is under the threshold. The scale problem is entirely in the pub/sub tier.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design to anchor on</span>
+        <h2>Why Erlang and Elixir keep appearing</h2>
+        <p>WhatsApp has publicly described running its messaging servers on Erlang, with a very large number of concurrent connections per machine, and Discord has written about using Elixir (also on the BEAM virtual machine) for its real-time presence and guild fan-out. The reason is structural: BEAM gives cheap isolated processes, message passing between them, and supervised restart, which is exactly the shape of "a connection per user and a mailbox per channel". The chapter's Erlang alternative is this same observation. See the neighbouring page on <a href="../../discord-presence-system-design.html">Discord presence</a> for a related fan-out problem.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and numbers</span>
+        <h2>Scope and sizing</h2>
+        <p>The interview dialogue pins down the scope: "nearby" means straight-line distance within a configurable five miles; the app has one billion users of which ten percent use this feature; inactive friends drop off the list after about ten minutes; history is stored for analytics and machine learning; privacy law is out of scope for the exercise (in the real product it absolutely is not, see gotchas). Functional needs: a list of nearby friends, each with distance and a "last updated" timestamp, refreshed every few seconds. Non-functional: low latency delivery, tolerance for occasional lost updates, and eventual consistency for location data.</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Users of the feature</td><td>1 B × 10%</td><td>100 M</td></tr>
+            <tr><td>Concurrent users</td><td>100 M × 10%</td><td>10 M</td></tr>
+            <tr><td>Update interval</td><td>Walking pace is about 1.4 m/s, so 30 s is a 40 m error</td><td>30 s</td></tr>
+            <tr><td>Location writes</td><td>10 M ÷ 30 s</td><td>about 334 K/s</td></tr>
+            <tr><td>Friends per user</td><td>400, of which about 10% are online and using the feature</td><td>about 40 recipients</td></tr>
+            <tr><td>Fan-out messages</td><td>334 K × 40</td><td>about 13.4 M/s (call it 14 M)</td></tr>
+            <tr><td>Pub/sub memory</td><td>100 M channels; assume about 100 subscribers each and about 20 bytes per subscription entry</td><td>about 200 GB</td></tr>
+            <tr><td>Pub/sub CPU</td><td>14 M pushes/s ÷ about 100 K pushes/s per Redis node (assumption)</td><td>at least 140 nodes</td></tr>
+            <tr><td>History volume (upper bound)</td><td>334 K rows/s × 86,400 s × about 50 B</td><td>about 1.4 TB/day</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>The headline:</strong> memory says 2 Redis nodes, CPU says 140. Memory is cheap, delivering fourteen million messages a second is not. Always size a fan-out system on message rate, not storage. The 100 K per node figure is an assumption (Redis pub/sub delivery cost grows with subscriber count and message size); in an interview, state it, then say you would benchmark.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Why not peer to peer, and why not pull</h2>
+        <p>Phones sit behind carrier NAT, lose connectivity in lifts, and must conserve battery. Direct device-to-device messaging is therefore impractical; a shared backend acts as the fan-out point. It receives every active user's location, finds recipients, and forwards a message only when the pair is within the radius.</p>
+        <p>A pull design is the other obvious option: every thirty seconds each client asks "where are my friends". With 10 M concurrent users, even if the server only looks up online friends (about 40 each), that is 10 M × 40 ÷ 30 ≈ 13 M cache reads per second, equal in volume to push, but with an extra request round trip, no early out when nobody has moved, and constant polling of friends who are far away. Push is better because a quiet user generates no work. Both designs have the same asymptotic cost; push has the better constants and the lower delay.</p>
+        <div class="diagram-box" style="white-space:pre">
+   mobile ◀═══ WebSocket ═══▶ <span class="hi">WS server</span> (stateful) ──┬─▶ <span class="step">Location cache (Redis, TTL 10 min)</span>
+                                                     ├─▶ <span class="step">Location history (Cassandra)</span>
+                                                     ├─▶ <span class="step">User/friend DB (sharded by user_id)</span>
+                                                     └─▶ <span class="ok">Redis pub/sub</span>  channel per user
+
+   update from Bob:   Bob's WS ──publish──▶ channel[bob] ══▶ WS servers of Bob's online friends
+                                                               │ distance(bob, friend) ≤ 5 mi ?
+                                                               ▼ yes
+                                                       push to friend's socket
+   REST servers (stateless) do everything else: profile, add/remove friend, settings
+        </div>
+        <ul class="check-list">
+          <li><strong>Load balancer</strong> fronts both REST and WebSocket traffic. For WebSockets it only picks a server at connection time; after that the connection is sticky by nature.</li>
+          <li><strong>REST API servers</strong> are ordinary stateless services for friend management and profile.</li>
+          <li><strong>WebSocket servers</strong> hold the live connection, accept the periodic update, publish it, and receive friends' updates to forward. They are stateful (they remember each connected user's latest location and their subscriptions in memory for distance maths).</li>
+          <li><strong>Location cache</strong> (Redis) maps <code>user_id → (lat, lon, timestamp)</code> with a TTL of about ten minutes. Expiry is the definition of "inactive": no key, not nearby. Each update refreshes the TTL.</li>
+          <li><strong>Location history</strong> (Cassandra, partition by user, cluster by time) is write-only from this feature's view and feeds analytics and ML. It must not be in the hot path.</li>
+          <li><strong>Redis pub/sub</strong> is the message bus. A channel costs almost nothing when nobody subscribes, so every user's channel can exist implicitly.</li>
+        </ul>
+        <p class="mini-heading">One periodic update, end to end</p>
+        <ol>
+          <li>Phone sends <code>{lat, lon, ts}</code> over its WebSocket every 30 s.</li>
+          <li>WS server appends to history (async), writes the cache (refreshing the TTL) and updates its own in-memory copy for that user.</li>
+          <li>It publishes the update on the user's channel.</li>
+          <li>Every WS server with at least one subscriber on that channel receives it.</li>
+          <li>For each local subscriber it computes the distance between the subscriber's last known location and the published one. If within the radius it pushes <code>{friend_id, lat, lon, ts}</code> to the subscriber's socket; otherwise it drops it silently.</li>
+        </ol>
+        <p>The distance check sits on the receiving side because the sender's channel is shared by all friends; the sender does not know each friend's position. On average there are about 40 deliveries per update, which is where the 14 M/s comes from.</p>
+        <p class="mini-heading">Client initialisation</p>
+        <p>When a client connects, the WS server loads that user's friend list, subscribes to every friend's channel, reads each friend's last location from the cache, filters by distance, and returns the initial list. Without the cache read the user would wait up to 30 s before seeing anyone. Subscription is idempotent, so a reconnect simply repeats the process.</p>
+        <p class="mini-heading">WebSocket message types</p>
+        <table class="data-table">
+          <thead><tr><th>Direction</th><th>Message</th><th>Payload</th></tr></thead>
+          <tbody>
+            <tr><td>Client → server</td><td>init</td><td>current location, client version</td></tr>
+            <tr><td>Client → server</td><td>location update</td><td>lat, lon, ts (every 30 s or on significant movement)</td></tr>
+            <tr><td>Server → client</td><td>friend location</td><td>friend id, lat, lon, ts</td></tr>
+            <tr><td>Server → client</td><td>init response</td><td>list of nearby friends with last-known positions</td></tr>
+            <tr><td>Server → client</td><td>subscribe / unsubscribe hint</td><td>friend id to start or stop tracking (friend appeared, left, was added, removed)</td></tr>
+          </tbody>
+        </table>
+        <p>Use a compact binary or protobuf frame rather than JSON on cellular links; with 14 M messages a second, the difference in bytes is real money and battery.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 1</span>
+        <h2>Scaling each component</h2>
+        <table class="data-table">
+          <thead><tr><th>Component</th><th>How it scales</th><th>Sharp edges</th></tr></thead>
+          <tbody>
+            <tr><td>REST servers</td><td>Autoscaling group behind the LB</td><td>None; stateless</td></tr>
+            <tr><td>WebSocket servers</td><td>Add nodes; the connection count per node is bounded by memory and file descriptors. At roughly 50 K connections each, 10 M users need on the order of 200 servers</td><td>Draining: to remove a node, stop routing new sockets to it, wait or push clients to reconnect elsewhere gradually. Killing it at once sends 50 K clients reconnecting in the same second; add jitter to client backoff.</td></tr>
+            <tr><td>User/friend DB</td><td>Shard by user_id; better still expose it as a service owned by the team that owns the social graph</td><td>Friend-list reads at connect time spike during mass reconnects; cache lists</td></tr>
+            <tr><td>Location cache</td><td>Shard Redis by user_id. TTL bounds memory (10 M live users × tens of bytes is a few GB). Write rate of 334 K/s is easily spread over a handful of nodes</td><td>Hot keys are not an issue: one writer per key</td></tr>
+            <tr><td>Location history</td><td>Cassandra: partition by user_id, cluster by timestamp, write-optimised LSM storage</td><td>Unbounded partitions: bucket by day to cap partition size (see <a href="../../cassandra.html">Cassandra</a>)</td></tr>
+            <tr><td>Pub/sub tier</td><td>Distributed cluster; see below</td><td>The hard part</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 2</span>
+        <h2>Distributing the pub/sub tier</h2>
+        <p>Two Redis nodes would hold the 200 GB, but 140 are needed for delivery throughput, so the channel space must be partitioned. Partition by channel: each user's channel lives on exactly one pub/sub node. All publishers and subscribers must agree on which node that is, or messages vanish. That agreement is a <strong>consistent hash ring</strong> over the channel name, distributed via service discovery.</p>
+        <div class="diagram-box" style="white-space:pre">
+   ZooKeeper / etcd key:  /pubsub/ring  →  { vnodes: [(hash, node)...], version: 42 }
+         ▲ watch                                  ▲ watch
+   ┌─────┴───────┐                         ┌──────┴──────┐
+   │ WS server A │                         │ WS server B │       both cache the ring locally
+   └──────┬──────┘                         └──────┬──────┘
+          │ publish(chan:bob) → ring.get("chan:bob") = redis-17
+          ▼                                       │ subscribe(chan:bob) → same ring → redis-17
+        <span class="ok">redis-17</span> ◀────────────────────────────────┘
+        </div>
+        <ul class="check-list">
+          <li><strong>Ring in service discovery.</strong> ZooKeeper or etcd stores the authoritative ring and which Redis nodes are alive. WS servers watch it and cache it in memory so a publish costs a local binary search, not a network hop. See <a href="../../system-design/service-discovery.html">Service Discovery</a> and <a href="../../system-design/consistent-hashing.html">Consistent Hashing</a>.</li>
+          <li><strong>Virtual nodes.</strong> Each physical node owns many positions on the ring so channels spread evenly and a join or leave moves only about 1/N of the keys. The example below measures this: adding the fifth shard moves 20.4 percent of channels, close to the 20 percent ideal.</li>
+          <li><strong>Treat the cluster as stateful.</strong> A channel's subscriber list lives on its node. When a channel moves, every WS server with subscribers must re-subscribe on the new node. Pub/sub state is not replicated; a node that dies takes its subscriptions with it, and clients/WS servers must detect that and resubscribe.</li>
+          <li><strong>Resizing procedure.</strong> Publish a new ring version, WS servers resubscribe the moved channels, then retire old subscriptions. Messages in flight during the cutover may be lost, which this application tolerates (the next update is 30 s away). Do it at the daily traffic trough; schedule growth from historical data and over-provision for spikes, since a sudden unplanned resize is the riskiest operation in the system.</li>
+          <li><strong>Why not Redis Cluster?</strong> Classic Redis Cluster broadcasts PUBLISH to every node, which turns publish cost into O(nodes). Redis 7 added sharded pub/sub (SPUBLISH/SSUBSCRIBE) that routes by hash slot and fixes this, which is the modern way to get the same effect; the chapter's explicit ring is the pre-7 answer and also what you would build with a different bus.</li>
+        </ul>
+        <div class="warn-box"><strong>Delivery semantics.</strong> Redis pub/sub is at-most-once and non-durable: a subscriber that is disconnected misses messages and there is no replay. That is a deliberate fit here because a location is stale in thirty seconds. If you swapped in Kafka for durability you would pay for log storage you never read and add per-partition fan-out limits; pub/sub is the right tool when "latest value wins and missing one is fine".</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 3</span>
+        <h2>Friends, whales, strangers, alternatives</h2>
+        <h3>Adding and removing friends</h3>
+        <p>When the friend graph changes, the affected user's WS server must subscribe or unsubscribe from the new friend's channel. The feature lives in a larger app, so the app already emits a friend-added event; the client forwards it over the socket and the server acts. Server-side, a message from the social graph service (published on the same bus or a stream) is more robust than trusting clients. When a friend first appears online, the server tells the client to start tracking them; when the friend's TTL expires, it tells the client to drop them.</p>
+        <h3>Users with many friends</h3>
+        <p>Cap the friend count (some networks use 5,000). The WS server of a user with 5,000 friends holds 5,000 subscriptions and receives about ten times the average traffic, but that is a single connection's worth; spread over a large fleet it is not a bottleneck. The inverse case is the publishing side: one update by a user with 5,000 subscribers produces up to 500 deliveries (with 10 percent online). Both are fine, but monitor the tail: p99 fan-out size determines p99 latency. If you remove the cap you need a different mechanism for celebrity accounts, such as sampling or opt-in only.</p>
+        <h3>Showing a random nearby person</h3>
+        <p>A product twist: occasionally surface a non-friend nearby. Friend channels cannot do this because the subscriber does not know whom to subscribe to. Introduce channels keyed by geohash cell: every active user publishes to the channel of the geohash cell they stand in, and every user subscribes to their own cell plus the eight neighbours (the boundary solution from the previous chapter). Pick a coarse precision such as length 5 so a cell holds a manageable crowd, and sample at the receiver to avoid flooding in dense places. These channels are distributed over the same ring (key = <code>geo:&lt;hash&gt;</code>). Privacy is the real constraint here: only show users who opted in, and show a rounded location.</p>
+        <h3>Erlang or Elixir instead of Redis</h3>
+        <p>On BEAM you can spawn a lightweight process per connection and per channel, so the WS server and the pub/sub layer are one distributed application with in-process routing and no separate bus. It removes the Redis hop and the ring bookkeeping (distributed Erlang or a process registry handles placement). The cost is organisational: Erlang/Elixir skills are scarcer, and you take on operating a distributed runtime. Worth naming as an option; choosing it depends on the team.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decision table</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Lean</th></tr></thead>
+          <tbody>
+            <tr><td>Transport</td><td>WebSocket: bidirectional, push</td><td>Polling: simple, wasteful</td><td>WebSocket</td></tr>
+            <tr><td>Fan-out key</td><td>Channel per sender: exact friends</td><td>Channel per geohash: also strangers</td><td>Per sender; geohash only for the stranger feature</td></tr>
+            <tr><td>Bus</td><td>Redis pub/sub: fast, ephemeral</td><td>Kafka: durable, replayable</td><td>Redis; durability has no value for stale locations</td></tr>
+            <tr><td>Where to filter by distance</td><td>Receiving WS server: sender channel is shared</td><td>Central index: needs all positions in one place</td><td>Receiver</td></tr>
+            <tr><td>Update frequency</td><td>Fixed 30 s</td><td>Adaptive (motion-aware)</td><td>Adaptive saves battery and load</td></tr>
+            <tr><td>History</td><td>Synchronous write</td><td>Async via queue/batch</td><td>Async, off the hot path</td></tr>
+            <tr><td>Consistency</td><td>Eventual</td><td>Strong</td><td>Eventual, as the requirement says</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Why this design holds</h4><ul><li>Cost is proportional to active movers, not total users</li><li>Idle channels are free</li><li>Failures lose only a stale sample</li></ul></div>
+          <div class="trade-col cons"><h4>What it pays</h4><ul><li>Stateful WS and Redis tiers need careful draining and resizing</li><li>No replay: reconnecting clients rebuild from the cache</li><li>High fan-out per update drives cost</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>Consistent hash ring, pub/sub shards, and WebSocket fan-out</h2>
+        <p>The example builds a hash ring with virtual nodes and measures balance and movement when a shard joins. It then simulates a small cluster: three pub/sub shards chosen by the ring, a WebSocket server that subscribes each connecting user to friends' channels, seeds initial state from the location cache, filters deliveries by haversine distance in miles, and expires presence via a TTL.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Nearby friends: consistent-hash ring (vnodes) placing per-user pub/sub channels on shards,
+// an in-process pub/sub "Redis", websocket-server fan-out with distance filtering and TTL presence.
+import { createHash } from 'node:crypto';
+import assert from 'node:assert/strict';
+
+const h32 = s =&gt; createHash('md5').update(s).digest().readUInt32BE(0);
+class Ring {
+  points = []; // sorted [hash, node]
+  constructor(vnodes = 100) { this.vnodes = vnodes; }
+  add(node) { for (let i = 0; i &lt; this.vnodes; i++) this.points.push([h32(`${node}#${i}`), node]); this.points.sort((a, b) =&gt; a[0] - b[0]); }
+  remove(node) { this.points = this.points.filter(p =&gt; p[1] !== node); }
+  get(key) {
+    const h = h32(key); let lo = 0, hi = this.points.length;
+    while (lo &lt; hi) { const m = (lo + hi) &gt;&gt; 1; if (this.points[m][0] &lt; h) lo = m + 1; else hi = m; }
+    return this.points[lo % this.points.length][1];
+  }
+}
+
+class PubSubShard { // channel -&gt; subscribers (each shard is "one Redis node")
+  chans = new Map(); published = 0;
+  subscribe(ch, fn) { (this.chans.get(ch) ?? this.chans.set(ch, new Set()).get(ch)).add(fn); }
+  unsubscribe(ch, fn) { this.chans.get(ch)?.delete(fn); }
+  publish(ch, msg) { this.published++; for (const fn of this.chans.get(ch) ?? []) fn(msg); }
+}
+
+const R = 3958.7613; // miles
+const rad = d =&gt; d * Math.PI / 180;
+const miles = (a, b) =&gt; {
+  const s = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lon - a.lon) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+};
+
+class Cluster {
+  now = 0; ttl = 600; // seconds
+  cache = new Map();  // location cache: user -&gt; {lat,lon,ts}
+  constructor(shardNames, vnodes) {
+    this.ring = new Ring(vnodes); this.shards = new Map();
+    shardNames.forEach(n =&gt; { this.ring.add(n); this.shards.set(n, new PubSubShard()); });
+  }
+  shardFor(user) { return this.shards.get(this.ring.get(`chan:${user}`)); }
+  alive(user) { const l = this.cache.get(user); return l &amp;&amp; this.now - l.ts &lt;= this.ttl ? l : null; }
+}
+
+class WsServer {
+  constructor(cluster, friendsOf, radiusMiles = 5) { this.c = cluster; this.friendsOf = friendsOf; this.radius = radiusMiles; this.users = new Map(); }
+  connect(user, loc, inbox) {
+    this.users.set(user, { loc, inbox, subs: [] });
+    this.c.cache.set(user, { ...loc, ts: this.c.now });
+    for (const f of this.friendsOf(user)) {                 // subscribe to every friend's channel
+      const fn = msg =&gt; this.#deliver(user, msg);
+      this.c.shardFor(f).subscribe(`chan:${f}`, fn);
+      this.users.get(user).subs.push([f, fn]);
+      const fl = this.c.alive(f);                           // seed initial view from the cache
+      if (fl &amp;&amp; miles(loc, fl) &lt;= this.radius) inbox.push({ from: f, miles: +miles(loc, fl).toFixed(2), ts: fl.ts, seed: true });
+    }
+  }
+  disconnect(user) { for (const [f, fn] of this.users.get(user).subs) this.c.shardFor(f).unsubscribe(`chan:${f}`, fn); this.users.delete(user); }
+  update(user, loc) {                                       // periodic location update
+    this.users.get(user).loc = loc;
+    this.c.cache.set(user, { ...loc, ts: this.c.now });
+    this.c.shardFor(user).publish(`chan:${user}`, { from: user, ...loc, ts: this.c.now });
+  }
+  #deliver(to, msg) {                                       // receiving side does the distance filter
+    const u = this.users.get(to); if (!u) return;
+    const d = miles(u.loc, msg);
+    if (d &lt;= this.radius) u.inbox.push({ from: msg.from, miles: +d.toFixed(2), ts: msg.ts });
+  }
+}
+
+// ---------- tests ----------
+// 1. ring balance + minimal movement when adding a shard
+const ring = new Ring(200); ['r1', 'r2', 'r3', 'r4'].forEach(n =&gt; ring.add(n));
+const keys = Array.from({ length: 20000 }, (_, i) =&gt; `chan:u${i}`);
+const before = keys.map(k =&gt; ring.get(k));
+const counts = {}; before.forEach(n =&gt; counts[n] = (counts[n] ?? 0) + 1);
+console.log('channels per shard:', JSON.stringify(counts));
+for (const n of Object.values(counts)) assert.ok(n &gt; 3500 &amp;&amp; n &lt; 6500);
+ring.add('r5');
+const moved = keys.filter((k, i) =&gt; ring.get(k) !== before[i]).length;
+console.log(`adding 1 of 5 shards moved ${(100 * moved / keys.length).toFixed(1)}% of channels (ideal 20%)`);
+assert.ok(moved / keys.length &lt; 0.30);
+assert.ok(keys.every((k, i) =&gt; ring.get(k) === before[i] || ring.get(k) === 'r5'));
+
+// 2. end-to-end fan-out
+const friends = { alice: ['bob', 'carol'], bob: ['alice'], carol: ['alice'] };
+const cl = new Cluster(['s1', 's2', 's3'], 100);
+const ws = new WsServer(cl, u =&gt; friends[u]);
+const inbox = { alice: [], bob: [], carol: [] };
+ws.connect('bob', { lat: 37.78, lon: -122.41 }, inbox.bob);          // ~0.6 mi away from alice
+ws.connect('carol', { lat: 37.33, lon: -121.89 }, inbox.carol);      // San Jose ~ 42 mi
+ws.connect('alice', { lat: 37.7749, lon: -122.4194 }, inbox.alice);
+console.log('alice seeded view:', JSON.stringify(inbox.alice));
+assert.equal(inbox.alice.length, 1); assert.equal(inbox.alice[0].from, 'bob');
+
+ws.update('bob', { lat: 37.79, lon: -122.40 });
+cl.now = 30; ws.update('carol', { lat: 37.34, lon: -121.88 });
+console.log('alice after updates:', JSON.stringify(inbox.alice.slice(1)));
+assert.equal(inbox.alice.length, 2);                                   // carol filtered (too far)
+assert.equal(inbox.bob.length, 0);                                 // bob only hears alice, who has not moved
+
+ws.update('alice', { lat: 37.7750, lon: -122.4190 });
+assert.equal(inbox.bob.length, 1);
+
+// 3. TTL presence
+cl.now = 30 + 601;
+assert.equal(cl.alive('bob'), null);
+console.log('bob expired from presence after 10 min of silence: true');
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the number of channels per shard (roughly 5,000 each of 20,000), the fraction moved when a fifth shard joins (about 20 percent), Alice's seeded view containing only Bob at about 0.6 miles, the later nearby update from Bob while far-away Carol is filtered out, the TTL expiry line, and "all assertions passed". Executed with Node 20+.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks and the response</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Effect</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>WS server crash</td><td>All its users disconnect; their subscriptions on pub/sub nodes may linger</td><td>Clients reconnect with jittered backoff and re-init from the cache; pub/sub drops dead subscribers when the TCP connection closes.</td></tr>
+            <tr><td>Pub/sub node crash</td><td>Subscriptions on it vanish; its channels are silent</td><td>Ring marks it dead, channels remap, WS servers resubscribe (watching service discovery). Gap of seconds is tolerable.</td></tr>
+            <tr><td>Resubscription storm after ring change</td><td>Spike of SUBSCRIBE calls and CPU</td><td>Batch, rate-limit, spread over time; do resizes off-peak.</td></tr>
+            <tr><td>Location cache loss</td><td>New connections see empty lists for up to 30 s</td><td>Acceptable; lists repopulate with the next update. Replicas optional.</td></tr>
+            <tr><td>Slow consumer</td><td>Client cannot keep up; server buffers grow</td><td>Per-connection bounded queue; drop oldest (only the newest position matters); disconnect repeat offenders.</td></tr>
+            <tr><td>Network partition between WS and ZK</td><td>Stale ring in some servers: publish and subscribe on different nodes</td><td>Version the ring; WS servers refuse to publish on an expired lease; reconcile on reconnect.</td></tr>
+            <tr><td>Clock skew</td><td>Timestamps appear out of order</td><td>Server stamps arrival time; clients send monotonic sequence numbers, receivers drop older ones.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Gotchas</h2>
+        <ul class="check-list">
+          <li><strong>Privacy is the product risk.</strong> Opt-in, mutual-friend-only visibility, a visible "sharing with" indicator, a "pause" switch, rounding location to a coarse precision when displayed, and blocked-user filtering at the receiver. Location history is sensitive personal data and subject to GDPR/CCPA in real deployments, however the interview waived it. Set retention limits and let users delete history.</li>
+          <li><strong>Battery.</strong> The biggest cost sits on the phone. Adaptive reporting (more often when moving fast, back off when stationary, suppress when the app is backgrounded), significant-change location APIs, and batching radio use all matter more than server tuning.</li>
+          <li><strong>Mass reconnect after an outage.</strong> Millions of clients reconnect together and each triggers a friend-list read plus hundreds of subscribes. Use connection admission control, exponential backoff with jitter, and a cached friend list.</li>
+          <li><strong>Subscription accounting.</strong> Each connection costs 400 subscribe calls in the worst case. Subscribe lazily to online friends only, and learn presence from the cache (a pipelined multi-get) before subscribing.</li>
+          <li><strong>Distance on a sphere.</strong> Haversine per delivery is cheap, but at 14 M/s it is millions of trig calls per second; precompute cosine of the receiver's latitude and short-circuit with a bounding-box test.</li>
+          <li><strong>Backpressure.</strong> A hotspot such as a stadium turns many friends co-located, so every update passes the distance test and fan-out goes from 40 to nearly 400. Plan for the worst case, not the mean.</li>
+          <li><strong>Observability.</strong> Track end-to-end delivery latency (publish timestamp to client receipt), fan-out size histogram, subscription counts per node, and ring version skew. See <a href="../../system-design/observability.html">Observability</a>.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Clarify radius, scale, history, inactivity window.</li>
+          <li>Show the arithmetic: 334 K updates/s, 14 M deliveries/s, 200 GB, 140+ nodes.</li>
+          <li>Reject peer-to-peer; compare push with pull.</li>
+          <li>WebSocket servers, Redis location cache with TTL, Cassandra history, per-user pub/sub channels.</li>
+          <li>Receiver-side distance filtering and why.</li>
+          <li>Initialisation flow: friends, subscribe, cache seed.</li>
+          <li>Pub/sub sharding by consistent hash with ZooKeeper/etcd; virtual nodes; resize procedure.</li>
+          <li>Friend add/remove, whale cap, geohash channels for strangers, Erlang option.</li>
+          <li>Failure modes and the "stale is fine" principle.</li>
+          <li>Privacy, battery, reconnect storms.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why subscribe to friends' channels instead of publishing to each friend's channel?</summary><p>Publishing to each friend multiplies publisher work by 400 on every update, even for offline friends. Subscribing moves the fan-out cost into the pub/sub node and, because subscriptions exist only for online friends, you pay only for friends who can actually receive.</p></details>
+        <details><summary>Could you use the geohash approach for friends too?</summary><p>Yes: everyone publishes to their cell channel and receivers filter to friends. It scales with cells not friends, but each receiver sees all strangers in nearby cells, which at city density is far more traffic than 40 friends. Friend channels are more selective.</p></details>
+        <details><summary>What if Redis pub/sub is too slow?</summary><p>Shard further, batch multiple updates per publish per destination node, drop precision (cheaper payloads), reduce update frequency, or move to in-process routing as in the Erlang design. First measure whether the limit is CPU on subscribers or network egress.</p></details>
+        <details><summary>How do you avoid showing a stale friend?</summary><p>Every update carries a timestamp, the cache TTL removes inactive users, and the UI displays "last updated". A friend not heard from in ten minutes disappears; the server sends an unsubscribe hint to the client.</p></details>
+        <details><summary>How would you make the radius configurable per user?</summary><p>Store the radius with the receiver; the receiving WS server applies it during the distance check. No change to publishing is needed, which is a benefit of receiver-side filtering.</p></details>
+        <details><summary>How do you test this at scale?</summary><p>Synthetic load generators holding millions of sockets with realistic movement models, ring-resize game days, and chaos tests that kill pub/sub nodes while measuring delivery gaps. Watch delivery latency percentiles, not averages.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./16-proximity-service.html">Chapter 16: Proximity Service</a> — previous chapter; geohash neighbours reused for stranger channels.</li>
+          <li><a href="./18-google-maps.html">Chapter 18: Google Maps</a> — next chapter; its location service solves the write-heavy ingest side.</li>
+          <li><a href="../../discord-presence-system-design.html">Discord presence</a> — another fan-out system on the BEAM.</li>
+          <li><a href="../../system-design/websockets.html">WebSockets</a> — connection handling and draining.</li>
+          <li><a href="../../system-design/pub-sub.html">Pub/Sub</a> — delivery semantics and trade-offs.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — the ring used to place channels.</li>
+          <li><a href="../../uber-architecture-driver-tracking.html">Uber driver tracking</a> — moving-point indexing in production.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repo's Readme lists no additional resources specific to this chapter; its consistent hashing list includes <a href="https://blog.discord.com/scaling-elixir-f9b8e1e7c29b">Scaling Discord</a> (https://blog.discord.com/scaling-elixir-f9b8e1e7c29b), which is relevant to the BEAM discussion above.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>When points move, stop thinking in indexes and start thinking in message rates. One channel per user, subscribers filter by distance, a TTL cache defines presence, and a consistent-hash ring spreads channels over enough pub/sub nodes to carry fourteen million deliveries a second. Because stale locations are worthless, an ephemeral at-most-once bus is exactly right.</p>
+      </section>
+    </main>
+  </body>
+</html>

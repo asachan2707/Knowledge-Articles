@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Key-Value Store | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 6 of the System Design Interview Handbook (created 2026-10-15 from liquidslr/system-design-notes ch.06). Designs a Dynamo-style distributed key-value store - CAP and PACELC framing, consistent-hash partitioning, replication, N/W/R quorum consensus and its limits, consistency models, vector clocks and conflict resolution, gossip failure detection, sloppy quorum and hinted handoff, Merkle-tree anti-entropy, multi-data-center, LSM write and read paths with Bloom filters and compaction, and the coordinator-based final architecture. Includes a runnable JavaScript mini-Dynamo (ring, quorum, vector clocks, hinted handoff, Merkle repair) executed with node. Related pages - chapters 4 and 5, hub cap-theorem, consistency-models, cassandra. Read time about 21 min.</div>
+        <h1>Design a Key-Value Store</h1>
+        <p class="summary">A distributed key-value store combines a partitioning ring, N-way replication, tunable quorums, vector-clock versioning, gossip failure detection, hinted handoff, Merkle-tree repair and an LSM-style storage engine. This chapter assembles those pieces into a Dynamo-style, leaderless, highly available design and explains the consistency trade-off behind each one.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">6 of 28 · Part 2 Building Blocks</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">21 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">CAP, consistent hashing, N/W/R quorum, vector clocks, gossip, sloppy quorum, hinted handoff, Merkle tree, commit log, memtable, SSTable, Bloom filter</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Amazon Dynamo, DynamoDB, Apache Cassandra, Riak, Bigtable, RocksDB, etcd</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">A key-value store is the simplest database interface that still matters: <code>put(key, value)</code> and <code>get(key)</code>. Because the interface is tiny, a distributed implementation can spend all its complexity budget on the hard parts: staying up when machines die, staying fast under load, and staying roughly consistent when the network misbehaves. This chapter is where most of the distributed-systems vocabulary of the whole handbook is introduced.</p>
+        <div class="callout"><p><strong>Core idea:</strong> partition with a consistent-hash ring, replicate each key to N nodes, let clients pick how many acknowledgements (W for writes, R for reads) they need, version values with vector clocks, and use background repair (hinted handoff, Merkle trees) so that replicas converge. No node is special, so no node is a single point of failure.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known public design</span>
+        <h2>The Dynamo paper</h2>
+        <p>In 2007 Amazon engineers published "Dynamo: Amazon's Highly Available Key-value Store". The motivating requirement, stated in the paper, was that shopping-cart-style workloads should always accept writes, even during failures, and that an "always writeable" store was worth the price of occasionally returning conflicting versions that the application must merge. Dynamo combined consistent hashing, vector clocks, sloppy quorums with hinted handoff, Merkle-tree anti-entropy and gossip membership. Cassandra and Riak adopted large parts of that design (Cassandra grafted it onto a Bigtable-style storage engine). Note that today's managed DynamoDB service shares the name and the spirit but not the leaderless internals: it uses per-partition replication groups with a leader. When someone says "Dynamo-style", they mean the paper.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · scope</span>
+        <h2>Requirements and numbers</h2>
+        <table class="data-table">
+          <thead><tr><th>Requirement</th><th>Decision</th></tr></thead>
+          <tbody>
+            <tr><td>Small items</td><td>Each value under about 10 KB. Larger blobs belong in object storage with a pointer here.</td></tr>
+            <tr><td>Big data</td><td>Billions of keys across many machines.</td></tr>
+            <tr><td>High availability</td><td>Keep answering during node, rack or data-center failures.</td></tr>
+            <tr><td>High scalability</td><td>Add nodes with no downtime and no manual resharding.</td></tr>
+            <tr><td>Automatic and tunable</td><td>Scaling is automatic; consistency level is selectable per request.</td></tr>
+            <tr><td>Low latency</td><td>Single-digit-millisecond typical reads and writes.</td></tr>
+          </tbody>
+        </table>
+        <div class="diagram-box">Sizing example (illustrative):
+  10 billion items x 5 KB average         = 50 TB logical
+  replication N = 3                        = 150 TB raw
+  per-node usable ~2 TB (headroom, compaction space)   → ~75 nodes
+  at 1M reads/s peak and ~20K ops/s/node comfortable   → 50+ nodes for throughput
+  Verdict: storage and throughput are in the same ballpark → ~75-100 nodes, with room to grow.</div>
+        <p class="mini-heading">The single-server baseline</p>
+        <p>Start with a hash table in memory: O(1) get and put. Squeeze it by compressing values and keeping cold data on disk, but you quickly hit the limits of one machine's memory, one machine's failure, and one machine's network card. Hence the distributed design. The rest of this chapter makes explicit what we give up to get there.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Theory</span>
+        <h2>CAP, stated carefully</h2>
+        <p>The CAP theorem says that when a network partition splits a replicated system, you must choose between consistency (every read sees the latest write, linearizably) and availability (every non-failed node answers). Partition tolerance is not an option you can decline: networks do partition, so the real decision is "when the partition happens, which one do I give up?".</p>
+        <div class="diagram-box">   n1 ──── n2 ──── n3          partition:   [n1 n2]   |X|   [n3]
+ CP choice: refuse writes (and maybe reads) on the minority side → consistent, but unavailable there
+ AP choice: keep serving both sides → available, replicas diverge, reconcile after the heal</div>
+        <ul>
+          <li><strong>CP systems</strong> (etcd, ZooKeeper, Spanner-style systems; ledgers) sacrifice availability in the minority partition. Right for locks, configuration, money.</li>
+          <li><strong>AP systems</strong> (Dynamo, Cassandra at low consistency levels, Riak) keep accepting requests and reconcile later. Right for carts, sessions, feeds, counters of low stakes.</li>
+          <li><strong>"CA" is a mirage for distributed systems.</strong> A single-node database is CA only because there is no network between replicas to partition. Once data lives on several nodes, partitions will happen.</li>
+        </ul>
+        <div class="insight-box"><strong>CAP is only the partition-time story.</strong> The more useful framing is PACELC: if there is a Partition choose A or C; Else, even with no failure, you still trade Latency for Consistency, because waiting for more replicas costs time. A Dynamo-style system is PA/EL: available during partitions, low-latency otherwise. The N/W/R dial below is how you move along that second axis.</div>
+        <p>This chapter builds an AP, leaderless design. That is a decision to be defended in an interview by naming the workload: "we accept stale reads and application-level conflict resolution because blocking writes would cost more than occasional conflicts."</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Component 1</span>
+        <h2>Data partitioning</h2>
+        <p>Keys are spread over nodes using the consistent-hash ring from chapter 5. Properties we need and get: automatic scaling (add a node and it takes over only its arcs), and heterogeneity via virtual nodes (a bigger machine takes more vnodes, so more data). Because the key's position determines its home, any node can compute where a key lives without a central directory, which is what makes the design decentralised.</p>
+        <div class="diagram-box">          ring positions (vnodes of 5 physical nodes: n1..n5)
+      get("cart:7") → hash → position p → first vnode clockwise → coordinator
+      all nodes can compute this locally; clients may be ring-aware or contact any node</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Component 2</span>
+        <h2>Data replication</h2>
+        <p>To survive failures, each key is stored on N nodes (commonly N = 3). The rule is the preference list from chapter 5: starting from the key's position, walk clockwise and take the first N distinct physical nodes, skipping vnodes that belong to a machine already chosen. Better, spread replicas across racks and availability zones, and (for disaster tolerance) across data centers, so that a single power or network domain cannot hold all copies.</p>
+        <div class="diagram-box">key k at position p, N = 3
+   ring →  [ n1 ] [ n2 ] [ n3 ] [ n4 ] ...        k → n1 (coordinator) , n2 , n3 hold copies
+   n4 takes over the 3rd copy if n3 is down (sloppy quorum, below)</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Component 3</span>
+        <h2>Consistency: quorum consensus</h2>
+        <p>Replicas must agree "enough". The knobs are:</p>
+        <ul>
+          <li><strong>N</strong>: number of replicas per key.</li>
+          <li><strong>W</strong>: replicas that must acknowledge a write before it is reported successful.</li>
+          <li><strong>R</strong>: replicas that must answer a read before the coordinator returns.</li>
+        </ul>
+        <p>The coordinator sends each request to all N replicas in parallel and returns as soon as the W-th (or R-th) response arrives. This is a latency optimisation: you wait for the W-th fastest of N, which cuts the tail compared with waiting for a specific node.</p>
+        <table class="data-table">
+          <thead><tr><th>Setting (N=3)</th><th>Behaviour</th><th>Typical use</th></tr></thead>
+          <tbody>
+            <tr><td>W=1, R=1</td><td>Fastest, weakest: stale reads likely</td><td>Metrics, caches, session data</td></tr>
+            <tr><td>W=2, R=2</td><td>W + R &gt; N: read set overlaps write set; tolerates one failure on either path</td><td>The default balanced choice</td></tr>
+            <tr><td>W=N, R=1</td><td>Fast reads, slow and fragile writes</td><td>Read-heavy data</td></tr>
+            <tr><td>W=1, R=N</td><td>Fast writes, slow reads</td><td>Write-heavy ingest read rarely</td></tr>
+            <tr><td>W + R &le; N</td><td>No guaranteed overlap; eventual consistency only</td><td>Availability-first workloads</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><strong>W + R &gt; N is necessary, not sufficient, for strong consistency.</strong> It guarantees that a read quorum contains at least one replica that saw the latest <em>acknowledged</em> write, but it does not give linearizability on its own. Sloppy quorums can write to stand-in nodes outside the preference list so the overlap disappears; concurrent writes can still conflict; a failed write that reached fewer than W replicas can be observed by some readers and not others; and last-write-wins resolution depends on clocks. Call it "strongly consistent in the absence of failures and concurrency", not linearizable.</div>
+        <p class="mini-heading">Consistency models, in plain terms</p>
+        <ul>
+          <li><strong>Strong (linearizable):</strong> every read returns the most recent completed write. Requires consensus or a single leader per key.</li>
+          <li><strong>Weak:</strong> after a write, reads may or may not see it, with no promise about when.</li>
+          <li><strong>Eventual:</strong> a special weak form; if writes stop, all replicas converge. Dynamo-style stores target this, and add session guarantees (read-your-writes through sticky coordinators or higher R).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Component 4</span>
+        <h2>Inconsistency resolution with vector clocks</h2>
+        <p>With replicas accepting writes independently, two clients can update the same key at the same time through different coordinators. There is no single correct order, so the system must detect that the writes were concurrent rather than silently pick one. Treat every update as an immutable new version and attach a vector clock.</p>
+        <p class="mini-heading">How a vector clock works</p>
+        <ul>
+          <li>A clock is a map from node id to counter, written D([S1, 2], [S2, 1]).</li>
+          <li>When node Si coordinates a write, it takes the clock from the version the client read (the context), increments its own entry (adding it as 1 if absent), and stores the new version.</li>
+          <li><strong>Comparison.</strong> Clock X is an ancestor of Y (X happened before Y, Y supersedes X) if every counter in X is less than or equal to its counterpart in Y (missing counts as 0). If neither dominates, the versions are concurrent, called siblings. Equal clocks are the same version.</li>
+        </ul>
+        <div class="diagram-box">v1 = D([S1,1])                       client A reads v1, writes via S1 → v2 = D([S1,2])
+v1 → read by B too, B writes via S2 → v3 = D([S1,1],[S2,1])
+compare v2 vs v3:  S1: 2 &gt; 1  (v2 ahead)    S2: 0 &lt; 1  (v3 ahead)   → CONCURRENT (siblings)
+client reads both, merges, writes via S3 with merged context:
+v4 = D([S1,2],[S2,1],[S3,1])   dominates v2 and v3  → siblings collapse</div>
+        <p>On reads, the coordinator gathers R responses, discards any version that is an ancestor of another, and returns all remaining siblings with their clocks. The application merges them (union the carts, keep the later edit of a document, apply a domain rule) and writes back with the combined clock as context, which supersedes both. If the application does not merge, siblings accumulate.</p>
+        <table class="data-table">
+          <thead><tr><th>Approach</th><th>Pros</th><th>Cons</th></tr></thead>
+          <tbody>
+            <tr><td>Vector clocks + client merge</td><td>Never silently loses a write; correct causality</td><td>Complexity pushed to clients; sibling explosion; clock growth</td></tr>
+            <tr><td>Last-write-wins by timestamp (Cassandra's default per-cell)</td><td>Trivial; no siblings; bounded metadata</td><td>Silently drops concurrent writes; clock skew can make an older write win</td></tr>
+            <tr><td>CRDTs (counters, sets, registers)</td><td>Automatic, mathematically convergent merge</td><td>Only for data types that fit the merge model</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Clock growth</p>
+        <p>Entries accumulate as more nodes coordinate writes for a key, so the clock can grow without bound. Dynamo stores a timestamp with each entry and drops the oldest once the clock exceeds a threshold (for example 10 entries). That can in principle lose causality information and turn a true ancestor into an apparent sibling, but the paper reports that it did not matter in production. Riak later moved to dotted version vectors to control sibling explosion.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Component 5</span>
+        <h2>Handling failures</h2>
+        <p class="mini-heading">a. Failure detection: gossip</p>
+        <p>One node declaring another dead is a rumour, not a fact; the link between them may be at fault. Systems require corroboration. In a gossip protocol each node keeps a membership list with a heartbeat counter per member, increments its own counter periodically, and every second or so sends its list to a few random peers, who merge it (taking the higher counter per member). If a member's counter has not advanced for a configured period, it is suspected down; if several nodes agree, it is marked down. Gossip needs no central monitor, scales logarithmically in rounds to spread information (about log N rounds), and tolerates its own failures. Practical systems refine the binary alive/dead question into a suspicion level, for example the phi-accrual detector used by Cassandra, which adapts to network jitter.</p>
+        <div class="diagram-box">n1 table: {n1:104, n2:98, n3:77, n4:101}   ← n3 hasn't advanced in a while
+ every tick: n1 bumps its own counter, sends the table to 2-3 random peers
+ peers merge by max(); n3 stale across several nodes' views → marked down</div>
+
+        <p class="mini-heading">b. Temporary failures: sloppy quorum and hinted handoff</p>
+        <p>A strict quorum would block writes if too many of the N designated nodes are unreachable. A sloppy quorum relaxes this: use the first W (or R) <em>healthy</em> nodes found walking the ring, skipping unreachable ones. If n3 is down, the replica write goes to n4 instead, tagged with a hint saying "this belongs to n3". When failure detection sees n3 return, n4 hands the data back (hinted handoff) and deletes its temporary copy. This keeps the store always writeable. The cost: during the outage, the quorum overlap guarantee is gone, which is exactly the availability-over-consistency choice.</p>
+        <div class="diagram-box">strict:  put → n1 n2 n3(down)           → W=2 achieved by n1,n2 only if both up
+sloppy:  put → n1 n2 [n4 holds hint for n3]  → W met even if n1 or n2 also down
+n3 returns → n4 streams hint to n3 → n4 drops it</div>
+        <p>Operational limits: hints are stored for a bounded time (hours), because a node that is down for days must be rebuilt, not replayed. And hints add write load on stand-ins at the worst time.</p>
+
+        <p class="mini-heading">c. Permanent failures: anti-entropy with Merkle trees</p>
+        <p>Hinted handoff cannot repair a node that was gone too long, or a replica that silently lost or corrupted data. Anti-entropy compares replicas and copies only differences. Comparing every key is too expensive, so each replica builds a Merkle (hash) tree over its key range:</p>
+        <ol>
+          <li>Divide the key space into buckets (for example 1,024).</li>
+          <li>Hash each key-value pair, then hash the pairs in a bucket into one leaf hash.</li>
+          <li>Hash pairs of children upward until a single root hash summarises the range.</li>
+        </ol>
+        <div class="diagram-box">            root = H(h12 + h34)
+           /                \
+     h12 = H(b1+b2)    h34 = H(b3+b4)
+      /      \           /      \
+   hash(b1) hash(b2) hash(b3) hash(b4)      leaf = hash of the keys in that bucket
+
+ compare roots: equal → replicas identical, stop.
+ differ → compare children, recurse only into mismatching subtrees → find bad buckets → sync those keys</div>
+        <p>Cost is proportional to the amount of divergence, not the data size: with one bad bucket among 1,024 you exchange about log2(1024) = 10 levels of hashes and then one bucket's keys. Practical issue: when a node joins or leaves, the key ranges change, so trees must be recomputed; Dynamo noted this as a drawback and Cassandra runs repair as an explicit, rate-limited operation. The example code below uses 8 buckets to keep the output readable.</p>
+
+        <p class="mini-heading">d. Data-centre outages</p>
+        <p>Replicate across multiple data centers (the preference list is chosen to span them), so a whole site can go dark and quorums can still be met elsewhere. Consistency levels like "local quorum" (acknowledge within the local DC, replicate asynchronously to the others) keep latency low and make cross-DC failures a repair problem rather than a request-path problem.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Storage engine</span>
+        <h2>Write path, read path and compaction</h2>
+        <p>Each node stores its share using a log-structured merge (LSM) design, the Bigtable and Cassandra approach. The goal is to turn random writes into sequential ones.</p>
+        <p class="mini-heading">Write path</p>
+        <ol>
+          <li>The coordinator forwards the write to the replicas.</li>
+          <li>Each replica appends to a <strong>commit log</strong> on disk (sequential, fsynced per policy). This gives durability across crashes.</li>
+          <li>It inserts the entry into an in-memory sorted structure, the <strong>memtable</strong>.</li>
+          <li>When the memtable fills, it is flushed to an immutable sorted file on disk, an <strong>SSTable</strong> (sorted string table), and the corresponding commit-log segment is retired.</li>
+        </ol>
+        <div class="diagram-box">put ──▶ [commit log]  (sequential append, durable)
+   └──▶ [memtable]   (in RAM, sorted)  ── full → flush ──▶ SSTable-1, SSTable-2, SSTable-3 ...
+                                                              (immutable, sorted, on disk)
+        background compaction merges SSTables, drops overwritten values and tombstones</div>
+        <p class="mini-heading">Read path</p>
+        <ol>
+          <li>Check the memtable (and any memory cache). A hit is the freshest data.</li>
+          <li>On a miss, consult each SSTable's <strong>Bloom filter</strong>, a compact probabilistic set that can say "definitely not here" or "maybe here". Only SSTables that answer "maybe" are read, via a sparse index to the right block.</li>
+          <li>Merge the results (newest timestamp or clock wins, or siblings are returned) and answer.</li>
+        </ol>
+        <div class="diagram-box">get ──▶ memtable ──miss──▶ for each SSTable: Bloom filter ──no──▶ skip
+                                                   └──maybe──▶ index → block read ──▶ merge newest</div>
+        <p>A Bloom filter with about 10 bits per key and 7 hash functions gives roughly a 1 percent false-positive rate, so a read for an absent key touches an SSTable in only about 1 of 100 cases per file instead of every file. Without filters, read amplification would be one disk seek per SSTable.</p>
+        <ul class="check-list">
+          <li><strong>Compaction</strong> merges SSTables to bound read amplification and reclaim space. Strategies trade write amplification (rewriting data repeatedly) for read performance: size-tiered favours write throughput, leveled favours reads and space.</li>
+          <li><strong>Deletes are writes.</strong> A delete inserts a tombstone that must be replicated and kept longer than the maximum repair interval; otherwise a replica that missed the delete can resurrect the data ("zombie" values).</li>
+          <li><strong>Why LSM?</strong> Appends and flushes are sequential, which suits SSDs and especially HDDs (see the latency numbers in chapter 2). The price is read and compaction complexity.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Final architecture</span>
+        <h2>Putting it together</h2>
+        <div class="diagram-box">                 client
+                   │ get(key) / put(key, value, context)
+                   ▼
+            [ coordinator node ]  ← any node can play this role (or client-side routing)
+                   │ ring lookup → preference list (N=3)
+        ┌──────────┼──────────┐
+        ▼          ▼          ▼
+     [node A]   [node B]   [node C]      ack when W (write) or R (read) responded
+      commit log, memtable, SSTables, Bloom filters, hint store, Merkle trees
+      all nodes: gossip membership • failure detection • repair • compaction</div>
+        <table class="data-table">
+          <thead><tr><th>Goal</th><th>Technique</th></tr></thead>
+          <tbody>
+            <tr><td>Scalable partitioning</td><td>Consistent hashing with virtual nodes</td></tr>
+            <tr><td>High write availability</td><td>Sloppy quorum + hinted handoff; vector-clock versioning</td></tr>
+            <tr><td>Tunable consistency</td><td>N, W, R per request</td></tr>
+            <tr><td>Temporary failure handling</td><td>Gossip detection, hinted handoff</td></tr>
+            <tr><td>Permanent failure recovery</td><td>Merkle-tree anti-entropy</td></tr>
+            <tr><td>Data-center tolerance</td><td>Cross-DC replicas, local quorum levels</td></tr>
+            <tr><td>No single point of failure</td><td>Symmetric nodes, decentralised membership</td></tr>
+            <tr><td>Fast, durable local storage</td><td>Commit log, memtable, SSTables, Bloom filters, compaction</td></tr>
+          </tbody>
+        </table>
+        <p>The coordinator is a role, not a server: whichever node receives the request (or the ring-aware client library, which avoids an extra hop) plays it for that operation. Every node therefore has the same responsibilities, which is what removes the single point of failure and lets membership change automatically.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Leaderless versus leader-based, and when to choose which</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Leaderless (Dynamo-style)</h4><ul><li>Always writeable; no failover pause.</li><li>Latency tail cut by quorum of fastest replicas.</li><li>Natural multi-DC.</li><li>Elastic scaling.</li></ul></div>
+          <div class="trade-col cons"><h4>Costs</h4><ul><li>Conflicts surface to the application.</li><li>No transactions or secondary indexes by default.</li><li>Read repair, hints and anti-entropy to operate.</li><li>Hard to reason about stale reads.</li></ul></div>
+        </div>
+        <p>If your data needs uniqueness constraints, transactions, or strictly ordered updates (payments, inventory), pick a leader-based, consensus-backed store (Spanner-style systems, etcd, a relational primary with replicas). If you need massive, always-on, low-latency key access with tolerable staleness (carts, profiles, session, feature flags at scale, time-series events), the leaderless design shines. Many companies use both.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable example: a mini-Dynamo</h2>
+        <p>One file, no dependencies: a consistent-hash ring with vnodes, N/W/R quorum put and get, vector clocks with sibling detection and client merge, sloppy quorum with hinted handoff, and Merkle-tree anti-entropy that repairs only the divergent bucket. Network failures are simulated by flipping a node's <code>up</code> flag.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+const h32 = s =&gt; createHash('sha1').update(s).digest().readUInt32BE(0);
+
+// ---------- vector clocks ----------
+const vcInc = (vc, node) =&gt; ({ ...vc, [node]: (vc[node] ?? 0) + 1 });
+export function vcCompare(a, b) {            // 'before' | 'after' | 'equal' | 'concurrent'
+  let aLess = false, bLess = false;
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    const x = a[k] ?? 0, y = b[k] ?? 0; if (x &lt; y) aLess = true; if (x &gt; y) bLess = true;
+  }
+  return aLess &amp;&amp; bLess ? 'concurrent' : aLess ? 'before' : bLess ? 'after' : 'equal';
+}
+const vcMerge = (a, b) =&gt; { const o = { ...a }; for (const [k, v] of Object.entries(b)) o[k] = Math.max(o[k] ?? 0, v); return o; };
+// keep only versions not dominated by another (the "siblings")
+function reconcile(versions) {
+  return versions.filter((v, i) =&gt; !versions.some((w, j) =&gt; i !== j &amp;&amp; vcCompare(v.vc, w.vc) === 'before'))
+    .filter((v, i, arr) =&gt; arr.findIndex(w =&gt; vcCompare(w.vc, v.vc) === 'equal') === i);
+}
+
+// ---------- Merkle tree over key buckets ----------
+const sha = s =&gt; createHash('sha1').update(s).digest('hex');
+export function merkle(store, buckets = 8) {
+  const leaves = Array.from({ length: buckets }, (_, b) =&gt; {
+    const items = [...store].filter(([k]) =&gt; h32(k) % buckets === b).sort().map(([k, v]) =&gt; k + '=' + JSON.stringify(v.map(x =&gt; x.value)));
+    return sha(items.join('|'));
+  });
+  const levels = [leaves];
+  while (levels.at(-1).length &gt; 1) {
+    const cur = levels.at(-1), next = [];
+    for (let i = 0; i &lt; cur.length; i += 2) next.push(sha(cur[i] + (cur[i + 1] ?? '')));
+    levels.push(next);
+  }
+  return levels;                                  // levels.at(-1)[0] is the root
+}
+export function diffBuckets(a, b, level = a.length - 1, idx = 0, out = []) {
+  if (a[level][idx] === b[level][idx]) return out;          // identical subtree: stop
+  if (level === 0) { out.push(idx); return out; }
+  diffBuckets(a, b, level - 1, idx * 2, out);
+  if (idx * 2 + 1 &lt; a[level - 1].length) diffBuckets(a, b, level - 1, idx * 2 + 1, out);
+  return out;
+}
+
+// ---------- the cluster: ring + quorum + sloppy quorum + hinted handoff ----------
+export class Cluster {
+  constructor(names, { N = 3, W = 2, R = 2, vnodes = 64 } = {}) {
+    Object.assign(this, { N, W, R });
+    this.nodes = Object.fromEntries(names.map(n =&gt; [n, { up: true, store: new Map(), hints: [] }]));
+    this.ring = names.flatMap(n =&gt; Array.from({ length: vnodes }, (_, i) =&gt; [h32(`${n}#${i}`), n])).sort((a, b) =&gt; a[0] - b[0]);
+  }
+  walk(key) {                                      // all distinct nodes clockwise from the key
+    const p = h32(key); let i = this.ring.findIndex(([pos]) =&gt; pos &gt;= p); if (i &lt; 0) i = 0;
+    const out = [];
+    for (let s = 0; s &lt; this.ring.length &amp;&amp; out.length &lt; Object.keys(this.nodes).length; s++)
+      { const n = this.ring[(i + s) % this.ring.length][1]; if (!out.includes(n)) out.push(n); }
+    return out;
+  }
+  put(key, value, ctx = {}, { sloppy = true } = {}) {
+    const walk = this.walk(key), home = walk.slice(0, this.N), coord = walk.find(n =&gt; this.nodes[n].up);
+    const vc = vcInc(ctx, coord), ver = { value, vc };
+    let acks = 0; const stand = walk.slice(this.N).filter(n =&gt; this.nodes[n].up);
+    for (const n of home) {
+      if (this.nodes[n].up) { this.#apply(n, key, ver); acks++; }
+      else if (sloppy &amp;&amp; stand.length) { this.nodes[stand.shift()].hints.push({ for: n, key, ver }); acks++; }
+    }
+    if (acks &lt; this.W) throw new Error(`write quorum failed (${acks}/${this.W})`);
+    return vc;
+  }
+  get(key) {
+    const home = this.walk(key).slice(0, this.N).filter(n =&gt; this.nodes[n].up);
+    if (home.length &lt; this.R) throw new Error('read quorum failed');
+    const seen = home.slice(0, this.R).flatMap(n =&gt; this.nodes[n].store.get(key) ?? []);
+    return reconcile(seen);                        // &gt;1 result means siblings -&gt; client must merge
+  }
+  #apply(n, key, ver) { const s = this.nodes[n].store; s.set(key, reconcile([...(s.get(key) ?? []), ver])); }
+  recover(name) {                                  // node returns; stand-ins hand hints back
+    this.nodes[name].up = true;
+    for (const o of Object.values(this.nodes)) {
+      const keep = []; for (const hnt of o.hints) hnt.for === name ? this.#apply(name, hnt.key, hnt.ver) : keep.push(hnt);
+      o.hints = keep;
+    }
+  }
+  antiEntropy(a, b) {                              // Merkle-guided repair; returns buckets repaired
+    const ta = merkle(this.nodes[a].store), tb = merkle(this.nodes[b].store), bad = diffBuckets(ta, tb);
+    for (const [k] of new Map([...this.nodes[a].store, ...this.nodes[b].store]))
+      if (bad.includes(h32(k) % 8)) { const m = reconcile([...(this.nodes[a].store.get(k) ?? []), ...(this.nodes[b].store.get(k) ?? [])]);
+        this.nodes[a].store.set(k, m); this.nodes[b].store.set(k, m); }
+    return bad;
+  }
+}
+
+// ---------- tests ----------
+// vector clocks
+assert.equal(vcCompare({ s1: 1 }, { s1: 2 }), 'before');
+assert.equal(vcCompare({ s1: 2, s2: 1 }, { s1: 2, s3: 1 }), 'concurrent');
+assert.equal(vcCompare(vcMerge({ s1: 2, s2: 1 }, { s1: 2, s3: 1 }), { s1: 2, s2: 1 }), 'after');
+
+const c = new Cluster(['n1', 'n2', 'n3', 'n4', 'n5']);
+const ctx1 = c.put('cart:7', ['milk']);
+let r = c.get('cart:7'); assert.equal(r.length, 1);
+// two clients write concurrently from the same context -&gt; siblings
+const home = c.walk('cart:7').slice(0, 3);
+// simulate two replicas that each accepted a different write (e.g. during a partition):
+c.nodes[home[0]].store.set('cart:7', [{ value: ['milk', 'eggs'], vc: { ...ctx1, a: 1 } }]);
+c.nodes[home[1]].store.set('cart:7', [{ value: ['milk', 'bread'], vc: { ...ctx1, b: 1 } }]);
+c.nodes[home[2]].store.set('cart:7', []);
+r = c.get('cart:7'); assert.equal(r.length, 2); console.log('siblings detected:', r.map(x =&gt; x.value.join('+')));
+const merged = c.put('cart:7', ['milk', 'eggs', 'bread'], r.reduce((m, x) =&gt; vcMerge(m, x.vc), {}));
+assert.equal(c.get('cart:7').length, 1); console.log('after client merge -&gt;', c.get('cart:7')[0].value.join('+'));
+
+// sloppy quorum + hinted handoff
+const key = 'user:99', w = c.walk(key), down = w[0];
+c.nodes[down].up = false;
+c.put(key, 'v1');                                              // still succeeds (W=2 of 3 live)
+assert.equal(c.get(key)[0].value, 'v1');
+const standIn = w.slice(3).find(n =&gt; c.nodes[n].hints.length);
+console.log(`${down} down; hint parked on ${standIn}`);
+assert.ok(standIn);
+c.recover(down); assert.equal(c.nodes[down].store.get(key)?.[0].value, 'v1');
+
+// quorum failure when too many replicas die (strict mode)
+const d = new Cluster(['a', 'b', 'c'], { N: 3, W: 2, R: 2 });
+const dw = d.walk('k'); d.nodes[dw[0]].up = d.nodes[dw[1]].up = false;
+assert.throws(() =&gt; d.put('k', 1, {}, { sloppy: false }), /write quorum failed/);
+
+// Merkle anti-entropy: replicas diverge in one key; repair touches only that bucket
+const x = new Cluster(['p', 'q', 'r']); for (let i = 0; i &lt; 200; i++) x.put('k' + i, i);
+x.nodes.p.store.delete('k17');
+const bad = x.antiEntropy('p', 'q'); console.log('anti-entropy repaired buckets:', bad);
+assert.ok(bad.length &gt;= 1 &amp;&amp; bad.length &lt;= 3);
+assert.deepEqual(merkle(x.nodes.p.store).at(-1), merkle(x.nodes.q.store).at(-1));
+console.log('all checks passed');</code></pre>
+        <p class="code-caption">Prints "siblings detected: [ 'milk+eggs', 'milk+bread' ]" and "after client merge -&gt; milk+eggs+bread", then which stand-in node holds the hint while n1 is down, which Merkle bucket was repaired, and "all checks passed". Executed with node.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What goes wrong in a Dynamo-style store</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Effect</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Single node down</td><td>Reads and writes continue via other replicas; its data is stale when it returns</td><td>Hinted handoff, read repair, anti-entropy</td></tr>
+            <tr><td>Network partition</td><td>Both sides accept writes; siblings appear</td><td>Vector clocks, application merge, CRDTs</td></tr>
+            <tr><td>Hint buffer overflow / long outage</td><td>Hints dropped; node permanently behind</td><td>Bounded hint window, full repair via Merkle trees, rebuild by streaming</td></tr>
+            <tr><td>Clock skew with LWW</td><td>Older write overwrites newer</td><td>Use vector clocks, or tight NTP and logical timestamps, or avoid concurrent writers per key</td></tr>
+            <tr><td>Tombstone resurrection</td><td>Deleted data reappears after repair</td><td>Retain tombstones longer than repair interval; run repair regularly</td></tr>
+            <tr><td>Sibling explosion</td><td>Reads return many versions; large responses</td><td>Always write with context; merge in client; dotted version vectors</td></tr>
+            <tr><td>Hot partition</td><td>One key overloads its replicas</td><td>Caching in front, key splitting, adaptive capacity</td></tr>
+            <tr><td>Compaction storm</td><td>Disk and CPU saturation, read latency spikes</td><td>Rate-limit compaction, provision IO headroom</td></tr>
+            <tr><td>Mass failure / DC loss</td><td>Quorums unavailable</td><td>Multi-DC placement, local quorum levels, capacity headroom</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Gotchas</h2>
+        <ul class="check-list">
+          <li><strong>Read repair.</strong> When the coordinator sees that some of the R replicas returned stale data, it should write the newest version back to them in the background. It is cheap and heals hot keys quickly.</li>
+          <li><strong>Speculative retries.</strong> If one replica is slow, send the request to another after a percentile-based delay, rather than waiting for a timeout. This tames tail latency.</li>
+          <li><strong>Idempotent writes.</strong> Clients retry. Use idempotent operations or request ids so a retried put does not create a spurious sibling.</li>
+          <li><strong>Size limits.</strong> Keep values small. Large values blow up memtable flushes, repair streams and sibling payloads.</li>
+          <li><strong>Capacity headroom.</strong> Keep disks well under full: compaction needs scratch space, and a failed node's data must be re-replicated onto survivors.</li>
+          <li><strong>Consistency level per call.</strong> Use stronger levels for rare critical reads, and weaker for bulk. Document which paths use which.</li>
+          <li><strong>Upgrades and membership churn.</strong> Do rolling restarts one node at a time and wait for gossip to settle and hints to drain before the next.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Design checklist</h2>
+        <ul class="check-list">
+          <li>State the CAP/PACELC position and the workload that justifies it.</li>
+          <li>Ring with vnodes; replicas on distinct nodes, racks and DCs.</li>
+          <li>N, W, R chosen with the latency/consistency reasoning; limits of W + R &gt; N acknowledged.</li>
+          <li>Conflict strategy: vector clocks plus merge, LWW, or CRDT, and why.</li>
+          <li>Failure detection (gossip), temporary (sloppy quorum, hints) and permanent (Merkle anti-entropy) handling.</li>
+          <li>Write path (commit log, memtable, SSTable), read path (cache, Bloom filter), compaction and tombstones.</li>
+          <li>Coordinator role, symmetric nodes, no SPOF, multi-DC story.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Does W + R &gt; N give me strong consistency?</summary><p>Only a weaker, conditional form. Overlap ensures a read quorum intersects the latest acknowledged write's quorum, but sloppy quorums, concurrent writers, partial writes and clock-based resolution break linearizability. If you need it, use a consensus-based store (Raft or Paxos per partition) or a single leader per key.</p></details>
+        <details><summary>Why vector clocks instead of timestamps?</summary><p>Timestamps from different machines cannot establish causality reliably and force silent loss of concurrent writes. Vector clocks say precisely whether one write saw the other. The price is larger metadata and client merging, so many systems choose LWW deliberately for data where last-writer-wins is acceptable.</p></details>
+        <details><summary>What is the difference between hinted handoff and anti-entropy?</summary><p>Hinted handoff is a fast path for short outages: a stand-in holds writes the downed replica missed. Anti-entropy with Merkle trees is the slow, thorough path that detects any divergence (long outages, lost hints, bit rot) by comparing hashes. A robust system needs both.</p></details>
+        <details><summary>How does a read differ from a write when R=2, W=2, N=3?</summary><p>A write goes to all three replicas and succeeds on two acknowledgements. A read asks all three (or two plus a background third), returns after two answers, picks the newest by clock, and repairs stale replicas in the background. Because any 2 of 3 overlap with any other 2 of 3, a read sees at least one copy of the last acknowledged write.</p></details>
+        <details><summary>How do you add a node without downtime?</summary><p>The new node joins the ring, claims its vnodes, learns the membership via gossip, streams the data for its ranges from the current owners, and only then begins to serve reads for those ranges. Existing owners keep serving until the handover completes, then discard moved data. Bootstrapping one node at a time keeps load bounded.</p></details>
+        <details><summary>Why are Bloom filters safe to use in the read path?</summary><p>They have no false negatives: if the filter says a key is absent from an SSTable, it truly is. False positives only cost one unneeded read. That asymmetry makes them ideal for skipping files.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./05-consistent-hashing.html">Chapter 5: Design Consistent Hashing</a> — previous chapter; the partitioning layer used here.</li>
+          <li><a href="./07-unique-id-generator.html">Chapter 7: Design a Unique ID Generator</a> — next chapter; generating the keys that stores like this hold.</li>
+          <li><a href="../../system-design/cap-theorem.html">CAP Theorem</a> — the trade-off in depth.</li>
+          <li><a href="../../system-design/consistency-models.html">Consistency Models</a> — strong, causal and eventual in more detail.</li>
+          <li><a href="../../cassandra.html">Cassandra</a> — a production system built on this design.</li>
+          <li><a href="../../dynamodb-hot-partition-sharding.html">DynamoDB Hot Partition and Sharding</a> — hot keys in a managed descendant.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — partitioning context.</li>
+        </ul>
+      </section>
+
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p><p><strong>Additional resources from the repo:</strong></p><ul><li><a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf">Amazon Dynamo</a></li><li><a href="https://docs.datastax.com/en/archived/cassandra/3.0/cassandra/architecture/archIntro.html">Cassandra Architecture</a></li><li><a href="https://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf">Google BigTable Architecture</a></li><li><a href="https://www.allthingsdistributed.com/2007/10/amazons_dynamo.html">Amazon Dynamo DB Internals</a></li><li><a href="https://www.youtube.com/watch?v=HaEPXoXVf2k">Design Patterns in Amazon Dynamo DB</a></li><li><a href="https://www.youtube.com/watch?v=yvBR71D0nAQ">Internals of Amazon Dynamo DB</a></li></ul></section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>A Dynamo-style store is a chain of deliberate availability-over-consistency choices, each paired with a repair mechanism: sloppy quorums with hinted handoff, vector clocks with client reconciliation, Merkle trees for anti-entropy. The tunable N, W, R dial lets you move along the latency and consistency spectrum per request, but quorum overlap alone never gives you linearizability, so decide explicitly what your callers can tolerate.</p></section>
+    </main>
+  </body>
+</html>

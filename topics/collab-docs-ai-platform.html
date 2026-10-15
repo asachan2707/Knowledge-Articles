@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Collaboration Docs System Design: Building an AI-Assisted Document Platform (From MVP to GenAI) | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1552664730-d307ca884978?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Multiple people collaborating on documents around a table with laptops"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · AI · Architecture · Interview · 35 min</span>
+          </div>
+        </figure>
+
+        <h1>Collaboration Docs System Design: Building an AI-Assisted Document Platform (From MVP to GenAI)</h1>
+        <p class="summary">
+          A mock system design interview that walks through building a Google Docs-class collaborative document platform
+          — from the minimal viable MVP (real-time sync, CRDT conflict resolution, presence awareness) through the hard
+          scaling problems (operational transforms at 100k concurrent users, fan-out storms), and into genuine GenAI
+          integration: RAG-powered search, context-aware writing assistance, and intelligent summarisation. The thesis:
+          generative AI is a capability you add where the system has a genuine understanding gap, not a veneer on top
+          of unsolved storage problems.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: codefarm · Medium</span>
+          <span class="meta-item">Domain: Distributed Systems / AI Architecture</span>
+          <span class="meta-item" data-added="2026-09-03">Published: 2026-09-03</span>
+        </div>
+      </header>
+
+      <!-- ═══════════════════════════════ LEAD ═══════════════════════════════ -->
+      <section class="content-card">
+        <p class="lead">
+          The mistake most candidates make in this interview is jumping straight to WebSockets and vector databases.
+          Real collaborative document platforms are hard because of a deceptively small problem: two users typed at
+          position 5 simultaneously — who wins? Getting that decision consistently right at 200ms round-trip across
+          thousands of concurrent editors is the entire system design. GenAI is downstream of that correctness.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> Collaborative editing requires a conflict resolution primitive (CRDT or OT)
+            that is commutative, associative, and idempotent — correctness properties that must be preserved all
+            the way through your persistence, replication, and API layers before AI can provide any value.
+            Bolt GenAI onto a broken sync model and you get hallucinated paragraphs that override real user edits.
+          </p>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════ STORY ═══════════════════════════════ -->
+      <section class="story-card">
+        <span class="section-label">Story · The Wave Postmortem</span>
+        <p>
+          In 2009 Google shipped Google Wave — the most technically ambitious real-time collaboration system of its
+          era. It used a custom OT engine, persistent streams, federated servers, and per-character granularity.
+          Engineers at Google called it the hardest system they had ever built. By 2010 it was dead.
+        </p>
+        <p>
+          The failure was not technical — it was product. The OT engine worked. The problem was that Wave tried to
+          be email, chat, document editor, and workflow tool simultaneously, with a synchronisation model that
+          terrified non-technical users. Google quietly harvested the OT implementation into what became Google
+          Drive's real-time collaboration layer, which today serves over a billion users.
+        </p>
+        <p>
+          The lesson for system designers: nail the sync primitive first, design the product layer around human
+          mental models second, and defer AI-augmentation until you have enough user signal to know where the
+          genuine understanding gaps are. Notion spent three years on their block-based CRDT model before adding
+          AI features. Notion AI launched in 2023 — years after Notion itself became a reliable, consistent
+          platform. The sequencing was not accidental.
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════ PART 1: MVP ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 1 · MVP Core Architecture</span>
+        <h2>What "Minimal Viable" Actually Means for Collaborative Editing</h2>
+        <p>
+          The MVP for a Google Docs competitor is not minimal at all. The hard constraints arrive immediately:
+          sub-200ms perceived latency for keystrokes, ordering guarantees for concurrent edits, and the ability
+          to recover a document from any historical state. Here is the component list that cannot be deferred:
+        </p>
+        <ul>
+          <li><strong>Document storage:</strong> an append-only operation log (the source of truth) plus a periodically
+            snapshotted materialized view for fast loads. PostgreSQL with JSONB for the snapshot, S3 for operation
+            history at scale.</li>
+          <li><strong>Real-time transport:</strong> WebSocket connections per document session. A stateful WebSocket
+            gateway routes messages to the correct document shard. Long-polling as a graceful fallback for corporate
+            firewalls.</li>
+          <li><strong>Conflict resolution engine:</strong> either Operational Transform (OT) — server-authoritative,
+            requires a sequencing server — or a CRDT (Conflict-free Replicated Data Type) that allows peer-to-peer
+            merge without coordination.</li>
+          <li><strong>Presence service:</strong> ephemeral user cursor positions, selection ranges, and online status
+            broadcast to all collaborators in the session.</li>
+          <li><strong>Session management:</strong> authentication, document permissions (view/comment/edit), and
+            revision history with named versions.</li>
+        </ul>
+
+        <h3>OT vs. CRDT: The Foundational Choice</h3>
+        <p>
+          This choice is the most important architectural decision in the entire system. It cascades into every
+          other component.
+        </p>
+        <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem;">
+          <thead>
+            <tr style="background:var(--surface-2,#f1f5f9)">
+              <th style="padding:8px;text-align:left;border:1px solid var(--border,#e2e8f0)">Dimension</th>
+              <th style="padding:8px;text-align:left;border:1px solid var(--border,#e2e8f0)">Operational Transform (OT)</th>
+              <th style="padding:8px;text-align:left;border:1px solid var(--border,#e2e8f0)">CRDT</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Coordination requirement</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Requires central server to sequence ops</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Peer-to-peer; eventual consistency by construction</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Network topology</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Star (server hub)</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Mesh or star</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Offline editing</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Hard — requires buffering + replay</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">First-class; merge on reconnect</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Memory overhead</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Low (server holds history)</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Higher (tombstones for deletions grow forever)</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Who uses it</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Google Docs (original), SharePoint</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Notion, Figma, Linear, VS Code Live Share</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Correctness proof</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Hard — Jupiter/dOPT transform correctness is difficult to prove for rich text</td>
+              <td style="padding:8px;border:1px solid var(--border,#e2e8f0)">Mathematically guaranteed if the CRDT is correctly implemented</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          For a 2026 greenfield design, pick a sequence CRDT — specifically RGA (Replicated Growable Array) or
+          its successor Yjs's Y.Array — unless you have very specific server-authoritative requirements. The
+          tombstone growth is manageable with periodic GC passes on inactive documents.
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════ CRDT CODE ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Code · CRDT Sequence Implementation</span>
+        <h2>CRDT-Based Conflict Resolution in JavaScript</h2>
+        <p>
+          Below is a simplified but structurally correct RGA (Replicated Growable Array) CRDT. Each character
+          carries a globally unique ID (site ID + logical clock). Insertions are ordered by ID; concurrent inserts
+          at the same position use the site ID as a tiebreaker — making the outcome deterministic and
+          convergent everywhere regardless of delivery order.
+        </p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Simplified RGA (Replicated Growable Array) CRDT
+// Each element: { id: [siteId, clock], value, tombstoned, after: parentId | null }
+
+class RGA {
+  constructor(siteId) {
+    this.siteId = siteId;
+    this.clock = 0;
+    // Map of id-string -> node
+    this.nodes = new Map();
+    // Sentinel head node
+    this.head = { id: [0, 0], value: null, tombstoned: false, after: null };
+    this.nodes.set(this._key(this.head.id), this.head);
+  }
+
+  _key([site, clock]) { return `${site}:${clock}`; }
+
+  // Insert `value` after the node with id `afterId` (null = head)
+  localInsert(value, afterId = null) {
+    this.clock++;
+    const op = {
+      type: 'insert',
+      id: [this.siteId, this.clock],
+      value,
+      after: afterId ?? this.head.id
+    };
+    this._applyInsert(op);
+    return op; // broadcast this to peers
+  }
+
+  localDelete(nodeId) {
+    const op = { type: 'delete', id: nodeId };
+    this._applyDelete(op);
+    return op; // broadcast this to peers
+  }
+
+  // Apply a remote or local insert — idempotent; safe to replay
+  _applyInsert({ id, value, after }) {
+    if (this.nodes.has(this._key(id))) return; // already applied
+
+    const afterNode = this.nodes.get(this._key(after));
+    if (!afterNode) throw new Error(`Parent node ${this._key(after)} not found`);
+
+    const newNode = { id, value, tombstoned: false, after };
+    this.nodes.set(this._key(id), newNode);
+
+    // Determine insertion point using RGA ordering rule:
+    // Among nodes that have the same 'after', sort descending by id
+    // so higher-site-id wins (deterministic tiebreak)
+    let scan = afterNode;
+    while (scan.next) {
+      const next = scan.next;
+      if (!this._sameAfter(next, after)) break;
+      // Concurrent insert — compare ids
+      if (this._idGt(next.id, id)) {
+        scan = next; // next takes priority; keep scanning right
+      } else {
+        break; // insert here
+      }
+    }
+    newNode.next = scan.next;
+    scan.next = newNode;
+  }
+
+  _applyDelete({ id }) {
+    const node = this.nodes.get(this._key(id));
+    if (node) node.tombstoned = true;
+  }
+
+  _sameAfter(node, parentId) {
+    return this._key(node.after) === this._key(parentId);
+  }
+
+  _idGt([sA, cA], [sB, cB]) {
+    return cA !== cB ? cA > cB : sA > sB;
+  }
+
+  // Remote operation dispatcher
+  apply(op) {
+    if (op.type === 'insert') this._applyInsert(op);
+    else if (op.type === 'delete') this._applyDelete(op);
+  }
+
+  // Read the visible text
+  toString() {
+    let result = '';
+    let cur = this.head.next;
+    while (cur) {
+      if (!cur.tombstoned) result += cur.value;
+      cur = cur.next;
+    }
+    return result;
+  }
+}
+
+// ── Convergence demo ──────────────────────────────────────────────────────────
+const docA = new RGA('alice');
+const docB = new RGA('bob');
+
+// Alice types "Hello"
+const ops = [];
+ops.push(docA.localInsert('H'));
+ops.push(docA.localInsert('e', docA.head.next.id));
+ops.push(docA.localInsert('l'));
+ops.push(docA.localInsert('l'));
+ops.push(docA.localInsert('o'));
+
+// Sync Alice → Bob
+ops.forEach(op => docB.apply(op));
+
+// Concurrent edits: Alice inserts '!' at end; Bob inserts '?' at end
+const afterLastId = [...docA.nodes.values()]
+  .filter(n => !n.tombstoned && n.value === 'o')[0].id;
+
+const opA = docA.localInsert('!', afterLastId);
+const opB = docB.localInsert('?', afterLastId);
+
+// Cross-apply — simulate out-of-order delivery
+docA.apply(opB);
+docB.apply(opA);
+
+console.log('Alice sees:', docA.toString()); // "Hello?!" or "Hello!?" — same on both
+console.log('Bob sees:  ', docB.toString()); // identical — CRDT convergence guaranteed
+// Higher site-id wins the tiebreak. With alice > bob alphabetically,
+// alice's '!' appears after bob's '?' → both see "Hello?!"</code></pre>
+        <div class="callout">
+          <p>
+            <strong>Production note:</strong> Yjs, the leading open-source CRDT library used by TipTap, Lexical,
+            and ProseMirror, uses an optimised variant of this algorithm with O(1) amortised insert by keeping a
+            position cache. Raw RGA is O(n) per insert in the worst case. For documents over ~50k characters,
+            use Yjs directly rather than rolling your own.
+          </p>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════ PRESENCE ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Code · WebSocket Presence System</span>
+        <h2>Real-Time Cursor Presence with WebSocket Fan-Out</h2>
+        <p>
+          Presence data — cursor positions, user names, selection ranges — is fundamentally different from document
+          mutations. It is:
+        </p>
+        <ul>
+          <li><strong>Ephemeral:</strong> you never need to persist cursor positions to a database</li>
+          <li><strong>Lossy-acceptable:</strong> dropping a cursor update is fine; the next one arrives in ~100ms</li>
+          <li><strong>Strongly scoped:</strong> only users in the same document session need to see it</li>
+        </ul>
+        <p>
+          The architecture is a stateful in-memory session map on each WebSocket server node. Presence updates
+          never hit the database. When a user disconnects, their cursor is simply removed from the broadcast list.
+        </p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Server-side WebSocket presence manager (Node.js / ws library)
+import { WebSocketServer } from 'ws';
+
+// documentId → Map&lt;clientId, { ws, user, cursor, selection }&gt;
+const sessions = new Map();
+
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on('connection', (ws, req) => {
+  const url = new URL(req.url, 'ws://localhost');
+  const docId = url.searchParams.get('docId');
+  const userId = url.searchParams.get('userId');
+  const userName = url.searchParams.get('name') ?? 'Anonymous';
+
+  if (!docId) { ws.close(1008, 'Missing docId'); return; }
+
+  // Register this client in the document session
+  if (!sessions.has(docId)) sessions.set(docId, new Map());
+  const session = sessions.get(docId);
+
+  const clientState = { ws, userId, userName, cursor: null, selection: null };
+  session.set(userId, clientState);
+
+  // Broadcast current presence snapshot to the newly joined user
+  ws.send(JSON.stringify({
+    type: 'presence_snapshot',
+    users: [...session.values()]
+      .filter(c => c.userId !== userId)
+      .map(({ userId, userName, cursor, selection }) =>
+        ({ userId, userName, cursor, selection })
+      )
+  }));
+
+  // Announce join to existing collaborators
+  broadcast(docId, userId, { type: 'user_joined', userId, userName });
+
+  ws.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch { return; }
+
+    switch (msg.type) {
+      case 'cursor_move':
+        clientState.cursor = msg.cursor;      // { line, ch }
+        clientState.selection = msg.selection; // { anchor, head } | null
+        broadcast(docId, userId, {
+          type: 'cursor_update',
+          userId,
+          userName,
+          cursor: msg.cursor,
+          selection: msg.selection
+        });
+        break;
+
+      case 'doc_op':
+        // Forward document operation to all peers (and your own transform engine)
+        broadcast(docId, userId, { type: 'doc_op', op: msg.op, userId });
+        break;
+
+      default:
+        // Unknown message types are silently dropped
+    }
+  });
+
+  ws.on('close', () => {
+    session.delete(userId);
+    if (session.size === 0) sessions.delete(docId); // GC empty sessions
+    broadcast(docId, null, { type: 'user_left', userId });
+  });
+});
+
+// Fan-out to all clients in a session except the sender
+function broadcast(docId, senderId, payload) {
+  const session = sessions.get(docId);
+  if (!session) return;
+  const data = JSON.stringify(payload);
+  for (const [id, { ws }] of session) {
+    if (id !== senderId && ws.readyState === 1 /* OPEN */) {
+      ws.send(data);
+    }
+  }
+}
+
+// ── Client-side presence consumer ────────────────────────────────────────────
+class PresenceClient {
+  constructor(docId, userId, userName) {
+    this.cursors = new Map(); // userId → { cursor, userName }
+    const ws = new WebSocket(
+      `ws://localhost:8080?docId=${docId}&userId=${userId}&name=${encodeURIComponent(userName)}`
+    );
+    ws.onmessage = ({ data }) => {
+      const msg = JSON.parse(data);
+      switch (msg.type) {
+        case 'presence_snapshot':
+          msg.users.forEach(u => this.cursors.set(u.userId, u));
+          break;
+        case 'user_joined':
+          this.cursors.set(msg.userId, { userId: msg.userId, userName: msg.userName });
+          break;
+        case 'user_left':
+          this.cursors.delete(msg.userId);
+          break;
+        case 'cursor_update':
+          this.cursors.set(msg.userId, { cursor: msg.cursor, selection: msg.selection, userName: msg.userName });
+          break;
+      }
+      this.onPresenceChange?.(this.cursors); // trigger re-render
+    };
+    this.ws = ws;
+  }
+
+  sendCursor(cursor, selection = null) {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'cursor_move', cursor, selection }));
+  }
+}</code></pre>
+        <div class="callout">
+          <p>
+            <strong>Scaling gotcha:</strong> The above works perfectly on a single node. When you have multiple
+            WebSocket servers, a client on node-1 cannot directly fan-out to clients on node-2. The solution is
+            a pub/sub bus — Redis Pub/Sub or a dedicated channel per <code>docId</code>. Each WebSocket server
+            subscribes to the channel for every active document it hosts and re-broadcasts locally. This adds
+            ~1-2ms to presence propagation and is the correct production architecture at any non-trivial scale.
+          </p>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════ PART 2: SCALING ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 2 · Scaling Challenges</span>
+        <h2>Where the MVP Breaks at Production Scale</h2>
+        <p>
+          The MVP described above fails in predictable ways once you hit roughly 500 concurrent editors on a
+          single document (think a company-wide shared OKR doc) or 100k concurrent document sessions across
+          the platform. Here are the exact failure modes, with solutions.
+        </p>
+
+        <h3>1. Operation Log Thundering Herd</h3>
+        <p>
+          Every document operation must be persisted durably before being broadcast (otherwise you can lose
+          writes on a server crash). At low scale, a synchronous PostgreSQL write per operation is fine. At
+          high scale, 50 users each typing at 10 chars/second generates 500 writes/second on a single document —
+          easily overwhelming a row lock on the document's operation log table.
+        </p>
+        <p>
+          <strong>Fix:</strong> Batch operations into micro-transactions (50ms windows). A write-ahead buffer
+          accumulates ops in Redis, flushes to PostgreSQL every 50ms, then broadcasts the flush sequence number
+          to all clients. Clients maintain an unacknowledged op buffer and re-apply after receiving the
+          authoritative sequence. This is exactly the Jupiter transformation algorithm from Google Docs.
+        </p>
+
+        <h3>2. Fan-Out Storm on Large Collaborative Sessions</h3>
+        <p>
+          A 200-person shared document with everyone active simultaneously means every keystroke fans out to
+          199 WebSocket connections. At 200 users typing 5 chars/second each, a single WebSocket server handles
+          200 × 5 × 199 = ~200k messages/second of fan-out traffic just for that document. A single Node.js
+          WebSocket server handles ~50k msg/s realistically.
+        </p>
+        <p>
+          <strong>Fix:</strong> Implement operational coalescing. Batch all ops from the same 50ms window into
+          a single broadcast message. Also enforce a "presence throttle" — cursor moves from the same user are
+          coalesced to at most 10 updates/second even if the user is typing faster. These two changes reduce
+          fan-out by 80-90% in practice.
+        </p>
+
+        <h3>3. Presence System Memory Growth</h3>
+        <p>
+          The in-memory session map unbounded-grows if clients disconnect without a clean close (mobile app
+          backgrounded, browser tab killed). Redis-backed presence with TTL-keyed keys solves this:
+          each presence heartbeat resets the TTL; when the TTL expires the cursor is removed automatically.
+          Set TTL to 30 seconds; heartbeat interval to 10 seconds. Users on slow connections get 2 missed
+          heartbeats before being considered offline.
+        </p>
+
+        <h3>4. Document Snapshot Divergence</h3>
+        <p>
+          The materialized snapshot (used for fast document loads) can diverge from the operation log if your
+          snapshot job crashes mid-write. The solution: store the snapshot with the sequence number of the last
+          op that was included. On load, fetch the snapshot plus all ops with sequence &gt; snapshot_seq and
+          replay them. This is exactly how event-sourced systems reconstruct state and is O(n) in the number
+          of un-snapshotted ops, not O(total ops).
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════ PART 3: GenAI ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Part 3 · GenAI Integration</span>
+        <h2>Where AI Earns Its Place in the Architecture</h2>
+        <p>
+          The fundamental question before adding any GenAI feature is: <em>does this address a genuine
+          understanding gap, or am I solving a storage/retrieval problem that a simpler system handles better?</em>
+          Keyword search across documents is a retrieval problem — Elasticsearch solves it. Autocomplete based
+          on the last 5 words is a statistical problem — n-gram models solve it. The genuinely hard understanding
+          problems that justify LLMs are:
+        </p>
+        <ul>
+          <li>Semantic search: "find the section where we discussed the pricing strategy" with no exact keyword match</li>
+          <li>Cross-document synthesis: "summarise all meeting notes from Q3 where we mentioned customer churn"</li>
+          <li>Contextual writing assistance: suggest the next paragraph consistent with the document's existing argument</li>
+          <li>Intent-aware formatting: restructure a prose dump into a structured table or action-item list</li>
+        </ul>
+
+        <h3>RAG Architecture for Document Search</h3>
+        <p>
+          The correct RAG pipeline for a document platform is chunk-based, not document-based. Documents are
+          split into semantic chunks (paragraph or section level), embedded with a text embedding model
+          (OpenAI <code>text-embedding-3-small</code>, or a self-hosted BGE-M3), and stored in a vector
+          database (pgvector for simplicity, Weaviate or Qdrant at scale). At query time, the top-k chunks are
+          retrieved and injected into the LLM prompt as context.
+        </p>
+        <p>
+          Critical detail: chunks must carry document metadata (doc ID, section title, author, last-modified
+          timestamp) so permission filtering can be applied at retrieval time. A user who cannot read a document
+          must never receive chunks from it in a semantic search result — this is a security invariant that
+          must be enforced at the vector database query layer, not in post-processing.
+        </p>
+
+        <h3>AI Writing Assistant Architecture</h3>
+        <p>
+          The writing assistant needs two context sources: (1) the surrounding document content (already in
+          the model context window), and (2) the organisation's relevant documents retrieved via RAG. The
+          challenge is context window management — a 50-page document cannot fit in the prompt. The solution
+          is hierarchical context selection:
+        </p>
+        <ol>
+          <li>Include the 3 paragraphs immediately before and after the cursor (local context, ~500 tokens)</li>
+          <li>Include the document outline/headings (structural context, ~200 tokens)</li>
+          <li>Include top-3 RAG chunks from related documents (external context, ~800 tokens)</li>
+          <li>Include the system prompt with formatting instructions (~300 tokens)</li>
+        </ol>
+        <p>
+          Total: ~1800 tokens per AI request. This fits in <code>claude-3-5-haiku</code> or <code>gpt-4o-mini</code>
+          with room to generate 500 tokens of output. Streaming the response token-by-token via SSE gives the
+          user a typewriter effect that signals progress and allows early cancellation.
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════ AI SUMMARISATION CODE ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Code · AI Document Summarisation Pipeline</span>
+        <h2>Context-Aware Document Summarisation with RAG</h2>
+        <p>
+          This example shows the full summarisation pipeline: extract chunks from the document, embed them,
+          retrieve relevant cross-document context, and call the LLM with a structured prompt. This runs as
+          a background job, not in the hot path of the editing session.
+        </p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// Document summarisation pipeline with RAG context injection
+// Uses Anthropic Claude SDK + pgvector for semantic retrieval
+
+import Anthropic from '@anthropic-ai/sdk';
+import { Pool } from 'pg';
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// ── Step 1: Chunk a document into semantic paragraphs ─────────────────────────
+function chunkDocument(plainText, docId, docTitle) {
+  const paragraphs = plainText
+    .split(/\n{2,}/)
+    .map(p => p.trim())
+    .filter(p => p.length > 50); // drop empty / too-short paragraphs
+
+  return paragraphs.map((text, idx) => ({
+    docId,
+    docTitle,
+    chunkIndex: idx,
+    text,
+    charStart: plainText.indexOf(text)
+  }));
+}
+
+// ── Step 2: Embed chunks and upsert into pgvector ─────────────────────────────
+async function embedAndStore(chunks) {
+  // Batch embed — Anthropic doesn't have a dedicated embeddings endpoint;
+  // use OpenAI text-embedding-3-small or Cohere embed for production
+  const { data } = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'text-embedding-3-small',
+      input: chunks.map(c => c.text)
+    })
+  }).then(r => r.json());
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (let i = 0; i < chunks.length; i++) {
+      const embedding = data[i].embedding; // float32 array, dim=1536
+      await client.query(
+        `INSERT INTO doc_chunks (doc_id, doc_title, chunk_index, text, embedding)
+         VALUES ($1, $2, $3, $4, $5::vector)
+         ON CONFLICT (doc_id, chunk_index) DO UPDATE
+           SET text = EXCLUDED.text, embedding = EXCLUDED.embedding`,
+        [chunks[i].docId, chunks[i].docTitle, chunks[i].chunkIndex,
+         chunks[i].text, JSON.stringify(embedding)]
+      );
+    }
+    await client.query('COMMIT');
+  } finally {
+    client.release();
+  }
+}
+
+// ── Step 3: Retrieve top-k semantically relevant chunks ───────────────────────
+async function retrieveRelatedChunks(queryText, userId, excludeDocId, k = 5) {
+  // Embed the query
+  const { data } = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ model: 'text-embedding-3-small', input: queryText })
+  }).then(r => r.json());
+
+  const embedding = data[0].embedding;
+
+  // Permission-filtered vector search — only return chunks from docs the user can read
+  const result = await pool.query(
+    `SELECT dc.doc_id, dc.doc_title, dc.text, dc.chunk_index,
+            1 - (dc.embedding <=> $1::vector) AS similarity
+     FROM doc_chunks dc
+     JOIN doc_permissions dp ON dp.doc_id = dc.doc_id
+     WHERE dp.user_id = $2
+       AND dp.permission IN ('view', 'comment', 'edit')
+       AND dc.doc_id != $3
+     ORDER BY dc.embedding <=> $1::vector
+     LIMIT $4`,
+    [JSON.stringify(embedding), userId, excludeDocId, k]
+  );
+
+  return result.rows;
+}
+
+// ── Step 4: Generate AI summary with context ──────────────────────────────────
+async function summariseDocument(docId, docText, userId) {
+  const outline = extractOutline(docText); // Extract H1/H2 headings
+  const relatedChunks = await retrieveRelatedChunks(
+    outline.join(' '), userId, docId, 3
+  );
+
+  const relatedContext = relatedChunks.map(c =>
+    `[From "${c.doc_title}" — similarity ${(c.similarity * 100).toFixed(0)}%]\n${c.text}`
+  ).join('\n\n---\n\n');
+
+  const message = await anthropic.messages.create({
+    model: 'claude-3-5-haiku-20241022',
+    max_tokens: 500,
+    system: `You are a document analyst. Produce a concise, structured summary.
+Output format: 3-5 bullet points covering the main decisions, open questions, and action items.
+If related documents are provided, note any contradictions or dependencies.`,
+    messages: [{
+      role: 'user',
+      content: `DOCUMENT TO SUMMARISE:\n${docText.slice(0, 4000)}\n\n` +
+               (relatedContext
+                 ? `RELATED CONTEXT FROM OTHER DOCUMENTS:\n${relatedContext}`
+                 : '')
+    }]
+  });
+
+  return message.content[0].text;
+}
+
+function extractOutline(text) {
+  // Extract markdown headings as outline
+  return text.match(/^#{1,3}\s+.+$/gm) ?? [];
+}
+
+// ── Usage ─────────────────────────────────────────────────────────────────────
+const DOC_TEXT = `
+# Q3 Product Roadmap
+
+## Pricing Strategy
+We discussed moving to usage-based pricing in the Aug 12 meeting.
+The customer success team flagged that enterprise customers prefer seat-based pricing...
+
+## Engineering Priorities
+The CRDT migration is blocked on the mobile client team completing the Yjs integration.
+Target: complete by end of September.
+`;
+
+const chunks = chunkDocument(DOC_TEXT, 'doc-123', 'Q3 Product Roadmap');
+await embedAndStore(chunks);
+const summary = await summariseDocument('doc-123', DOC_TEXT, 'user-alice');
+console.log('Summary:\n', summary);
+/* Output:
+   - Pricing strategy under review: considering shift to usage-based model;
+     enterprise customers prefer seat-based (conflicts with doc-456 which approved usage-based)
+   - CRDT migration blocked on mobile Yjs integration; September deadline at risk
+   - No explicit action items assigned in this document
+*/</code></pre>
+      </section>
+
+      <!-- ═══════════════════════════════ FAILURE MODES ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>How Collaborative Doc Systems Break in Production</h2>
+
+        <h3>Split-Brain Document State</h3>
+        <p>
+          Symptom: two users see different document content even after both are "online." Root cause: the
+          WebSocket server crashed mid-operation, some clients received the op and some did not, and the
+          reconnect logic replayed ops from the wrong sequence number. Fix: every client stores the last
+          acknowledged server sequence number. On reconnect, send that number and the server replays all
+          missing ops from the operation log. This is the exact protocol Google Docs uses.
+        </p>
+
+        <h3>CRDT Tombstone Accumulation</h3>
+        <p>
+          A document with 5 years of edit history accumulates tombstone nodes for every deleted character.
+          A 10,000-word document that has been edited 100 times may have 500k tombstone nodes in memory.
+          Fix: run periodic GC passes. Any tombstone node that has been acknowledged by all currently connected
+          clients (tracked via a vector clock per session) can be physically deleted. Do this as an offline
+          job on documents idle for >24 hours.
+        </p>
+
+        <h3>AI Context Injection Leading to Edit Conflicts</h3>
+        <p>
+          An AI writing suggestion arrives as a batch document insertion. If the user has typed concurrently
+          while the AI was generating (2-4 second latency), the AI's insertion position is now stale. Naive
+          implementations overwrite the user's concurrent edits. Fix: AI suggestions must go through the same
+          CRDT/OT path as human edits. The AI is just another "client" with a site ID. Its operations are
+          transformed against the user's concurrent ops just like any peer edit.
+        </p>
+
+        <h3>Vector Index Staleness</h3>
+        <p>
+          A document is semantically searched one second after being edited. The new content is not yet
+          indexed (embedding jobs run asynchronously). The search returns outdated context. Fix: implement
+          a "freshness guard" — if the document was edited within the last N seconds, perform a direct
+          lexical search on the latest snapshot in addition to the vector search and merge results. This
+          hybrid approach avoids the indexing lag problem at the cost of slightly higher query latency.
+        </p>
+      </section>
+
+      <!-- ═══════════════════════════════ SCALING CONSTRAINTS ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Scaling Constraints &amp; Production Gotchas</span>
+        <h2>Numbers Every Architect Should Know</h2>
+        <ul>
+          <li><strong>WebSocket connection density:</strong> ~50k concurrent connections per Node.js process
+            at reasonable memory. Google Docs routes by document ID to a shard — a single document's collaborators
+            always land on the same server for fan-out efficiency.</li>
+          <li><strong>Operation log write throughput:</strong> PostgreSQL handles ~5k writes/second per table
+            with synchronous WAL. Batch writes in 50ms windows to stay comfortably under this with tens of
+            thousands of active users.</li>
+          <li><strong>Embedding latency:</strong> OpenAI text-embedding-3-small processes ~20k tokens/second
+            via the API. A 10-page document (~5k tokens) takes ~250ms to embed. Run embedding jobs async;
+            never block the editing path.</li>
+          <li><strong>LLM suggestion latency:</strong> First-token latency for claude-3-5-haiku is ~500ms.
+            Users tolerate up to 1 second for an AI suggestion. Streaming the response token-by-token keeps
+            perceived latency at ~500ms regardless of total generation time.</li>
+          <li><strong>Document load time:</strong> If the snapshot is &lt;6 months old and the op log has
+            &lt;10k unprocessed ops, load time should be under 200ms on a warm PostgreSQL primary. Beyond
+            this, force a new snapshot before the user session begins.</li>
+          <li><strong>Vector search latency (pgvector):</strong> HNSW index on 10M chunks returns top-5
+            results in ~20ms. Beyond 50M chunks, migrate to a dedicated vector DB with better memory mapping.</li>
+          <li><strong>Presence heartbeat cost:</strong> 10k active users each sending a 10-second heartbeat
+            = 1k requests/second to the presence service. Redis Pub/Sub handles this trivially; a relational
+            database presence table at this rate is a common anti-pattern that destroys write throughput.</li>
+        </ul>
+      </section>
+
+      <!-- ═══════════════════════════════ CHECKLIST ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Practical Checklist</span>
+        <h2>System Design Interview Checklist</h2>
+        <ul class="check-list">
+          <li>Choose CRDT (Yjs/RGA) for greenfield; choose OT (Jupiter protocol) if you need strict server-authoritative sequencing</li>
+          <li>Append-only operation log is the source of truth; materialized snapshot is an optimisation</li>
+          <li>WebSocket gateway shards by document ID so all collaborators on one document share a server</li>
+          <li>Presence data lives in Redis with TTL; never in PostgreSQL</li>
+          <li>Redis Pub/Sub bus connects WebSocket servers for cross-node fan-out</li>
+          <li>Coalesce operations into 50ms batches before broadcast and persistence</li>
+          <li>Reconnect protocol: client sends last-ack'd sequence; server replays from log</li>
+          <li>Snapshot includes the sequence number of the last op it reflects</li>
+          <li>CRDT tombstone GC runs as an offline job on idle documents</li>
+          <li>AI suggestions are routed through the same CRDT transform path as human edits</li>
+          <li>RAG permission filtering is enforced at query time, not post-processing</li>
+          <li>Embedding jobs are async; hybrid search (vector + lexical) covers freshness gaps</li>
+          <li>LLM context budget: local (~500 tokens) + structural (~200) + RAG (~800) + system (~300) = ~1800 tokens per request</li>
+          <li>Streaming AI output via SSE; first-token latency &lt;1s is the UX target</li>
+          <li>Rate-limit AI features per user; uncapped usage will blow your LLM cost budget in days</li>
+        </ul>
+      </section>
+
+      <!-- ═══════════════════════════════ FAQ ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Interview Questions &amp; Answers</h2>
+
+        <details>
+          <summary>Why not just use Last-Write-Wins for conflict resolution?</summary>
+          <p>
+            LWW loses concurrent edits. If Alice types "cat" and Bob types "dog" at the same position
+            simultaneously, LWW discards one writer's work entirely. CRDT and OT both preserve intent:
+            the final document contains characters from both edits, interleaved by timestamp. For
+            plain key-value metadata (document title, last-modified-by), LWW is perfectly acceptable.
+            For text content, it is not.
+          </p>
+        </details>
+
+        <details>
+          <summary>Can you use a relational database as the operation log at scale?</summary>
+          <p>
+            Yes, with batching. An append-only table in PostgreSQL with a (doc_id, sequence_number)
+            index can sustain high throughput if you batch writes (50ms windows) and use range-based
+            partitioning by doc_id. Beyond ~1B total operations, partition by creation_date and archive
+            old partitions to object storage (S3/GCS). Kafka is a common alternative for the operation
+            log — its sequential write throughput is higher than PostgreSQL, but it adds operational
+            complexity and requires a separate consumer to materialise snapshots.
+          </p>
+        </details>
+
+        <details>
+          <summary>How does Google Docs handle the single-server bottleneck for popular documents?</summary>
+          <p>
+            Google Docs does not shard a single document across multiple servers — the OT sequencing
+            server for a document is a single authoritative instance. What they do instead is limit how
+            many people can actively edit the same document (the viewer cap is 100 active editors, with
+            additional users in view-only mode). The server communicates via their internal Stubby RPC
+            and runs in Google's distributed infrastructure with automatic failover. The practical
+            answer for an interview: at Google scale, you tolerate the single-server limit via capacity
+            planning + fast failover, not by splitting the sequencer.
+          </p>
+        </details>
+
+        <details>
+          <summary>Should AI suggestions be synchronous or asynchronous?</summary>
+          <p>
+            Always asynchronous from the user's perspective. The editing session should never block on
+            an LLM call. Trigger AI suggestions on a debounced pause (user stops typing for 1.5 seconds),
+            send the request in the background, stream the response token-by-token, and render it as a
+            ghost suggestion that the user can accept (Tab) or dismiss (Escape). This is the exact
+            pattern GitHub Copilot uses. Blocking the editor on a 2-second LLM call would make the
+            product unusable.
+          </p>
+        </details>
+
+        <details>
+          <summary>How do you handle AI-generated content in the revision history?</summary>
+          <p>
+            Treat AI-generated insertions as a first-class author in the revision history. Each
+            operation carries an <code>authorType</code> field: <code>"human"</code> or
+            <code>"ai"</code>, plus the AI model ID and the prompt fragment that triggered it.
+            This is important for three reasons: (1) auditors need to know which content was AI-generated;
+            (2) users can selectively revert AI edits; (3) AI-generated text must be excluded from
+            retrieval contexts when generating new AI suggestions to avoid circular hallucination loops.
+          </p>
+        </details>
+
+        <details>
+          <summary>What is the biggest cost driver in a GenAI-augmented doc platform?</summary>
+          <p>
+            LLM API calls, by a large margin. A single AI suggestion generation costs ~$0.001 with
+            claude-3-5-haiku. If 10k users each trigger 20 suggestions per session and have 5 sessions
+            per day, that is $1,000/day in LLM costs — $365k/year — before any growth. The mitigation
+            playbook: aggressive client-side debouncing (reduce suggestion trigger frequency), response
+            caching for common prompt patterns (often 20-30% cache hit rates on short completions),
+            and tiered access (AI features gated behind a paid plan).
+          </p>
+        </details>
+      </section>
+
+      <!-- ═══════════════════════════════ RELATED ═══════════════════════════════ -->
+      <section class="content-card">
+        <span class="section-label">Related Topics</span>
+        <h2>Continue Learning</h2>
+        <ul>
+          <li><a href="discord-presence-system-design.html">Discord Presence System Design</a> — deep dive on ephemeral state fan-out at scale</li>
+          <li><a href="real-time-leaderboard-system-design.html">Real-Time Leaderboard System Design</a> — Redis sorted sets and WebSocket push patterns</li>
+          <li><a href="22-system-design-failure-scenarios.html">22 System Design Failure Scenarios</a> — distributed system failure patterns with production postmortems</li>
+          <li><a href="agent-memory-evals-guardrails.html">Agent Memory, Evals &amp; Guardrails</a> — memory architectures relevant to long-context AI writing assistants</li>
+          <li><a href="system-design-concepts.html">System Design Concepts</a> — foundational patterns: consistency models, CAP theorem, partition tolerance</li>
+        </ul>
+      </section>
+
+      <!-- ═══════════════════════════════ TAKEAWAY ═══════════════════════════════ -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Building a collaborative document platform is fundamentally an exercise in distributed consistency,
+          not storage. The sync primitive — whether CRDT or OT — is a load-bearing architectural choice that
+          ripples through your persistence model, your reconnect protocol, your scaling topology, and your
+          AI integration. The pattern that survives production is: append-only operation log as source of
+          truth, materialized snapshot for fast loads, CRDT for conflict-free convergence, Redis for ephemeral
+          presence, and GenAI layered on top only once the document state is reliably correct. A user who
+          loses an edit because of a sync bug will never trust the AI writing assistant sitting above that
+          broken foundation. Get the correctness primitives right first; the generative layer is straightforward
+          by comparison.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

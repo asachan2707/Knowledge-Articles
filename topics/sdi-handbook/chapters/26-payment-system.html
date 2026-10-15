@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Payment System | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Created 2026-10-15 from liquidslr/system-design-notes ch.26. Covers pay-in and pay-out flows, payment events/orders data model, double-entry ledger vs wallet, hosted payment page and webhooks, reconciliation, delayed payments (3DS), sync vs async messaging with outbox, retry strategies and DLQ, exactly-once via idempotency, consistency and security. Includes an executed Node example (idempotent payments, ledger, back-off, reconciliation). Read time about 25 min. Related: ch25 leaderboard, ch27 digital wallet, payment gateway hub page, idempotency.</div>
+        <h1>Design a Payment System</h1>
+        <p class="summary">How to move money through a PSP without losing or duplicating a cent: idempotency keys, a double-entry ledger, retries with dead-letter queues, hosted payment pages, and nightly reconciliation.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">Chapter 26 of 28 · Part 6 Transactional Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">23 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Idempotency keys, double-entry ledger, retry and DLQ, reconciliation, hosted payment page</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Stripe, Adyen, Braintree, Kafka, PostgreSQL, CockroachDB, Visa/Mastercard</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">A payment system is the part of an e-commerce company where a bug is not an outage, it is somebody's money. The interesting engineering is not throughput (the chapter's own estimate is about ten transactions per second) but <em>never losing, duplicating, or mis-attributing a cent</em> while talking to external systems that time out, retry, lie, and settle a day later.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Treat every payment as a state machine keyed by a client-generated idempotency key, drive it with at-least-once retries, make every side effect idempotent, record money only in an append-only double-entry ledger, and assume your view of the world is wrong until tomorrow's reconciliation proves otherwise.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known public design</span>
+        <h2>Stripe's Idempotency-Key header</h2>
+        <p>Stripe's public API popularised the pattern this whole chapter leans on: the client generates a unique key (typically a UUID), sends it in an <code>Idempotency-Key</code> header on a POST, and the server stores the status code and body of the <em>first</em> execution under that key. A retry with the same key replays the saved response instead of charging again; a retry with the same key but different parameters is rejected as a misuse. Their docs note that keys are pruned after a retention window (24 hours at time of writing), which is a good reminder that an idempotency store is a bounded-lifetime cache of outcomes, not a ledger.</p>
+        <p>Everything below, from the <code>payment_order_id</code> forwarded to the PSP to the unique constraint on the orders table, is the same idea applied at each hop.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scope &amp; Requirements</span>
+        <h2>What we are actually building</h2>
+        <p>The scenario is the money backend of an Amazon-style marketplace. Card processing is delegated to a third-party Payment Service Provider (Stripe, Braintree, Adyen, Square). Raw card numbers never touch our systems, for compliance reasons. The product is global but we model one currency. Volume is about a million transactions a day. Two flows are in scope, and one cross-cutting capability is mandatory.</p>
+        <table class="data-table">
+          <thead><tr><th>Item</th><th>Requirement</th><th>Why it matters</th></tr></thead>
+          <tbody>
+            <tr><td>Pay-in</td><td>Collect money from buyers on behalf of sellers</td><td>The revenue path; one buyer checkout may fan out into several seller payment orders</td></tr>
+            <tr><td>Pay-out</td><td>Send accumulated seller balances to bank accounts, e.g. monthly</td><td>Same plumbing, different regulatory and bookkeeping burden</td></tr>
+            <tr><td>Reliability</td><td>Failed or ambiguous payments are handled deliberately, never dropped</td><td>An unknown outcome is worse than a known failure</td></tr>
+            <tr><td>Reconciliation</td><td>Detect and repair divergence between internal records and PSP/bank records</td><td>Every distributed step can fail halfway; this is the safety net</td></tr>
+            <tr><td>Consistency over speed</td><td>Strong consistency; latency is secondary</td><td>Choose the boring ACID database</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Back-of-envelope</p>
+        <ul>
+          <li>Rate: 1,000,000 transactions / 86,400 s = 11.6 TPS, call it 10 TPS. Using the usual 5x peak multiplier gives roughly 60 TPS. Flash-sale spikes can be higher, but a single well-provisioned relational primary does thousands of simple writes per second.</li>
+          <li>Storage: a payment event plus its orders plus ledger rows is a few KB. At roughly 3 KB per transaction, 1M/day is about 3 GB/day, around 1 TB/year before indexes. That is a small database, but it must be retained for years for audit and tax reasons, so plan for archival tiers rather than deletion.</li>
+          <li>Conclusion: capacity is a non-problem. If an interviewer pushes toward sharding at this scale, politely point out that the engineering budget belongs to correctness, idempotency, and recovery. (Contrast with the <a href="./27-digital-wallet.html">digital wallet chapter</a>, where 1M <em>TPS</em> changes everything.)</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-Level Design</span>
+        <h2>Cast of characters and the pay-in flow</h2>
+        <p>Three parties move money: the payer, the payee, and the intermediaries who clear it. Inside our boundary the pieces are as follows.</p>
+        <table class="data-table">
+          <thead><tr><th>Component</th><th>Responsibility</th><th>Owns state?</th></tr></thead>
+          <tbody>
+            <tr><td>Payment service</td><td>Accepts a payment event (a checkout), validates it, runs risk/AML screening through a third party, coordinates the orders</td><td>Yes: events and orders tables</td></tr>
+            <tr><td>Payment executor</td><td>Executes one payment order against the PSP; the only component that talks to the PSP</td><td>Yes: per-order attempt state</td></tr>
+            <tr><td>PSP</td><td>Moves money, e.g. from the buyer's card account to our bank account</td><td>External</td></tr>
+            <tr><td>Card schemes</td><td>Visa, Mastercard and similar networks that the PSP talks to</td><td>External</td></tr>
+            <tr><td>Wallet</td><td>Current balance per merchant (what we owe each seller)</td><td>Yes: mutable balances</td></tr>
+            <tr><td>Ledger</td><td>Immutable double-entry record of every money movement</td><td>Yes: append-only</td></tr>
+          </tbody>
+        </table>
+        <div class="diagram-box"><span class="hi">PAY-IN, HAPPY PATH</span>
+ Buyer ──"place order"──▶ <span class="hi">Payment Service</span> ──(1) persist payment_event + N payment_orders
+                               │
+                               ├──(2) risk / AML check (3rd party)
+                               ▼
+                         <span class="hi">Payment Executor</span> ──(3) store order = EXECUTING
+                               │
+                               ├──(4) charge(order_id as idempotency key) ──▶ <span class="warn">PSP</span> ──▶ card scheme ──▶ issuer
+                               │◀─────────── result / webhook ─────────────────┘
+                               ▼
+              <span class="ok">order = SUCCESS</span>
+                               │
+                               ├──(5) <span class="hi">Wallet</span>: seller balance += amount   (wallet_updated = true)
+                               └──(6) <span class="hi">Ledger</span>: buyer -amount / seller +amount (ledger_updated = true)</div>
+        <p>Notice the two boolean columns on the order row. They are not decoration. They record which downstream side effects have been durably applied, so that a background job can finish whatever a crash interrupted. The PSP call is the one step we cannot undo, so everything after it must be retryable until it sticks.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">API &amp; Data Model</span>
+        <h2>Contracts and tables</h2>
+        <p class="mini-heading">API</p>
+        <p><code>POST /v1/payments</code> takes the buyer, a <code>checkout_id</code>, card information (in practice a PSP token, see the hosted page below) and a list of <code>payment_orders</code>. Each order carries <code>seller_account</code>, <code>amount</code>, <code>currency</code> and a globally unique <code>payment_order_id</code>. <code>GET /v1/payments/{id}</code> returns the status of one order.</p>
+        <ul class="check-list">
+          <li><strong>Amount is a string (or an integer of minor units).</strong> Binary floating point cannot represent 0.10 exactly, and the error compounds across millions of rows. Store integer cents plus an ISO 4217 currency code; remember currencies with zero or three decimal places (JPY, KWD) so "cents" is really "minor units".</li>
+          <li><strong><code>payment_order_id</code> is the idempotency key.</strong> It is generated by the caller (or by the payment service at checkout creation, <em>before</em> any external call) and forwarded to the PSP, which de-duplicates on it.</li>
+          <li>The event is one checkout; the orders are one per seller. A single card authorisation may need splitting across sellers, which is why two tables exist.</li>
+        </ul>
+        <p class="mini-heading">Tables</p>
+        <table class="data-table">
+          <thead><tr><th>Table</th><th>Key columns</th></tr></thead>
+          <tbody>
+            <tr><td><code>payment_events</code></td><td><code>checkout_id</code> PK, buyer reference, card/token reference, <code>is_payment_done</code></td></tr>
+            <tr><td><code>payment_orders</code></td><td><code>payment_order_id</code> PK, <code>checkout_id</code> FK, buyer account, seller account, amount, currency, <code>payment_order_status</code> (NOT_STARTED, EXECUTING, SUCCESS, FAILED), <code>ledger_updated</code>, <code>wallet_updated</code></td></tr>
+          </tbody>
+        </table>
+        <p>Pay-out later needs seller details that pay-in does not, so keep them out of the event row and reference a normalised seller table instead of storing blobs in string columns.</p>
+        <p class="mini-heading">Why a boring SQL database</p>
+        <p>Payment volume is low and consistency is everything, so the choice is driven by trust: multi-statement ACID transactions, unique constraints (which we will use as the idempotency enforcement mechanism), a deep hiring pool of DBAs, mature tooling, and a long track record in financial institutions. PostgreSQL or MySQL with a synchronous standby is the default answer. Document and wide-column stores buy scale you do not need and cost you constraints you do.</p>
+        <div class="diagram-box"><span class="hi">ORDER STATE MACHINE</span>
+   NOT_STARTED ──claim──▶ EXECUTING ──PSP ok──▶ <span class="ok">SUCCESS</span> ──┬─ ledger_updated=true
+        │                    │    │                        └─ wallet_updated=true
+        │                    │    └─PSP definitive decline─▶ <span class="warn">FAILED</span>
+        │                    └─ timeout / 5xx ─▶ retry queue ─▶ (back to EXECUTING, same key)
+        │                                          └─ attempts exhausted ─▶ <span class="warn">dead-letter queue</span>
+   <span class="dim">A sweeper job alerts on any order stuck in EXECUTING beyond its SLA.</span></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Ledger</span>
+        <h2>Double-entry bookkeeping is the spine</h2>
+        <p>Every movement is recorded as two or more lines that sum to zero: the buyer account is debited by the amount while the seller account is credited by the same amount. The invariant "the sum over all entries is zero" is cheap to check and catches an enormous class of bugs, from dropped writes to half-applied refunds. It also gives end-to-end traceability: any balance is the sum of its entries, and any entry points at the transaction that caused it.</p>
+        <table class="data-table">
+          <thead><tr><th>Account</th><th>Debit</th><th>Credit</th></tr></thead>
+          <tbody><tr><td>buyer</td><td>$1</td><td></td></tr><tr><td>seller</td><td></td><td>$1</td></tr></tbody>
+        </table>
+        <p class="mini-heading">Ledger versus wallet</p>
+        <p>They look redundant but answer different questions. The wallet is a mutable, fast-to-read balance ("what can this seller withdraw?"). The ledger is an immutable history ("why is that the balance?"). If they disagree, the ledger is the evidence and the wallet is the cache, so reconciliation can rebuild the wallet from the ledger but not the reverse.</p>
+        <div class="warn-box"><strong>Rules for a ledger:</strong> append only (corrections are new reversing entries, never UPDATE or DELETE); entries for one transaction are written in a single database transaction; the transaction id is unique so replays are no-ops; and nobody gets an "admin" path that edits rows. Auditors will ask.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · PSP Integration</span>
+        <h2>Hosted payment page: keep card data out of your blast radius</h2>
+        <p>The rare large merchants connect directly to card schemes and banks. Everyone else integrates a PSP in one of two ways. In the <strong>API model</strong> your servers collect card details and forward them, which pulls your whole stack into the heaviest tier of PCI DSS scope. In the <strong>hosted page model</strong> the browser sends the card number straight to the PSP (a redirect or an embedded iframe/JS widget), and your backend only ever sees an opaque token. The second is the default recommendation; it shrinks PCI scope to a lightweight self-assessment instead of a full audit of your infrastructure.</p>
+        <div class="diagram-box"><span class="hi">HOSTED PAYMENT PAGE</span>
+ Browser          Payment Service                     PSP
+    │──checkout──────▶│                                 │
+    │                 │──register(order_id, amt, ccy,──▶│   order_id doubles as the PSP's nonce
+    │                 │          expiry, redirect_url)  │
+    │                 │◀──────────── token ─────────────│
+    │                 │ store token on payment_order    │
+    │◀─page(token, redirect_url)───────────────────────│   <span class="dim">card data goes browser→PSP only</span>
+    │──card details ─────────────────────────────────▶│
+    │◀──redirect to redirect_url?token=…&amp;result=…────│   <span class="warn">untrusted: user can edit this URL</span>
+    │                 │◀────── webhook(result) ─────────│   <span class="ok">authoritative, signed</span>
+    │                 │ verify signature → record result│</div>
+        <ul class="check-list">
+          <li><strong>Trust the webhook, not the redirect.</strong> The redirect query string is under the user's control. Treat it as a hint to refresh the UI; mutate state only from the signed server-to-server webhook (verify the HMAC signature, check timestamp to blunt replays) or from your own explicit API poll.</li>
+          <li>Webhooks are delivered at-least-once, possibly out of order and possibly never. De-duplicate on the event id, make the handler idempotent, and keep a polling fallback.</li>
+          <li>Store the registration token before showing the page; if the user closes the tab, the token lets you query the PSP for the outcome later.</li>
+        </ul>
+        <p class="mini-heading">Pay-out</p>
+        <p>Structurally the same: money moves from our bank account to the seller's. Differences are operational. A payables provider (Tipalti is the chapter's example) handles seller onboarding, tax forms, bank-detail validation, and the long tail of country-specific rails. Expect more compliance (KYC/AML, sanctions screening, withholding rules), more manual exception handling, and batch-oriented timing rather than interactive latency. Because payouts are driven by wallet balances, the ledger and wallet must be reconciled <em>before</em> a payout run, or you will pay out money you do not owe.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Reconciliation</span>
+        <h2>Tomorrow's file is the real source of truth</h2>
+        <p>Happy-path engineering only gets you most of the way. Webhooks go missing, processes crash between the PSP call and the ledger write, and PSPs themselves have incidents. The backstop is a nightly job: the PSP (and banks) send a settlement file listing every charge they believe happened, and we compare it with our own records. The same comparison can run internally, ledger versus wallet versus order table.</p>
+        <div class="diagram-box"><span class="hi">NIGHTLY RECONCILIATION</span>
+  PSP settlement file ─┐
+                       ├─▶ <span class="hi">match on payment_order_id</span> ──▶ matched ✔
+  internal orders      ┘                      │
+                                              ├─ amount differs ─────▶ mismatch
+                                              ├─ at PSP, not ours ───▶ mismatch (we missed a webhook / crashed)
+                                              └─ ours, not at PSP ───▶ mismatch (charge never happened?)
+  mismatches ─▶ <span class="ok">classifiable + automatable</span> → apply standard adjustment
+              ├▶ <span class="note">classifiable, not automatable</span> → finance team fixes by hand
+              └▶ <span class="warn">unclassifiable</span> → investigation, then manual adjustment</div>
+        <p>The point of the three buckets is to shrink the third one over time: every unclassifiable break that gets diagnosed becomes a rule in the first bucket. Two practical details are cut-off times (a charge made at 23:59:58 may land in tomorrow's file, so match on windows and carry over unmatched rows rather than alarming) and fees (PSP files report gross, fee, and net; your ledger needs a fee account or the sums will never tie).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Latency Tails</span>
+        <h2>When a payment takes hours instead of seconds</h2>
+        <p>Most card payments finish in seconds, but a minority are slow by design: the PSP's risk engine flags the order for manual review, or the issuer demands step-up authentication such as 3-D Secure where the cardholder must approve in their banking app. The design response is to make "pending" a first-class status rather than a timeout to be retried.</p>
+        <ul class="check-list">
+          <li>Complete the checkout request immediately with <code>PENDING</code>; do not hold an HTTP connection open for hours.</li>
+          <li>Wait for the PSP webhook; if the PSP has no webhooks, poll its status API on a back-off schedule.</li>
+          <li>Give the user a status page and optionally an email or push notification when the result lands. Reserve inventory for a bounded time while pending.</li>
+          <li>Model pending-expiry explicitly: after N hours, void the authorisation and release the stock, otherwise you create zombie reservations.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Service Communication</span>
+        <h2>Synchronous call chains versus a message bus</h2>
+        <p>If checkout calls the payment service, which calls the executor, which calls the wallet, which calls the ledger, all over HTTP, then latency adds up, a slow PSP blocks the user, every service must know its neighbours, and a traffic surge has no buffer to absorb it. That works at small scale and is the right way to start. Past a point, move to asynchronous messaging.</p>
+        <table class="data-table">
+          <thead><tr><th>Model</th><th>Semantics</th><th>Payment use</th></tr></thead>
+          <tbody>
+            <tr><td>Single receiver (work queue)</td><td>Many consumers share one subscription; each message handled once by one of them</td><td>Spreading executor work across workers</td></tr>
+            <tr><td>Multiple receivers (pub/sub, consumer groups)</td><td>Every subscriber group sees every message</td><td>One <code>PaymentSucceeded</code> event drives wallet, ledger, notification, analytics and fraud independently</td></tr>
+          </tbody>
+        </table>
+        <p>The second shape fits payments because one success has many independent consequences. Kafka (consumer groups), SQS+SNS fan-out or RabbitMQ topic exchanges all do it. See the hub's <a href="../../system-design/message-queue.html">message queue</a> and <a href="../../system-design/pub-sub.html">pub/sub</a> pages.</p>
+        <div class="insight-box"><strong>Use the transactional outbox.</strong> "Update the order row and publish an event" is a dual write: either can succeed alone. Write the event to an <code>outbox</code> table in the same DB transaction as the state change, and have a relay (poller or CDC such as Debezium) publish it. You get at-least-once publishing without distributed transactions, and consumers de-duplicate on event id.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Failure Handling</span>
+        <h2>Failed payments: classify, retry, park</h2>
+        <p>First decide what <em>kind</em> of failure it is, because the right action differs. A definitive decline (insufficient funds, stolen card) is a business outcome: mark FAILED and tell the user. A transient failure (network timeout, 5xx, rate-limit response) is retryable. An <strong>ambiguous</strong> failure, where the request may or may not have reached the PSP, is the dangerous one: retry with the <em>same</em> idempotency key, or query the PSP by that key, never generate a new key.</p>
+        <div class="diagram-box"><span class="hi">FAILURE ROUTING</span>
+  attempt ──▶ PSP
+     │ success ─────────────▶ SUCCESS → side effects
+     │ definitive decline ──▶ FAILED  → notify user, no retry
+     │ transient / unknown ─▶ <span class="note">retry queue</span> (delay = backoff(attempt) + jitter)
+     │                           │  attempts &lt; max ──▶ attempt again, SAME key
+     │                           └─ attempts = max ───▶ <span class="warn">dead-letter queue</span> → alert, human inspects,
+     │                                                    queries PSP by key, resolves or refunds
+     └─ state is persisted BEFORE each hop, so we always know whether to retry or refund</div>
+        <table class="data-table">
+          <thead><tr><th>Retry strategy</th><th>Behaviour</th><th>Verdict</th></tr></thead>
+          <tbody>
+            <tr><td>Immediate</td><td>Resend at once</td><td>Fine for a single dropped connection; otherwise amplifies an outage</td></tr>
+            <tr><td>Fixed interval</td><td>Constant wait</td><td>Simple; synchronises clients into waves</td></tr>
+            <tr><td>Incremental</td><td>Wait grows linearly</td><td>Gentler, still slow to back off under heavy failure</td></tr>
+            <tr><td>Exponential back-off</td><td>Wait doubles each time, usually capped</td><td>Default. Add random jitter so thousands of retries do not align</td></tr>
+            <tr><td>Cancel</td><td>Stop and surface the failure</td><td>For terminal errors or when attempts or total time budget are exhausted</td></tr>
+          </tbody>
+        </table>
+        <p>Let the server steer clients with a <code>Retry-After</code> header, and use a circuit breaker toward each PSP so a downed provider is not hammered by every worker. A secondary PSP with automatic routing is a common resilience upgrade, but note that a second PSP cannot de-duplicate against the first; failover must be gated on proof that the first attempt did not succeed.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Exactly Once</span>
+        <h2>At-least-once plus idempotency equals "exactly once, effectively"</h2>
+        <p>True exactly-once delivery across a network is impossible, since a lost acknowledgement is indistinguishable from a lost request. What you build is the composition of two guarantees: <strong>at-least-once execution</strong> from retries, and <strong>at-most-once effect</strong> from idempotency. Duplicates arrive from two places: a user who double-clicks Pay, and the case where the PSP succeeded but a downstream step (ledger, wallet) failed and the retry would re-run the whole thing.</p>
+        <p class="mini-heading">Layered defences</p>
+        <ol>
+          <li><strong>Client:</strong> generate the idempotency key when the checkout is created, disable the button, reuse the key on every retry.</li>
+          <li><strong>API edge:</strong> <code>INSERT</code> into the orders table with the key as primary key. A unique-violation means "seen before": load the existing row and return it. The database serialises concurrent duplicates for you, which is far safer than check-then-insert in application code.</li>
+          <li><strong>Fingerprint the payload.</strong> Store a hash of the request with the key. Same key, different body is a client bug; return a 4xx rather than silently returning a response for a different request.</li>
+          <li><strong>PSP:</strong> pass the same key as the provider's idempotency or nonce field, so even if our own state is lost the provider will not double-charge.</li>
+          <li><strong>Downstream:</strong> ledger posting keyed by transaction id (unique constraint), wallet updates guarded by the <code>wallet_updated</code> flag inside the same transaction as the balance change.</li>
+        </ol>
+        <div class="warn-box"><strong>In-flight duplicates:</strong> the second request can arrive while the first is still executing. Return the current status (202/409 style, "in progress") rather than blocking or starting another attempt. And never store only "key seen"; store the key and the outcome, otherwise the retry has nothing to replay.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Consistency &amp; Security</span>
+        <h2>Keeping stateful services in agreement, and keeping attackers out</h2>
+        <p>A payment touches four stateful systems: our payment service, the PSP, the wallet and the ledger. Any pair can disagree after a partial failure. The strategy is not distributed transactions but <strong>eventual consistency with proof</strong>: idempotent retries to push things forward, the state flags to resume, and reconciliation to detect anything that slipped through.</p>
+        <p>Inside the database tier, replication lag is the other trap. A user pays, the page reads from a replica, and the order shows as unpaid. Options, in order of simplicity: serve reads and writes from the primary and use replicas only for failover and analytics; make replicas synchronous via a consensus protocol (Paxos or Raft); or adopt a consensus-based SQL database such as CockroachDB, YugabyteDB or Google Spanner, accepting higher write latency (acceptable at 10 TPS).</p>
+        <table class="data-table">
+          <thead><tr><th>Threat</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Eavesdropping on requests/responses</td><td>TLS everywhere, including internal hops</td></tr>
+            <tr><td>Tampering with data</td><td>Encryption at rest, signed webhooks, integrity monitoring, immutable ledger</td></tr>
+            <tr><td>Man-in-the-middle</td><td>TLS with certificate pinning on mobile clients</td></tr>
+            <tr><td>Data loss</td><td>Multi-region replication, snapshots, tested restores</td></tr>
+            <tr><td>DDoS</td><td>Rate limiting (see <a href="../../system-design/rate-limiting.html">rate limiting</a>), WAF, upstream scrubbing</td></tr>
+            <tr><td>Card theft</td><td>Tokenisation: store PSP tokens, never PANs</td></tr>
+            <tr><td>Compliance</td><td>PCI DSS scope minimisation via hosted fields; audit logs</td></tr>
+            <tr><td>Fraud</td><td>Address verification (AVS), CVV checks, velocity limits, behavioural and ML risk scoring</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decisions and their price</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Hosted page + tokens</h4><ul><li>Card numbers never enter our systems</li><li>Dramatically smaller PCI scope</li><li>PSP handles 3-D Secure and wallets</li></ul></div>
+          <div class="trade-col cons"><h4>Cost</h4><ul><li>Less control over checkout UX</li><li>Dependence on PSP uptime and redirect flow</li><li>Webhook handling becomes critical code</li></ul></div>
+          <div class="trade-col pros"><h4>Async bus between services</h4><ul><li>Failure isolation and buffering</li><li>Independent scaling and easy fan-out</li><li>New consumers need no change upstream</li></ul></div>
+          <div class="trade-col cons"><h4>Cost</h4><ul><li>Eventual consistency and harder debugging</li><li>Duplicates and reordering are now your problem</li><li>Needs outbox, DLQ, and tracing</li></ul></div>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Choice</th><th>Option A</th><th>Option B</th><th>Lean</th></tr></thead>
+          <tbody>
+            <tr><td>Database</td><td>SQL with ACID</td><td>NoSQL / NewSQL</td><td>SQL; unique constraints do real work here</td></tr>
+            <tr><td>Reads</td><td>Primary only</td><td>Replicas</td><td>Primary at this volume</td></tr>
+            <tr><td>Wallet source of truth</td><td>Mutable balance</td><td>Derive from ledger</td><td>Both: ledger authoritative, balance as cache</td></tr>
+            <tr><td>Result trust</td><td>Browser redirect</td><td>Signed webhook + poll</td><td>Webhook + poll</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Idempotent pay-in, double-entry ledger, retries and reconciliation</h2>
+        <p>This Node program models the core loop: integer-cent money, a PSP that de-duplicates on the key and fails transiently on demand, exponential back-off with a dead-letter queue, a ledger that refuses unbalanced transactions, and a reconciliation pass over a mock settlement file. It was executed and its assertions pass.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Payment core: idempotent pay-in, double-entry ledger, retry with backoff + DLQ, nightly reconciliation.
+import assert from 'node:assert/strict';
+
+// ---- money as integer minor units (cents); never floats ----
+const toCents = (s) =&gt; {
+  const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(s);
+  if (!m) throw new Error(`bad amount ${s}`);
+  return BigInt(m[1]) * 100n + BigInt((m[2] ?? '').padEnd(2, '0') || '0');
+};
+const fmt = (c) =&gt; { const n = c &lt; 0n; const a = n ? -c : c; return `${n ? '-' : ''}${a / 100n}.${String(a % 100n).padStart(2, '0')}`; };
+
+// ---- double-entry ledger: every transaction must sum to zero ----
+class Ledger {
+  entries = []; txIds = new Set();
+  post(txId, lines) {
+    if (this.txIds.has(txId)) return false; // idempotent on txId
+    const sum = lines.reduce((a, l) =&gt; a + l.delta, 0n);
+    if (sum !== 0n) throw new Error(`unbalanced tx ${txId}: ${sum}`);
+    this.txIds.add(txId);
+    for (const l of lines) this.entries.push({ txId, ...l });
+    return true;
+  }
+  balance(acct) { return this.entries.filter(e =&gt; e.acct === acct).reduce((a, e) =&gt; a + e.delta, 0n); }
+  total() { return this.entries.reduce((a, e) =&gt; a + e.delta, 0n); }
+}
+
+// ---- fake PSP: dedups on the idempotency key (the payment_order_id), can fail transiently ----
+class FakePSP {
+  seen = new Map(); calls = 0; failuresLeft = new Map();
+  failNext(key, n) { this.failuresLeft.set(key, n); }
+  async charge(key, amount) {
+    this.calls++;
+    const left = this.failuresLeft.get(key) ?? 0;
+    if (left &gt; 0) { this.failuresLeft.set(key, left - 1); throw Object.assign(new Error('timeout'), { transient: true }); }
+    if (!this.seen.has(key)) this.seen.set(key, { pspRef: `psp_${this.seen.size + 1}`, amount });
+    return this.seen.get(key); // same key -&gt; same result, charged once
+  }
+}
+
+// ---- payment service ----
+class PaymentService {
+  orders = new Map(); // payment_order_id -&gt; row (PRIMARY KEY = idempotency)
+  dlq = [];
+  constructor(psp, ledger, { maxAttempts = 4, baseMs = 1 } = {}) { Object.assign(this, { psp, ledger, maxAttempts, baseMs }); }
+
+  async pay({ paymentOrderId, buyer, seller, amount }) {
+    const existing = this.orders.get(paymentOrderId); // unique-key insert would fail here in SQL
+    if (existing) return existing;
+    const row = { id: paymentOrderId, buyer, seller, cents: toCents(amount), status: 'NOT_STARTED', ledgerUpdated: false, walletUpdated: false, attempts: 0 };
+    this.orders.set(paymentOrderId, row);
+    row.status = 'EXECUTING';
+    for (let a = 1; a &lt;= this.maxAttempts; a++) {
+      row.attempts = a;
+      try {
+        const r = await this.psp.charge(row.id, row.cents);
+        row.pspRef = r.pspRef; row.status = 'SUCCESS';
+        break;
+      } catch (e) {
+        if (!e.transient) { row.status = 'FAILED'; break; }
+        await new Promise(r =&gt; setTimeout(r, this.baseMs * 2 ** (a - 1))); // exponential back-off
+      }
+    }
+    if (row.status === 'EXECUTING') { row.status = 'FAILED'; this.dlq.push(row.id); }
+    if (row.status === 'SUCCESS') this.recordSideEffects(row);
+    return row;
+  }
+  // idempotent side effects: safe to re-run by a background job if we crashed after the PSP call
+  recordSideEffects(row) {
+    if (!row.ledgerUpdated) {
+      this.ledger.post(`pay:${row.id}`, [{ acct: `buyer:${row.buyer}`, delta: -row.cents }, { acct: `seller:${row.seller}`, delta: row.cents }]);
+      row.ledgerUpdated = true;
+    }
+    row.walletUpdated = true;
+  }
+}
+
+// ---- reconciliation: compare PSP settlement file to internal orders ----
+function reconcile(settlement, orders) {
+  const out = [];
+  const internal = new Map([...orders.values()].map(o =&gt; [o.id, o]));
+  for (const s of settlement) {
+    const o = internal.get(s.key);
+    if (!o) out.push({ key: s.key, kind: 'MISSING_INTERNAL' });
+    else if (o.cents !== s.amount) out.push({ key: s.key, kind: 'AMOUNT_MISMATCH' });
+    else if (o.status !== 'SUCCESS') out.push({ key: s.key, kind: 'STATUS_MISMATCH', internal: o.status });
+  }
+  for (const o of internal.values()) if (o.status === 'SUCCESS' &amp;&amp; !settlement.find(s =&gt; s.key === o.id)) out.push({ key: o.id, kind: 'MISSING_AT_PSP' });
+  return out;
+}
+
+// ---------------- self-test ----------------
+const psp = new FakePSP(), ledger = new Ledger(), svc = new PaymentService(psp, ledger);
+
+const o1 = { paymentOrderId: 'po-1', buyer: 'alice', seller: 'shopA', amount: '3.15' };
+const r1 = await svc.pay(o1);
+const r1again = await svc.pay(o1); // double click / client retry
+assert.equal(r1.status, 'SUCCESS'); assert.equal(r1again, r1);
+assert.equal(psp.seen.size, 1); assert.equal(psp.calls, 1);
+
+psp.failNext('po-2', 2); // two transient timeouts, then success: retried with the same key
+const r2 = await svc.pay({ paymentOrderId: 'po-2', buyer: 'bob', seller: 'shopA', amount: '10.00' });
+assert.equal(r2.status, 'SUCCESS'); assert.equal(r2.attempts, 3);
+
+psp.failNext('po-3', 99); // never recovers -&gt; dead-letter queue
+const r3 = await svc.pay({ paymentOrderId: 'po-3', buyer: 'carol', seller: 'shopB', amount: '7.50' });
+assert.equal(r3.status, 'FAILED'); assert.deepEqual(svc.dlq, ['po-3']);
+
+assert.equal(ledger.total(), 0n); // double-entry invariant
+console.log('seller shopA balance :', fmt(ledger.balance('seller:shopA')));
+console.log('buyer  alice balance :', fmt(ledger.balance('buyer:alice')));
+console.log('PSP charge calls     :', psp.calls, '(unique charges:', psp.seen.size + ')');
+console.log('DLQ                  :', svc.dlq);
+
+// settlement file from PSP: has an amount mismatch on po-2 and an unknown charge po-9
+const settlement = [{ key: 'po-1', amount: 315n }, { key: 'po-2', amount: 999n }, { key: 'po-9', amount: 100n }];
+console.log('reconciliation       :', JSON.stringify(reconcile(settlement, svc.orders)));
+assert.equal(reconcile(settlement, svc.orders).length, 2);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints seller and buyer balances (13.15 and -3.15), PSP call count 8 with only 2 unique charges, the DLQ contents ['po-3'], the two reconciliation breaks (AMOUNT_MISMATCH on po-2, MISSING_INTERNAL on po-9), then "all assertions passed".</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What breaks and what saves you</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Defence</th></tr></thead>
+          <tbody>
+            <tr><td>Crash after PSP success, before DB commit</td><td>Money taken, order says EXECUTING</td><td>Retry with same key returns the original result; sweeper queries PSP by key</td></tr>
+            <tr><td>Crash after order SUCCESS, before ledger write</td><td>Wallet/ledger missing</td><td>Flags + background job re-applies idempotent side effects</td></tr>
+            <tr><td>Webhook lost or delayed</td><td>Order stuck pending</td><td>Polling fallback, reconciliation next day</td></tr>
+            <tr><td>Duplicate webhook</td><td>Double credit</td><td>De-dupe on event id; guarded updates</td></tr>
+            <tr><td>PSP outage</td><td>Timeouts everywhere</td><td>Circuit breaker, queue and back off, optional secondary PSP with proof gating</td></tr>
+            <tr><td>Retry storm</td><td>Self-inflicted overload</td><td>Back-off with jitter, retry budgets, Retry-After</td></tr>
+            <tr><td>Replica lag</td><td>User sees stale status</td><td>Read from primary or read-your-writes routing</td></tr>
+            <tr><td>Partial refund / chargeback arrives late</td><td>Ledger misses a reversal</td><td>Model refunds and disputes as new ledger transactions, reconcile against PSP reports</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling &amp; Production Gotchas</span>
+        <h2>Where it bends, and the traps people hit</h2>
+        <p>At 10 TPS nothing bends. At 100x (a large marketplace on Black Friday) the knees are: the PSP's rate limits (per-account request caps), hot rows in the wallet table for a very popular seller (serialise via an append-only ledger and aggregate balances asynchronously), and the ledger table's growth (partition by month). Shard by merchant or order id only when a single primary genuinely runs out, and keep ledger entries for one transaction on one shard.</p>
+        <ul class="check-list">
+          <li><strong>Generate idempotency keys server-side at checkout creation</strong> and persist them before the first external call; a key born inside the retry loop protects nothing.</li>
+          <li><strong>Timeouts are not failures.</strong> Treat a PSP timeout as "unknown" and resolve it by query, never by creating a fresh charge.</li>
+          <li><strong>Never use wall-clock "now" for money-critical ordering;</strong> use a database sequence or version column.</li>
+          <li><strong>Multi-currency:</strong> store the original currency and amount, plus the FX rate and settlement amount as separate fields; rounding rules must be explicit and deterministic.</li>
+          <li><strong>Test with the PSP's failure sandbox</strong> (declines, delayed webhooks, 3DS challenges) and chaos-test the crash points listed above.</li>
+          <li><strong>Debuggability:</strong> an internal tool that, given an order id, shows every state transition, PSP request id and webhook is worth a quarter of engineering time.</li>
+          <li>Alerting: stuck-in-EXECUTING age, DLQ depth, reconciliation break count and value, webhook lag, PSP error rate by code.</li>
+          <li>Locally relevant payment methods: cash on delivery (common in India and Brazil), bank transfers, instant payment schemes and Google/Apple Pay each add their own asynchronous quirks; abstract them behind the executor interface.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Before you call a payment design done</h2>
+        <ul class="check-list">
+          <li>Every external call carries a stable idempotency key that survives retries</li>
+          <li>Unique constraints enforce de-duplication in the database, not just in code</li>
+          <li>Money is integer minor units plus currency; no floats anywhere</li>
+          <li>Ledger is append-only, double-entry, and sums to zero by construction</li>
+          <li>Order state machine persisted before and after each hop; stuck states alert</li>
+          <li>Retries use exponential back-off with jitter, a cap, and a DLQ</li>
+          <li>Webhooks are signature-verified, idempotent, and backed by polling</li>
+          <li>Card data stays with the PSP; only tokens are stored</li>
+          <li>Nightly reconciliation with a triage path for each mismatch class</li>
+          <li>Pending states (3DS, manual review) are first-class with expiry</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>The user clicked Pay twice and a request timed out. How do you make sure they are charged once?</summary><p>One idempotency key per checkout attempt, created before any external call and stored as the primary key of the order row. The second click inserts the same key, hits the unique constraint, and gets the existing row back. The timeout is retried with the same key to the PSP, which de-duplicates on it. If our own database state were lost entirely, the PSP-side key still prevents a second charge.</p></details>
+        <details><summary>Why not use a distributed transaction across PSP, wallet and ledger?</summary><p>The PSP is an external system that does not participate in your commit protocol. You cannot roll back a card charge; you can only issue a refund, which is a new transaction. So you accept eventual consistency: idempotent forward progress plus reconciliation, with refunds as the compensating action.</p></details>
+        <details><summary>What if the PSP returns success but our service crashes before saving it?</summary><p>On restart the order is stuck in EXECUTING. The sweeper retries the call with the same key (the PSP replays the stored success), or queries the PSP by the key. Either way we learn the true outcome without charging again. The reconciliation file is the final backstop.</p></details>
+        <details><summary>Why keep both a wallet and a ledger?</summary><p>The ledger is the immutable, auditable truth; the wallet is a fast current-balance view. The ledger lets you reconstruct and verify balances and answer "why"; the wallet answers "how much" cheaply. Reconciliation compares them continuously.</p></details>
+        <details><summary>How would the design change at 100x volume?</summary><p>Keep the same logic, but partition: shard orders and ledger by merchant, give hot sellers an aggregated balance updated asynchronously, add per-PSP concurrency limits and multiple PSP routes, and partition the ledger by time for archival. The concepts do not change; only the hot paths get engineering attention.</p></details>
+        <details><summary>How do you handle refunds and chargebacks?</summary><p>As new payment orders in the reverse direction with their own idempotency keys and ledger transactions that reference the original. Chargebacks arrive asynchronously from the card scheme through the PSP, so they must flow through the same webhook and reconciliation machinery.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./25-gaming-leaderboard.html">Previous: Chapter 25, Real-time Gaming Leaderboard</a></li>
+          <li><a href="./27-digital-wallet.html">Next: Chapter 27, Digital Wallet</a> — the wallet component here, rebuilt for a million transfers per second.</li>
+          <li><a href="../../payment-gateway-system-design.html">Payment gateway system design</a> — a companion hub article on gateway-side concerns.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — the pattern at the heart of this chapter.</li>
+          <li><a href="../../system-design/message-queue.html">Message queues</a> — retry queues, DLQs and fan-out.</li>
+          <li><a href="../../event-driven-architecture-guide.html">Event-driven architecture</a> — outbox and event choreography in depth.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repository lists no additional resources for this chapter.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Payments are a reliability problem wearing a throughput costume. Give every payment a client-generated idempotency key, persist state before every hop, retry with back-off until the PSP gives a definitive answer, record money only in an append-only double-entry ledger, and let nightly reconciliation catch whatever the clever parts missed.</p>
+      </section>
+
+    </main>
+  </body>
+</html>

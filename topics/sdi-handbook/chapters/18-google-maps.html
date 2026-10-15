@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design Google Maps | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 18 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.18. Covers a Google Maps style system: map basics (projection, Web Mercator, geocoding, tiles, routing graphs), sizing (about 70 PB of tiles, 3.5 M raw GPS QPS reduced to about 200 K by 15 s batching, 1 M peak), location service with Cassandra and Kafka, static tile serving through a CDN, vector tiles, routing tiles in object storage with hierarchical A*, geocoding, route planner/ETA/ranker/updater services, adaptive ETA and rerouting through ancestor-tile indexing, and delivery protocols (WebSocket vs SSE vs push). Includes an executed Node.js example (Web Mercator tile and quadkey math, A* on a tiled road graph, affected-user lookup and rerouting). About 23 min read. Related: ch16 Proximity Service, ch17 Nearby Friends, cdn, cassandra, uber-architecture-driver-tracking.</div>
+        <h1>Design Google Maps</h1>
+        <p class="summary">Three systems in one: a write-heavy GPS ingest pipeline, a read-heavy static image (or vector) delivery network, and a graph search service that must answer in a second over a planet-sized road network. The unifying trick is tiling, applied to pixels, to roads and to cache keys alike.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">18 of 28 · Part 4 Geo Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">23 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Map tiles, Web Mercator, routing tiles, A*, adaptive ETA, CDN, vector tiles</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Google Maps, OpenStreetMap, Valhalla, OSRM, Mapbox vector tiles, Cassandra, Kafka, S3</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">A maps product looks like one application and is really three unrelated workloads sharing a coordinate system. Ingesting a billion people's positions is a streaming problem. Showing a map is a CDN problem. Finding a route is a graph problem. The skill the interviewer wants to see is whether you can tell them apart and give each its own storage and scaling model.</p>
+        <div class="callout"><p><strong>Core idea:</strong> divide the world into tiles at multiple zoom levels and use the tile ID as the universal key. Image tiles go to the CDN, routing graph tiles go to object storage and are loaded on demand by the pathfinder, and an in-flight trip is indexed by the tiles it crosses so that a traffic event can be matched to affected drivers with a key lookup.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design to anchor on</span>
+        <h2>OpenStreetMap, Valhalla and slippy tiles</h2>
+        <p>The open ecosystem makes the pieces visible. OpenStreetMap supplies raw road data as nodes, ways and tags. Open routers such as Valhalla preprocess it into hierarchical routing tiles (levels for highways, arterial roads and local streets) and load only the tiles a query touches, while OSRM uses contraction hierarchies instead. Rendering servers produce slippy-map tiles addressed as <code>/{z}/{x}/{y}</code>, increasingly as vector tiles (the Mapbox Vector Tile format is protobuf-encoded geometry) that the client draws. Google has said publicly that its ETA predictions combine historical and live traffic with machine-learning models, including graph neural networks. None of these systems routes over one global graph in memory; they all slice.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Map 101</span>
+        <h2>The geography you need before designing</h2>
+        <p class="mini-heading">Coordinates and projection</p>
+        <p>Positions are latitude (north-south, -90 to 90) and longitude (east-west, -180 to 180). To draw on a flat screen you project the sphere onto a plane, and every projection distorts something: area, shape, distance or direction. Web Mercator, the variant used by Google and virtually every web map, preserves local shape (so streets look right at every zoom) but inflates area toward the poles, and it cuts off at about ±85.05 degrees latitude, which is why the map is a clean square. Never compute distances in projected coordinates; use great-circle maths for that.</p>
+        <p class="mini-heading">Geocoding and reverse geocoding</p>
+        <p>Geocoding converts an address into coordinates; reverse geocoding does the opposite. Providers combine address-range interpolation along street segments (house 100 to 198 on this block, so number 150 lies about halfway along it), authoritative parcel or building data, and place databases. The output carries a precision class: rooftop, interpolated, street, locality. Surface that class; a "locality"-level match is not an address.</p>
+        <p class="mini-heading">Geohash (and what maps actually use)</p>
+        <p>The chapter introduces geohashing as a recursive four-way split of the plane into a string (see the previous chapters). Strictly, web maps address tiles with the <strong>z/x/y scheme</strong> of the Mercator square (or an equivalent quadkey string where each digit 0 to 3 is a quadrant), not a base32 geohash. They are the same idea, recursive quartering with a prefix hierarchy, but the details differ and a client must reproduce them exactly. The example below uses z/x/y and quadkeys.</p>
+        <p class="mini-heading">Tiles</p>
+        <p>Rendering the whole planet as one image is impossible, so it is cut into 256 by 256 pixel tiles per zoom level. Zoom 0 is one tile for the world; each zoom level doubles the resolution along each axis and so quadruples the tile count: 4<sup>z</sup> tiles at level z. The client downloads only the handful covering its viewport at its zoom and stitches them. Many modern clients use 512-pixel tiles at a lower zoom number to cut request counts on high-density screens.</p>
+        <p class="mini-heading">Roads as a graph</p>
+        <p>Intersections are nodes; road segments are directed edges with attributes: length, speed limit, road class, turn restrictions, one-way flags, tolls, and a live traffic multiplier. Real routers add turn costs by modelling edges between edges, since a left turn across traffic takes longer than going straight. Dijkstra and A* are the base algorithms, but both degrade as the graph grows, which forces the tiling and hierarchy ideas below.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and numbers</span>
+        <h2>Scope and sizing</h2>
+        <p>Scope fixed by the interview: one billion daily active users; features are location updates, navigation with ETA, and map rendering; road data is terabytes from multiple sources and is available; traffic must be considered; modes include driving, walking and cycling; multi-stop routes, business listings and photos are out. Non-functional: accuracy (never send someone the wrong way), smooth rendering, low data and battery use on the client, plus ordinary availability and scale.</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Tiles at zoom 21</td><td>4<sup>21</sup></td><td>about 4.4 trillion</td></tr>
+            <tr><td>Raw tile storage at zoom 21</td><td>4.4 T × about 100 KB (the chapter's assumption)</td><td>about 440 PB</td></tr>
+            <tr><td>After exploiting emptiness</td><td>about 90% of the planet is sea, desert, ice or empty and compresses by around 99%: 44 PB + about 4 PB</td><td>about 50 PB</td></tr>
+            <tr><td>All coarser zoom levels</td><td>geometric series 1 + 1/4 + 1/16 … = 4/3</td><td>x 1.33, so about 65 to 70 PB total</td></tr>
+            <tr><td>Navigation time</td><td>1 B DAU × 35 min/week ÷ 7 = 5 min/day each</td><td>5 B minutes/day</td></tr>
+            <tr><td>Raw GPS requests at 1/s</td><td>5 B × 60 s ÷ 86,400 s</td><td>about 3.5 M/s</td></tr>
+            <tr><td>With 15 s client batching</td><td>3.5 M ÷ 15</td><td>about 230 K/s average; plan on 200 K avg, 1 M peak (5x)</td></tr>
+            <tr><td>Location points stored</td><td>3.5 M points/s × about 40 B</td><td>about 140 MB/s, about 12 TB/day before compression</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Two payoffs:</strong> batching shrinks the request rate 15x with no change in data volume, because the bottleneck is per-request overhead (TLS, headers, auth, scheduling), not bytes. And the tile figure shows why you serve pre-generated static objects: dynamic rendering of planetary-scale imagery per request is out of the question, while a CDN serving a few hundred kilobytes per second per viewer is routine.</div>
+        <p>Metadata (place names, labels) is negligible against imagery and is omitted from storage maths.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Three services, three data stores</h2>
+        <div class="diagram-box" style="white-space:pre">
+   mobile client (GPS batching, tile cache, route state)
+        │                 │                         │
+        │ batched pings   │ route request           │ tile GETs (z/x/y)
+        ▼                 ▼                         ▼
+   <span class="hi">Location service</span>   <span class="hi">Navigation service</span>        <span class="ok">CDN (edge POPs)</span> ──miss──▶ tile origin (S3)
+        │  ▲                │                                                      ▲
+        │  │                ├─ geocoding ──▶ Redis (address ⇄ lat/lon)             │
+        ▼  │                ├─ route planner ──▶ shortest-path (A*) ──▶ routing tiles in S3
+   Cassandra + <span class="step">Kafka</span>          ├─ ETA service (ML + live traffic)           nightly tile builder
+        │                   ├─ ranker (avoid tolls, highways…)           (raw road data → tiles)
+        ▼                   └─ updater ─▶ keeps traffic/route stores fresh
+   traffic updater, routing-tile updater, ML personalisation, analytics
+        </div>
+        <h3>Location service</h3>
+        <p>Clients record GPS fixes locally and send a batch every few seconds (the sizing used 15), as <code>POST /v1/locations</code> with an array of <code>(lat, lon, timestamp)</code> tuples. Batching saves radio wake-ups and battery, a stated non-functional goal, at the cost of delaying traffic data by up to one batch. For navigation this is acceptable because the on-device blue dot is driven by the local GPS stream; the server copy matters for aggregate traffic.</p>
+        <p>The storage requirement is extreme write throughput with no need for transactions or read-your-writes. Cassandra fits: partition key <code>user_id</code>, clustering key <code>timestamp</code>, so one user's trail is contiguous and time-ordered; availability is favoured over consistency since a newer ping makes the older one stale anyway. In parallel the same pings go to Kafka, which fans them out to independent consumers: a traffic updater, a routing-data improver (new roads appear as unmapped traces), a personalisation/ML pipeline, and analytics. Writing to Kafka first and consuming into Cassandra is an equally valid arrangement and makes ordering and replay uniform.</p>
+        <h3>Navigation service</h3>
+        <p><code>GET /v1/nav?origin=…&amp;destination=…&amp;mode=driving</code> returns distance, duration, step-by-step instructions, an encoded polyline for drawing, and the geocoded waypoints (with a status and a "partial match" flag so the client can ask for disambiguation). Latency of a second or so is acceptable, accuracy is paramount. Traffic-aware rerouting while driving is handled in the deep dive.</p>
+        <h3>Map rendering</h3>
+        <p>The full tile set is petabytes, so clients fetch on demand according to position and zoom, when the user pans, zooms or drives into a new tile. There are two serving models: render per request (huge CPU, poor cache behaviour) or pre-render once and serve static objects with deterministic URLs. The chapter picks the second: tiles are named by <code>z/x/y</code> (the chapter says geohash, the principle is identical), stored in object storage and served through the CDN from a point of presence near the user. There are two ways for a client to find the URL:</p>
+        <ul class="check-list">
+          <li><strong>Client computes the tile ID</strong> from lat/lon and zoom. Zero extra round trips and perfect cacheability, but the algorithm is baked into every shipped app for years because forcing upgrades is hard. Choose a standard scheme (z/x/y Web Mercator) you will never want to change.</li>
+          <li><strong>Server computes it</strong> via a small tile-URL API. One extra call, but you can change schemes, shards and CDN hostnames at will. Fine as a hybrid: standard scheme with a server-provided URL template and version.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 1</span>
+        <h2>Data stores and tile rendering</h2>
+        <table class="data-table">
+          <thead><tr><th>Data</th><th>Store</th><th>Reasoning</th></tr></thead>
+          <tbody>
+            <tr><td>Routing tiles (road graph)</td><td>Object storage (S3), heavy caching, compact binary adjacency lists</td><td>No query language needed; the pathfinder reads whole tiles by key. Offline pipeline converts raw unstructured road data into graph tiles, refreshed on a schedule and when ingestion detects change.</td></tr>
+            <tr><td>User location history</td><td>Cassandra (partition user_id, cluster timestamp)</td><td>Write-heavy, AP, append-only; row holds lat, lon, timestamp, travel mode and navigation state.</td></tr>
+            <tr><td>Geocoding</td><td>Redis (KV from place text or coordinates to canonical place)</td><td>Read-heavy, rarely changed; in-memory for latency. Back it with a durable store and a text index for fuzzy match.</td></tr>
+            <tr><td>Pre-rendered tiles</td><td>Object storage behind a CDN</td><td>Immutable per version; long TTL; versioned URLs for atomic data updates.</td></tr>
+            <tr><td>Navigating users and their route tiles</td><td>Fast KV (see adaptive ETA)</td><td>Keyed by tile, to find affected users.</td></tr>
+          </tbody>
+        </table>
+        <h3>Zoom levels and tile counts</h3>
+        <p>At the smallest zoom the whole world is a single 256 by 256 tile. Every increase by one splits each tile into four, so the count grows by 4x and the ground covered per pixel halves. Ground width of a tile at the equator is about 40,075 km divided by 2<sup>z</sup>: roughly 1.2 km at zoom 15, 305 m at zoom 17. Driving at 60 km/h (16.7 m/s), a driver crosses a zoom-17 tile in about 18 seconds, so a navigation client continuously prefetches the tiles ahead of the heading, and a client cache keyed on tile ID with LRU eviction avoids refetching on reverse and revisit.</p>
+        <h3>Vector tiles</h3>
+        <p>Instead of shipping rendered pictures, send geometry: roads as polylines, buildings as polygons, labels as points, packed in a compact binary format (for example protobuf), and let the client rasterise on the GPU. Benefits: far less bandwidth (paths compress much better than anti-aliased pixels), crisp rendering at any device density, smooth zoom between levels, rotation and tilt, and restyling (dark mode, route highlighting) with no new tiles. Costs: more client CPU/GPU work, a style engine on every platform, and harder debugging than "look at the PNG". Most modern map products use vector tiles for the base map and keep raster tiles for satellite imagery.</p>
+        <div class="diagram-box" style="white-space:pre">
+ zoom 0: 1 tile          zoom 1: 4 tiles         zoom 2: 16 tiles
+ ┌─────────┐             ┌────┬────┐             ┌──┬──┬──┬──┐
+ │         │             │0/0 │1/0 │             ├──┼──┼──┼──┤  … each level ×4
+ │  0/0/0  │   ──────▶   ├────┼────┤   ──────▶   ├──┼──┼──┼──┤
+ │         │             │0/1 │1/1 │             ├──┼──┼──┼──┤
+ └─────────┘             └────┴────┘             └──┴──┴──┴──┘
+ quadkey of a tile = quadkey of its parent + one digit (0..3)   →  ancestors are string prefixes
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 2</span>
+        <h2>Routing: graph, tiles, hierarchy, A*</h2>
+        <p>A planet-wide road network has hundreds of millions of nodes. Running Dijkstra from a source explores a disc of roads out to the destination's distance, which for cross-country trips is almost everything. Three standard techniques bring this under control.</p>
+        <ol>
+          <li><strong>A* with an admissible heuristic.</strong> Prioritise nodes by <code>cost_so_far + estimate_to_goal</code> where the estimate is straight-line distance divided by the maximum plausible speed. Because it never over-estimates, the result is still optimal while the search is pulled toward the destination. The quality of the heuristic dominates: the example assumes 130 km/h while its toy grid streets run at about 60 km/h, so the estimate is loose and the 12 by 12 city still expands every node. A tighter per-region speed bound prunes far more.</li>
+          <li><strong>Partition the graph into routing tiles.</strong> Each tile stores the nodes and edges within a geographic cell plus references to neighbouring tiles at its borders. The pathfinder loads a tile only when the search reaches it, so memory and I/O are proportional to the corridor of the trip, not to the planet.</li>
+          <li><strong>Hierarchy of tile levels.</strong> A long journey does not need every residential street. Maintain several graphs: a fine level with all roads, a middle level of arterials, and a coarse level of highways. Search at fine detail near the origin and destination, and at coarse detail in between, switching down as the search approaches the ends. Valhalla builds exactly such a three-level tile set. Contraction hierarchies (used by OSRM) reach the same goal by adding precomputed shortcut edges.</li>
+        </ol>
+        <p>The routing tiles are generated offline by a pipeline that ingests the raw road sources, cleans and merges them, builds the graph, assigns edges to tiles and levels, serialises each tile into compact binary form (adjacency lists compress well) and uploads the result to object storage. Hot tiles stay in memory on the pathfinder nodes via an LRU cache; cold ones are fetched from S3. Version tiles by build number so a deployment switches atomically.</p>
+        <h3>The navigation pipeline</h3>
+        <table class="data-table">
+          <thead><tr><th>Stage</th><th>Role</th></tr></thead>
+          <tbody>
+            <tr><td>Geocoding service</td><td>Resolves the text address to a lat/lon pair (and place ID). Result classes are mapped to a confidence so the app can ask the user to disambiguate.</td></tr>
+            <tr><td>Route planner</td><td>Orchestrates: asks the shortest-path service for several candidate routes, asks the ETA service to price each under current traffic, and gives the set to the ranker.</td></tr>
+            <tr><td>Shortest-path service</td><td>Converts origin and destination to routing tile IDs, loads those tiles from storage or cache, runs the hierarchical A* variant, traverses into neighbouring tiles as needed, and returns the top-k paths free of traffic.</td></tr>
+            <tr><td>ETA service</td><td>Predicts travel time per candidate using ML over live and historical traffic by road segment, time of day and day of week. Edge weights in the path search are the same travel-time estimates.</td></tr>
+            <tr><td>Ranker</td><td>Applies user preferences and constraints (avoid tolls, ferries, highways), safety filters and product rules, and sorts.</td></tr>
+            <tr><td>Updater services</td><td>Consume the location stream asynchronously to refresh traffic speeds, routing tile data and the navigating-users store.</td></tr>
+          </tbody>
+        </table>
+        <p>Two real-world details the notes skip. First, <strong>map matching</strong>: raw GPS is noisy by many metres, so the server (and client) snap traces onto the most probable road sequence using a hidden Markov model with Viterbi decoding; without this, traffic speeds are attributed to the wrong road, notably on parallel highway frontage roads. Second, <strong>traffic as an aggregate</strong>: a stream job groups matched points by road segment over a short window, takes a robust statistic (a median or trimmed mean, to resist the single parked phone), and publishes a speed to the traffic store; sparse segments fall back to historical profiles.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 3</span>
+        <h2>Adaptive ETA and rerouting</h2>
+        <p>A route computed at departure goes stale: an accident, a closure or a sudden slowdown ahead changes the best path. To react without scanning every active trip, index the trips. A naive index stores, per navigating user, the list of every routing tile on the path (<code>user_1: r1, r2, … rk</code>). When an incident hits tile r2, query "who has r2" and recompute their routes. With millions of concurrent trips the lists are large.</p>
+        <p>The chapter's compression: store only the user's origin tile and its ancestors at progressively coarser levels, up to the level whose tile contains the destination: <code>user_1: r1, super(r1), super(super(r1)), …</code>. A user is possibly affected by an incident if the incident's tile lies inside the topmost stored ancestor (a super-tile containing the whole trip). That is a cheap necessary test with few false positives for long trips, then confirm with the actual path. In a quadkey scheme this is delightfully simple, because a tile's ancestors are the prefixes of its key. The example indexes each trip under every prefix of every path tile, which is the dual: look up the accident tile's key and you get exactly the trips whose paths cross it.</p>
+        <div class="diagram-box" style="white-space:pre">
+  incident in tile  <span class="warn">0230102033|3231</span>
+                        │ lookup keys: that tile and each ancestor prefix
+                        ▼
+  index[ "02301020333231" ]  → {u1}          (trip passes through this exact tile)
+  index[ "0230102033"     ]  → {u1, u7, …}   (trips touching the parent region: coarser candidates)
+                        │ for each candidate: re-run A* from current position with new weights
+                        ▼
+  push new route / "faster route available" over WebSocket
+        </div>
+        <p>Beyond closures, a service can retain each navigating user's alternatives and notify them when a better one appears. Throttle: rerouting every minute is exhausting; require a minimum time gain (for example two minutes, or ten percent) before interrupting.</p>
+        <h3>How to push the update to the phone</h3>
+        <ul class="check-list">
+          <li><strong>Mobile push notifications:</strong> payload limits are small (a few KB), delivery is not instantaneous, and web clients cannot use them. Fine for "your route changed", not for carrying a route.</li>
+          <li><strong>Long polling:</strong> works anywhere but holds a server request per user and wastes resources at this scale.</li>
+          <li><strong>WebSocket:</strong> bidirectional, lowest overhead per message; the chapter's preference, useful also for last-mile delivery features that need upstream messages.</li>
+          <li><strong>Server-sent events:</strong> simpler (one-way, HTTP-based, auto-reconnect), a fine fit when only the server speaks; chosen against because bidirectional capability is valuable.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decisions and their costs</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Lean</th></tr></thead>
+          <tbody>
+            <tr><td>Tile format</td><td>Raster: simple client, big</td><td>Vector: small, flexible, client-heavy</td><td>Vector base map; raster for imagery</td></tr>
+            <tr><td>Tile ID derivation</td><td>Client-side: no round trip, hard to change</td><td>Server-side: flexible, extra hop</td><td>Standard z/x/y client-side, versioned template</td></tr>
+            <tr><td>Location batching</td><td>Per-second: freshest traffic</td><td>15 s batches: 15x fewer requests, better battery</td><td>Batch; adaptive</td></tr>
+            <tr><td>Routing graph</td><td>One global graph: simple, impossible at scale</td><td>Tiled and hierarchical: complex</td><td>Tiled and hierarchical</td></tr>
+            <tr><td>Optimality</td><td>Exact shortest: slower</td><td>Near-optimal with hierarchy: much faster</td><td>Near-optimal; accuracy defined as ETA realism, not mathematical minimum</td></tr>
+            <tr><td>Location store</td><td>Cassandra: write-optimised, AP</td><td>SQL: constraints, poor write scaling</td><td>Cassandra</td></tr>
+            <tr><td>Push channel</td><td>WebSocket</td><td>SSE / push notification</td><td>WebSocket</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Why tiling everywhere works</h4><ul><li>Cache keys are deterministic</li><li>Work is proportional to the trip, not the planet</li><li>Hierarchy comes free from prefixes</li><li>Parallel, independent tile build jobs</li></ul></div>
+          <div class="trade-col cons"><h4>What tiling costs</h4><ul><li>Edge effects at tile borders (features cut, paths cross tiles)</li><li>Format lock-in on clients</li><li>Rebuild and invalidate when data changes</li><li>Hierarchical routing can miss exact optimum</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>Tile math, tiled A*, and affected-user rerouting</h2>
+        <p>The example implements Web Mercator lat/lon to z/x/y and quadkey conversion (checked against well-known reference values), builds a small grid city road graph with node coordinates, runs A* with an admissible great-circle heuristic, and then builds the prefix-based tile index over an active trip. A simulated accident is mapped to affected users by key lookup, edge weights are updated, and the reroute from the current position avoids the jam.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Map tiles (Web Mercator z/x/y + quadkeys), tile-partitioned A* routing, and affected-user lookup for rerouting.
+import assert from 'node:assert/strict';
+
+const TILE = 256;
+const clampLat = lat =&gt; Math.max(-85.0511287798, Math.min(85.0511287798, lat));
+function latLonToTile(lat, lon, z) {                       // slippy-map convention, Web Mercator
+  const n = 2 ** z, x = Math.floor(((lon + 180) / 360) * n);
+  const r = clampLat(lat) * Math.PI / 180;
+  const y = Math.floor((1 - Math.asinh(Math.tan(r)) / Math.PI) / 2 * n);
+  return { z, x: Math.min(x, n - 1), y: Math.min(y, n - 1) };
+}
+const quadkey = ({ z, x, y }) =&gt; { let q = ''; for (let i = z; i &gt; 0; i--) { const m = 1 &lt;&lt; (i - 1); q += ((x &amp; m ? 1 : 0) + (y &amp; m ? 2 : 0)); } return q; };
+const tileUrl = t =&gt; `/tiles/${t.z}/${t.x}/${t.y}.pbf`;
+
+// --- road graph: nodes carry coordinates; each node belongs to a leaf routing tile via quadkey ---
+class RoadGraph {
+  adj = new Map(); xy = new Map();
+  node(id, lat, lon) { this.xy.set(id, { lat, lon }); this.adj.set(id, []); }
+  road(a, b, seconds) { this.adj.get(a).push({ to: b, w: seconds }); this.adj.get(b).push({ to: a, w: seconds }); }
+  setWeight(a, b, seconds) { for (const [u, v] of [[a, b], [b, a]]) this.adj.get(u).find(e =&gt; e.to === v).w = seconds; }
+  tileOf(id, z = 14) { const p = this.xy.get(id); return quadkey(latLonToTile(p.lat, p.lon, z)); }
+}
+const rad = d =&gt; d * Math.PI / 180;
+const km = (a, b) =&gt; 6371 * 2 * Math.asin(Math.sqrt(Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lon - a.lon) / 2) ** 2));
+
+function astar(g, src, dst, maxKmh = 130) {                // admissible heuristic: straight line at top speed
+  const h = n =&gt; km(g.xy.get(n), g.xy.get(dst)) / maxKmh * 3600;
+  const dist = new Map([[src, 0]]), prev = new Map(), open = [[h(src), src]], closed = new Set(); let expanded = 0;
+  while (open.length) {
+    open.sort((a, b) =&gt; a[0] - b[0]); const [, u] = open.shift();
+    if (closed.has(u)) continue; closed.add(u); expanded++;
+    if (u === dst) break;
+    for (const { to, w } of g.adj.get(u)) {
+      const nd = dist.get(u) + w;
+      if (nd &lt; (dist.get(to) ?? Infinity)) { dist.set(to, nd); prev.set(to, u); open.push([nd + h(to), to]); }
+    }
+  }
+  if (!dist.has(dst)) return null;
+  const path = [dst]; while (path[0] !== src) path.unshift(prev.get(path[0]));
+  return { path, seconds: dist.get(dst), expanded };
+}
+
+// grid city: 12x12 intersections, ~1 km apart, 60 s per block
+const g = new RoadGraph(), N = 12, id = (r, c) =&gt; `n${r}_${c}`;
+for (let r = 0; r &lt; N; r++) for (let c = 0; c &lt; N; c++) g.node(id(r, c), 37.70 + r * 0.009, -122.50 + c * 0.0113);
+for (let r = 0; r &lt; N; r++) for (let c = 0; c &lt; N; c++) { if (c + 1 &lt; N) g.road(id(r, c), id(r, c + 1), 60); if (r + 1 &lt; N) g.road(id(r, c), id(r + 1, c), 60); }
+
+// --- tests ---
+const sf = latLonToTile(37.7749, -122.4194, 10);
+console.log('SF z10 tile:', JSON.stringify(sf), tileUrl(sf), 'quadkey', quadkey(sf));
+assert.deepEqual(sf, { z: 10, x: 163, y: 395 });                       // well-known slippy-map value
+assert.deepEqual(latLonToTile(0, 0, 1), { z: 1, x: 1, y: 1 });
+assert.equal(quadkey({ z: 3, x: 3, y: 5 }), '213');                    // Bing quadkey docs example
+// ancestors are string prefixes -&gt; hierarchy comes for free
+const k14 = quadkey(latLonToTile(37.7749, -122.4194, 14));
+assert.ok(k14.startsWith(quadkey(sf)));
+// tile counts: 4^z; z21 pixel world
+console.log('tiles at z21:', (4 ** 21).toLocaleString('en-US'), '| sum z0..z21 factor:', ((4 ** 22 - 1) / 3 / 4 ** 21).toFixed(3));
+
+const r1 = astar(g, id(0, 0), id(N - 1, N - 1));
+console.log(`route: ${r1.path.length} nodes, ${r1.seconds}s, expanded ${r1.expanded}/${N * N}`);
+assert.equal(r1.seconds, 60 * 2 * (N - 1));
+
+// register an active navigation: store origin tile + ancestor tiles at coarser zoom, per the "super tile" trick
+const nav = { user: 'u1', path: r1.path };
+const tileSet = new Set(); r1.path.forEach(n =&gt; { const k = g.tileOf(n, 14); for (let l = k.length; l &gt;= 8; l--) tileSet.add(k.slice(0, l)); });
+const index = new Map(); tileSet.forEach(t =&gt; (index.get(t) ?? index.set(t, new Set()).get(t)).add(nav.user));
+
+// accident on a mid-route edge: jam it and find who is affected via the tile index
+const [a, b] = [r1.path[10], r1.path[11]];
+const hot = g.tileOf(a, 14);
+const affected = [...(index.get(hot) ?? [])];
+console.log('accident tile', hot, '-&gt; affected users:', affected);
+assert.deepEqual(affected, ['u1']);
+g.setWeight(a, b, 3600);
+const r2 = astar(g, r1.path[10], id(N - 1, N - 1));
+console.log(`reroute from mid-trip: ${r2.seconds}s (was ${60 * (2 * (N - 1) - 10)}s clear) avoids jam:`, !r2.path.includes(b) || r2.path[1] !== b);
+assert.ok(r2.seconds &lt; 3600 &amp;&amp; r2.path[1] !== b);
+// a user in a far corner is not indexed under the jammed tile
+assert.equal((index.get(g.tileOf(id(0, N - 1), 14)) ?? new Set()).size, 0);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the San Francisco zoom-10 tile (x=163, y=395) with its quadkey, 4,398,046,511,104 tiles at zoom 21 and a cumulative factor of 1.333, a 1,320 second route across a 12 by 12 grid, the accident tile resolving to user u1, a reroute that avoids the jammed segment, and "all assertions passed". Executed with Node 20+.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Effect</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>CDN POP outage or regional miss storm</td><td>Slow map loads</td><td>Multi-CDN or fallback to origin; client retries with backoff; coarser tiles as placeholders.</td></tr>
+            <tr><td>Bad routing tile build</td><td>Wrong or impossible routes</td><td>Versioned tile sets, canary builds, automated route-quality regression tests, instant rollback of the version pointer.</td></tr>
+            <tr><td>Traffic feed lags</td><td>ETAs too optimistic</td><td>Fall back to historical speed profiles; widen ETA intervals; staleness alarms per region.</td></tr>
+            <tr><td>Location ingest overload</td><td>Dropped pings</td><td>Kafka absorbs bursts; drop-on-overload by sampling is acceptable for traffic; clients keep batching and retry.</td></tr>
+            <tr><td>Cassandra node loss</td><td>Reduced write capacity</td><td>RF 3 with quorum; hinted handoff; traffic data tolerates loss.</td></tr>
+            <tr><td>Reroute storm</td><td>Thousands of simultaneous A* runs after a major incident</td><td>Queue and rate-limit; prioritise nearest and soonest-affected; reuse cached partial routes; hysteresis on notifications.</td></tr>
+            <tr><td>Geocoder wrong result</td><td>User navigates to wrong place</td><td>Show the resolved address and confidence; ask on ambiguity; log corrections.</td></tr>
+            <tr><td>Offline or tunnel</td><td>No data</td><td>Local route state continues turn by turn; offline map regions pre-downloaded.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Knees and gotchas</h2>
+        <ul class="check-list">
+          <li><strong>Egress dominates again.</strong> Tile bytes, not routes, are the cost centre. Vector tiles, aggressive client caching, long TTL on immutable versioned URLs, and HTTP/2 or HTTP/3 multiplexing for the many small requests matter more than server optimisation.</li>
+          <li><strong>Antimeridian and poles.</strong> Tiles wrap in x and are clamped in y; routes that cross longitude ±180 must handle wrap in both the heuristic and tile lookup.</li>
+          <li><strong>Heuristic admissibility.</strong> A* with a heuristic that overestimates (for example assuming a top speed lower than some real road allows) silently returns suboptimal routes. Derive the speed bound from the data, per region.</li>
+          <li><strong>Time-dependent edges.</strong> A road's cost depends on the hour, so true shortest path is on a time-dependent graph; predicted arrival time at each edge selects its weight. Many systems approximate with the departure-time profile.</li>
+          <li><strong>Turn restrictions and one-ways</strong> are data bugs that become user-facing hazards. Treat road data quality as a first-class system with feedback from the location stream (many traces on a "one-way" the wrong way suggest an error).</li>
+          <li><strong>Privacy.</strong> Location trails identify home and work. Aggregate for traffic, strip or rotate identifiers, apply k-anonymity thresholds on published speeds, and keep personal history opt-in with retention.</li>
+          <li><strong>Battery and data.</strong> Sensor fusion, batching, adaptive GPS duty-cycling, delta-encoded polylines and compressed protobuf all serve the stated non-functional goal.</li>
+          <li><strong>Multi-modal routing</strong> (walk, bike, transit) uses different graphs and weights; keep modes as separate tile sets rather than flags on one graph so each can evolve independently.</li>
+          <li><strong>Multi-stop routing</strong> is the travelling salesman problem in disguise; heuristics (nearest neighbour, 2-opt, or OR-tools-style solvers) over a matrix of pairwise ETAs. It is the natural enterprise extension the chapter closes with, selling optimal ordering to delivery and ride-hailing platforms.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Scope: location update, navigation + ETA, rendering; traffic-aware; multiple modes.</li>
+          <li>Explain projection, geocoding, tiles, road graph in two sentences each.</li>
+          <li>Numbers: 70 PB of tiles, 3.5 M raw QPS to 200 K by batching, 1 M peak.</li>
+          <li>Location service: client batching, Cassandra (user_id, timestamp), Kafka consumers.</li>
+          <li>Tiles: precomputed, static, CDN, deterministic IDs; client vs server ID derivation; vector option.</li>
+          <li>Routing tiles in S3, produced offline; hierarchy of detail levels; A* with admissible heuristic.</li>
+          <li>Services: geocoder, planner, shortest path, ETA, ranker, updater.</li>
+          <li>Adaptive ETA through ancestor tiles; WebSocket delivery; throttle reroutes.</li>
+          <li>Failure modes, privacy, map matching, versioned data.</li>
+          <li>Wrap-up: multi-stop optimisation as an extension.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not store the road graph in a graph database?</summary><p>The access pattern is "load a tile by key, run an in-memory search", not ad hoc traversals. Binary tiles in object storage are cheaper, trivially cacheable and faster to load. A graph database adds a query layer you never use and struggles at planetary size.</p></details>
+        <details><summary>How is traffic incorporated into routing?</summary><p>Streams of map-matched location points yield per-segment speeds that multiply or replace the static travel time on edges. The ETA service uses these plus historical patterns and predicts speeds for when the driver will actually be on each segment, not just now.</p></details>
+        <details><summary>What happens to tiles when the road data changes?</summary><p>An offline pipeline rebuilds only changed tiles, publishes a new data version, and the CDN URLs include the version, so new loads pick up fresh tiles while old clients keep working until their cache expires. No mass invalidation is needed.</p></details>
+        <details><summary>How would you design offline maps?</summary><p>Let users download region bundles: vector tiles for chosen bounding boxes and zoom ranges plus the routing tiles for the region and a geocoding index. Routing then runs on-device with static speed profiles, no live traffic.</p></details>
+        <details><summary>Why is A* not enough by itself?</summary><p>It reduces exploration but still scales with route length. Continental routes require hierarchy or precomputed shortcuts (contraction hierarchies, transit nodes) that answer in milliseconds after heavy preprocessing. The hierarchical tile levels in the chapter are the lightweight version of that.</p></details>
+        <details><summary>How do you keep location batching from hurting rerouting?</summary><p>Rerouting decisions use the server's latest batch plus on-device logic. The device itself detects that it left the route (off-route detection within a few seconds) and asks for a fresh route, so server-side reroute is only for incidents the device cannot know about.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./17-nearby-friends.html">Chapter 17: Nearby Friends</a> — previous chapter; same geo cell ideas, applied to streaming positions.</li>
+          <li><a href="./19-distributed-message-queue.html">Chapter 19: Distributed Message Queue</a> — next chapter; the Kafka layer this page leans on.</li>
+          <li><a href="./16-proximity-service.html">Chapter 16: Proximity Service</a> — geohash, quadtree and S2 in detail.</li>
+          <li><a href="../../system-design/cdn.html">CDN</a> — how static tiles reach users cheaply.</li>
+          <li><a href="../../cassandra.html">Cassandra</a> — the write-heavy location history store.</li>
+          <li><a href="../../uber-architecture-driver-tracking.html">Uber driver tracking</a> — production geo-indexing and ETAs for moving vehicles.</li>
+          <li><a href="../../system-design/websockets.html">WebSockets</a> — pushing reroutes to clients.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repo's top-level Readme lists no additional resources for this chapter.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Tile the world and reuse the tile ID everywhere: as the CDN key for map pictures, as the unit of routing-graph loading, as the hierarchy for coarse-to-fine path search, and as the index that finds drivers affected by an incident. Batch GPS on the client to cut ingest 15x, keep write-heavy trails in Cassandra and Kafka, and make routing accuracy a property of the data pipeline as much as of the algorithm.</p>
+      </section>
+    </main>
+  </body>
+</html>

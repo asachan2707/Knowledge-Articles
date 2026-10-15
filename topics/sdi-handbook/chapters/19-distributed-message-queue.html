@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Distributed Message Queue | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 19 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.19. Covers designing a Kafka-style distributed message queue: partitioned append-only segmented log, batching, producer routing, pull-based consumers, consumer groups and rebalancing, ISR replication with acks=0/1/all, high watermark, broker and partition scaling, delivery semantics (at-most/at-least/exactly once), message filtering, delayed messages with timing wheels, plus capacity math. Includes a runnable Node.js example (segmented log with CRC, ISR/high-watermark replication with failover, group coordinator with rebalance and generation fencing, delivery-semantics demo) that was executed. About 30 min read. Related: message-queue, pub-sub, consistent-hashing, idempotency, event-driven-architecture, delayed-job-scheduler pages, chapters 20 and 21.</div>
+        <h1>Design a Distributed Message Queue</h1>
+        <p class="summary">A message queue that retains data for two weeks, replays on demand, preserves order per partition and offers tunable delivery guarantees is really a replicated, partitioned commit log. This chapter builds one from the storage layer up and shows where every knob trades latency, throughput and durability.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">19 of 28 · Part 5 Data Infrastructure</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">30 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Segmented WAL, partitions, consumer groups, ISR, high watermark, delivery semantics</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Kafka, Pulsar, RabbitMQ, RocketMQ, ZooKeeper / KRaft</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every large system eventually grows a spine of asynchronous messaging. Producers should not wait on consumers, consumers should be free to fall behind and catch up, and a crash in one component should not take its neighbours down. A message queue gives you that decoupling; a <em>distributed</em> one gives it to you at hundreds of megabytes per second without a single machine being special.</p>
+        <p>The four classic benefits are decoupling (components deploy and fail separately), independent scalability (add consumers without touching producers), availability (the queue absorbs outages downstream) and latency (producers return as soon as the broker has the data). The twist in this chapter is the scope: the interviewer wants the features that traditional queues such as RabbitMQ or ActiveMQ deliberately skip, namely long retention, repeated consumption by many independent readers, and strict ordering. Those three requirements are what turn a "queue" into an event streaming platform, and the design that satisfies them is the one Kafka popularised.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Treat each partition as an append-only, immutable, segmented file. Order is the offset. Retention is "delete old segments". Replay is "reset an integer". Scale is "more partitions". Durability is "replicate the file and agree on how far it is committed". Everything else in this chapter is a consequence of that one choice.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Public design · LinkedIn and Kafka</span>
+        <h2>Why the log won</h2>
+        <p>Kafka was built at LinkedIn to move activity events and operational metrics between systems, and its design paper and the later open-source project made one unfashionable bet: use the filesystem and the operating system's page cache as the storage engine rather than an in-memory structure or a B-tree database. Messages are appended to files, consumers read sequentially, and the kernel's read-ahead and sendfile zero-copy path do most of the work. The result was a broker whose throughput is limited by disks and NICs rather than by its own CPU. Pulsar later separated the serving layer from storage (BookKeeper ledgers) to get easier elasticity, and RocketMQ came out of Alibaba's commerce workloads with strong delayed-message support. Different implementations, same skeleton: partitioned logs, consumer offsets, leader-based replication. Learn the skeleton and you can reason about any of them.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>Scope, requirements and back-of-envelope numbers</h2>
+        <p>The agreed scope: text messages of a few KB; many producers and consumers; the same message can be read by many consumers and re-read later; per-key ordering; two-week retention; at-least-once delivery as the default with at-most-once and exactly-once available as configuration; throughput that can be dialled between "log aggregation firehose" and "low-latency task queue".</p>
+        <p class="mini-heading">Functional</p>
+        <ul class="check-list">
+          <li>Producers append messages to a topic; consumers read them from a topic.</li>
+          <li>A message may be consumed once (work-sharing) or by many independent subscribers, and may be replayed.</li>
+          <li>Order is preserved within a unit of ordering (the partition) and old data is truncated by retention.</li>
+          <li>Delivery guarantee is configurable per producer and per consumer.</li>
+        </ul>
+        <p class="mini-heading">Non-functional</p>
+        <ul class="check-list">
+          <li>Tunable latency versus throughput.</li>
+          <li>Horizontal scalability for sudden surges in volume.</li>
+          <li>Persistence and replication: an acknowledged message survives the loss of a machine.</li>
+        </ul>
+        <p class="mini-heading">Capacity estimate (my assumptions, show the arithmetic)</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Ingest rate</td><td>100,000 msg/s average × 3 KB</td><td>300 MB/s (peak 3× is 900 MB/s)</td></tr>
+            <tr><td>Daily volume</td><td>300 MB/s × 86,400 s</td><td>about 25.9 TB/day</td></tr>
+            <tr><td>Two-week logical data</td><td>25.9 TB × 14</td><td>about 363 TB</td></tr>
+            <tr><td>With replication factor 3</td><td>363 TB × 3</td><td>about 1.09 PB on disk</td></tr>
+            <tr><td>Broker count (storage bound)</td><td>1.09 PB ÷ (20 TB usable × 70% fill target)</td><td>about 78 brokers</td></tr>
+            <tr><td>Inter-broker replication traffic</td><td>300 MB/s × 2 followers</td><td>600 MB/s cluster-wide, under 10 MB/s per broker</td></tr>
+            <tr><td>Consumer egress (3 groups)</td><td>300 MB/s × 3</td><td>900 MB/s cluster-wide, mostly served from page cache if consumers are caught up</td></tr>
+            <tr><td>Partitions (throughput bound)</td><td>300 MB/s ÷ about 10 MB/s per partition</td><td>30 minimum</td></tr>
+            <tr><td>Partitions (consumer-parallelism bound)</td><td>100,000 msg/s ÷ 1,000 msg/s per consumer instance</td><td>100 consumers means at least 100 partitions; provision 256 for headroom</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>Insight:</strong> Storage, not bandwidth, sizes this cluster. Retention × replication dominates. That is why tiered storage (cold segments in object storage) and compression (a batch of similar JSON compresses 3-5×) are the first levers you pull when the bill arrives. Partition count is chosen from consumer parallelism, because it is the hard ceiling on how many consumers in one group can do useful work.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Messaging models, topics, partitions and consumer groups</h2>
+        <p>Two models exist. In <strong>point-to-point</strong> a message goes to exactly one consumer and is deleted on acknowledgement; there is no history. In <strong>publish-subscribe</strong> messages belong to a topic and every subscriber sees every message. Our design is pub-sub with a twist that recovers point-to-point: a <em>consumer group</em> is a set of consumers that jointly read a topic and split the work, while distinct groups each get the full stream. One abstraction, both behaviours.</p>
+        <p>A single topic cannot live on one machine, so it is split into <strong>partitions</strong> (shards of the topic) hosted on <strong>brokers</strong>. Each partition is a FIFO log; the position of a message in it is its <strong>offset</strong>. Ordering is guaranteed only inside a partition, so the producer picks the partition from a message key: <code>hash(key) mod partitionCount</code>. Using <code>user_id</code> as the key means all events of one user are ordered; messages without a key can be spread round-robin or sticky-batched for balance.</p>
+        <p>A group keeps one offset per partition. To preserve order, a partition is assigned to at most one consumer in a group, which implies the consumer count in a group is useful only up to the partition count. Extra consumers sit idle as hot standbys. Messages are not copied per group; the log is shared and each group simply holds its own cursor.</p>
+        <div class="diagram-box"><pre>
+  Producers                         Brokers (partitions of topic "orders")             Consumer groups
+                                 +----------------------------------------+
+  P1 --key=u7--\                 | B1: [p0 leader] [p3 follower] [p2 foll]|   group "billing"  (offsets: p0=812 p1=790 p2=801)
+  P2 --key=u9---+--route-------> | B2: [p1 leader] [p0 follower] [p3 foll]|     C1: p0,p1      C2: p2
+  P3 --key=u7--/   hash(key)%N   | B3: [p2 leader] [p1 follower] [p0 foll]|
+                                 +----------------------------------------+   group "analytics" (own offsets)
+                                    |  metadata + group state + elections           C1: p0,p1,p2
+                                    v
+                         +--------------------------+
+                         | Coordination service     |   ZooKeeper (or Raft quorum in KRaft)
+                         | brokers alive, leader,   |
+                         | topic config, ISR        |
+                         +--------------------------+
+</pre></div>
+        <table class="data-table">
+          <thead><tr><th>Component</th><th>Responsibility</th></tr></thead>
+          <tbody>
+            <tr><td>Producer / consumer clients</td><td>Producer pushes to a topic; consumer group pulls from it.</td></tr>
+            <tr><td>Brokers</td><td>Host partition replicas; serve produce and fetch requests.</td></tr>
+            <tr><td>Data storage</td><td>Segmented append-only files, one directory per partition.</td></tr>
+            <tr><td>State storage</td><td>Group membership, partition-to-consumer assignment, committed offsets.</td></tr>
+            <tr><td>Metadata storage</td><td>Topic config: partition count, retention, replica placement.</td></tr>
+            <tr><td>Coordination service</td><td>Liveness of brokers, controller and partition leader election.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Storage</span>
+        <h2>Data storage: why a write-ahead log, and why it is fast</h2>
+        <p>Look at the access pattern before choosing a store. Messages are written once and never updated; deletions are bulk and time-based; reads are mostly sequential from an offset forward. A relational or key-value database pays for random-access indexes, per-row locking and update-in-place machinery that this workload never uses, and it struggles to be simultaneously write-heavy and read-heavy at hundreds of MB/s. A <strong>write-ahead log</strong> is the minimal structure that fits: append at the tail, read from any offset, drop from the head.</p>
+        <p>A partition is split into <strong>segments</strong>: only the newest (active) segment accepts writes; older ones are immutable. This bounds file size, makes retention a cheap <code>unlink</code> of whole files instead of rewriting, and lets you locate a message by choosing the right segment from its base offset. Kafka names each segment file by the base offset of its first record and pairs it with a sparse offset index and a time index: a lookup binary-searches the segment list, then the sparse index to a nearby file position, then scans forward a few records. The index stays small enough to be memory-mapped.</p>
+        <div class="diagram-box"><pre>
+  partition orders-2/
+    00000000000000000000.log   [ rec0 | rec1 | ... | rec4999 ]          (immutable, retention candidate)
+    00000000000000000000.index  sparse: every ~4 KB -> (relative offset, file position)
+    00000000000000005000.log   [ rec5000 | ... | rec9999 ]               (immutable)
+    00000000000000010000.log   [ rec10000 | rec10001 | ... ]  &lt;-- active segment, append only
+                                                 ^ log end offset (LEO)
+  record := offset | size | CRC | timestamp | key | value | headers
+</pre></div>
+        <p class="mini-heading">The "HDDs are slow" misconception</p>
+        <p>Random IO on a spinning disk costs a seek of several milliseconds, but sequential throughput is high: a modern HDD streams on the order of 100-200 MB/s, and an array of them far more. The notes quote "several MB/s", which badly undersells it; the principle is right though. Design the access pattern to be sequential and the disk stops being the bottleneck. On top of that, the OS page cache keeps recently written data in memory, so a consumer that is keeping up reads straight from RAM, and the broker can hand pages to the NIC with <code>sendfile</code> without copying through user space. This is also why you should not give the broker a huge JVM heap: you want that memory available to the page cache.</p>
+        <p class="mini-heading">Immutable, byte-compatible messages</p>
+        <p>The wire format, the on-disk format and the in-memory format should be the same bytes. If the broker had to decode and re-encode each message, it would burn CPU and allocate heavily at 100k msg/s. A message carries: an optional <strong>key</strong> (not unique, may be absent; used for partitioning and, optionally, compaction), a <strong>value</strong> (plain text or compressed binary), and metadata: topic, partition, offset, timestamp, size and a <strong>CRC</strong> to catch corruption. A message is addressable by the triple (topic, partition, offset). Extra header fields, such as tags, enable filtering later without touching the payload.</p>
+        <p class="mini-heading">Batching everywhere</p>
+        <p>Small IO is the enemy of throughput. The producer buffers records per partition and sends a batch; the broker appends the whole batch with one sequential write and one replication round; the consumer fetches a chunk. Batches amortise network round trips, syscall overhead, checksum cost and compression (compression works on the batch, not on single records). The price is latency: records wait in the buffer until the batch fills or a linger timer fires. Kafka exposes this as <code>batch.size</code> and <code>linger.ms</code>. For a throughput workload use large batches and more partitions; for a task-queue workload set linger near zero and accept more requests per second.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Large batches</h4><ul><li>Fewer requests, better compression ratio</li><li>Sequential disk writes, higher MB/s per broker</li><li>Cheaper per-message CPU</li></ul></div>
+          <div class="trade-col cons"><h4>Large batches cost</h4><ul><li>Added latency up to the linger time</li><li>Bigger in-memory buffers in the producer</li><li>Larger redelivery blast radius on a failed batch</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Producer</span>
+        <h2>Producer flow and the routing layer</h2>
+        <p>A producer wants to write to partition 3. Which broker? The replicated answer is "the current leader of partition 3". Discovering that requires the replica plan from metadata storage. The naive approach inserts a routing tier: producers talk to a router, the router caches the plan and forwards to the leader. It works but adds a network hop (latency) and, being a pass-through, removes the chance to batch per partition on the client.</p>
+        <p>The better design embeds the routing logic in the producer client library. The client keeps a cached copy of cluster metadata, picks the partition itself (so applications can supply custom partitioners), accumulates records in per-partition buffers, and ships batches directly to the leader. If the leader moves, the broker answers "not leader" and the client refreshes metadata and retries. One fewer hop, client-side batching, and no router tier to scale and keep available.</p>
+        <div class="diagram-box"><pre>
+  app.send(key,value)
+      |
+  [serializer] -&gt; [partitioner: hash(key) % N] -&gt; [per-partition buffer]
+                                                       | batch full OR linger.ms elapsed
+                                                       v
+                                          [sender thread] --ProduceRequest--&gt; leader of partition
+                                                                                 | append to active segment
+                                                                                 | followers pull
+                                                                                 | HW advances (acks=all)
+                                          &lt;--------------- ack(offset) -----------+
+</pre></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Consumer</span>
+        <h2>Consumer flow: pull beats push</h2>
+        <p>A consumer names a partition and an offset and receives a chunk of messages from there. Should the broker push or should the consumer pull? Push gives the lowest latency but the broker does not know how fast each consumer can process; a slow consumer is flooded and a heterogeneous fleet cannot be served by one send rate. Pull lets each consumer set its own pace, makes batching natural (fetch up to N bytes), and makes catching up after downtime just "read faster". The downside, empty polls burning network and CPU, is neutralised by <strong>long polling</strong>: the broker holds the fetch open until data arrives or a timeout fires (<code>fetch.min.bytes</code> and <code>fetch.max.wait.ms</code>). Almost every real system chooses pull for this reason.</p>
+        <p class="mini-heading">Joining a group</p>
+        <ol>
+          <li>The consumer hashes the group name to find its <strong>group coordinator</strong>, one of the brokers. All members of a group talk to the same coordinator. This is not the same thing as the cluster coordination service.</li>
+          <li>The coordinator registers it as a member and (after a rebalance) assigns it partitions.</li>
+          <li>The consumer reads the group's committed offset for each assigned partition from state storage and fetches forward from there.</li>
+          <li>It processes the messages and <strong>commits the offset</strong>. The order of "process" and "commit" is exactly what decides delivery semantics (see below).</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Rebalancing</span>
+        <h2>Consumer rebalancing</h2>
+        <p>Rebalancing decides which consumer owns which partition. It happens when a consumer joins, leaves or stops heartbeating, and when partitions are added. The coordinator runs the protocol, but the actual assignment is computed by one member designated <strong>group leader</strong>, which keeps assignment strategy (range, round-robin, sticky) in client code rather than in the broker.</p>
+        <div class="diagram-box"><pre>
+  Consumer B joins a group that has only A:
+  A, B           Coordinator
+  B --JoinGroup--&gt;|
+  A --Heartbeat---&gt;|   reply: REBALANCE_IN_PROGRESS            (passive notification on the heartbeat response)
+  A --JoinGroup---&gt;|
+                 | picks leader (A), bumps generation to g+1
+  A &lt;-members, g+1-|  B &lt;-"you are follower"-
+  A computes plan {A:[p0,p1], B:[p2,p3]}
+  A --SyncGroup(plan)--&gt;|   B --SyncGroup--&gt;|
+  A &lt;-assignment-|        B &lt;-assignment-|     both resume fetching from committed offsets
+</pre></div>
+        <p>The same sequence runs when a member sends a LeaveGroup, or when the coordinator has not seen a heartbeat within the session timeout. Three production details matter. First, a classic ("eager") rebalance stops every consumer in the group while assignments are recomputed; with a big group this "stop the world" pause is visible. Incremental cooperative rebalancing (Kafka's cooperative-sticky assignor) revokes only the partitions that actually move. Second, a <strong>generation</strong> number is attached to every commit so a zombie consumer that was kicked out but still thinks it owns partition 5 cannot commit stale offsets; the executable example below fences it. Third, a consumer that takes too long between polls is declared dead even though its heartbeat thread is healthy, which causes rebalance storms when processing latency spikes; tune <code>max.poll.interval.ms</code> and batch size together.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · State and metadata</span>
+        <h2>State storage, metadata storage and the coordination service</h2>
+        <p><strong>State storage</strong> holds the assignment of partitions to consumers and the last committed offset per (group, partition). Offsets are written often but in tiny volumes, updated in place, read randomly, and must be consistent, since a lost update means reprocessing or skipping data. <strong>Metadata storage</strong> holds topic configuration: partition count, retention, replica placement. It changes rarely, is small, and has a strong consistency requirement. Both fit a hierarchical consistent key-value store such as ZooKeeper or etcd, whose watch mechanism also provides push notifications on change.</p>
+        <p>The coordination service has two other jobs: tracking which brokers are alive (ephemeral nodes disappear when a session expires) and electing the controller broker that assigns partition leaders. With all of that outsourced, the broker keeps only message data, which makes brokers nearly stateless apart from their logs.</p>
+        <div class="warn-box"><p><strong>Outdated detail worth knowing:</strong> the book keeps consumer offsets in ZooKeeper. Modern Kafka moved offsets into an internal compacted topic (<code>__consumer_offsets</code>), because ZooKeeper writes do not scale to many groups committing frequently; and Kafka now runs without ZooKeeper at all using KRaft, a Raft quorum of controller nodes holding the metadata log. In an interview, describe the responsibilities (membership, leader election, metadata) and say they can be served by ZooKeeper or an in-cluster Raft quorum.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Replication</span>
+        <h2>Replication, in-sync replicas and the high watermark</h2>
+        <p>Disks and machines die, so every partition is replicated on several brokers. One replica is the <strong>leader</strong>: it takes all writes and, by default, all reads. The others are <strong>followers</strong> that continuously fetch from the leader using the same fetch protocol consumers use. The assignment of replicas to brokers is the replica distribution plan, held in metadata and created when the topic is created. Spread replicas of a partition across different brokers and, in a production cluster, different racks or zones; otherwise a single failure domain kills all copies.</p>
+        <p>When is a message safe? Not when the leader has it, but when enough followers have it too. The set of replicas that are currently caught up is the <strong>in-sync replica (ISR)</strong> set. A message is <strong>committed</strong> once every ISR member has it, and the offset up to which everything is committed is the <strong>high watermark (HW)</strong>. Consumers can only read below the HW. This is crucial: if a consumer saw an uncommitted message and the leader then died, the new leader might not have it, and the consumer would have observed data that never existed.</p>
+        <div class="diagram-box"><pre>
+  offset:        ... 11 12 13 | 14 15
+  leader  (R1)   [ ----------- committed ---|---- 14 15 ]  LEO=16
+  follower (R2)  [ ----------- committed ---|---- 14 15 ]  LEO=16   in ISR
+  follower (R3)  [ ----------- committed ---|---- 14    ]  LEO=15   in ISR (lag 1)
+  follower (R4)  [ -- 11 12                                 ]  LEO=13   lagging -&gt; dropped from ISR
+                                              ^
+                           HW = 14 (min LEO over ISR); consumers see offsets 0..13
+</pre></div>
+        <p>How does a replica fall out of the ISR? The notes use a message-count threshold (<code>replica.lag.max.messages</code>). Real Kafka dropped that in favour of a time threshold (<code>replica.lag.time.max.ms</code>): a count threshold flaps during traffic bursts, since a healthy follower can be thousands of messages behind for a moment, whereas "has not caught up to the leader's end within 30 s" identifies a genuinely slow or dead follower. The leader maintains the ISR and publishes changes to the controller.</p>
+        <p class="mini-heading">Acknowledgement modes</p>
+        <table class="data-table">
+          <thead><tr><th>Setting</th><th>Producer gets an ack when</th><th>Latency</th><th>Durability</th><th>Use for</th></tr></thead>
+          <tbody>
+            <tr><td><code>acks=0</code></td><td>never waits; fire and forget</td><td>lowest</td><td>lowest: loss on any hiccup, producer is blind to failure</td><td>metrics, best-effort logs</td></tr>
+            <tr><td><code>acks=1</code></td><td>leader has appended (not necessarily replicated)</td><td>low</td><td>message lost if the leader dies before followers fetch it</td><td>general telemetry, tolerable loss</td></tr>
+            <tr><td><code>acks=all</code></td><td>every ISR member has it (HW passed it)</td><td>highest</td><td>highest, provided ISR size is at least <code>min.insync.replicas</code></td><td>orders, payments, anything you cannot lose</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>The gotcha behind acks=all:</strong> "all ISR" shrinks to just the leader if two followers lag, and then <code>acks=all</code> degenerates into <code>acks=1</code>. The fix is <code>min.insync.replicas</code> (say 2 with replication factor 3): the leader rejects writes when the ISR is smaller than that. You deliberately trade availability for durability, which is the CP side of CAP. The runnable example below shows precisely that refusal.</p></div>
+        <p>On the read side, simply point consumers at the leader. The connection count is bounded because each partition has at most one active consumer per group, and a hot topic is scaled by adding partitions. The exception is cross-datacenter consumers, where reading from a nearby follower (Kafka's follower fetching, KIP-392) saves expensive inter-region bandwidth.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scalability</span>
+        <h2>Scaling producers, consumers, brokers and partitions</h2>
+        <p><strong>Producers</strong> are stateless clients; add more. <strong>Consumers</strong> scale by adding group members (up to the partition count) and by adding independent groups; rebalancing makes membership changes graceful. <strong>Brokers</strong> and <strong>partitions</strong> need more thought.</p>
+        <p class="mini-heading">Broker failure</p>
+        <ol>
+          <li>The controller notices the broker's session expire.</li>
+          <li>For each partition that had its leader there, it elects a new leader from the ISR. Choosing only from the ISR guarantees no committed message is lost. Electing an out-of-sync replica ("unclean leader election") restores availability but silently discards committed data; leave it off for important topics.</li>
+          <li>Followers on the dead broker are removed from ISRs; the cluster is now under-replicated. A replacement broker (or the surviving brokers) is assigned the missing replicas, which copy data from the leaders and rejoin the ISR when caught up.</li>
+        </ol>
+        <p>Design rules that follow: pick the replica count and <code>min.insync.replicas</code> for the loss you can accept (3 and 2 is the common default); never put two replicas of a partition on one broker; if the entire cluster in one site can be lost, mirror to another cluster asynchronously (MirrorMaker 2, or Pulsar geo-replication). Synchronous cross-region replication of every write is usually too slow.</p>
+        <p class="mini-heading">Adding a broker</p>
+        <p>A new broker owns nothing. The controller computes a new placement, and for each moved partition first adds the new broker as an extra replica (temporarily exceeding the replication factor), waits for it to catch up and join the ISR, and only then removes the old replica. Safety first: there is never a moment with fewer copies than configured. Throttle the copy, since re-replicating terabytes can saturate the network and hurt live traffic.</p>
+        <p class="mini-heading">Increasing partitions</p>
+        <p>Add new partitions and let only new messages land there; old data is not moved. Producers learn of the new partitions via metadata refresh, and consumers rebalance. The catch is that <code>hash(key) mod N</code> changes when N changes, so a key that used to go to partition 2 may now go to partition 7 and per-key ordering across the boundary is broken for a while. Teams therefore overprovision partitions at topic creation (hence 256 above) and treat increases as a last resort.</p>
+        <p class="mini-heading">Decreasing partitions</p>
+        <p>Harder, because existing partitions hold data. Mark the partition decommissioned: producers stop writing to it, consumers keep reading it until retention expires, then it is deleted and the group rebalances. Kafka does not support shrinking a topic at all; the practical answer is a new topic and a migration.</p>
+        <table class="data-table">
+          <thead><tr><th>Dimension</th><th>Knee of the curve</th><th>What breaks first</th></tr></thead>
+          <tbody>
+            <tr><td>Partitions per broker</td><td>Thousands</td><td>Open file handles, controller failover time, per-partition memory; leader election after a broker loss slows linearly</td></tr>
+            <tr><td>Partitions per topic</td><td>Consumer-count bound</td><td>Order is only per partition; too many gives tiny batches and more end-to-end latency</td></tr>
+            <tr><td>Consumers per group</td><td>Equal to partitions</td><td>Beyond that they idle; rebalance duration grows with group size</td></tr>
+            <tr><td>Hot key</td><td>One partition's throughput</td><td>A single partition cannot be sharded further without changing keys; salt the key if ordering allows</td></tr>
+            <tr><td>Retention</td><td>Disk per broker</td><td>Recovery time: re-replicating 20 TB at 200 MB/s is about 28 hours; tiered storage shrinks the hot set</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Delivery semantics</span>
+        <h2>At-most-once, at-least-once and exactly-once</h2>
+        <p>Delivery semantics come from the ordering of two operations on each side: acknowledging and doing the work.</p>
+        <div class="diagram-box"><pre>
+  AT-MOST-ONCE             AT-LEAST-ONCE                 EXACTLY-ONCE (effect)
+  producer: acks=0, no     producer: acks=1/all, retry   producer: idempotent (PID + sequence) + txn
+            retry                    on timeout                    retries cannot duplicate in the log
+  consumer: commit offset  consumer: process, THEN       consumer: process + commit offset atomically
+            THEN process             commit offset                 (txn, or idempotent sink + dedup key)
+  crash between =  LOST    crash between = DUPLICATE     crash anywhere = no visible duplicate/loss
+</pre></div>
+        <ul class="check-list">
+          <li><strong>At-most-once.</strong> The producer sends without retrying; the consumer commits before processing. Fastest, may lose messages. Fine for metrics and sampled logs.</li>
+          <li><strong>At-least-once.</strong> The producer retries until acked; the consumer commits after processing. Nothing is lost, but duplicates occur after a crash between processing and commit, and after a producer retry whose first attempt actually landed. Use when the consumer is idempotent or duplicates are tolerable. It is the sensible default.</li>
+          <li><strong>Exactly-once.</strong> The notes leave this as "very costly". The practical recipe: an <strong>idempotent producer</strong> (the broker tracks a producer id and per-partition sequence numbers and discards retried duplicates), <strong>transactions</strong> that write output records and the consumer's offset commit atomically (the consume-transform-produce loop in Kafka Streams), and consumers that read only committed transactional data. Across a boundary into an external system, exactly-once cannot be had from the queue alone; you need an idempotent write keyed by a dedup id, which is the same technique as in payments.</li>
+        </ul>
+        <div class="warn-box"><p><strong>Warning:</strong> "exactly-once delivery" is not achievable over an unreliable network; what systems offer is exactly-once <em>processing effects</em> through deduplication plus atomic commit. Be precise about that wording in an interview and the follow-up questions get easier.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Advanced features</span>
+        <h2>Message filtering, delayed and scheduled messages, retries, archives</h2>
+        <p class="mini-heading">Filtering</p>
+        <p>Some consumers want only a subset of a topic. One topic per subset wastes storage (the same message is stored many times) and couples producers to each consumer's needs. Filtering on the consumer wastes network because everything is fetched and then thrown away. Better: producers attach <strong>tags</strong> (a small header attribute) and the broker evaluates a tag subscription before sending, which RocketMQ does. Filtering on payload content is fragile (encrypted or serialized blobs) and full expression engines are heavy for a broker. Keep the broker filter to simple header predicates and do richer logic in a stream processor.</p>
+        <p class="mini-heading">Delayed and scheduled messages</p>
+        <p>"Check this payment in 30 minutes." The broker must hold the message invisibly and release it into the real partition at the right time. Park messages in internal delay topics; a timer service moves each into its target topic when due. Options for the timer: fixed delay levels with one delay queue per level (RocketMQ's discrete levels are the well-known example; each queue is naturally time-ordered), or a <strong>hierarchical timing wheel</strong> (Varghese and Lauck): buckets per tick, with overflow wheels for longer horizons, giving O(1) insert and expiry. Kafka uses a hierarchical timing wheel internally for request purgatory. See the dedicated delayed job scheduler page for the full pattern.</p>
+        <p class="mini-heading">Retry and dead-letter topics</p>
+        <p>If a message cannot be processed now, republish it to a retry topic (possibly with a delay) so the main partition is not blocked, and after N attempts send it to a dead-letter topic for humans. This avoids head-of-line blocking at the cost of breaking order for the retried message, so choose per use case.</p>
+        <p class="mini-heading">History and archive</p>
+        <p>Beyond the two-week hot retention, copy segments to HDFS or object storage like S3. Tiered storage (Kafka KIP-405, Pulsar offload) makes this transparent so old offsets remain readable.</p>
+        <p class="mini-heading">Wire protocol</p>
+        <p>The protocol must carry high volume, support batching and verify integrity with checksums. Kafka has its own binary protocol, AMQP is the standard for classic brokers like RabbitMQ. Version negotiation matters: brokers and clients upgrade independently for years.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decision table</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Pick when</th></tr></thead>
+          <tbody>
+            <tr><td>Storage</td><td>Segmented log on disk</td><td>Database / in-memory queue</td><td>Log for retention and replay; in-memory only for tiny ephemeral work queues</td></tr>
+            <tr><td>Consumption</td><td>Pull with long poll</td><td>Push</td><td>Pull unless you need single-digit-ms delivery to a few well-sized consumers</td></tr>
+            <tr><td>Routing</td><td>Client-embedded</td><td>Separate router tier</td><td>Client-embedded for batching and fewer hops; router when clients must stay dumb (multi-language, security gateways)</td></tr>
+            <tr><td>Acks</td><td>all + min ISR 2</td><td>1 or 0</td><td>all for business data, 1/0 for telemetry</td></tr>
+            <tr><td>Queue vs stream</td><td>Log with offsets (Kafka)</td><td>Per-message ack, no ordering (RabbitMQ, SQS)</td><td>Log for replay, ordering, many readers; per-message queue for job fan-out with retries and priorities</td></tr>
+            <tr><td>Partition count</td><td>Many, up front</td><td>Few, grow later</td><td>Many: changing N breaks key-to-partition mapping</td></tr>
+            <tr><td>Leader election</td><td>ISR only</td><td>Allow unclean</td><td>ISR only whenever data matters</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>A miniature broker you can execute</h2>
+        <p>The example implements the pieces that carry the interview: a segmented log with CRC-checked records and head-only retention; per-key partitioning; a replicated partition with ISR shrinking, a high watermark that hides unreplicated data, leader failover from the ISR and <code>min.insync.replicas</code> refusal; a group coordinator with range and round-robin assignment, heartbeat expiry and generation fencing; and a crash test that contrasts at-most-once with at-least-once.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import { strict as assert } from 'node:assert';
+import { createHash } from 'node:crypto';
+
+// ---------- CRC + framed records (append-only segmented log) ----------
+function crc32(buf) {
+  let c, crc = 0xffffffff;
+  for (const b of buf) { c = (crc ^ b) &amp; 0xff; for (let k = 0; k &lt; 8; k++) c = c &amp; 1 ? (c &gt;&gt;&gt; 1) ^ 0xedb88320 : c &gt;&gt;&gt; 1; crc = (crc &gt;&gt;&gt; 8) ^ c; }
+  return (crc ^ 0xffffffff) &gt;&gt;&gt; 0;
+}
+class Segment {
+  constructor(baseOffset) { this.baseOffset = baseOffset; this.records = []; this.bytes = 0; }
+  append(rec) { this.records.push(rec); this.bytes += rec.size; }
+  get nextOffset() { return this.baseOffset + this.records.length; }
+}
+class PartitionLog {
+  constructor({ segmentBytes = 256 } = {}) { this.segments = [new Segment(0)]; this.segmentBytes = segmentBytes; }
+  get logEnd() { return this.segments.at(-1).nextOffset; }          // next offset to assign
+  get logStart() { return this.segments[0].baseOffset; }
+  append(key, value, ts = 0) {
+    let seg = this.segments.at(-1);
+    if (seg.bytes &gt;= this.segmentBytes) { seg = new Segment(seg.nextOffset); this.segments.push(seg); } // roll
+    const body = Buffer.from(value);
+    const rec = { offset: seg.nextOffset, key, value, ts, size: body.length + 16, crc: crc32(body) };
+    seg.append(rec);
+    return rec.offset;
+  }
+  read(fromOffset, max = 10, upTo = this.logEnd) {                   // upTo = high watermark for consumers
+    const out = [];
+    for (const seg of this.segments) {                               // binary search in real life (sparse index)
+      if (seg.nextOffset &lt;= fromOffset) continue;
+      for (const r of seg.records) if (r.offset &gt;= fromOffset &amp;&amp; r.offset &lt; upTo &amp;&amp; out.length &lt; max) {
+        assert.equal(crc32(Buffer.from(r.value)), r.crc, 'corrupt record');
+        out.push(r);
+      }
+    }
+    return out;
+  }
+  truncateBefore(offset) {                                           // retention: drop whole old segments only
+    while (this.segments.length &gt; 1 &amp;&amp; this.segments[0].nextOffset &lt;= offset) this.segments.shift();
+  }
+  truncateTo(offset) {                                               // follower divergence repair
+    for (const s of this.segments) s.records = s.records.filter(r =&gt; r.offset &lt; offset);
+  }
+}
+
+// ---------- Replicated partition: leader, followers, ISR, high watermark ----------
+class ReplicatedPartition {
+  constructor(brokers, { minIsr = 2, maxLagMessages = 3 } = {}) {
+    this.replicas = new Map(brokers.map(b =&gt; [b, new PartitionLog()]));
+    this.leader = brokers[0]; this.isr = new Set(brokers); this.hw = 0; this.minIsr = minIsr; this.maxLag = maxLagMessages;
+    this.down = new Set(); this.lagging = new Set();
+  }
+  produce(key, value, acks) {
+    if (acks === 'all' &amp;&amp; this.isr.size &lt; this.minIsr) throw new Error('NotEnoughReplicas');
+    const off = this.replicas.get(this.leader).append(key, value);
+    if (acks === 0 || acks === 1) return { offset: off, acked: acks === 1 };   // follower pull happens later
+    this.replicate();                                                          // acks=all: wait for ISR
+    return { offset: off, acked: this.hw &gt; off };
+  }
+  replicate() {                                                      // followers "pull" from the leader
+    const L = this.replicas.get(this.leader);
+    for (const [b, log] of this.replicas) {
+      if (b === this.leader || this.down.has(b) || this.lagging.has(b)) continue;
+      for (const r of L.read(log.logEnd, 1000)) log.append(r.key, r.value);
+    }
+    for (const [b, log] of this.replicas) {                          // leader maintains ISR by lag
+      if (b === this.leader) continue;
+      const lag = L.logEnd - log.logEnd;
+      if (this.down.has(b) || lag &gt; this.maxLag) this.isr.delete(b); else this.isr.add(b);
+    }
+    this.hw = Math.min(...[...this.isr].map(b =&gt; this.replicas.get(b).logEnd)); // committed = all ISR have it
+  }
+  fetch(from, max) { return this.replicas.get(this.leader).read(from, max, this.hw); }
+  failLeader() {                                                     // controller elects from ISR only (clean election)
+    this.down.add(this.leader); this.isr.delete(this.leader);
+    const next = [...this.isr][0]; if (!next) throw new Error('partition offline');
+    this.leader = next;
+  }
+}
+
+// ---------- Consumer-group coordinator: heartbeats, generations, rebalance ----------
+const coordinatorFor = (group, brokers) =&gt; brokers[createHash('md5').update(group).digest().readUInt32BE(0) % brokers.length];
+class GroupCoordinator {
+  constructor(partitions, strategy = 'range') { this.partitions = partitions; this.strategy = strategy; this.members = new Map(); this.generation = 0; this.assignment = new Map(); this.offsets = new Map(); }
+  join(id, now) { this.members.set(id, now); return this.rebalance(); }
+  leave(id) { this.members.delete(id); return this.rebalance(); }
+  heartbeat(id, now) { this.members.set(id, now); }
+  expire(now, sessionMs) { let ch = false; for (const [m, t] of this.members) if (now - t &gt; sessionMs) { this.members.delete(m); ch = true; } return ch ? this.rebalance() : this.assignment; }
+  rebalance() {                                                      // the group leader's job in the book; computed here directly
+    this.generation++; const ms = [...this.members.keys()].sort(); const a = new Map(ms.map(m =&gt; [m, []]));
+    if (ms.length) {
+      if (this.strategy === 'roundrobin') for (let p = 0; p &lt; this.partitions; p++) a.get(ms[p % ms.length]).push(p);
+      else { const per = Math.floor(this.partitions / ms.length), extra = this.partitions % ms.length; let p = 0;
+        ms.forEach((m, i) =&gt; { const n = per + (i &lt; extra ? 1 : 0); for (let k = 0; k &lt; n; k++) a.get(m).push(p++); }); }
+    }
+    this.assignment = a; return a;
+  }
+  commit(member, gen, p, offset) { if (gen !== this.generation) throw new Error('StaleGeneration'); this.offsets.set(p, offset); }
+  committed(p) { return this.offsets.get(p) ?? 0; }
+}
+
+// ---------- Tests ----------
+// 1. Segmented log + retention
+const log = new PartitionLog({ segmentBytes: 60 });
+for (let i = 0; i &lt; 10; i++) log.append('k', `msg-${i}`);
+assert.equal(log.logEnd, 10); assert.ok(log.segments.length &gt; 1);
+assert.deepEqual(log.read(4, 3).map(r =&gt; r.value), ['msg-4', 'msg-5', 'msg-6']);
+log.truncateBefore(5); console.log('segments after retention, logStart =', log.logStart, 'segments =', log.segments.length);
+
+// 2. Key -&gt; partition keeps per-key order
+const P = 3, parts = Array.from({ length: P }, () =&gt; new PartitionLog());
+const partOf = k =&gt; createHash('md5').update(k).digest().readUInt32BE(0) % P;
+for (let i = 0; i &lt; 9; i++) { const k = 'user' + (i % 3); parts[partOf(k)].append(k, `${k}#${i}`); }
+for (const pl of parts) for (const k of new Set(pl.read(0).map(r =&gt; r.key))) {
+  const seq = pl.read(0).filter(r =&gt; r.key === k).map(r =&gt; +r.value.split('#')[1]); assert.deepEqual(seq, [...seq].sort((a, b) =&gt; a - b)); }
+console.log('per-key ordering holds across', P, 'partitions');
+
+// 3. Replication, high watermark, ISR shrink, leader failover without losing committed data
+const rp = new ReplicatedPartition(['b1', 'b2', 'b3'], { minIsr: 2, maxLagMessages: 2 });
+rp.produce('k', 'a', 'all'); rp.produce('k', 'b', 'all');
+assert.equal(rp.hw, 2); assert.deepEqual([...rp.isr].sort(), ['b1', 'b2', 'b3']);
+rp.lagging.add('b3'); for (const v of 'cdef') rp.produce('k', v, 'all');       // b3 stalls
+assert.ok(!rp.isr.has('b3')); assert.equal(rp.hw, 6); console.log('ISR after b3 stalls:', [...rp.isr].join(','), 'HW =', rp.hw);
+rp.produce('k', 'unreplicated', 1);                                            // acks=1: on leader only, HW does not move
+assert.equal(rp.hw, 6); assert.equal(rp.fetch(0, 100).length, 6);              // consumers never see offset 6
+rp.failLeader(); assert.equal(rp.leader, 'b2');
+assert.deepEqual(rp.fetch(0, 100).map(r =&gt; r.value), ['a', 'b', 'c', 'd', 'e', 'f']); // committed data survived
+rp.isr = new Set(['b2']);                                                      // only the new leader is left in sync
+assert.throws(() =&gt; rp.produce('k', 'x', 'all'), /NotEnoughReplicas/);
+console.log('failover ok: new leader', rp.leader, '; acks=all refused with ISR=1 &lt; minIsr=2');
+
+// 4. Consumer group rebalance + stale generation fencing + at-least-once vs at-most-once
+const co = new GroupCoordinator(5, 'range');
+co.join('A', 0); let asg = co.join('B', 1);
+console.log('range assignment', JSON.stringify([...asg]));
+assert.deepEqual(asg.get('A'), [0, 1, 2]); assert.deepEqual(asg.get('B'), [3, 4]);
+const genAtJoin = co.generation; co.heartbeat('A', 5000); asg = co.expire(9000, 6000);   // B silent for 8s &gt; 6s session
+assert.deepEqual(asg.get('A'), [0, 1, 2, 3, 4]); assert.throws(() =&gt; co.commit('B', genAtJoin, 3, 9), /StaleGeneration/);
+const rr = new GroupCoordinator(5, 'roundrobin'); rr.join('A', 0); rr.join('B', 0); assert.deepEqual(rr.assignment.get('A'), [0, 2, 4]);
+assert.ok(['b1', 'b2', 'b3'].includes(coordinatorFor('payments-group', ['b1', 'b2', 'b3'])));
+
+const topic = new PartitionLog(); for (let i = 0; i &lt; 5; i++) topic.append('k', 'job' + i);
+// Consumer crashes while handling job2; a replacement resumes from the committed offset.
+function run(mode) {
+  const c = new GroupCoordinator(1); c.join('X', 0); const done = []; let crashed = false;
+  while (c.committed(0) &lt; topic.logEnd) {
+    for (const r of topic.read(c.committed(0), 100)) {
+      const crashHere = !crashed &amp;&amp; r.offset === 2;
+      if (mode === 'at-most-once') c.commit('X', c.generation, 0, r.offset + 1);   // commit, then process
+      if (crashHere &amp;&amp; mode === 'at-most-once') { crashed = true; break; }         // died before processing
+      done.push(r.value);                                                          // process
+      if (crashHere) { crashed = true; break; }                                    // died before committing
+      if (mode === 'at-least-once') c.commit('X', c.generation, 0, r.offset + 1);  // process, then commit
+    }
+  }
+  return done;
+}
+const amo = run('at-most-once'), alo = run('at-least-once');
+console.log('at-most-once :', amo.join(' '));
+console.log('at-least-once:', alo.join(' '));
+assert.ok(!amo.includes('job2')); assert.equal(alo.filter(v =&gt; v === 'job2').length, 2);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Run with <code>node mq.mjs</code> (Node 20+). It prints the retention result, per-key ordering across partitions, the ISR and HW after a follower stalls, the failover result, the range assignment, then the two crash runs: at-most-once yields job0 job1 job3 job4 (job2 lost), at-least-once yields job0 job1 job2 job2 job3 job4 (job2 duplicated). All assertions pass and it ends with "all assertions passed".</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What goes wrong and what you do about it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Leader broker dies</td><td>Brief produce errors on its partitions</td><td>Controller elects new leader from ISR; clients refresh metadata and retry; idempotent producer prevents duplicates from retry</td></tr>
+            <tr><td>Slow follower</td><td>ISR shrinks, <code>acks=all</code> latency rises, then refuses writes under min ISR</td><td>Alert on under-replicated partitions; fix disk or network; do not lower min ISR to "make errors go away"</td></tr>
+            <tr><td>All replicas lost</td><td>Partition offline</td><td>Wait for an ISR member to return (preferred) or accept data loss with unclean election; cross-cluster mirror for disasters</td></tr>
+            <tr><td>Consumer crashes after processing, before commit</td><td>Duplicates</td><td>Idempotent handler or dedup key; commit frequently but not per message</td></tr>
+            <tr><td>Rebalance storm</td><td>Group repeatedly pauses, lag climbs</td><td>Tune session timeout, max poll interval and batch size; cooperative-sticky assignor; static membership for rolling restarts</td></tr>
+            <tr><td>Zombie consumer commits</td><td>Offsets regress or skip</td><td>Generation or epoch fencing on commit</td></tr>
+            <tr><td>Poison message</td><td>Consumer loops forever on one offset, blocking the partition</td><td>Retry topic with bounded attempts, then dead-letter topic</td></tr>
+            <tr><td>Hot partition</td><td>One broker disk or NIC saturated while others idle</td><td>Better key choice, key salting, more partitions for future data</td></tr>
+            <tr><td>Disk full</td><td>Broker stops accepting writes</td><td>Size retention by bytes as well as time, alert at 70%, tiered storage</td></tr>
+            <tr><td>Silent corruption</td><td>CRC mismatch on fetch or replication</td><td>Verify CRC on read, refetch from another replica, truncate and resync the bad one</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Production gotchas</span>
+        <h2>Things that bite after launch</h2>
+        <ul class="check-list">
+          <li>Throughput scales with partitions, but so do open files, replication fetchers, and leader-election time after a failure. Do not create 100k partitions "just in case".</li>
+          <li>Consumer lag is the number-one health signal: lag in messages and, more usefully, in time. Alert on lag growth, not just absolute value.</li>
+          <li>Message size is a lever: very large messages hurt batching and replication, so store the blob in object storage and publish a pointer.</li>
+          <li>Ordering across retries: with several in-flight requests, a retried batch can land after a later one. Enable idempotence (which bounds in-flight and uses sequence numbers) if per-key order matters.</li>
+          <li>Compaction is a different retention policy: keep only the latest record per key, for changelog and state topics. Do not confuse it with time retention.</li>
+          <li>Rolling upgrades: brokers and clients must tolerate mixed versions; pin the protocol version until the whole fleet is upgraded.</li>
+          <li>Time-based retention can only delete whole segments; one record in the active segment keeps it alive. Small, low-volume topics may keep data far past the retention time unless segments roll on time as well as size.</li>
+          <li>Security: authenticate and authorise per topic and per group; encrypt in transit; the queue often carries your most sensitive events.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Clarified: retention, replay, ordering, delivery semantics, throughput versus latency.</li>
+          <li>Computed ingest, daily volume, retention × replication storage, partitions.</li>
+          <li>Drew producers → brokers (partitions, replicas) → consumer groups, plus state, metadata and coordination.</li>
+          <li>Justified an append-only segmented log, immutable byte-compatible records, batching.</li>
+          <li>Explained client-embedded routing, pull with long polling, group coordinator and rebalancing with generations.</li>
+          <li>Explained leader/follower replication, ISR, high watermark, <code>acks</code>, <code>min.insync.replicas</code>, clean election.</li>
+          <li>Covered scaling of brokers and partitions, including the key remapping problem.</li>
+          <li>Stated the three delivery semantics with commit ordering and how exactly-once is really built.</li>
+          <li>Mentioned filtering, delay (timing wheel), retry/DLQ, archive, protocol.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why is ordering only per partition, and how do I get a global order?</summary><p>Ordering requires a single writer path and a single reader per partition; two partitions are on different machines with no shared clock or sequence. If you truly need a global order, use a single partition and accept its throughput ceiling, or assign a global sequence at the producer (a unique ID service) and reorder in the consumer within a bounded window. Most systems actually need per-entity order, which the partition key gives you for free.</p></details>
+        <details><summary>What happens if I add partitions to a topic that uses keys?</summary><p>New messages for a key may be routed to a different partition than its earlier messages, because the modulus changed. Per-key ordering is broken across the transition. Overprovision up front, use a consistent-hash style partitioner if you must grow, or create a new topic and migrate with a cut-over.</p></details>
+        <details><summary>Why can't we read uncommitted messages from the leader?</summary><p>If the leader fails before followers copy a message, the new leader will not have it. A consumer that already read it would have seen state that disappears, and downstream effects cannot be undone. The high watermark exists to guarantee consumers only see data that will survive failover.</p></details>
+        <details><summary>Kafka or RabbitMQ (or SQS)?</summary><p>Choose the log when you need replay, long retention, multiple independent readers, strict per-key order, or very high throughput. Choose a broker with per-message acknowledgement when you need flexible routing, priorities, per-message retries and delays, and low volumes with complex consumer behaviour. SQS gives you per-message visibility timeouts with zero operations at moderate throughput. They solve overlapping but different problems.</p></details>
+        <details><summary>How do you achieve exactly-once end to end?</summary><p>Make the producer idempotent, make the consume-process-produce step transactional so output and offset commit atomically, and make external side effects idempotent through a dedup key or a unique constraint. The queue guarantees the log has no duplicates and the offset moves with the output; the sink must handle the rest.</p></details>
+        <details><summary>A consumer group is lagging and adding consumers does not help. Why?</summary><p>Either all partitions are already assigned (consumers are capped by partition count), the lag is concentrated in one hot partition, or processing is bottlenecked on a downstream dependency. Check per-partition lag, then raise partitions (for future data), fix the key skew, or increase per-consumer parallelism within a partition only if order does not matter.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./18-google-maps.html">Chapter 18: Design Google Maps</a> — previous chapter in the handbook.</li>
+          <li><a href="./20-metrics-monitoring-alerting.html">Chapter 20: Metrics Monitoring and Alerting</a> — next chapter, which puts a queue like this in front of a time-series database.</li>
+          <li><a href="./21-ad-click-aggregation.html">Chapter 21: Ad Click Aggregation</a> — a streaming pipeline built on exactly the log abstraction from this chapter.</li>
+          <li><a href="../../system-design/message-queue.html">Message Queue</a> — the concept-level summary of queues and brokers.</li>
+          <li><a href="../../system-design/pub-sub.html">Pub/Sub</a> — the subscription model that consumer groups generalise.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — an alternative to modulus partitioning when partition count must change.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — the technique that turns at-least-once into effectively-once.</li>
+          <li><a href="../../delayed-job-scheduler-system-design.html">Delayed Job Scheduler</a> — a deeper look at the timing wheel and delay queue pattern.</li>
+          <li><a href="../../event-driven-architecture-guide.html">Event-Driven Architecture Guide</a> — how teams use brokers as the backbone of services.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The notes list the following reference for this chapter:</p>
+        <ul>
+          <li><a href="http://www.cs.columbia.edu/~nahum/w6998/papers/sosp87-timing-wheels.pdf">Hashed and Hierarchical Timing Wheels (timing wheels paper)</a></li>
+          <li><a href="https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=27846330">Kafka mirroring / data mirroring</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A distributed message queue is a replicated commit log with cursors. Partition it for parallelism, make each partition an immutable segmented file so IO is sequential, batch relentlessly, let consumers pull, replicate with a leader and an ISR whose high watermark defines what is durable, and choose delivery semantics by the order of commit and process. Every knob (batch size, acks, min ISR, partition count) is a dial between latency, throughput and safety, and a strong answer says which way you turn it for the workload at hand.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Search Autocomplete System | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 13 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.13. Covers search autocomplete / typeahead: data gathering (logs, aggregators, weekly trie rebuild) versus query service, trie with top-k cached per node, prefix length cap, trie storage as serialized snapshot or prefix key-value map, filter layer for removals, browser caching, range sharding with a shard map, trending and multi-language extensions. Includes QPS arithmetic (10M DAU, 24,000 average, 48,000 peak) and an executed JavaScript trie with cached top-k, filtering and decayed trending scores. About 17 minute read. Related: caching, sharding, elasticsearch, chat system.</div>
+        <h1>Design a Search Autocomplete System</h1>
+        <p class="summary">Typeahead has a brutal latency budget and a deceptively simple data structure. This chapter builds a system that returns the five most popular completions for a prefix in well under 100 ms, keeps the ranking fresh without updating anything in the hot path, and shards the index sensibly.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">13 of 28 · Part 3 Product Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">17 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Trie, top-k cached per node, offline aggregation, prefix sharding</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Google Suggest, Elasticsearch completion suggester, Redis, Prefixy, MongoDB</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every keystroke in a search box is a read request, and users abandon boxes that lag. Autocomplete is therefore a read-optimized system with an enormous read-to-write ratio: billions of lookups against a ranking that changes slowly. That asymmetry dictates the whole design: precompute the answer for every prefix, serve it from memory, and refresh the precomputation offline.</p>
+        <div class="callout"><p><strong>Core idea:</strong> split the system in two. A <em>data gathering</em> pipeline turns raw query logs into aggregated counts and builds a trie snapshot offline; a <em>query service</em> answers prefix lookups from an in-memory copy where each trie node already stores its own top-k list, so a lookup costs O(prefix length), not O(subtree size).</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design to anchor on</span>
+        <h2>Prefixy and the prefix hash tree</h2>
+        <p>Two sources from the repo's reading list frame the problem space. The Prefixy engineering write-up describes a prefix-search service that stores completions in a key-value layer (MongoDB) keyed by prefix instead of keeping a literal tree in memory, trading a bit of space for horizontal scalability and simple operations. The Prefix Hash Tree paper (Berkeley) shows how to run prefix and range queries over a distributed hash table by hashing trie nodes onto the DHT. Both land on the same insight this chapter reaches: a trie is a logical model, and the physical layout can be a flat map from prefix to precomputed result.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>Scope and numbers</h2>
+        <ul class="check-list">
+          <li>Match on the <em>beginning</em> of the query only (prefix match, not fuzzy or mid-string).</li>
+          <li>Return 5 suggestions, ranked by historical popularity.</li>
+          <li>Lowercase English letters to start; no spell correction.</li>
+          <li>Response in under roughly 100 ms; highly available and scalable.</li>
+        </ul>
+        <p class="mini-heading">Back-of-envelope</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Daily searches</td><td>10M DAU × 10 searches/user/day</td><td>100 million</td></tr>
+            <tr><td>Requests per search</td><td>about 20 characters typed, one request per keystroke</td><td>20 requests</td></tr>
+            <tr><td>Daily autocomplete requests</td><td>100M × 20</td><td>2 billion</td></tr>
+            <tr><td>Average QPS</td><td>10M × 10 × 20 ÷ 86,400 s = 2×10<sup>9</sup> ÷ 86,400</td><td>about 23,000, round to 24,000</td></tr>
+            <tr><td>Peak QPS</td><td>2 × average</td><td>about 48,000</td></tr>
+            <tr><td>New data per day</td><td>100M queries × 20% never seen before × 20 bytes</td><td>about 0.4 GB/day</td></tr>
+          </tbody>
+        </table>
+        <p>Two honest observations. First, the 20-requests-per-search figure is an upper bound: clients debounce (wait 100 to 150 ms after the last keystroke) and cancel superseded requests, which commonly removes a large fraction of the traffic. Second, 0.4 GB/day of genuinely new query text is tiny; the index is small enough to fit comfortably in RAM on a handful of machines. The challenge is latency and QPS, not capacity.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Two services, one precomputed table</h2>
+        <div class="diagram-box"><span class="dim">WRITE PATH (offline, minutes to days)</span>
+ search logs ──▶ <span class="step">aggregators</span> ──▶ frequency table ──▶ <span class="step">trie workers</span> ──▶ <span class="ok">trie DB</span>
+                                                                          │ snapshot
+ <span class="dim">READ PATH (online, tens of ms)</span>                                                  ▼
+ keystroke ──▶ LB ──▶ API ──▶ <span class="hi">trie cache (memory)</span> ◀──── load/refresh ───── trie DB
+                          └─▶ filter layer ──▶ top-5 JSON ──▶ browser cache</div>
+        <p>The naive first version keeps one table of (query, frequency). Given a prefix <code>tw</code>, run <code>SELECT query FROM freq WHERE query LIKE 'tw%' ORDER BY frequency DESC LIMIT 5</code>. It works at small scale, and it is a good thing to say out loud first, because it makes the problem visible: with an index it still scans every match of a short prefix like <code>t</code> before sorting, and at 48,000 QPS that is a disaster. The fix is to stop computing the answer at request time.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>The trie and the top-k trick</h2>
+        <p>A trie stores strings by sharing prefixes: each edge is a character, each root-to-node path is a prefix, and nodes marking a complete query hold its frequency. Finding the prefix node is O(p) for prefix length p. The original approach then walks the whole subtree under that node collecting valid queries and sorts them to pick the top 5. For short prefixes the subtree is a large fraction of all queries, so the cost is O(p + c + c log c) where c is the number of descendants.</p>
+        <div class="diagram-box">             root
+           ┌───┴───┐
+           t       w
+        ┌──┴──┐    └─ i ─ s ─ h        <span class="dim">wish</span>
+        o     w
+        │   ┌─┴──┐
+        y   e    i
+            │  ┌─┴─┬──┐
+            e  t   n  s
+            t  ├─ t─ e─ r ...  <span class="dim">twitter, twitch, twin, twist</span>
+
+ <span class="hi">node "tw"</span> caches: [ twitter 80, tweet 60, twitch 40, twilight 30, twin 22 ]   <span class="ok">← answer is already here</span></div>
+        <p>Two optimizations remove the subtree walk entirely.</p>
+        <ul class="check-list">
+          <li><strong>Cap the prefix length.</strong> Real queries are short; clamp stored and looked-up prefixes to a small constant such as 50 characters. Then finding the node is O(1) in effect, because p is bounded.</li>
+          <li><strong>Cache the top-k at every node.</strong> During the offline build, each node stores the best five queries in its subtree. A lookup becomes: walk p characters, return the node's list. Time is O(p), and no sorting happens online.</li>
+        </ul>
+        <p>The price is space. Each node holds up to k references, so memory grows by roughly a factor of k times the node count. Mitigations: store query ids instead of strings (the strings live once in a side table), and prune low-frequency leaves so rare queries are not indexed at all. A rare query will never be in any top-5 list except for its own very specific prefix, so you can often keep it out of the structure and fall back to a slower path or no suggestion.</p>
+        <div class="insight-box"><strong>Complexity summary:</strong> build is O(N · L · k) for N queries of length L (each insertion offers the query to L+1 ancestors, each keeps k entries sorted); lookup is O(p); memory is O(total nodes × k). The expensive work all lives in the offline build, which is exactly where you want it.</div>
+        <p>A subtle correctness point: when merging a child's top-k into its parent during a bottom-up build you can take the top-k of the union of the children's lists plus the node's own query. This is exact, not approximate, because anything in the parent's top-k must be in the top-k of the child subtree it came from.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Data gathering: why not update the trie live?</h2>
+        <p>The simple design bumps a counter on every search. That is impractical for three reasons: billions of queries per day would hammer the structure with writes; the top five for a prefix rarely change between consecutive queries, so most updates are wasted; and a mutable shared trie under concurrent update is a lock-contention nightmare. Instead, the pipeline is batch:</p>
+        <ol>
+          <li><strong>Analytics logs.</strong> Raw (query, timestamp) records appended in time order. Append-only, not indexed.</li>
+          <li><strong>Aggregators.</strong> Roll the logs into (query, time bucket, count). The bucket size depends on the product: a news or social app wants hourly or finer; a shopping site is fine with weekly. Use MapReduce, Spark or a streaming job such as Flink for the roll-up.</li>
+          <li><strong>Workers.</strong> Build a fresh trie from the aggregated counts and write it to the trie database.</li>
+          <li><strong>Trie cache.</strong> A distributed in-memory tier (Redis, Memcached or a process-local copy) loads the new snapshot and serves reads.</li>
+        </ol>
+        <p>Rebuilding rather than mutating gives you immutable snapshots: the serving fleet loads version N+1 beside version N and flips a pointer, and rollback is a pointer flip back. It also means a bad build never corrupts the live index.</p>
+        <h3>How the trie is stored durably</h3>
+        <table class="data-table">
+          <thead><tr><th>Option</th><th>How</th><th>Strength</th><th>Weakness</th></tr></thead>
+          <tbody>
+            <tr><td>Document store snapshot</td><td>Serialize the whole trie weekly and store the blob (for example in MongoDB)</td><td>Trivial to produce and restore</td><td>Reloading means deserializing everything; no partial reads</td></tr>
+            <tr><td>Prefix key-value map</td><td>Key = prefix, value = node data (its top-k and counts)</td><td>Random access per prefix; easy to shard by key; no pointer chasing</td><td>More keys; duplicated strings unless ids are used</td></tr>
+          </tbody>
+        </table>
+        <p>I favour the key-value form for serving. It turns the "tree" into a flat map, which is trivially shardable, cacheable and mirrors the Prefixy approach. The tree shape then exists only during the build.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Query service</span>
+        <h2>The online request path</h2>
+        <ol>
+          <li>The client sends the current prefix, for example <code>GET /autocomplete?q=tw</code>, to a load balancer.</li>
+          <li>The API server looks up the prefix in the trie cache. A hit returns the stored top five immediately.</li>
+          <li>On a miss it reads from the trie database and populates the cache.</li>
+          <li>The filter layer removes suggestions that must not be shown.</li>
+          <li>The five strings are returned as a small JSON array.</li>
+        </ol>
+        <p class="mini-heading">Client-side tricks that are worth as much as the server work</p>
+        <ul class="check-list">
+          <li><strong>Asynchronous requests</strong> (XHR/fetch) so typing is never blocked.</li>
+          <li><strong>Debounce and cancel</strong> in-flight calls when a new character arrives; drop out-of-order responses by tagging each request with the prefix it was for.</li>
+          <li><strong>Browser caching.</strong> Autocomplete results for a prefix are stable, so a response header such as <code>Cache-Control: private, max-age=3600</code> lets the browser answer repeated prefixes locally. Google's own suggestions are cached this way for about an hour.</li>
+          <li><strong>Data sampling.</strong> At very high volume you can log only one in N requests for analytics; counts are statistically still correct and you save pipeline cost.</li>
+          <li><strong>Prefetch</strong> on focus: serve the empty-prefix list (popular or personal recents) instantly.</li>
+        </ul>
+        <h2>Removing unwanted suggestions</h2>
+        <p>Hateful, dangerous, legally contested or simply wrong suggestions must be removable quickly, and a weekly rebuild is far too slow. Put a filter layer between the trie cache and the client: a blocklist keyed by query (and pattern rules) that is checked on every response. The trie itself is cleaned later, asynchronously, when the next build excludes those entries. The filter layer also gives you per-region and per-policy rules without rebuilding anything. Because it can drop entries from a list of exactly k, store a few extra candidates per node (say k+3) so the response is still full after filtering; the code below shows the filtering step.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable core: trie with cached top-k, filter and decayed trending</h2>
+        <p>The implementation builds a trie where every node keeps a sorted top-k list, answers prefix queries in O(prefix length), applies a read-time blocklist, rebuilds with an exponentially decayed score so recent surges outrank stale volume, and repeats the QPS arithmetic from above.</p>
+        <span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Autocomplete trie with top-k cached per node, weekly rebuild, filter layer, and decayed trending score.
+import assert from 'node:assert/strict';
+
+class Node { constructor() { this.kids = new Map(); this.top = []; } }  // top: [{q, score}] sorted desc, len&lt;=k
+
+class AutocompleteTrie {
+  constructor(k = 5, maxPrefix = 50) { this.root = new Node(); this.k = k; this.maxPrefix = maxPrefix; }
+  static build(freq, k = 5) {                                          // freq: Map(query -&gt; count)
+    const t = new AutocompleteTrie(k);
+    for (const [q, c] of freq) t.#insert(q, c);
+    return t;
+  }
+  #insert(q, score) {
+    q = q.slice(0, this.maxPrefix);
+    let n = this.root;
+    this.#offer(n, q, score);
+    for (const ch of q) {
+      if (!n.kids.has(ch)) n.kids.set(ch, new Node());
+      n = n.kids.get(ch);
+      this.#offer(n, q, score);                                        // every ancestor keeps its own top-k
+    }
+  }
+  #offer(n, q, score) {
+    n.top.push({ q, score });
+    n.top.sort((a, b) =&gt; b.score - a.score || (a.q &lt; b.q ? -1 : 1));
+    if (n.top.length &gt; this.k) n.top.length = this.k;
+  }
+  suggest(prefix, blocked = () =&gt; false) {
+    let n = this.root;
+    for (const ch of prefix.slice(0, this.maxPrefix)) { n = n.kids.get(ch); if (!n) return []; }
+    return n.top.filter(e =&gt; !blocked(e.q)).map(e =&gt; e.q);             // O(len(prefix) + k)
+  }
+}
+
+const freq = new Map(Object.entries({
+  tree: 10, try: 29, true: 35, toy: 14, wish: 25, win: 15, twitter: 80, twitch: 40, twilight: 30,
+  twin: 22, twist: 12, tweet: 60, twelve: 9, tw: 5,
+}));
+const trie = AutocompleteTrie.build(freq);
+console.log('tw   -&gt;', trie.suggest('tw'));
+console.log('twi  -&gt;', trie.suggest('twi'));
+console.log('t    -&gt;', trie.suggest('t'));
+assert.deepEqual(trie.suggest('tw'), ['twitter', 'tweet', 'twitch', 'twilight', 'twin']);
+assert.deepEqual(trie.suggest('twi'), ['twitter', 'twitch', 'twilight', 'twin', 'twist']);
+assert.deepEqual(trie.suggest('zzz'), []);
+
+// filter layer: hide a query immediately at read time; physical delete happens at next rebuild
+const hideTwitch = q =&gt; q === 'twitch';
+console.log('tw (filtered) -&gt;', trie.suggest('tw', hideTwitch));
+assert.ok(!trie.suggest('tw', hideTwitch).includes('twitch'));
+
+// weekly rebuild with exponential decay so recent queries outrank stale ones
+const halfLifeDays = 7, decay = d =&gt; 0.5 ** (d / halfLifeDays);
+const daily = [ // [query, ageDays, count]
+  ['election results', 30, 1000], ['election results', 1, 50], ['eclipse today', 0, 400], ['eclipse today', 1, 300],
+];
+const scored = new Map();
+for (const [q, age, c] of daily) scored.set(q, (scored.get(q) ?? 0) + c * decay(age));
+const trending = AutocompleteTrie.build(scored);
+console.log('e -&gt; ', trending.suggest('e'), [...scored].map(([q, s]) =&gt; `${q}=${s.toFixed(1)}`));
+assert.equal(trending.suggest('e')[0], 'eclipse today');
+
+// back-of-envelope
+const dau = 10e6, queriesPerUser = 10, charsPerQuery = 20, qps = dau * queriesPerUser * charsPerQuery / 86400;
+console.log('avg QPS', Math.round(qps), 'peak', Math.round(qps * 2));
+assert.equal(Math.round(qps * 2), 46296);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Run with <code>node trie.mjs</code> (Node 20+, no dependencies). It prints the top five for <code>tw</code>, <code>twi</code> and <code>t</code>, the filtered result with "twitch" hidden, the trending ranking (eclipse today beats the older, larger election volume), the average and peak QPS (23,148 and 46,296) and "all assertions passed". Executed and verified.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling</span>
+        <h2>Sharding the trie</h2>
+        <p>Even though the data fits in memory on a few boxes, QPS and availability push you to replicate and shard. The obvious scheme is range sharding by first letters: <code>a-m</code> on one shard, <code>n-z</code> on another. It breaks quickly because letters are not evenly popular; far more queries begin with <code>s</code> than with <code>x</code>. Refine it in two steps.</p>
+        <ul class="check-list">
+          <li><strong>Multi-letter ranges.</strong> Shard on the first two or three characters (<code>aa-ag</code>, <code>ah-an</code>), choosing boundaries from historical traffic so each shard receives similar load.</li>
+          <li><strong>Shard map manager.</strong> A small, cached routing table maps prefix ranges to servers; the API tier consults it per request. Rebalancing means updating the map and moving the affected key range, which is much cheaper than rehashing everything.</li>
+        </ul>
+        <div class="diagram-box"> request "tw…" ──▶ API ──▶ <span class="step">shard map</span>:  a-ag→S1   ah-an→S2  …  t-tm→S9  tn-tz→S10 …
+                                      │
+                                      ▼
+                                  S9 (replicas R1, R2, R3)  ──▶ top-5 for "tw"</div>
+        <p>One catch: every prefix of a query lives on the shard that owns the query's early characters, so all prefixes of <code>twitter</code> land on the same shard and lookups never fan out. That is why sharding by <em>leading</em> characters is right here, whereas hashing the full query would scatter a single query's prefixes across the cluster. Hash-based placement (see <a href="../../system-design/consistent-hashing.html">consistent hashing</a>) works only if you hash the <em>prefix key</em> itself, in which case each key lookup hits one node but hot short prefixes like <code>a</code> become single-key hot spots. Replicate or locally cache the first few levels everywhere; they are tiny and extremely hot.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Design alternatives</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Verdict</th></tr></thead>
+          <tbody>
+            <tr><td>Update model</td><td>Live counter bumps</td><td>Batch rebuild of immutable snapshot</td><td>Batch; shorter window for trending products</td></tr>
+            <tr><td>Per-node data</td><td>Frequency only, walk subtree</td><td>Cached top-k</td><td>Cached top-k; trade memory for latency</td></tr>
+            <tr><td>Serving structure</td><td>Pointer trie in process memory</td><td>Flat prefix to top-k map in a cache</td><td>Flat map: easier sharding and refresh</td></tr>
+            <tr><td>Ranking</td><td>Raw frequency</td><td>Decayed, personalized, contextual</td><td>Start with frequency, add decay for freshness</td></tr>
+            <tr><td>Removal</td><td>Rebuild and wait</td><td>Filter layer at read time</td><td>Filter layer plus async cleanup</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Precomputed top-k</h4><ul><li>O(prefix) lookup, no online sort</li><li>Predictable p99 latency</li><li>Trivial to cache and replicate</li></ul></div>
+          <div class="trade-col cons"><h4>Precomputed top-k</h4><ul><li>Staleness equal to the rebuild interval</li><li>Memory multiplied by k</li><li>Breaking news is invisible until the next build</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What goes wrong</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Effect</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Bad trie build (empty or corrupt)</td><td>Blank or garbage suggestions everywhere</td><td>Validate size and sample queries before the pointer flip; keep the previous snapshot for instant rollback</td></tr>
+            <tr><td>Cache cold start</td><td>Thundering herd to the trie DB</td><td>Pre-warm the shallow levels; request coalescing on misses</td></tr>
+            <tr><td>Hot shard</td><td>Popular letters overload one node</td><td>Traffic-based boundaries; more replicas for hot ranges</td></tr>
+            <tr><td>Offensive or poisoned suggestion</td><td>Brand and legal risk; coordinated query spamming can game popularity</td><td>Filter layer; de-duplicate by user or IP when counting; anomaly detection on sudden rank jumps</td></tr>
+            <tr><td>Aggregation lag</td><td>Trending lags reality</td><td>Add a small real-time layer for the last hour merged at read time</td></tr>
+            <tr><td>Slow or lost responses</td><td>Stale suggestions after the user typed more</td><td>Prefix-tagged responses; drop non-matching</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Extensions</span>
+        <h2>Multi-language and trending</h2>
+        <p><strong>Other languages.</strong> Store Unicode, not ASCII, which immediately changes the branching factor: a trie node over Chinese characters can have thousands of children, so use a map per node (or a compact radix tree) rather than a 26-slot array. Normalise input first (case folding, Unicode normalization form, accent stripping where appropriate) and decide whether to tokenise at the character, grapheme or word level; for scripts without spaces you may need a segmenter. Build separate tries per country or language so suggestions reflect local popularity, and route by the user's locale.</p>
+        <p><strong>Real-time and trending queries.</strong> A weekly batch cannot surface an event that started an hour ago. Layer three techniques: shorten the aggregation window for a "recent" index; weight counts by recency with exponential decay (as the code does); and, for sharp surges, stream the logs through Kafka into a stream processor that maintains approximate counts (count-min sketch plus a top-k heap) and merges the trending list into the trie answer at read time. Capping how fast a query can climb prevents a spam burst from owning the box.</p>
+        <p><strong>Personalization and relevance.</strong> Frequency is only a baseline. Mix in the user's own history, location, language and time of day, then re-rank the shortlist of candidates; keep personalization out of the trie and apply it as a small second stage so the shared index stays cacheable.</p>
+        <div class="warn-box"><strong>Production gotcha:</strong> privacy. Autocomplete is built from other people's queries, so a rare query typed by one person can leak. Apply a minimum-count threshold before a query enters the index, and never index queries that look like personal data (emails, phone numbers, ID numbers).</div>
+        <p>For a very different serving option, a search engine with a built-in completion suggester (an FST-based structure in Elasticsearch, see the existing <a href="../../elasticsearch.html">Elasticsearch</a> page) is a pragmatic choice when you already run one and do not need extreme QPS from a bespoke service.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Before you leave the whiteboard</h2>
+        <ul class="check-list">
+          <li>QPS computed with the arithmetic shown: 24,000 average, 48,000 peak.</li>
+          <li>Two services: offline data gathering and online query.</li>
+          <li>Trie with top-k cached at each node; prefix length capped.</li>
+          <li>Weekly (or shorter) rebuild into an immutable snapshot with rollback.</li>
+          <li>Trie stored as a snapshot or a prefix key-value map; cache in front.</li>
+          <li>Filter layer for takedowns; physical removal during rebuild.</li>
+          <li>Client debounce, cancellation and browser caching.</li>
+          <li>Range sharding with traffic-based boundaries and a shard map.</li>
+          <li>Plan for Unicode, per-locale tries and trending.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not just use a database index with LIKE 'prefix%'?</summary><p>An ordered index handles the match, but you still have to rank every match by popularity, and short prefixes match a huge share of rows. At tens of thousands of QPS that sort is the bottleneck. Precomputing the answer per prefix moves the work offline.</p></details>
+        <details><summary>How much memory does the cached top-k add?</summary><p>Roughly k references per node. If you store 4-byte query ids rather than strings, k=5 adds about 20 bytes per node plus list overhead, which is modest compared to storing the strings themselves. Pruning rare queries from deep nodes shrinks it further.</p></details>
+        <details><summary>How do you make suggestions fresh without rebuilding constantly?</summary><p>Keep the big trie on a slow cadence and add a small, fast "recent" structure covering the last hour or so; merge its top results with the trie's at read time. This is the pattern used by lambda-style architectures: batch for accuracy, speed layer for freshness.</p></details>
+        <details><summary>What if the user types a typo?</summary><p>Prefix matching cannot recover. Add a spell-correction stage (edit distance over a dictionary, or learned from query reformulations in the logs) as a separate component that proposes corrected prefixes to look up. It is outside this chapter's scope but is the usual first follow-up.</p></details>
+        <details><summary>Why shard by leading characters rather than hash the whole query?</summary><p>All prefixes of a query share leading characters, so they stay together on one shard and each keystroke goes to one node. Whole-query hashing would scatter prefixes and force fanout. The cost is skew, handled by traffic-based boundaries.</p></details>
+        <details><summary>How do you handle a suggestion that must disappear right now?</summary><p>Add it to the blocklist consulted by the filter layer, which takes effect in seconds across the fleet. The next trie build omits it permanently and you can then drop the blocklist entry.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./12-chat-system.html">Chapter 12: Chat System</a> — previous chapter; shares the pattern of keeping the hot path precomputed and stateless.</li>
+          <li><a href="./14-youtube-video-streaming.html">Chapter 14: YouTube and Video Streaming</a> — next chapter in the product systems part.</li>
+          <li><a href="../../system-design/caching.html">Caching</a> — the layers (browser, edge, trie cache) this design leans on.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — range versus hash partitioning and skew.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent hashing</a> — the alternative placement scheme discussed above.</li>
+          <li><a href="../../elasticsearch.html">Elasticsearch</a> — completion suggesters and the wider search stack.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. Additional resources from the repository:</p>
+        <ul>
+          <li><a href="https://medium.com/@prefixyteam/how-we-built-prefixy-a-scalable-prefix-search-service-for-powering-autocomplete-c20f98e2eff1">How We Built Prefixy</a></li>
+          <li><a href="https://people.eecs.berkeley.edu/~sylvia/papers/pht.pdf">Prefix Hash Tree</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Autocomplete is a read-heavy problem solved by moving all computation offline. Aggregate logs into counts, bake the top-k answer into every trie node, serve a flat prefix-to-suggestions map from memory, shard by leading characters with traffic-aware boundaries, and use a filter layer plus a small recency index to cover the two things batch rebuilds cannot: takedowns and trending.</p>
+      </section>
+    </main>
+  </body>
+</html>

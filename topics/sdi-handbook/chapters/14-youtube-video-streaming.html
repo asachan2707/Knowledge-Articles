@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design YouTube (Video Streaming) | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 14 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.14. Covers a YouTube-style upload and streaming system: back-of-envelope sizing (150 TB/day ingest, about 7.5 PB/day egress, CDN cost), the upload and metadata flows, containers vs codecs, GOP splitting, the transcoding DAG, scheduler / resource manager / task workers, adaptive bitrate streaming (HLS, DASH), pre-signed URLs, DRM, cost levers and error handling. Includes an executed Node.js example (DAG stage planner, priority-queue resource manager with retries, ABR rung picker). About 19 min read. Related: youtube-video-processing-pipeline, cdn, message-queue, ch15 Google Drive, ch24 S3-like object storage.</div>
+        <h1>Design YouTube (Video Streaming)</h1>
+        <p class="summary">A video platform is two separate systems glued by a blob store: a slow, CPU-hungry, asynchronous ingest pipeline and a fast, bandwidth-hungry, CDN-fronted playback path. This page walks through both, with the transcoding DAG as the centrepiece.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">14 of 28 · Part 3 Product Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">19 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Transcoding DAG, GOP chunking, adaptive bitrate, CDN economics</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">YouTube, Netflix, HLS, MPEG-DASH, S3, CloudFront, Widevine, FairPlay</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Video looks like a storage problem and behaves like a money problem. A 300 MB upload becomes a dozen renditions, each cut into seconds-long segments, and then gets pulled across the planet thousands of times. The design question is not "where do the bytes live" but "how few times do we pay to move and compute them".</p>
+        <div class="callout"><p><strong>Core idea:</strong> split the product at the blob store. Everything left of it (upload, transcode, package) is asynchronous, parallel, retryable batch work. Everything right of it (playback) is a static-file delivery problem that a CDN solves. Neither side should ever wait on the other.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design to anchor on</span>
+        <h2>What Netflix and YouTube publicly describe</h2>
+        <p>Netflix has written openly about its encoding pipeline: a source file is cut into chunks, each chunk is encoded independently on a farm of workers, and the results are stitched and validated. They later moved to shot-based encoding, where chunk boundaries follow scene cuts so each shot can be given its own bitrate budget. YouTube's public material shows the same shape: upload, fan out to many encoders, publish a ladder of resolutions. The shared lesson is that <em>chunk-level parallelism</em> turns a job that would take longer than the video itself into one that finishes in a fraction of the runtime.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and numbers</span>
+        <h2>Scope and back-of-envelope</h2>
+        <p>Functional scope is deliberately two verbs: upload a video, watch a video, on phones, browsers and TVs. The non-functional list is what drives the architecture: fast uploads, smooth playback, the ability to switch quality mid-stream, low infrastructure cost, and high availability. Notice that "low cost" sits next to "fast"; at this scale they are in tension and you must say which wins where.</p>
+        <p class="mini-heading">Sizing (assumptions: 5 M DAU, 10% upload one video a day, 300 MB average, 5 videos watched per user per day, 1 GB cap)</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Daily raw ingest</td><td>5 M × 10% × 300 MB = 500 K × 0.3 GB</td><td>150 TB/day</td></tr>
+            <tr><td>Yearly raw storage</td><td>150 TB × 365</td><td>about 55 PB/year, before renditions</td></tr>
+            <tr><td>Stored renditions</td><td>8 to 12 bitrate/codec outputs, but the small ones are tiny; total about 1.5x to 3x the original</td><td>budget 2x as a planning number</td></tr>
+            <tr><td>Daily egress</td><td>5 M × 5 videos × 0.3 GB</td><td>7.5 PB/day</td></tr>
+            <tr><td>Average egress bandwidth</td><td>7.5 PB × 8 bits ÷ 86,400 s</td><td>about 700 Gbps average, several Tbps at peak</td></tr>
+            <tr><td>CDN bill (CloudFront-style list price $0.02/GB)</td><td>7.5 PB = 7,500,000 GB × $0.02</td><td>$150,000/day, about $55 M/year</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Read the table:</strong> storage is a rounding error next to delivery. A petabyte of S3 costs tens of thousands per month; a petabyte of CDN egress at list price costs twenty thousand dollars <em>per petabyte served</em>, every day. Every optimisation worth discussing in this chapter eventually points at egress.</div>
+        <p>Note that the quoted $150 K/day is a list-price figure. Large publishers negotiate committed-use pricing, peer directly with ISPs and run their own caches, which is exactly the last cost lever discussed below.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Components and the two flows</h2>
+        <div class="diagram-box" style="white-space:pre"> UPLOAD PATH (async, write-heavy, CPU-heavy)
+
+  client ──(1) pre-signed PUT, chunked──▶ <span class="hi">Original storage</span> (blob)
+    │                                          │ object-created event
+    │(2) metadata: title, size, format         ▼
+    ▼                                    <span class="step">Transcoding pipeline</span>
+  API servers ──▶ Metadata DB (+cache)     │ preprocess → DAG → workers
+                      ▲                      ├──▶ <span class="hi">Transcoded storage</span> ──▶ CDN (push / warm)
+                      │                      └──▶ completion queue ──▶ handlers
+                      └───── status = READY, notify uploader ◀──────────┘
+
+ PLAYBACK PATH (sync, read-heavy, bandwidth-heavy)
+
+  player ──▶ API (fetch manifest URL) ──▶ metadata
+  player ══▶ <span class="ok">CDN edge</span> ══ segment GETs (.m4s / .ts) ══▶ cache hit; miss → origin
+                 ABR logic in the player picks the rung per segment</div>
+        <p class="mini-heading">Component roles</p>
+        <ul class="check-list">
+          <li><strong>Client:</strong> phone, laptop, smart TV. It owns the adaptive-bitrate decision, so the server stays dumb and cacheable.</li>
+          <li><strong>API servers:</strong> everything except the video bytes: auth, feed, metadata edits, issuing upload URLs. Stateless, horizontally scaled.</li>
+          <li><strong>Metadata DB and cache:</strong> title, description, owner, renditions available, processing state. Sharded, replicated; read-heavy so a cache fronts hot videos.</li>
+          <li><strong>Original storage:</strong> blob store holding exactly what the user sent. Keep it: re-encoding for a new codec years later needs the source.</li>
+          <li><strong>Transcoding servers:</strong> the compute farm, the focus of the deep dive.</li>
+          <li><strong>Transcoded storage and CDN:</strong> the distributable outputs, and the edge caches that actually serve viewers.</li>
+          <li><strong>Completion queue and handlers:</strong> decouple "encoding finished" from "update the database and tell the user".</li>
+        </ul>
+        <p class="mini-heading">Upload flow, step by step</p>
+        <p>The client does two things in parallel. It streams the video to blob storage, and it posts the metadata (file name, size, declared format) to an API server, which inserts a row in state <code>UPLOADING</code>. When the blob lands, an event kicks off transcoding. Each finished output is written to transcoded storage, and when the last one is done a completion event goes on a queue. A handler flips the metadata row to <code>READY</code>, pushes the assets towards the CDN and notifies the uploader. The row state machine (<code>UPLOADING → PROCESSING → READY | FAILED</code>) is the contract between the two halves, and it is the only thing the playback side needs to trust.</p>
+        <p class="mini-heading">Streaming flow</p>
+        <p>"Streaming" here does not mean a long-lived socket from the server. The player fetches a small manifest that lists renditions and segment URLs, then issues ordinary HTTP GETs for consecutive segments, typically two to ten seconds each. Because segments are plain static objects, any CDN can cache them and any HTTP stack can retry them. The two dominant protocols are Apple's HLS (m3u8 playlists, historically MPEG-TS segments, now commonly fragmented MP4) and MPEG-DASH (an XML <code>.mpd</code> manifest with fMP4 segments). Common Media Application Format (CMAF) lets one set of fMP4 segments satisfy both, which halves storage and CDN cache footprint for operators who serve both ecosystems. Older protocols such as Adobe HDS have faded with Flash; if an interviewer names one, say it exists and that your player stack decides the choice.</p>
+        <div class="warn-box"><strong>Do not stream from your API tier.</strong> Putting bytes through application servers couples your stateless fleet to the heaviest bandwidth in the system and gives up edge caching. Video bytes should never touch the API servers in either direction; they carry URLs and signatures, not payloads.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 1</span>
+        <h2>Why transcode at all, and what a video file really is</h2>
+        <p>Three reasons, in order of importance. First, raw camera or screen-recorder output is enormous; modern codecs compress by one to two orders of magnitude. Second, devices differ: a ten-year-old TV and a new phone support different codecs, profiles and containers. Third, networks differ and change: a viewer on a train needs a 400 kbps rung one minute and a 5 Mbps rung the next.</p>
+        <table class="data-table">
+          <thead><tr><th>Concept</th><th>What it is</th><th>Examples</th></tr></thead>
+          <tbody>
+            <tr><td>Container</td><td>The wrapper that interleaves video, audio, subtitles and timing metadata</td><td>MP4, MKV, WebM, MPEG-TS, fMP4</td></tr>
+            <tr><td>Codec</td><td>The compression algorithm for one stream inside the container</td><td>H.264/AVC, H.265/HEVC, VP9, AV1; AAC and Opus for audio</td></tr>
+            <tr><td>Bitrate and resolution</td><td>The quality/size knobs applied per rendition</td><td>240p at about 0.4 Mbps up to 4K at 15+ Mbps</td></tr>
+            <tr><td>GOP</td><td>Group of Pictures: a keyframe (I-frame) followed by dependent P/B frames until the next keyframe</td><td>typically 1 to 4 seconds</td></tr>
+          </tbody>
+        </table>
+        <p>The GOP is the unit that matters architecturally. A GOP starts with a keyframe that can be decoded alone, so it is the smallest chunk you can hand to a worker, and also the smallest segment a player can switch quality on. If you cut a file in the middle of a GOP you either re-encode more than needed or produce a segment that cannot start playback. This is why the preprocessor aligns splits to GOP boundaries.</p>
+        <div class="insight-box"><strong>Compute is the real cost of codecs.</strong> AV1 saves bandwidth over H.264 at equal quality but costs far more CPU per second of video to produce. That flips the economics for popular content (encode once, serve a million times: spend the CPU) versus the long tail (watched twice: do not).</div>
+        <p class="mini-heading">Adaptive bitrate (ABR) in one paragraph</p>
+        <p>The encoder produces a ladder: the same content at several resolution/bitrate pairs, all cut at identical segment boundaries. The player measures recent throughput and buffer level, and before each segment request picks the highest rung it expects to download faster than it plays. Switching is seamless precisely because every rung has keyframes at the same timestamps. Throughput-based rules are simple but jittery; buffer-based rules are more stable; production players blend both and add a safety margin (the code below uses 80% of measured throughput). Per-title or per-shot ladders, as Netflix publishes, replace the fixed ladder with one tuned to how hard each piece of content is to compress.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive 2</span>
+        <h2>The transcoding pipeline as a DAG</h2>
+        <p>One upload fans out into many independent jobs: split the container into video, audio and metadata streams; encode the video into several resolutions and codecs; generate thumbnails; burn or overlay a watermark; transcode audio; run content-safety and copyright checks; and finally package manifests. Different creators or product tiers want different subsets. Hard-coding a pipeline for each does not survive contact with product managers, so the pipeline is expressed as a <strong>directed acyclic graph</strong> of tasks that a configuration file declares.</p>
+        <div class="diagram-box" style="white-space:pre">                    ┌──────────┐
+                    │  split   │                       stage 0
+                    └────┬─────┘
+          ┌──────────────┼───────────────┐
+      ┌───▼───┐      ┌───▼───┐       ┌───▼───┐
+      │ video │      │ audio │       │ meta  │          stage 1
+      └───┬───┘      └───┬───┘       └───┬───┘
+  ┌───────┼────────┬─────┘               │
+┌─▼──┐ ┌──▼───┐ ┌──▼────┐ ┌──────────┐   │
+│720p│ │1080p │ │thumb  │ │watermark │   │              stage 2   (parallel)
+└─┬──┘ └──┬───┘ └──┬────┘ └────┬─────┘   │
+  └───────┴────────┴───────────┴─────────┘
+                    ▼
+               ┌─────────┐
+               │ package │  manifests + segment index   stage 3
+               └─────────┘</div>
+        <p>A DAG buys you three things: <em>parallelism</em> (anything with satisfied dependencies runs now), <em>partial retry</em> (a failed 1080p encode does not redo the audio), and <em>configurability</em> (add a task by adding a node and edges). Execution is by topological layers, called stages: stage 0 has no dependencies, stage N depends only on earlier stages. The executable example below computes exactly this layering with Kahn's algorithm and rejects cycles.</p>
+        <p class="mini-heading">The five moving parts</p>
+        <table class="data-table">
+          <thead><tr><th>Component</th><th>Job</th><th>Design notes</th></tr></thead>
+          <tbody>
+            <tr><td>Preprocessor</td><td>Splits the video into GOP-aligned chunks, generates the DAG from the config, writes chunks and metadata to temporary storage</td><td>Persisting chunks first is what makes retries cheap. Splitting to GOP boundaries also helps legacy clients that cannot split themselves.</td></tr>
+            <tr><td>DAG scheduler</td><td>Breaks the graph into stages and enqueues each stage's tasks</td><td>A stage is released only when every task of the previous stage reports success, or the dependency edges are tracked per task for finer-grained release.</td></tr>
+            <tr><td>Resource manager</td><td>Matches tasks to workers using three queues: a task priority queue, a worker queue ordered by utilisation, and a running queue of (task, worker) pairs</td><td>Picks the highest-priority task and the best-fit worker, records the pair in the running queue, and moves it back on completion or timeout.</td></tr>
+            <tr><td>Task workers</td><td>Run one kind of task each: encode, thumbnail, watermark, merge</td><td>Pools are specialised: GPU or high-core machines for encodes, small ones for thumbnails. Scale each pool on its own queue depth.</td></tr>
+            <tr><td>Temporary storage</td><td>Chunks and intermediate outputs</td><td>Small metadata in memory or a fast KV store; large chunks in blob storage with a short lifecycle rule. Delete once the job is final.</td></tr>
+          </tbody>
+        </table>
+        <p>In production you would not hand-write the scheduler. This shape maps onto Temporal, AWS Step Functions with Batch or MediaConvert, or a Kubernetes job controller, and the interview answer should say so while still explaining what those tools do for you. Whichever you choose, tasks must be <strong>idempotent</strong>: given the same input chunk and parameters, writing the same output key a second time must be harmless. That one property is what lets the scheduler retry blindly. See <a href="../../system-design/idempotency.html">Idempotency</a>.</p>
+        <p class="mini-heading">Queues between stages</p>
+        <p>Rather than module A calling module B, put a message queue between each pair: upload to preprocessor, preprocessor to scheduler, workers to completion handler. The benefit is back-pressure and independent scaling. If encoders fall behind during a viral surge, the queue grows (an alarm, not an outage) while uploads keep succeeding. Priority matters here: a creator's 30-second clip should not wait behind a 4-hour livestream archive, and retried tasks should jump the line so a nearly finished job completes. See <a href="../../system-design/message-queue.html">Message Queues</a>.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Speed, safety, cost</span>
+        <h2>System optimisations</h2>
+        <h3>Speed</h3>
+        <ul class="check-list">
+          <li><strong>Parallel, resumable uploads.</strong> The client slices the file by GOP or fixed size and uploads slices concurrently using multipart upload. A dropped connection resumes from the last acknowledged slice rather than from zero. S3 multipart, the tus protocol and GCS resumable upload sessions all work this way.</li>
+          <li><strong>Upload close to the user.</strong> Terminate uploads at the nearest edge or regional ingest point, then move bytes over the provider backbone. Round-trip time to a far region dominates TCP throughput for a single stream.</li>
+          <li><strong>Pipeline parallelism through queues.</strong> Because each stage reads from a queue, the encoder can start on the first chunks while later chunks are still uploading, instead of waiting for a complete file.</li>
+        </ul>
+        <h3>Safety</h3>
+        <ul class="check-list">
+          <li><strong>Pre-signed URLs.</strong> The client first asks the API for an upload target. The API authenticates the user, then returns a time-limited, single-object URL signed with the storage provider's credentials. The client uploads straight to blob storage; no credentials leak and no bytes cross the API tier.</li>
+          <li><strong>Content protection.</strong> Encrypt segments (AES-128 in HLS, CENC in DASH) and gate the key through a DRM licence server: Widevine on Chrome/Android, FairPlay on Apple, PlayReady on Microsoft. Visible and forensic watermarking deter and trace leaks. Be honest that DRM raises the bar but does not make piracy impossible.</li>
+          <li><strong>Upload validation.</strong> Scan the container header, enforce size/duration limits, and run the transcoder in a sandbox: media parsers are a classic source of memory-safety bugs, and you are decoding hostile files.</li>
+        </ul>
+        <h3>Cost</h3>
+        <ul class="check-list">
+          <li><strong>Pareto the catalogue.</strong> Views follow a heavy tail. Keep popular videos in the CDN; serve the tail from regional origin storage with a lower-cost tier and let the first viewer warm the edge.</li>
+          <li><strong>Encode lazily for the tail.</strong> Always make the cheap rungs; produce the expensive codecs or 4K rung only after a video crosses a view threshold.</li>
+          <li><strong>Regionalise.</strong> A video popular in one country does not need replicas in all points of presence.</li>
+          <li><strong>Own the edge.</strong> At sufficient volume, deploy caches inside ISP networks (Netflix Open Connect is the public example) so the traffic never crosses a paid transit link.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decisions and their costs</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Lean</th></tr></thead>
+          <tbody>
+            <tr><td>Segmented HTTP vs persistent streaming</td><td>HLS/DASH over HTTP: cacheable, simple, 2 to 10 s latency</td><td>WebRTC/LL-HLS: sub-3 s latency, harder to cache</td><td>A for VOD; B only for live interaction</td></tr>
+            <tr><td>Segment length</td><td>Short (2 s): fast switching, more requests, worse compression</td><td>Long (10 s): efficient, slow adaptation</td><td>4 to 6 s for VOD</td></tr>
+            <tr><td>Encode everything up front</td><td>Instant playback of any rung, large CPU bill</td><td>Lazy/on-demand: cheap, first-view latency</td><td>Up-front for head; lazy for tail</td></tr>
+            <tr><td>Push vs pull CDN fill</td><td>Push popular assets: no cold miss</td><td>Pull on miss: simple, one slow first request</td><td>Pull by default, pre-warm for known launches</td></tr>
+            <tr><td>Scheduler</td><td>Build bespoke priority queues</td><td>Adopt a workflow engine</td><td>Engine, unless you have a media-specific reason</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>DAG stage planner, resource manager, and ABR picker</h2>
+        <p>The example does three things. It layers a transcoding DAG into stages with Kahn's algorithm and detects cycles. It runs the stages through a small resource manager: a binary-heap task queue (encodes outrank other work, retried tasks outrank everything), a worker pool where each job goes to the least-loaded worker, and bounded retries. Finally it picks an ABR rung from measured throughput.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Video transcoding DAG: stage planning (Kahn layering) + resource manager
+// with a priority task queue, least-loaded worker choice and retry on failure.
+import assert from 'node:assert/strict';
+
+// 1. DAG -&gt; stages -------------------------------------------------------
+function planStages(dag) {
+  const indeg = new Map(Object.keys(dag).map(k =&gt; [k, 0]));
+  for (const deps of Object.values(dag)) for (const d of deps) {
+    if (!indeg.has(d)) throw new Error(`unknown dependency ${d}`);
+  }
+  for (const [task, deps] of Object.entries(dag)) indeg.set(task, deps.length);
+  const stages = [];
+  let ready = [...indeg].filter(([, n]) =&gt; n === 0).map(([k]) =&gt; k);
+  let seen = 0;
+  while (ready.length) {
+    stages.push(ready);
+    seen += ready.length;
+    const next = [];
+    for (const done of ready)
+      for (const [task, deps] of Object.entries(dag))
+        if (deps.includes(done) &amp;&amp; indeg.set(task, indeg.get(task) - 1).get(task) === 0) next.push(task);
+    ready = next;
+  }
+  if (seen !== Object.keys(dag).length) throw new Error('cycle detected');
+  return stages;
+}
+
+// 2. Tiny binary heap used as priority queue -------------------------------
+class Heap {
+  constructor(cmp) { this.a = []; this.cmp = cmp; }
+  get size() { return this.a.length; }
+  push(x) {
+    const a = this.a; a.push(x); let i = a.length - 1;
+    while (i &gt; 0) { const p = (i - 1) &gt;&gt; 1; if (this.cmp(a[i], a[p]) &gt;= 0) break; [a[i], a[p]] = [a[p], a[i]]; i = p; }
+  }
+  pop() {
+    const a = this.a; const top = a[0]; const last = a.pop();
+    if (a.length) {
+      a[0] = last; let i = 0;
+      for (;;) {
+        let l = 2 * i + 1, r = l + 1, m = i;
+        if (l &lt; a.length &amp;&amp; this.cmp(a[l], a[m]) &lt; 0) m = l;
+        if (r &lt; a.length &amp;&amp; this.cmp(a[r], a[m]) &lt; 0) m = r;
+        if (m === i) break; [a[i], a[m]] = [a[m], a[i]]; i = m;
+      }
+    }
+    return top;
+  }
+}
+
+// 3. Resource manager: run stage by stage, tasks in a stage in parallel ----
+async function run(dag, { workers = 3, maxAttempts = 3, flaky = {} } = {}) {
+  const log = [];
+  const load = new Array(workers).fill(0);              // "worker queue"
+  const attemptsSeen = {};
+  const exec = async (task, w) =&gt; {
+    attemptsSeen[task] = (attemptsSeen[task] ?? 0) + 1;
+    await new Promise(r =&gt; setTimeout(r, 5));
+    if ((flaky[task] ?? 0) &gt;= attemptsSeen[task]) throw new Error(`${task} crashed on worker ${w}`);
+  };
+  const stages = planStages(dag);
+  for (const [si, stage] of stages.entries()) {
+    const taskQ = new Heap((x, y) =&gt; y.prio - x.prio || x.name.localeCompare(y.name));
+    stage.forEach(name =&gt; taskQ.push({ name, prio: name.startsWith('encode') ? 2 : 1 }));
+    const running = new Set();
+    const pending = [];
+    const dispatch = async () =&gt; {
+      while (taskQ.size) {
+        while (running.size &gt;= workers) await Promise.race(running);
+        const t = taskQ.pop();
+        const w = load.indexOf(Math.min(...load));      // least-loaded worker
+        load[w]++;
+        const p = exec(t.name, w).then(
+          () =&gt; log.push(`stage${si} ${t.name} ok on w${w} (attempt ${attemptsSeen[t.name]})`),
+          err =&gt; {
+            if (attemptsSeen[t.name] &gt;= maxAttempts) throw err;
+            log.push(`stage${si} ${t.name} FAILED -&gt; requeue`);
+            taskQ.push({ ...t, prio: t.prio + 10 });      // retried work jumps the queue
+          }
+        ).finally(() =&gt; { load[w]--; running.delete(p); });
+        running.add(p); pending.push(p);
+      }
+    };
+    await dispatch();
+    while (running.size) { await Promise.all(running); await dispatch(); }
+    await Promise.all(pending);
+  }
+  return { stages, log };
+}
+
+// 4. Adaptive-bitrate ladder pick -------------------------------------------
+const ladder = [ // height, kbps (illustrative ladder)
+  { h: 240, kbps: 400 }, { h: 360, kbps: 800 }, { h: 480, kbps: 1400 },
+  { h: 720, kbps: 2800 }, { h: 1080, kbps: 5000 },
+];
+const pickRung = (throughputKbps, safety = 0.8) =&gt;
+  [...ladder].reverse().find(r =&gt; r.kbps &lt;= throughputKbps * safety) ?? ladder[0];
+
+// ---- demo + self test -------------------------------------------------------
+const dag = {
+  split: [],
+  video: ['split'], audio: ['split'], meta: ['split'],
+  encode_720p: ['video'], encode_1080p: ['video'], thumbnail: ['video'], watermark: ['video'],
+  package: ['encode_720p', 'encode_1080p', 'audio', 'meta', 'thumbnail', 'watermark'],
+};
+const stages = planStages(dag);
+console.log('stages:', JSON.stringify(stages));
+assert.deepEqual(stages[0], ['split']);
+assert.equal(stages.at(-1)[0], 'package');
+assert.throws(() =&gt; planStages({ a: ['b'], b: ['a'] }), /cycle/);
+
+const { log } = await run(dag, { workers: 2, flaky: { encode_1080p: 2 } });
+log.forEach(l =&gt; console.log(l));
+assert.ok(log.some(l =&gt; l.includes('encode_1080p FAILED')));
+assert.ok(log.some(l =&gt; l.includes('encode_1080p ok') &amp;&amp; l.includes('attempt 3')));
+assert.equal(log.filter(l =&gt; l.includes(' ok ')).length, Object.keys(dag).length);
+
+console.log('3 Mbps -&gt;', pickRung(3000).h + 'p', '| 0.4 Mbps -&gt;', pickRung(400).h + 'p', '| 20 Mbps -&gt;', pickRung(20000).h + 'p');
+assert.equal(pickRung(3000).h, 480);
+assert.equal(pickRung(20000).h, 1080);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the four stages (split; video/audio/meta; four parallel tasks; package), shows encode_1080p failing twice and succeeding on attempt 3, then 480p for 3 Mbps, 240p for 0.4 Mbps, 1080p for 20 Mbps, and "all assertions passed". Executed with Node 20+.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>Error handling</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Class</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>Upload connection drops</td><td>Recoverable</td><td>Resume from last acknowledged part; abort multipart uploads that sit idle for a day so orphans do not accrue storage cost.</td></tr>
+            <tr><td>Worker crashes mid-encode</td><td>Recoverable</td><td>Running-queue entry times out, task requeued at higher priority; the chunk is still in temporary storage so nothing upstream reruns.</td></tr>
+            <tr><td>Resource shortage</td><td>Recoverable</td><td>Tasks wait in the queue; autoscale on queue age, not CPU, since idle workers waiting on I/O look healthy.</td></tr>
+            <tr><td>Corrupt or malformed file</td><td>Non-recoverable</td><td>Stop at preprocessing, mark <code>FAILED</code>, surface a specific error to the uploader. Retrying a bad file only burns compute.</td></tr>
+            <tr><td>Poison task (crashes every worker)</td><td>Non-recoverable</td><td>Cap attempts, move to a dead-letter queue, alert. One bad title must not starve the fleet.</td></tr>
+            <tr><td>Metadata DB failover during completion</td><td>Recoverable</td><td>Completion handler is idempotent; redelivered messages set <code>READY</code> again harmlessly.</td></tr>
+            <tr><td>CDN origin overloaded by a cold viral video</td><td>Recoverable</td><td>Origin shield / request coalescing so one miss fans in to one origin fetch.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Where it bends, and gotchas</h2>
+        <ul class="check-list">
+          <li><strong>The knee is egress, then transcode throughput.</strong> The metadata tier scales like any read-heavy sharded service. The first thing to hurt is the CDN bill; the second is encode latency for long uploads, solved by chunk-level parallelism.</li>
+          <li><strong>Thundering herd on a premiere.</strong> A scheduled launch means every viewer asks for the first segments of the same asset at once. Pre-warm the edge and use origin shielding.</li>
+          <li><strong>Keyframe alignment bugs.</strong> If rungs are cut at slightly different timestamps, ABR switching produces glitches or audio drift. Enforce fixed GOP duration across all rungs.</li>
+          <li><strong>Audio is a separate track.</strong> Encode and package it once and reuse across all video rungs; do not duplicate it per resolution.</li>
+          <li><strong>Manifest staleness.</strong> Cache manifests briefly (or not at all for live) while caching segments for a long time; segments are immutable, manifests are not.</li>
+          <li><strong>Thumbnails and metadata search</strong> deserve their own path. Sprite sheets for hover preview and a search index fed by the completion event keep the playback path clean. See <a href="../../elasticsearch.html">Elasticsearch</a>.</li>
+          <li><strong>Hot metadata.</strong> View counters written per play will melt a row; batch them through a stream and aggregate, as in <a href="../../youtube-video-processing-pipeline.html">YouTube video processing pipeline</a> and the ad-click chapter later in this handbook.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Clarify scope: VOD only, or live too? Device mix? Maximum upload size?</li>
+          <li>Show the arithmetic: 150 TB/day ingest, 7.5 PB/day egress, $150 K/day at list price.</li>
+          <li>Separate the upload and playback paths; never send video bytes through API servers.</li>
+          <li>Pre-signed, resumable, parallel uploads to blob storage.</li>
+          <li>Explain container vs codec, and why GOP is the chunk unit.</li>
+          <li>Draw the DAG; name preprocessor, scheduler, resource manager, workers, temp storage.</li>
+          <li>Explain ABR and why identical keyframe alignment across rungs matters.</li>
+          <li>Queues between stages, priorities, retries, dead-letter queue, idempotent tasks.</li>
+          <li>Cost levers: head/tail split, lazy encoding, regional placement, ISP-embedded caches.</li>
+          <li>Protection: signed URLs, encrypted segments, DRM, watermark.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not transcode on the client before uploading?</summary><p>You cannot trust the client's output (codec profile, keyframe cadence, malicious payloads), phones are battery-constrained, and you still need the full ladder. Light client-side work such as trimming or compressing a very large source is fine, but the authoritative encode runs server-side.</p></details>
+        <details><summary>How do you keep upload fast for a 1 GB file on a bad mobile network?</summary><p>Chunked multipart upload with small parts (a few MB), parallel part uploads, per-part retry and resume, and an endpoint close to the user. Compute a checksum per part so the server detects corruption without re-reading the whole file.</p></details>
+        <details><summary>What happens if the user opens the video while it is still processing?</summary><p>The metadata row says <code>PROCESSING</code>. A common approach is to publish the lowest rung first as soon as it is ready and add higher rungs as they finish, because the manifest can grow. The uploader sees "available in SD, HD processing".</p></details>
+        <details><summary>How would you add live streaming?</summary><p>Ingest over RTMP or SRT, transcode in near real time into a short-segment ladder, publish a rolling manifest with low-latency HLS or DASH, and accept 3 to 10 seconds of glass-to-glass delay. There is no time for a big DAG: encoding is per-segment and pipelined, and the CDN must refresh manifests every segment.</p></details>
+        <details><summary>How do you decide which videos stay in the CDN?</summary><p>Let the cache decide with LRU or a frequency-aware policy (TinyLFU style), and tier it: edge, regional shield, origin. Add explicit pre-positioning for predicted hits such as a scheduled release. Watching the hit ratio per tier tells you whether to resize.</p></details>
+        <details><summary>How do you handle copyright and abuse?</summary><p>Add scanning tasks into the DAG (audio and video fingerprint matching, hash lists for known illegal content, ML classifiers) that gate the transition to <code>READY</code>. Placing them in the DAG reuses the retry and scaling machinery.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./13-search-autocomplete.html">Chapter 13: Search Autocomplete</a> — previous chapter.</li>
+          <li><a href="./15-google-drive.html">Chapter 15: Google Drive</a> — next chapter; the same block-splitting idea applied to editable files.</li>
+          <li><a href="../../youtube-video-processing-pipeline.html">YouTube video processing pipeline</a> — a deeper walk through the processing side.</li>
+          <li><a href="../../system-design/cdn.html">CDN</a> — the delivery layer that dominates the cost model.</li>
+          <li><a href="../../system-design/message-queue.html">Message Queues</a> — the glue between pipeline stages.</li>
+          <li><a href="../../event-driven-architecture-guide.html">Event-Driven Architecture Guide</a> — the object-created and completion events.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. Additional resources listed by the repo for this chapter:</p>
+        <ul>
+          <li><a href="http://highscalability.com/youtube-architecture">YouTube Architecture</a> — http://highscalability.com/youtube-architecture</li>
+          <li><a href="https://www.youtube.com/watch?v=w5WVu624fY8">YouTube scalability 2012</a> — https://www.youtube.com/watch?v=w5WVu624fY8</li>
+          <li><a href="https://www.egnyte.com/blog/2018/12/transcoding-how-we-serve-videos-at-scale/">Transcoding Videos at Scale</a> — https://www.egnyte.com/blog/2018/12/transcoding-how-we-serve-videos-at-scale/</li>
+          <li><a href="https://engineering.fb.com/ios/under-the-hood-broadcasting-live-video-to-millions/">Facebook Video Broadcasting</a> — https://engineering.fb.com/ios/under-the-hood-broadcasting-live-video-to-millions/</li>
+          <li><a href="https://netflixtechblog.com/high-quality-video-encoding-at-scale-d159db052746">Netflix Video Encoding at Scale</a> — https://netflixtechblog.com/high-quality-video-encoding-at-scale-d159db052746</li>
+          <li><a href="https://netflixtechblog.com/optimized-shot-based-encodes-now-streaming-4b9464204830">Netflix Shot based encoding</a> — https://netflixtechblog.com/optimized-shot-based-encodes-now-streaming-4b9464204830</li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Treat video as two products: an asynchronous, DAG-driven factory that turns one upload into many GOP-aligned, adaptively switchable renditions, and a dumb static-file delivery path that a CDN serves. Make every task idempotent so retries are free, and spend your design effort where the money is: egress, not storage.</p>
+      </section>
+    </main>
+  </body>
+</html>

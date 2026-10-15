@@ -1,7 +1,7 @@
 # Rideshare App — Uber Driver Matching, Built from Scratch
 
 End-to-end implementation of the Uber driver matching system design. Every concept from the
-[interview topic document](../interview/uber-driver-matching.html) is working code here.
+[interview topic document](../uber-architecture-driver-tracking.html) is working code here.
 
 ## Architecture
 

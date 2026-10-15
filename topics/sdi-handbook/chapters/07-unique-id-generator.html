@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Unique ID Generator | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Created 2026-10-15 from liquidslr/system-design-notes ch.07. Covers distributed unique 64-bit ID generation: multi-master auto-increment, UUID, ticket servers, Snowflake bit layout (1/41/5/5/12), clock skew and regression handling, bit-budget tuning, worker-ID assignment, ULID/UUIDv7/KSUID alternatives, and the JavaScript 2^53 precision gotcha. Includes an executed Node.js Snowflake generator with sequence rollover and clock-regression handling. About 18 min read. Related: 06-key-value-store, 08-url-shortener, 12-chat-system, consistent-hashing hub page.</div>
+        <h1>Design a Unique ID Generator in Distributed Systems</h1>
+        <p class="summary">Auto-increment dies the moment you have more than one database writer. This chapter walks the four classic options, then builds the Snowflake layout bit by bit and covers what actually breaks in production: clocks that go backwards, worker-ID collisions, and ids that JavaScript silently corrupts.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">7 of 28 · Part 2 Building Blocks</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">18 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Bit budgeting, k-sortable ids, clock skew, worker-id leasing</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Twitter Snowflake, Flickr ticket servers, UUID/ULID/KSUID, Instagram sharded ids</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every row you ever insert needs a name. On one database the name is a counter. On fifty independent machines, there is no shared counter, and the moment you invent one you have built a bottleneck, a single point of failure, or a coordination protocol. A unique ID generator is the small service (or library) that hands out those names without anyone asking permission.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Make the id a <em>concatenation of independent coordinates</em>: when (time), where (worker), and which one in that instant (sequence). If each coordinate is unique within its parent, the whole is unique without any runtime agreement between machines. The only things you must coordinate are the worker numbers, once, at startup.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known design</span>
+        <h2>Why Twitter wrote Snowflake</h2>
+        <p>Around 2010 Twitter was moving its tweet storage off a single MySQL master with auto-increment keys toward a sharded, partly Cassandra-backed store. Sharded stores have no global counter, yet the product needed ids that were roughly time-ordered (timeline merges sort by id) and that fit in the 64-bit integers the existing code and databases used. Twitter's published answer was Snowflake: a small network service in which every node mints ids locally from the clock, a worker number and a per-millisecond counter. The idea has since been copied everywhere (Discord, Instagram's variant inside PostgreSQL, Sonyflake, many in-house libraries) because it removes the one thing that does not scale: a shared mutable counter.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements and numbers</span>
+        <h2>What we are actually building</h2>
+        <ul class="check-list">
+          <li><strong>Unique</strong>: no two ids ever collide, across all machines and data centers, forever.</li>
+          <li><strong>Numeric and 64-bit</strong>: fits a signed <code>BIGINT</code>, which keeps indexes small and comparisons cheap.</li>
+          <li><strong>Roughly time-sorted</strong>: sorting by id approximates sorting by creation time. Not necessarily +1 per call.</li>
+          <li><strong>Fast</strong>: at least 10,000 ids/second system-wide; the real design handles millions.</li>
+          <li><strong>Highly available</strong>: if ids stop, writes stop. This is a tier-0 dependency.</li>
+        </ul>
+        <p class="mini-heading">Back-of-envelope</p>
+        <table class="data-table">
+          <tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr>
+          <tr><td>Target throughput</td><td>10,000 ids/s ÷ 1,000 ms</td><td>10 ids per ms, system-wide</td></tr>
+          <tr><td>One worker's ceiling</td><td>12 sequence bits → 2<sup>12</sup> = 4,096 per ms</td><td>4.096 M ids/s per worker</td></tr>
+          <tr><td>Workers addressable</td><td>5 + 5 bits → 32 × 32</td><td>1,024 workers</td></tr>
+          <tr><td>Whole-cluster ceiling</td><td>1,024 × 4.096 M</td><td>≈ 4.2 billion ids/s</td></tr>
+          <tr><td>Timestamp lifetime</td><td>2<sup>41</sup> ms ÷ (1000 × 86,400 × 365.25)</td><td>≈ 69.7 years from the epoch</td></tr>
+          <tr><td>Max id</td><td>2<sup>63</sup> − 1</td><td>≈ 9.22 × 10<sup>18</sup> (19 digits)</td></tr>
+        </table>
+        <p>The headroom is absurd compared to the 10k/s target, which is the point: you are not buying throughput, you are buying <em>independence</em>. That headroom is also what lets you trade bits between fields later.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Four candidate designs</span>
+        <h2>The options, and why three of them lose</h2>
+
+        <p class="mini-heading">1. Multi-master auto-increment</p>
+        <p>Run k databases; server i hands out i, i+k, i+2k, and so on (auto_increment_increment = k, auto_increment_offset = i). It reuses boring technology, and ids stay numeric.</p>
+        <div class="diagram-box"><pre>
+  app ──► DB-1 : 1, 3, 5, 7 ...    (step 2, offset 1)
+  app ──► DB-2 : 2, 4, 6, 8 ...    (step 2, offset 2)
+
+  <span class="warn">add DB-3 tomorrow?</span>  step must become 3  → existing ranges collide
+  <span class="warn">ordering</span>: id 7 (DB-1) may be created before id 4 (DB-2)</pre></div>
+        <p>Problems: the step is baked into every server, so adding or removing one is a migration rather than a deploy. Ids do not follow time across servers (one lagging server issues "old" numbers). Cross-datacenter use is painful because each DC needs its own non-overlapping offsets, and every id costs a database round trip and a durable write.</p>
+
+        <p class="mini-heading">2. UUID (v4)</p>
+        <p>128 random bits, generated anywhere with zero coordination. Collision probability is negligible (for 2<sup>122</sup> random bits you would need on the order of 10<sup>18</sup> ids before a collision gets likely). It scales with the web tier because the generator is a library call. Costs: twice the width of a BIGINT, no time order, and in a B-tree primary key every insert lands on a random leaf page, which wrecks write locality, bloats the buffer pool and fragments the index. In InnoDB the clustered key is copied into every secondary index, so a 16-byte key penalizes every index.</p>
+
+        <p class="mini-heading">3. Ticket server</p>
+        <p>One dedicated database whose only table has an auto-increment column; clients run <code>REPLACE INTO tickets (stub) VALUES ('a')</code> and read <code>LAST_INSERT_ID()</code>. Flickr published this pattern: it is simple, numeric and strictly increasing. But a single server is a SPOF and a throughput ceiling. Flickr's own mitigation was two ticket servers, one issuing odd and one even, with clients round-robining; that is multi-master again, with the same ordering weakness.</p>
+        <div class="diagram-box"><pre>
+  web-1 ─┐                  ┌─────────────┐
+  web-2 ─┼── "give me id" ─►│ ticket DB   │ auto_increment
+  web-3 ─┘                  └─────────────┘
+              <span class="warn">every insert in the company waits on one box</span></pre></div>
+        <p>A common refinement is <em>range allocation</em> ("ID block" or "HiLo"): a worker leases a block of, say, 10,000 ids from the ticket server and serves them from memory, going back only when the block is exhausted. That cuts ticket-server QPS by 10,000x. The costs are gaps after crashes (unused block is lost) and ids that are ordered within a worker but not across workers.</p>
+
+        <p class="mini-heading">4. Snowflake-style composition</p>
+        <p>Split 64 bits into fields and let each machine fill them itself. This is the winner because it gives uniqueness (by construction), rough time order (timestamp occupies the high bits), numeric 64-bit width, and no runtime dependency on any other machine.</p>
+
+        <table class="data-table">
+          <tr><th>Approach</th><th>Width</th><th>Time-sortable</th><th>Coordination at runtime</th><th>SPOF</th><th>Fits an index well</th></tr>
+          <tr><td>Multi-master auto-inc</td><td>64</td><td>No (per-server only)</td><td>DB round trip</td><td>Per node</td><td>Yes</td></tr>
+          <tr><td>UUID v4</td><td>128</td><td>No</td><td>None</td><td>None</td><td>Poor (random)</td></tr>
+          <tr><td>Ticket server</td><td>64</td><td>Yes</td><td>Every id</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td>Ticket + block lease</td><td>64</td><td>Per block</td><td>Once per block</td><td>Soft</td><td>Yes</td></tr>
+          <tr><td>Snowflake</td><td>64</td><td>Yes (ms)</td><td>None (only at startup)</td><td>None</td><td>Yes</td></tr>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The bit layout</span>
+        <h2>Anatomy of a Snowflake id</h2>
+        <div class="diagram-box"><pre>
+   63   62                              22 21    17 16     12 11            0
+  ┌───┬──────────────────────────────────┬────────┬────────┬───────────────┐
+  │ <span class="dim">0</span> │ <span class="hi">timestamp (41 bits)</span>             │ <span class="ok">dc (5)</span>  │ <span class="step">mach(5)</span>│ <span class="warn">sequence (12)</span>  │
+  └───┴──────────────────────────────────┴────────┴────────┴───────────────┘
+   sign   ms since custom epoch          0..31    0..31     0..4095 per ms
+
+  id = (ts - EPOCH) &lt;&lt; 22  |  dc &lt;&lt; 17  |  machine &lt;&lt; 12  |  seq</pre></div>
+        <ul class="check-list">
+          <li><strong>Sign bit (1)</strong>: always 0 so the value stays positive in signed 64-bit columns and signed comparisons order correctly. It also leaves a spare bit you could reclaim if you were willing to use unsigned types.</li>
+          <li><strong>Timestamp (41)</strong>: milliseconds since a <em>custom epoch</em> you choose. Twitter's was 1288834974657, which is 2010-11-04 01:42:54.657 UTC. Using your launch date instead of 1970 is what gives you the full 69.7 years rather than having burned 40 of them.</li>
+          <li><strong>Datacenter (5) and machine (5)</strong>: together a 10-bit worker identity, 1,024 workers. The 5/5 split is cosmetic; the generator only cares that the 10 bits are unique per live process.</li>
+          <li><strong>Sequence (12)</strong>: counter within one millisecond on one worker; resets to 0 when the millisecond changes. If you hit 4,096 in the same ms you must wait for the next tick, a deliberate throttle.</li>
+        </ul>
+        <p>Because the timestamp is in the most significant bits, ids sort by time down to the millisecond; within one millisecond, ids from different workers order by worker bits, which is arbitrary but stable. That property is called <em>k-sortable</em> (sorted within a small window of k), and it is what makes <code>ORDER BY id DESC LIMIT 20</code> work as a "latest" query and keeps inserts append-mostly in a B-tree.</p>
+        <div class="insight-box"><strong>Insight:</strong> Ordering is only as good as your clocks. Two events 1 ms apart on machines whose clocks differ by 5 ms can get ids in the "wrong" order. Treat id order as <em>approximate causality</em>, never as a source of truth for "A happened before B". If you need real ordering, use a per-entity version number or a consensus log.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Clocks: the part everyone underestimates</h2>
+        <p>The generator is a pure function of (clock, worker, counter). Break the clock assumption and you break uniqueness, not just ordering. Three distinct hazards:</p>
+        <table class="data-table">
+          <tr><th>Hazard</th><th>What happens</th><th>Defence</th></tr>
+          <tr><td>Clock drift between machines</td><td>Ids from different workers interleave out of real-time order.</td><td>NTP (or chrony) with monitoring; in clouds, the provider's time service (AWS Time Sync, Google's leap-smeared NTP). Accept ms-level disorder.</td></tr>
+          <tr><td>Clock steps backwards on one machine (NTP step, VM migration, leap second, operator error)</td><td>Same (ts, worker) pair repeats; sequence restarts at 0, so <strong>duplicate ids</strong>.</td><td>Remember <code>lastTs</code>; if now &lt; lastTs, refuse. For tiny regressions spin-wait; for larger ones fail loudly and take the node out of rotation.</td></tr>
+          <tr><td>Restart after crash</td><td>Process loses <code>lastTs</code>; if the clock regressed while down, duplicates become possible.</td><td>Persist the high-water mark periodically and on shutdown; on boot, wait until the clock is past it. Or add a few "epoch generation" bits bumped on every restart.</td></tr>
+        </table>
+        <p>Use a <em>monotonic</em> source for deltas when you can. Node's <code>process.hrtime</code> and Java's <code>System.nanoTime</code> never go backwards but are not wall-clock; a common trick is to read wall-clock once at boot and advance it with the monotonic clock, re-syncing slowly. NTP slewing (gradually speeding or slowing the clock) is safe; stepping is what bites. Configure <code>chrony</code> with <code>makestep</code> limited to boot, and prefer leap-second smearing.</p>
+        <div class="warn-box"><strong>Production gotcha:</strong> A "temporary" -2 s step on one host with no guard produces up to two seconds of duplicate ids, which show up weeks later as unique-constraint violations on the replica or as silently overwritten rows in a key-value store. Always include the clock-regression check, and alert on it.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Who gets which worker id?</h2>
+        <p>The 10 worker bits must be unique among <em>live</em> generators. This is the only coordination Snowflake needs, and it is a startup concern, not a per-id one. Options, from simplest to most robust:</p>
+        <ul class="check-list">
+          <li><strong>Static config</strong>: bake the id into the deploy (machine number from a host inventory). Works for pet servers; fragile for autoscaled fleets.</li>
+          <li><strong>Lease from a coordinator</strong>: on boot, create an ephemeral/sequential node in ZooKeeper or etcd (or a TTL'd row in a database or a Redis key with <code>SET NX PX</code>); the lease number is the worker id; renew periodically, relinquish on shutdown. If the lease lapses (GC pause, partition), the process must stop issuing ids before the lease expires from the coordinator's point of view.</li>
+          <li><strong>Derive from stable identity</strong>: for Kubernetes StatefulSets the pod ordinal is already unique and stable; for others hash an IP/MAC (risk of collisions: with only 1,024 values the birthday paradox bites at around 40 nodes, so never hash blindly).</li>
+        </ul>
+        <p>Reusing a worker id too quickly is also a trap: if worker 17 dies and its replacement takes 17 while the replacement's clock is behind, you recreate the clock-regression scenario across processes. Keep a cooling period of at least the maximum expected clock offset.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Tuning the bit budget</h2>
+        <p>The 41/10/12 split is a default, not a law. Redo the arithmetic for your workload:</p>
+        <table class="data-table">
+          <tr><th>Situation</th><th>Adjustment</th><th>Cost</th></tr>
+          <tr><td>Few workers, enormous per-worker burst</td><td>Fewer worker bits (e.g. 3), more sequence bits (e.g. 19)</td><td>Max 8 workers</td></tr>
+          <tr><td>Thousands of small stateless pods</td><td>More worker bits (13) and fewer sequence bits (9 → 512/ms/worker)</td><td>Per-worker burst cap drops 8x</td></tr>
+          <tr><td>Want a century of life</td><td>Seconds instead of milliseconds for the timestamp (Sonyflake uses 10 ms units: 39 bits time, 8 bits sequence, 16 bits machine)</td><td>Coarser order, lower per-worker rate (256 per 10 ms)</td></tr>
+          <tr><td>Low volume, long life</td><td>Reduce sequence bits, keep time bits</td><td>Throughput cap</td></tr>
+        </table>
+        <p>Instagram published a variant implemented inside PostgreSQL: 41 bits of time, 13 bits of logical shard id and 10 bits from a per-table sequence. Because the shard id is embedded in the id, you can route a lookup to the right shard without a directory. That is a real design lever: <em>ids that carry routing information</em>. The flip side is that re-sharding is harder, since the id is a permanent address.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Beyond the chapter</span>
+        <h2>Modern alternatives and how to choose</h2>
+        <table class="data-table">
+          <tr><th>Scheme</th><th>Width / encoding</th><th>Sortable</th><th>Needs worker id</th><th>Use when</th></tr>
+          <tr><td>Snowflake</td><td>64-bit int</td><td>Yes (ms)</td><td>Yes</td><td>Numeric keys, high write rate, you control the fleet</td></tr>
+          <tr><td>UUIDv7 (RFC 9562)</td><td>128-bit: 48-bit ms time + random</td><td>Yes (ms)</td><td>No</td><td>You want standards, DB-native <code>uuid</code> type, no coordination</td></tr>
+          <tr><td>ULID</td><td>128-bit, 26-char Crockford base32</td><td>Yes (ms)</td><td>No</td><td>URL/log-friendly strings</td></tr>
+          <tr><td>KSUID</td><td>160-bit, 27-char base62</td><td>Yes (second)</td><td>No</td><td>Opaque tokens with creation time</td></tr>
+          <tr><td>MongoDB ObjectId</td><td>96-bit: time, process-random, counter</td><td>Yes (second)</td><td>No</td><td>Document stores</td></tr>
+          <tr><td>HiLo / block lease</td><td>64-bit int</td><td>Per block</td><td>Coordinator</td><td>You already have a transactional DB and modest scale</td></tr>
+        </table>
+        <p>My opinion: if you do not specifically need a 64-bit integer, UUIDv7 is the lowest-regret choice today. You get time-ordered inserts, no worker-id service and a native column type. Pick Snowflake when ids appear in URLs, are stored by the billion in narrow rows, or must be JSON-safe as strings, and the 8-byte saving across indexes matters.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Snowflake wins</h4><ul><li>8 bytes: half the index and foreign-key footprint of a UUID</li><li>Embeds creation time; decodable for debugging</li><li>Tunable bit budget; can embed shard routing</li></ul></div>
+          <div class="trade-col cons"><h4>Snowflake costs</h4><ul><li>Worker-id assignment is operational burden</li><li>Clock regression can silently corrupt uniqueness</li><li>Predictable and enumerable: leaks creation time and rate</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>A Snowflake generator you can break on purpose</h2>
+        <p>The implementation below uses <code>BigInt</code> because 64-bit ids exceed the 2<sup>53</sup> safe-integer limit of a JavaScript <code>Number</code>. The clock is injectable, which lets the test drive the sequence-rollover and clock-regression paths deterministically. It then measures real-clock throughput on a single worker.</p>
+        <span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Snowflake-style 64-bit ID generator: 1 sign | 41 time | 5 dc | 5 machine | 12 seq
+const EPOCH = 1288834974657n; // Twitter's custom epoch (ms)
+const TS_BITS = 41n, DC_BITS = 5n, M_BITS = 5n, SEQ_BITS = 12n;
+const MAX_SEQ = (1n &lt;&lt; SEQ_BITS) - 1n;
+const M_SHIFT = SEQ_BITS, DC_SHIFT = SEQ_BITS + M_BITS, TS_SHIFT = SEQ_BITS + M_BITS + DC_BITS;
+
+class Snowflake {
+  constructor({ dc, machine, now = () =&gt; BigInt(Date.now()), sleep = null, maxBackwardWaitMs = 5n }) {
+    if (dc &lt; 0 || dc &gt;= 32 || machine &lt; 0 || machine &gt;= 32) throw new RangeError('dc/machine must be 0..31');
+    this.dc = BigInt(dc); this.machine = BigInt(machine);
+    this.now = now; this.maxWait = maxBackwardWaitMs;
+    this.lastTs = -1n; this.seq = 0n;
+  }
+  next() {
+    let ts = this.now();
+    if (ts &lt; this.lastTs) {
+      const drift = this.lastTs - ts;
+      // small regression: refuse to go backwards; spin until the clock catches up
+      if (drift &gt; this.maxWait) throw new Error(`clock moved backwards by ${drift}ms, refusing to issue ids`);
+      while (ts &lt; this.lastTs) ts = this.now();
+    }
+    if (ts === this.lastTs) {
+      this.seq = (this.seq + 1n) &amp; MAX_SEQ;
+      if (this.seq === 0n) { // sequence exhausted this ms: wait for next ms
+        while (ts &lt;= this.lastTs) ts = this.now();
+      }
+    } else this.seq = 0n;
+    this.lastTs = ts;
+    return ((ts - EPOCH) &lt;&lt; TS_SHIFT) | (this.dc &lt;&lt; DC_SHIFT) | (this.machine &lt;&lt; M_SHIFT) | this.seq;
+  }
+}
+const decode = (id) =&gt; ({
+  timestamp: Number((id &gt;&gt; TS_SHIFT) + EPOCH),
+  dc: Number((id &gt;&gt; DC_SHIFT) &amp; 31n),
+  machine: Number((id &gt;&gt; M_SHIFT) &amp; 31n),
+  seq: Number(id &amp; MAX_SEQ),
+});
+
+// --- self-test with a fake clock so results are deterministic ---
+let fake = 1700000000000n;
+const gen = new Snowflake({ dc: 3, machine: 17, now: () =&gt; fake });
+const a = gen.next(), b = gen.next();
+console.log('a =', a.toString(), decode(a));
+console.log('b =', b.toString(), decode(b));
+console.assert(b &gt; a, 'same-ms ids must increase');
+console.assert(decode(a).dc === 3 &amp;&amp; decode(a).machine === 17, 'fields round-trip');
+console.assert(decode(a).timestamp === 1700000000000, 'timestamp round-trips');
+
+// sequence rollover: issue 4097 ids in one fake ms; the clock must tick forward once
+let calls = 0;
+const g2 = new Snowflake({ dc: 0, machine: 1, now: () =&gt; { calls++; return calls &gt; 4200 ? 1700000000001n : 1700000000000n; } });
+const ids = new Set(); let prev = -1n;
+for (let i = 0; i &lt; 4097; i++) { const id = g2.next(); ids.add(id); console.assert(id &gt; prev); prev = id; }
+console.log('4097 ids, unique =', ids.size, ' last decoded =', decode(prev));
+console.assert(ids.size === 4097 &amp;&amp; decode(prev).seq === 0 &amp;&amp; decode(prev).timestamp === 1700000000001);
+
+// clock regression: small drift waits, large drift throws
+let t = 1700000005000n;
+const g3 = new Snowflake({ dc: 1, machine: 1, now: () =&gt; t });
+g3.next();
+t = 1700000004999n; // 1ms back
+let spins = 0; const g3now = g3.now; g3.now = () =&gt; { if (++spins &gt; 3) t = 1700000005000n; return g3now(); };
+console.log('after 1ms regression id ok:', g3.next() &gt; 0n);
+t = 1700000004000n; g3.now = g3now;
+try { g3.next(); } catch (e) { console.log('large drift -&gt;', e.message); }
+
+// throughput on the real clock
+const real = new Snowflake({ dc: 1, machine: 2 });
+const N = 200000, t0 = process.hrtime.bigint(); const seen = new Set();
+for (let i = 0; i &lt; N; i++) seen.add(real.next());
+const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+console.log(`generated ${N} unique=${seen.size === N} in ${ms.toFixed(0)}ms (~${Math.round(N / ms * 1000)} ids/s, capped at 4096/ms = 4.096M/s)`);
+console.assert(seen.size === N);
+// 41-bit range
+console.log('41-bit lifetime (years):', (Number(2n ** 41n) / (1000 * 3600 * 24 * 365.25)).toFixed(1));
+</code></pre>
+        <p class="code-caption">Prints two decoded ids from one millisecond (sequence 0 then 1), a 4,097-id burst that rolls the sequence over and advances the timestamp by exactly one ms, a spin-wait over a 1 ms regression, a refusal on a 1,000 ms regression, and a ~200k-id uniqueness run with measured throughput (about 2 M ids/s on a laptop).</p>
+        <div class="warn-box"><strong>Gotcha, the 2<sup>53</sup> trap:</strong> Snowflake ids are ~1.7 × 10<sup>18</sup>, far above <code>Number.MAX_SAFE_INTEGER</code> (≈ 9.007 × 10<sup>15</sup>). <code>JSON.parse</code> in a browser will round them and two different ids can become the same number. This is why Twitter's API returns both <code>id</code> and <code>id_str</code>. Always serialize 64-bit ids as strings across JS boundaries.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks and what you see</h2>
+        <table class="data-table">
+          <tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr>
+          <tr><td>Clock steps back</td><td>Duplicate ids, unique-key violations or overwritten rows</td><td>Track lastTs, refuse/wait, alert; persist high-water mark</td></tr>
+          <tr><td>Two live processes share a worker id</td><td>Collisions only when both mint in the same ms (rare, so very hard to debug)</td><td>Lease with TTL via ZooKeeper/etcd; fence by stopping before lease expiry</td></tr>
+          <tr><td>Coordinator (ZK/etcd) down</td><td>New workers cannot start; existing ones keep working</td><td>Good: generation never depends on it at runtime. Cache the last lease locally with a safe TTL</td></tr>
+          <tr><td>Sequence exhausted in a ms</td><td>Latency spike up to 1 ms for that call</td><td>Size the sequence field for burst, or add workers</td></tr>
+          <tr><td>Epoch exhausted (year ~69)</td><td>Overflow into sign bit, negative ids</td><td>Alarm at 80% of the range; plan migration to a new epoch or wider layout well ahead</td></tr>
+          <tr><td>Generator service crashes</td><td>Callers block on id requests</td><td>Embed as a library so each app process mints its own; or run several stateless generator pods behind a load balancer, each with a distinct worker id</td></tr>
+          <tr><td>VM pause / live migration</td><td>Clock jumps forward then looks like it went back</td><td>Time-sync agents with limits on stepping; the same regression guard</td></tr>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Deployment shape and gotchas</h2>
+        <ul class="check-list">
+          <li><strong>Library vs service.</strong> A library has zero network hops and no extra SPOF, but needs worker ids for every app process. A service concentrates the worker-id problem in few nodes at the price of an RPC (sub-millisecond in-DC). Large shops typically do the library variant when processes are long-lived, service when they are short-lived (functions, batch).</li>
+          <li><strong>Batching.</strong> Let callers request n ids at once (<code>nextBatch(1000)</code>); amortizes RPC cost and reduces lock contention on the generator.</li>
+          <li><strong>Thread safety.</strong> The (lastTs, seq) update must be atomic; use a mutex or a single-threaded actor. In Node, a synchronous function is naturally atomic per process, but cluster/worker-threads need distinct worker ids.</li>
+          <li><strong>Observability.</strong> Export: ids/s, sequence-exhaust waits, clock-regression refusals, lease renewals, and max observed clock offset from NTP. The regression counter is the one that should page someone.</li>
+          <li><strong>Security.</strong> Ids are guessable. Never use them as an authorization token; use per-object authorization, and expose opaque tokens externally if enumeration is a problem.</li>
+          <li><strong>Multi-region.</strong> Allocate disjoint worker-id ranges per region (e.g. dc bits = region) so there is no cross-region lease. Ordering across regions is only as good as inter-region clock skew.</li>
+          <li><strong>Hot-key avoidance.</strong> Monotonic ids concentrate inserts on the right edge of a B-tree (good locality) but create a hot shard in range-partitioned stores like HBase or Bigtable. Hash or reverse the key, or prefix a salt, if you range-partition on the id.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview and design checklist</h2>
+        <ul class="check-list">
+          <li>Stated requirements: unique, numeric, 64-bit, time-sortable, 10k+/s, highly available.</li>
+          <li>Rejected multi-master (step coupling), UUID (128-bit, unordered), single ticket server (SPOF) with reasons.</li>
+          <li>Drew the 1/41/5/5/12 layout and computed lifetime (~69.7 years) and per-worker rate (4,096/ms).</li>
+          <li>Explained how worker ids are assigned (static, lease, ordinal) and their failure behaviour.</li>
+          <li>Covered clock sync (NTP), regression handling, and restart safety.</li>
+          <li>Discussed tuning bit sections (more sequence for bursty, more time for long-lived).</li>
+          <li>Mentioned HA: multiple generators, library embedding, no runtime coordination.</li>
+          <li>Called out string serialization for JS clients and the guessability of ids.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Are Snowflake ids strictly increasing?</summary><p>Per worker, yes, as long as the clock never regresses. Globally, no: they are ordered by millisecond then by worker bits, so two workers inside the same millisecond produce ids ordered by worker number, and clock skew can reorder events across machines. They are k-sortable, not totally ordered.</p></details>
+        <details><summary>What if I need more than 4,096 ids per millisecond on one machine?</summary><p>Shift bits: cut machine bits or timestamp precision (Sonyflake-style 10 ms units) to widen the sequence, or run several generators per machine with distinct worker ids. At 4 million ids per second per worker you are usually limited by the database, not the generator.</p></details>
+        <details><summary>Why not just use a database sequence with large caching?</summary><p>That is the block-lease design and it is fine for moderate scale. You get dense ints and an easy mental model, but you keep a stateful central dependency, ids are not time-ordered across workers, and a crash burns the cached block. It is a good answer if you are already on one PostgreSQL primary and not sharded yet.</p></details>
+        <details><summary>How do you guarantee uniqueness across data centers?</summary><p>By construction: dc and machine bits make every (worker, ms, seq) tuple distinct. The only global requirement is that each worker id is held by one live process at a time, which you enforce at startup with a lease or static allocation, not on the hot path.</p></details>
+        <details><summary>Should ids be sortable at all? Does it leak information?</summary><p>Sortability gives index locality and cheap "recent first" queries. It leaks creation time and, with sequence values, approximate volume. For public identifiers where that matters, store the sortable id internally and expose a separate random public id.</p></details>
+        <details><summary>Snowflake or UUIDv7 today?</summary><p>If you control the schema and 16 bytes is fine, UUIDv7 gives most of the benefits with no worker-id service. Choose Snowflake when you need an 8-byte integer, JSON-friendly decoding of time, or routing bits inside the id.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./06-key-value-store.html">Chapter 6: Design a Key-Value Store</a> — the previous chapter; high-write stores are the main consumers of time-ordered ids.</li>
+          <li><a href="./08-url-shortener.html">Chapter 8: Design a URL Shortener</a> — next chapter; it encodes these ids in base 62 to build short links.</li>
+          <li><a href="./12-chat-system.html">Chapter 12: Design a Chat System</a> — message ordering inside a channel is an id-ordering problem.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — how ids or keys later get mapped onto shards.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — why embedding shard routing into ids can pay off.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — client-generated ids are the usual idempotency key.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p>
+        <ul>
+          <li><a href="https://code.flickr.net/2010/02/08/ticket-servers-distributed-unique-primary-keys-on-the-cheap">Ticket Servers: Distributed Unique Primary Keys on the Cheap</a></li>
+          <li><a href="https://blog.twitter.com/engineering/en_us/a/2010/announcing-snowflake.html">Snowflake</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Do not share a counter; share a convention. Time in the high bits gives order, a leased worker number gives uniqueness, and a local sequence gives burst capacity. The whole design is safe exactly as long as one assumption holds, that no worker ever sees time go backwards, so the interesting engineering is the guard around the clock, not the bit shifting.</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Production RAG: Strategies, Scale, and Architecture | Learning Hub</title>
+    <title>RAG from Scratch to Production: Build, Scale, and Harden | Learning Hub</title>
     <link rel="stylesheet" href="../styles.css" />
     <script src="../read-state.js" defer></script>
     <script src="../highlight.js" defer></script>
@@ -21,49 +21,456 @@
       @media (max-width: 600px) { .tradeoff-grid { grid-template-columns: 1fr; } }
     </style>
   </head>
+
   <body>
     <main class="page container">
+      <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Merged 2026-10-13: original two-part Node.js RAG guide + Medium 'RAG Pipeline for Millions of Documents with Minimal Hallucination' (dewasheesh.rana) + 'Build a RAG App with Python' (gulsaba.fiha), both fully read. Added: 40-line Python on-ramp (Chroma/LangChain/OpenAI; source bugs 'n/n' separator and lost indentation NOT reproduced; py_compile ok, not run), RAG vs fine-tuning table, dedup (MinHash)/metadata/sentence-aware ~256/32 chunks/parent-child/contextual chunks, RRF constant 60, ~150 candidates -&gt; cross-encoder -&gt; ~20, permission filtering before the LLM, 'Retrieve, Constrain, Verify, Abstain' gates (evidence grading/Corrective RAG max 3 attempts, citation validation, atomic-claim verification scored by WEAKEST claim, independent verifier, 'I don't know' as structured result). Honest caveats from source: refused 98/100 unanswerable but also 54/100 answerable; '10M' benchmark used synthetic LanceDB vectors, Recall@10 ~0.105, 18 ms P95 raw vs ~4 s median / 17.7 s P95 end-to-end — does not prove near-zero hallucination on real 10M docs. CORRECTION made: removed unsupported claim 'below 5% hallucination at 10M+'; h2 renamed 'Reducing hallucination at scale'. Read time 59 min. Deferred (paywalled): RAG chunking x2 articles (planned separate page), local-RAG article. Related: agentic-knowledge-graph-40m-docs, llm-context-window-management, okf-plus-rag-agent-architecture.</div>
+
       <header class="page-header">
         <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
         <figure class="article-hero">
           <img class="article-hero-img"
             src="https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=1600&h=700&fit=crop&auto=format&q=80"
             alt="Abstract data pipeline visualization" loading="lazy" />
           <div class="article-hero-overlay"></div>
           <div class="article-hero-content">
-            <span class="article-hero-kicker">AI · RAG · Architecture · 40 min read</span>
+            <span class="article-hero-kicker">AI · RAG · Build &amp; Architecture · 59 min read</span>
           </div>
         </figure>
-        <h1>Production RAG: Advanced Strategies, 10M+ Document Scale, and Architecture Trade-offs</h1>
+
+        <h1>RAG from Scratch to Production: Build the Pipeline, Scale to 10M+ Documents, Reduce Hallucination</h1>
         <p class="summary">
-          Three RAG articles merged: advanced retrieval strategies (Flow RAG and Modular RAG),
-          building a pipeline for 10M+ documents with near-zero hallucination, and a complete
-          production-ready RAG architecture guide. Covers chunking, embedding, hybrid search,
-          re-ranking, routing, guardrails, and the full system design at scale.
+          A complete RAG guide, with a 40-line Python on-ramp and two main parts. Part 1 builds a working Node.js RAG service stage by stage
+          (ingest, clean, chunk, embed, index, retrieve, generate, API). Part 2 hardens it for production:
+          chunking strategies, hybrid search, re-ranking, Flow/Modular RAG routing, 10M+ document indexing,
+          evidence gating and abstention, semantic caching, and evals.
         </p>
         <div class="article-meta">
+          <div><span class="meta-label">Sources</span><span class="meta-value">Production RAG strategies/architecture article; kuriko-iwai.com/courses/llm-backbone-custom-gpt</span></div>
+          <div><span class="meta-label">Stack</span><span class="meta-value">Node.js · Anthropic SDK · pgvector · Voyage embeddings</span></div>
           <div><span class="meta-label">Level</span><span class="meta-value">Intermediate → Advanced</span></div>
-          <div><span class="meta-label">Focus</span><span class="meta-value">Production patterns, not toy demos</span></div>
-          <div><span class="meta-label">Scale</span><span class="meta-value">Covers 10M+ document corpus design</span></div>
         </div>
       </header>
 
       <section class="content-card">
         <p class="lead">
           Basic RAG is three lines: embed query, find similar chunks, stuff them into a prompt. Production
-          RAG is a system — with offline indexing pipelines, query understanding, multi-stage retrieval,
-          re-ranking, context assembly, and post-generation verification. The gap between demo RAG and
-          production RAG is where most projects break.
+          RAG is a system, with offline indexing pipelines, query understanding, multi-stage retrieval,
+          re-ranking, context assembly, and post-generation verification. In practice even the basic
+          version is eight stages (ingest, clean, chunk, embed, index, retrieve, re-rank, generate), and each
+          configuration decision compounds: a bad chunking strategy quietly degrades every answer, forever.
+          This guide first builds each stage from scratch, then upgrades it to production grade.
         </p>
         <div class="callout">
           <p><strong>Core idea:</strong> RAG quality is determined at two independent stages: indexing
           quality (how chunks are built and stored) and retrieval quality (how the right chunks are found
-          at query time). Most teams fix the LLM call and ignore both. Fix both.</p>
+          at query time). Most teams fix the LLM call and ignore both. Fix both, and keep each stage
+          independently replaceable so you can debug and improve one without touching the rest.</p>
         </div>
       </section>
 
+
       <section class="content-card">
-        <span class="section-label">RAG evolution</span>
+        <span class="section-label">Beginner on-ramp</span>
+        <h2>Beginner on-ramp: a 40-line Python RAG</h2>
+        <p>
+          Before the Node.js build below, here is the whole idea in one Python file (3.11+). It uses
+          ChromaDB in memory, OpenAI embeddings and a chat model, with LangChain used only for splitting.
+          Install with <code>pip install chromadb openai langchain-text-splitters</code> and export
+          <code>OPENAI_API_KEY</code>.
+        </p>
+        <pre class="code-block"><code># mini_rag.py
+from pathlib import Path
+
+import chromadb
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from openai import OpenAI
+
+EMBED_MODEL, CHAT_MODEL = "text-embedding-3-small", "gpt-4.1-mini"
+llm = OpenAI()  # reads OPENAI_API_KEY from the environment
+
+# 1. Knowledge: a tiny file so the demo runs end to end
+doc = Path("company.txt")
+if not doc.exists():
+    doc.write_text(
+        "Employees get 24 days of paid leave per year.\n\n"
+        "Remote work is allowed up to three days a week.\n\n"
+        "Support hours are 9am to 6pm on weekdays.\n\n"
+        "Salaries are paid on the last working day of each month.\n",
+        encoding="utf-8",
+    )
+
+def embed(texts: list[str]) -> list[list[float]]:
+    res = llm.embeddings.create(model=EMBED_MODEL, input=texts)
+    return [d.embedding for d in res.data]
+
+# 2. Load -> chunk (500 chars, 50 overlap) -> embed -> store
+text = doc.read_text(encoding="utf-8")
+chunks = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50).split_text(text)
+collection = chromadb.Client().get_or_create_collection("company")
+collection.add(ids=[f"c{i}" for i in range(len(chunks))], documents=chunks, embeddings=embed(chunks))
+
+# 3. Retrieve -> constrain -> generate
+def ask_rag(question: str, k: int = 3) -> str:
+    hits = collection.query(query_embeddings=embed([question]), n_results=k)["documents"][0]
+    context = "\n\n".join(hits)
+    prompt = (
+        "Answer using ONLY the context below. If the context does not contain the answer, "
+        "reply exactly: I don't know.\n\n"
+        f"Context:\n{context}\n\nQuestion: {question}"
+    )
+    res = llm.chat.completions.create(
+        model=CHAT_MODEL, temperature=0, messages=[{"role": "user", "content": prompt}]
+    )
+    return res.choices[0].message.content
+
+if __name__ == "__main__":
+    print(ask_rag("How many days of remote work are allowed?"))
+    print(ask_rag("What is the CEO's favourite colour?"))  # should say: I don't know</code></pre>
+
+        <h3>RAG vs fine-tuning</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Question</th><th>RAG</th><th>Fine-tuning</th></tr></thead>
+            <tbody>
+              <tr><td>What does it change?</td><td>The context supplied at question time</td><td>The model's weights and learned behaviour</td></tr>
+              <tr><td>Best for</td><td>Private, fast-changing facts that need citations</td><td>Consistent style, format or a narrow specialised task</td></tr>
+              <tr><td>Updating knowledge</td><td>Re-index the changed document</td><td>Retrain and re-evaluate</td></tr>
+              <tr><td>Main failure</td><td>Wrong chunks retrieved</td><td>Stale or baked-in facts</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          The two combine well: fine-tune for tone and format, retrieve for facts. The three classic
+          beginner failures are the ones this guide spends most of its time on: bad chunking (too small
+          loses context, too large blurs retrieval), poor retrieval (the answer exists but is never
+          fetched), and hallucination despite context (the prompt must allow "I don't know").
+        </p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1: Build it from scratch</span>
+        <h2>The eight-stage pipeline</h2>
+        <pre class="code-block"><code>/*
+  RAG Pipeline — component map
+
+  OFFLINE (indexing) pipeline — runs once or on update:
+  ┌──────────┐   ┌─────────┐   ┌──────────┐   ┌─────────────┐   ┌──────────────┐
+  │ Ingest   │──▶│  Clean  │──▶│  Chunk   │──▶│   Embed     │──▶│  Index/Store │
+  │ (load    │   │ (strip  │   │ (split   │   │ (voyage-3   │   │  (pgvector + │
+  │ docs)    │   │  noise) │   │  text)   │   │  embeddings)│   │   tsvector)  │
+  └──────────┘   └─────────┘   └──────────┘   └─────────────┘   └──────────────┘
+
+  ONLINE (query) pipeline — runs on every user query:
+  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐
+  │ Query    │──▶│ Retrieve │──▶│ Re-rank  │──▶│  Generate    │
+  │ (expand  │   │ (hybrid  │   │ (cross   │   │  (Claude +   │
+  │  + embed)│   │  search) │   │ encoder) │   │   citations) │
+  └──────────┘   └──────────┘   └──────────┘   └──────────────┘
+*/</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1 · Stage 1–2: Ingest &amp; Clean</span>
+        <h2>Loading and normalising documents</h2>
+        <pre class="code-block"><code>// document-loader.js
+import fs from 'fs/promises';
+import path from 'path';
+
+// Supported loaders by extension
+const LOADERS = {
+  '.txt':  content => content,
+  '.md':   content => content.replace(/^#+\s/gm, '').replace(/\*\*/g, ''),
+  '.json': content => {
+    const obj = JSON.parse(content);
+    // Flatten JSON to readable text for embedding
+    return JSON.stringify(obj, null, 2);
+  },
+};
+
+async function loadDocument(filePath) {
+  const ext     = path.extname(filePath).toLowerCase();
+  const loader  = LOADERS[ext];
+  if (!loader) throw new Error(`Unsupported file type: ${ext}`);
+
+  const raw = await fs.readFile(filePath, 'utf8');
+  return {
+    id:      path.basename(filePath, ext),
+    source:  filePath,
+    content: clean(loader(raw)),
+  };
+}
+
+function clean(text) {
+  return text
+    .replace(/\r\n/g, '\n')                   // normalise line endings
+    .replace(/\n{3,}/g, '\n\n')               // collapse excessive blank lines
+    .replace(/[ \t]+/g, ' ')                  // normalise whitespace
+    .replace(/https?:\/\/\S+/g, '[URL]')      // redact URLs (optional)
+    .trim();
+}
+
+// Load a whole directory
+async function loadDirectory(dir) {
+  const files = await fs.readdir(dir);
+  return Promise.all(
+    files
+      .filter(f => Object.keys(LOADERS).includes(path.extname(f)))
+      .map(f => loadDocument(path.join(dir, f)))
+  );
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1 · Stage 3: Chunk</span>
+        <h2>Splitting text into retrievable units (a simple overlap chunker)</h2>
+        <pre class="code-block"><code>// chunker.js — recursive splitter with overlap
+function chunkText(text, {
+  maxLen  = 800,   // ~600 tokens at 0.75 tok/word
+  overlap = 100,
+  sep     = ['\n\n', '\n', '. ', ' '],
+} = {}) {
+  if (text.length <= maxLen) return [text];
+
+  const separator = sep.find(s => text.includes(s)) ?? '';
+  const parts     = separator ? text.split(separator) : [text];
+
+  const chunks = [];
+  let   current = '';
+
+  for (const part of parts) {
+    const candidate = current ? current + separator + part : part;
+
+    if (candidate.length > maxLen && current) {
+      chunks.push(current.trim());
+      // Overlap: keep tail of previous chunk
+      const tail = current.slice(-overlap);
+      current    = tail + separator + part;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+// Chunk all loaded documents and attach metadata
+function chunkDocuments(docs, options = {}) {
+  return docs.flatMap(doc =>
+    chunkText(doc.content, options).map((chunk, i) => ({
+      id:          `${doc.id}::${i}`,
+      doc_id:      doc.id,
+      source:      doc.source,
+      chunk_index: i,
+      content:     chunk,
+    }))
+  );
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1 · Stage 4–5: Embed &amp; Index</span>
+        <h2>Generating vectors and storing them</h2>
+        <pre class="code-block"><code>// embedder.js — Voyage embeddings via Anthropic
+import Anthropic from '@anthropic-ai/sdk';
+import postgres   from 'postgres';
+
+const client = new Anthropic();
+const sql    = postgres(process.env.DATABASE_URL);
+
+// Generate embeddings in batches of 96
+async function embedBatch(texts) {
+  const all = [];
+  for (let i = 0; i < texts.length; i += 96) {
+    const batch = texts.slice(i, i + 96);
+    const res   = await client.embeddings.create({
+      model:      'voyage-3-large',
+      input:      batch,
+      input_type: 'document',
+    });
+    all.push(...res.data.map(d => d.embedding));
+  }
+  return all;
+}
+
+// Store chunks + vectors in Postgres (pgvector)
+async function indexChunks(chunks) {
+  const texts      = chunks.map(c => c.content);
+  const embeddings = await embedBatch(texts);
+
+  const rows = chunks.map((c, i) => ({
+    id:          c.id,
+    doc_id:      c.doc_id,
+    source:      c.source,
+    chunk_index: c.chunk_index,
+    content:     c.content,
+    embedding:   JSON.stringify(embeddings[i]), // pgvector accepts JSON array
+  }));
+
+  await sql`
+    INSERT INTO chunks ${sql(rows, 'id','doc_id','source','chunk_index','content','embedding')}
+    ON CONFLICT (id) DO UPDATE SET
+      content   = EXCLUDED.content,
+      embedding = EXCLUDED.embedding::vector,
+      indexed_at = now()
+  `;
+
+  // Update BM25 full-text search vector
+  await sql`
+    UPDATE chunks SET search_vector = to_tsvector('english', content)
+    WHERE doc_id = ANY(${[...new Set(chunks.map(c => c.doc_id))]})
+  `;
+
+  console.log(`Indexed ${rows.length} chunks`);
+}</code></pre>
+
+        <pre class="code-block"><code>-- schema.sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS chunks (
+  id           TEXT PRIMARY KEY,
+  doc_id       TEXT NOT NULL,
+  source       TEXT,
+  chunk_index  INT,
+  content      TEXT NOT NULL,
+  embedding    vector(1024),
+  search_vector tsvector,
+  indexed_at   TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+CREATE INDEX ON chunks USING gin (search_vector);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1 · Stage 6: Retrieve</span>
+        <h2>Finding the right chunks at query time (re-ranking is covered in Part 2)</h2>
+        <pre class="code-block"><code>// retriever.js
+import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+async function embedQuery(query) {
+  const res = await client.embeddings.create({
+    model:      'voyage-3-large',
+    input:      [query],
+    input_type: 'query', // different input_type for queries vs documents
+  });
+  return res.data[0].embedding;
+}
+
+// Hybrid: dense + sparse, merged via RRF
+async function retrieve(query, topK = 20) {
+  const qVec = await embedQuery(query);
+
+  const [dense, sparse] = await Promise.all([
+    sql`
+      SELECT id, content, source,
+             1 - (embedding <=> ${JSON.stringify(qVec)}::vector) AS score
+      FROM chunks
+      ORDER BY embedding <=> ${JSON.stringify(qVec)}::vector
+      LIMIT ${topK * 2}
+    `,
+    sql`
+      SELECT id, content, source,
+             ts_rank(search_vector, plainto_tsquery('english', ${query})) AS score
+      FROM chunks
+      WHERE search_vector @@ plainto_tsquery('english', ${query})
+      ORDER BY score DESC
+      LIMIT ${topK * 2}
+    `,
+  ]);
+
+  // reciprocalRankFusion() is the RRF merge defined in "Hybrid search" below
+  return reciprocalRankFusion(dense, sparse).slice(0, topK);
+}</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 1 · Stage 7–8: Re-rank &amp; Generate</span>
+        <h2>Answer with citations</h2>
+        <pre class="code-block"><code>// generator.js
+import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic();
+
+async function generate(query, chunks) {
+  const context = chunks
+    .map((c, i) => `[${i + 1}] ${c.source}\n${c.content}`)
+    .join('\n\n---\n\n');
+
+  const response = await client.messages.create({
+    model:      'claude-sonnet-4-6',
+    max_tokens: 2048,
+    system: `You are a factual assistant. Rules:
+1. Only use the provided sources. Never use outside knowledge.
+2. Cite every claim: [1], [2], etc.
+3. If the answer is not in the sources, say so explicitly.
+4. Be concise and direct.`,
+    messages: [{ role: 'user', content: `Sources:\n${context}\n\nQuestion: ${query}` }],
+  });
+
+  return {
+    answer:  response.content[0].text,
+    sources: chunks.map((c, i) => ({ ref: i + 1, source: c.source, excerpt: c.content.slice(0, 200) })),
+    usage:   response.usage,
+  };
+}
+
+// Full pipeline entry point
+export async function ask(question) {
+  const candidates = await retrieve(question, 20);
+  const reranked   = await rerankCohere(question, candidates, 5); // see Re-ranking below
+  return generate(question, reranked);
+}
+
+// Usage
+const result = await ask('What are the main pricing tiers for the product?');
+console.log(result.answer);
+console.log('Sources:', result.sources);</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">HTTP API layer</span>
+        <h2>Wrapping it in an Express endpoint</h2>
+        <pre class="code-block"><code>// server.js
+import express  from 'express';
+import { ask }  from './generator.js';
+import { indexChunks } from './embedder.js';
+import { loadDirectory, chunkDocuments } from './document-loader.js';
+
+const app = express();
+app.use(express.json());
+
+// Query endpoint
+app.post('/ask', async (req, res) => {
+  const { question } = req.body;
+  if (!question) return res.status(400).json({ error: 'question required' });
+
+  try {
+    const result = await ask(question);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Re-index endpoint (admin)
+app.post('/index', async (req, res) => {
+  const { dir } = req.body;
+  const docs   = await loadDirectory(dir);
+  const chunks = chunkDocuments(docs, { maxLen: 800, overlap: 100 });
+  await indexChunks(chunks);
+  res.json({ indexed: chunks.length });
+});
+
+app.listen(3000, () => console.log('RAG API listening on :3000'));</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Part 2: Make it production-grade · RAG evolution</span>
         <h2>From Naive RAG to Modular and Flow RAG</h2>
         <p>There are three generations of RAG architecture. Each solves limitations of the previous one.</p>
         <div class="arch-grid">
@@ -157,6 +564,38 @@ function cosineSim(a, b) {
           <li><strong>Semantic:</strong> long-form documents where topics shift. High quality. Expensive (requires embedding every sentence).</li>
           <li><strong>Document-specific:</strong> markdown by heading, HTML by section, PDF by page/column. Best for structured formats.</li>
         </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Ingestion hygiene · Chunk context</span>
+        <h2>Dedup, metadata and richer chunks</h2>
+        <p>
+          Production corpora contain near-copies, stale versions and documents not everyone may see.
+          Handle this at ingestion, before a single vector is computed.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Step</th><th>What to do</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr><td>Normalise and filter</td><td>Unicode-normalise; drop tiny or empty documents</td><td>Junk chunks pollute retrieval</td></tr>
+              <tr><td>Deduplicate</td><td>Exact hash, then MinHash for near-duplicates (one 20,007-passage test dropped to 19,987)</td><td>Copies crowd out distinct evidence in top-K</td></tr>
+              <tr><td>Keep metadata</td><td>Version, effective and expiry dates, owner, classification, permissions</td><td>Enables freshness checks and access filtering later</td></tr>
+              <tr><td>Sentence-aware chunks</td><td>About 256 tokens with about 32 overlap; never cut mid-sentence</td><td>Complete thoughts embed and cite better</td></tr>
+              <tr><td>Parent-child chunks</td><td>Search small child chunks, hand the larger parent section to the LLM</td><td>Precise matching plus enough surrounding context</td></tr>
+              <tr><td>Contextual description</td><td>Prepend a one-line "where this chunk sits" summary before embedding</td><td>Fixes orphaned chunks like "it increased 3%"</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Contextual descriptions cost one LLM call per chunk, which means millions of calls at 10M
+          documents. Batch them, cache by content hash, and only regenerate chunks that changed.
+        </p>
+        <p>
+          For retrieval at scale, the same source pipeline uses a funnel: hybrid search with RRF (constant
+          60), around 150 candidates into a cross-encoder, then roughly the top 20 into the prompt.
+          Permission filters must be applied in the retrieval query so unauthorised text never reaches
+          the model.
+        </p>
       </section>
 
       <section class="content-card">
@@ -468,7 +907,7 @@ CREATE INDEX ON document_chunks USING gin (search_vector);
 
       <section class="content-card">
         <span class="section-label">Hallucination reduction</span>
-        <h2>Near-zero hallucination at scale</h2>
+        <h2>Reducing hallucination at scale</h2>
         <pre class="code-block"><code>// Generate with mandatory citations + faithfulness check
 async function generateWithCitations(query, retrievedChunks) {
   const context = retrievedChunks
@@ -527,6 +966,50 @@ Is every claim in the answer supported by the sources? Check carefully for unsup
 
   return res.content.find(b => b.type === 'tool_use').input;
 }</code></pre>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Evidence control</span>
+        <h2>Retrieve, Constrain, Verify, Abstain</h2>
+        <p>
+          Treat RAG as controlled evidence processing rather than "search plus a smart model". The LLM is
+          one component surrounded by gates, and every gate may legitimately end in a refusal.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Gate</th><th>Mechanism</th></tr></thead>
+            <tbody>
+              <tr><td>Retrieve</td><td>Hybrid search, fusion, re-rank; flag questions built on a false premise (advisory only)</td></tr>
+              <tr><td>Grade evidence</td><td>Good: generate. Partial: rewrite the query and retry (cap at 3 attempts, Corrective RAG). Poor: refuse</td></tr>
+              <tr><td>Constrain</td><td>Answer only from supplied evidence, cite every statement; the backend checks each citation exists, was retrieved, is permitted and actually supports the claim</td></tr>
+              <tr><td>Verify</td><td>Split the answer into atomic claims, check each with a verifier independent of the generator (NLI model, rules, database or numeric checks, human review)</td></tr>
+              <tr><td>Abstain</td><td>One constrained revision using existing evidence only; if it still fails, return a structured "insufficient evidence" result</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Score an answer by its weakest claim, not the mean. A mean hides one invented fact:</p>
+        <pre class="code-block"><code>// verdict.js — run with: node verdict.js
+function verdict(claimScores, threshold = 0.7) {
+  const mean    = claimScores.reduce((a, b) => a + b, 0) / claimScores.length;
+  const weakest = Math.min(...claimScores);
+  return { mean: +mean.toFixed(2), weakest, action: weakest >= threshold ? 'answer' : 'revise-or-refuse' };
+}
+
+console.log(verdict([0.94, 0.91, 0.22]));
+// { mean: 0.69, weakest: 0.22, action: 'revise-or-refuse' }  (an average-based gate would be borderline)</code></pre>
+        <p>
+          Make "I don't know" a first-class structured result (for example
+          <code>{ status: 'insufficient_evidence', reason, closest_sources }</code>) so downstream UIs and
+          humans can route it, instead of parsing apologetic prose.
+        </p>
+        <div class="callout">
+          <p><strong>Honest caveats:</strong> abstention trades coverage for safety. In the source's
+          200-question test the system refused 98 of 100 unanswerable questions, but also refused 54 of 100
+          answerable ones. Its "10M documents" benchmark used synthetic vectors in LanceDB: Recall@10 was only
+          about 0.105, raw vector search took about 18 ms P95, yet the full pipeline needed about 4 s median
+          and 17.7 s P95. That shows the index scales, not that hallucination is near zero on 10M real
+          documents. Calibrate thresholds on held-out data from your own domain and load-test it.</p>
+        </div>
       </section>
 
       <section class="content-card">
@@ -616,11 +1099,29 @@ class SemanticCache {
       <section class="content-card takeaways">
         <h2>Key Takeaway</h2>
         <p>
-          Production RAG is a system, not a feature. The quality ceiling is set at index time (how chunks
-          are built) and the quality floor is set at retrieval time (how the right chunks are found).
-          Hybrid search + re-ranking + faithfulness verification together push hallucination rates below
-          5% even at 10M+ document scale. The architecture cost is real — but so is the reliability gain.
+          RAG is a system, not a feature: eight discrete, independently replaceable stages
+          (ingest, clean, chunk, embed, index, retrieve, re-rank, generate). The quality ceiling is set at
+          index time (how chunks are built) and the quality floor at retrieval time (how the right chunks are
+          found). The most impactful upgrades are chunking strategy and re-ranking (which converts recall
+          into precision). Hybrid search + re-ranking + mandatory citations + claim-level verification
+          with an explicit abstain path substantially reduce hallucination, but the price is coverage: the
+          system will refuse some answerable questions. Measure that trade-off on your own data rather than
+          trusting any single headline number. The architecture cost is real, but so is the reliability gain.
         </p>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Related Reading</span>
+        <h2>Explore Further</h2>
+        <ul>
+          <li><a href="./agentic-knowledge-graph-40m-docs.html">Agentic Knowledge Graph over 40M Documents</a> — what to do when flat vector retrieval stops being enough</li>
+          <li><a href="./llm-context-window-management.html">LLM Context Window Management</a> — budgeting, compressing and ordering the evidence you put in the prompt</li>
+          <li><a href="./okf-plus-rag-agent-architecture.html">OKF + RAG: The Agent Architecture That Reads First and Searches Second</a> — when authoritative, curated knowledge should bypass retrieval entirely</li>
+        </ul>
+      </section>
+    
+      <section class="content-card">
+        <h2>Related Reading</h2>
+        <ul><li><a href="./safe-reliable-ai-guardrails/index.html">Safe and Reliable AI via Guardrails</a> — course-based walkthrough of validators, NLI hallucination checks, topic, PII and competitor guards.</li></ul>
       </section>
     </main>
   </body>

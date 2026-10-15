@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design an S3-like Object Storage | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 24 of the System Design Interview Handbook. Created 2026-10-15 from liquidslr/system-design-notes ch.24. Covers an S3-like object store: block vs file vs object storage, metadata/data separation, API/IAM/placement/data-routing services, append-only log-structured data files with offset index, replication vs erasure coding (8+4), failure domains, checksums, metadata sharding and listing, versioning with delete markers, multipart upload, garbage collection and compaction, plus estimates (100 PB, 0.68B objects, 6 nines durability). Includes a runnable Node.js example (log-structured data node with checksums and compaction, Reed-Solomon over GF(256), multipart etag) that was executed. Read time about 27 min. Related: distributed email service (ch23), Google Drive (ch15), key-value store (ch6), consistent hashing (ch5).</div>
+        <h1>Design an S3-like Object Storage</h1>
+        <p class="summary">Object storage trades latency for durability, capacity and cost. This chapter separates metadata from bytes, packs small objects into big append-only files, protects data with erasure coding across failure domains, and handles listing, versioning, multipart uploads and garbage collection.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">24 of 28 · Part 6 Transactional Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">27 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Metadata/data split, append-only files, erasure coding, checksums, sharded metadata, multipart upload, compaction</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Amazon S3, Google Cloud Storage, Azure Blob, Ceph, HDFS, Facebook Haystack, Backblaze, RocksDB, SQLite</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Almost every large system eventually produces a pile of immutable blobs: photos, videos, backups, logs, model checkpoints, email attachments. Putting them in a database is wasteful, putting them on a network file system does not scale, and putting them on raw disks makes you reinvent durability every time. Object storage is the shared answer: a flat namespace of immutable objects, addressed by key over HTTP, built to be nearly impossible to lose.</p>
+        <p>The interesting part of this chapter is not the REST API, which is trivial. It is how you pack billions of objects of wildly different sizes onto commodity disks, keep six or more nines of durability without tripling your hardware bill, and still make listing, versioning and giant uploads work.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Split the system into a small, strongly consistent, sharded <em>metadata</em> plane (names, versions, locations) and a huge, dumb, append-only <em>data</em> plane (bytes on disks, protected by replication or erasure coding and verified by checksums). Everything else is bookkeeping around that split.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">Background · Public designs worth knowing</span>
+        <h2>Why "pack small files into big ones" is the oldest trick in the book</h2>
+        <p>Facebook's Haystack paper (OSDI 2010) is the canonical public account of the small-object problem. Serving billions of photos from a conventional file system meant several disk operations per photo, mostly spent reading directory and inode metadata. Haystack's fix was to append many photos into very large files and keep a compact in-memory index of offsets, so a read costs one disk seek. Google's GFS, HDFS and today's S3-class systems all share the same instinct: avoid one-file-per-object on the underlying file system.</p>
+        <p>The other public landmark is Amazon S3 itself, launched in 2006. It exposes a bucket/key API, publishes eleven nines of annual durability for its standard classes, and, since late 2020, provides strong read-after-write consistency for all operations. Backblaze's open durability analysis and the Reed-Solomon coding literature are the public foundations for the erasure-coding discussion below.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Background · Storage Types</span>
+        <h2>Block, file and object storage</h2>
+        <p><strong>Block storage</strong> (HDD, SSD, SAN volumes, cloud volumes such as EBS) exposes fixed-size blocks to a server, which formats them with a file system or hands them to a database that manages raw blocks. <strong>File storage</strong> adds hierarchy and POSIX-like semantics (directories, permissions, in-place edits) on top of block storage and is shared over NFS or SMB. <strong>Object storage</strong> drops the hierarchy and in-place mutation in exchange for scale, cost and durability: you PUT a whole object, GET it back, or DELETE it.</p>
+        <table class="data-table">
+          <thead><tr><th></th><th>Block</th><th>File</th><th>Object</th></tr></thead>
+          <tbody>
+            <tr><td>Mutability</td><td>Overwrite blocks in place</td><td>Edit files in place</td><td>Immutable; replace the whole object, or add a version</td></tr>
+            <tr><td>Access</td><td>SAS, iSCSI, Fibre Channel, NVMe</td><td>NFS, SMB, POSIX</td><td>HTTP REST API</td></tr>
+            <tr><td>Cost per GB</td><td>High</td><td>Medium to high</td><td>Low</td></tr>
+            <tr><td>Latency and throughput</td><td>Lowest latency, high IOPS</td><td>Medium</td><td>Higher first-byte latency, enormous aggregate throughput</td></tr>
+            <tr><td>Scale</td><td>Per volume or cluster</td><td>High, but metadata servers become the limit</td><td>Effectively unbounded</td></tr>
+            <tr><td>Best for</td><td>VM disks, databases</td><td>Shared home directories, legacy apps</td><td>Media, backups, data lakes, artifacts, attachments</td></tr>
+          </tbody>
+        </table>
+        <p>Vocabulary: a <strong>bucket</strong> is a globally unique container; an <strong>object</strong> is data plus metadata addressed by key inside a bucket; <strong>versioning</strong> keeps multiple variants of the same key; the <strong>URI</strong> is <code>/bucket/key</code>; an <strong>SLA</strong> states durability and availability promises. Note that there is no real directory tree: <code>photos/2024/cat.jpg</code> is one key that happens to contain slashes.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · Scope and Requirements</span>
+        <h2>Targets and the estimate</h2>
+        <p>Scope: create buckets, upload and download objects, versioning, list objects in a bucket. Objects range from tiny to huge and both must be efficient. Capacity: about 100 PB. Durability: six nines, availability: four nines. The extra requirement that decides the architecture is storage efficiency: lower the cost per stored byte without giving up reliability or performance.</p>
+        <p>With six nines of durability, you expect to lose roughly one object in a million per year. With four nines of availability you may be unavailable about 52 minutes per year (365 × 24 × 60 × 0.0001 ≈ 52.6 min). Note that durability and availability are different promises: an object can be perfectly safe while the service is temporarily down.</p>
+        <p class="mini-heading">Back-of-the-envelope</p>
+        <table class="data-table">
+          <thead><tr><th>Step</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Assumed size mix</td><td>20% small (&lt;1 MB, median 0.5 MB), 60% medium (1-64 MB, median 32 MB), 20% large (&gt;64 MB, median 200 MB)</td><td>Mix is by object count</td></tr>
+            <tr><td>Average object size</td><td>0.2×0.5 + 0.6×32 + 0.2×200 = 0.1 + 19.2 + 40</td><td>about 59.3 MB</td></tr>
+            <tr><td>Usable data</td><td>100 PB capacity × 40% utilization = 40 PB = 4×10<sup>10</sup> MB</td><td>40 PB</td></tr>
+            <tr><td>Object count</td><td>4×10<sup>10</sup> MB ÷ 59.3 MB</td><td>about 0.68 billion objects</td></tr>
+            <tr><td>Metadata volume</td><td>0.68×10<sup>9</sup> × 1 KB</td><td>about 0.68 TB</td></tr>
+            <tr><td>Raw disks, 3x replication</td><td>40 PB × 3 = 120 PB ÷ 16 TB drives</td><td>about 7,500 drives</td></tr>
+            <tr><td>Raw disks, 8+4 erasure coding</td><td>40 PB × 1.5 = 60 PB ÷ 16 TB</td><td>about 3,750 drives</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>Two takeaways.</strong> First, the metadata is tiny compared with the data (0.68 TB against 40 PB, a ratio of about 1 in 60,000), so it fits in a modest sharded database and can be engineered separately. Second, small objects are 20% of the count but only about 0.2% of the bytes (0.1 of 59.3 MB); they are the IOPS problem while large objects are the bandwidth problem. A 7200 rpm disk gives only 100-150 random IOPS, so one object per random seek would be ruinous. That is what pushes us toward sequential, append-only layouts. The drive counts above ignore headroom, rebuild spare capacity and growth, but the 2x gap between replication and erasure coding is the point.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · High-Level Design</span>
+        <h2>Properties that shape the design</h2>
+        <ul class="check-list">
+          <li><strong>Immutability:</strong> objects are never edited in place. A "modification" is a new object (or new version) under the same key. This kills a huge class of consistency and locking problems and makes erasure coding and caching safe.</li>
+          <li><strong>Key-value shape:</strong> the key is the URI; the value is the bytes.</li>
+          <li><strong>Write once, read many:</strong> published workload numbers put reads far above writes (one often-quoted figure is around 95% reads), so read paths and caches matter.</li>
+          <li><strong>Mixed sizes:</strong> the system must be efficient for kilobytes and for multi-gigabyte objects.</li>
+        </ul>
+        <p>The design mirrors a UNIX file system. A file has an <em>inode</em> (metadata and a list of block pointers) and data blocks scattered on disk; reading means looking up the inode first. Object storage does the same at datacenter scale: the <strong>metadata store</strong> plays the inode table (name to object id, size, owner, version, tags), the <strong>data store</strong> holds the blocks. Separating them lets each scale on its own axis: metadata is small and query-heavy, data is huge and throughput-heavy.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+ <span class="hi">Client</span> --HTTP--&gt; <span class="step">Load balancer</span> --&gt; <span class="hi">API service</span> (stateless) ---+--&gt; <span class="ok">IAM</span>: authn / authz / bucket policy
+                                                +--&gt; <span class="ok">Metadata store</span>: bucket + object tables (sharded)
+                                                +--&gt; <span class="ok">Data store</span>: bytes addressed by object_id (UUID)
+</pre></div>
+        <p class="mini-heading">Upload path</p>
+        <ol>
+          <li><code>PUT /bucket-to-share</code> creates a bucket. The API service asks IAM whether the caller may write, then inserts a bucket row in the metadata store and returns success.</li>
+          <li><code>PUT /bucket-to-share/script.txt</code> uploads an object. The API service re-checks authorization, then streams the payload to the data store, which persists it and returns a fresh <code>object_id</code> (a UUID).</li>
+          <li>Only after the data store acknowledges does the API service insert the object row (<code>object_id</code>, <code>bucket_id</code>, name, size, checksum, ...) into the metadata store. Order matters: writing data first means a crash leaves an orphan blob (garbage collected later) rather than a metadata row pointing at nothing.</li>
+        </ol>
+        <p class="mini-heading">Download path</p>
+        <ol>
+          <li><code>GET /bucket-to-share/script.txt</code> reaches the API service through the load balancer.</li>
+          <li>IAM checks read permission. The metadata store resolves bucket and name to <code>object_id</code> (and the current version).</li>
+          <li>The data store returns the bytes for that id, which are streamed back. Range requests (<code>Range: bytes=...</code>) must be supported, since large-object clients depend on them.</li>
+        </ol>
+        <div class="warn-box"><p><strong>The folder illusion.</strong> Because the namespace is flat, "folders" are a naming convention plus a listing feature: list with prefix <code>abc/</code> and delimiter <code>/</code> to get one level at a time. Consequently renaming a "folder" means copying every object under the prefix and deleting the originals; there is no O(1) rename.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 1</span>
+        <h2>The data store</h2>
+        <p>The data store is built from three kinds of services working together.</p>
+        <table class="data-table">
+          <thead><tr><th>Service</th><th>Responsibility</th><th>Scaling and HA</th></tr></thead>
+          <tbody>
+            <tr><td>Data routing service</td><td>Exposes REST/gRPC to the API service. Asks the placement service where to write, writes to data nodes, reads from them, and assembles results.</td><td>Stateless, scale by adding instances.</td></tr>
+            <tr><td>Placement service</td><td>Owns the virtual cluster map (the physical topology: regions, datacenters, racks, nodes, disks). Chooses replica locations, sends heartbeats, and removes dead nodes from the map.</td><td>Critical and stateful: run 5 or 7 replicas with Paxos or Raft; a 7-node group tolerates 3 failures.</td></tr>
+            <tr><td>Data nodes</td><td>Store the bytes on local disks. A daemon on each node reports heartbeats: number of drives and how much is stored on each.</td><td>Add nodes; the placement service steers new data to nodes with free space.</td></tr>
+          </tbody>
+        </table>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+ API service
+     |
+     v
+ <span class="hi">Data routing service</span> ---- "where does this go?" ----&gt; <span class="step">Placement service</span> (Raft group, virtual cluster map)
+     |                                                  ^
+     | write / read                              heartbeats (drives, usage)
+     v                                                  |
+ <span class="ok">Data node A (primary)</span> --replicate--&gt; <span class="ok">Data node B</span>, <span class="ok">Data node C</span>   (different racks / AZs)
+</pre></div>
+
+        <p class="mini-heading">Persistence flow with replication</p>
+        <ol>
+          <li>The API service sends the object to the data routing service.</li>
+          <li>The router generates the object id and picks the replication group for that id deterministically (consistent hashing over the cluster map), then sends the data to the group's primary.</li>
+          <li>The primary writes locally and replicates to two secondaries.</li>
+          <li>Once the replicas have acknowledged, the primary responds and the object id returns up the chain.</li>
+        </ol>
+        <p>The primary waits for replication before acknowledging, trading latency for consistency. There is a spectrum: acknowledge after all replicas (strongest, slowest), after a quorum of two out of three (usual compromise: survives one slow or dead replica), or after the primary alone (fast, but a primary crash loses data that no one else has). For an object store whose headline promise is durability, wait for at least a quorum, and make "no ack until durable on disk" literal by calling fsync or using O_DSYNC-style writes on the commit path.</p>
+
+        <p class="mini-heading">How bytes are laid out on disk</p>
+        <p>Storing one file per object is the obvious approach and breaks at scale for two reasons. Every file wastes the tail of its last block (a 4 KB block size makes a 1 KB object occupy 4 KB), and every file consumes an inode; file systems slow down and eventually run out of inodes with hundreds of millions of tiny files.</p>
+        <p>The fix is to append objects into large files, much like a write-ahead log: open a file, append records one after another, and when the file reaches a few gigabytes seal it and start a new one. Only one file per core or per disk is writable at a time, because appends to one file must be serialized; pinning writable files to cores (or giving each writer its own active file) removes lock contention. Sealed files are immutable, which makes them trivially cacheable, checksummable and replicable.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+ <span class="hi">/data/f0 (sealed)</span>  [obj A][obj B][obj C][obj D] ...            <span class="dim">immutable, a few GB</span>
+ <span class="hi">/data/f1 (active)</span>  [obj E][obj F][obj G] --&gt; append here          <span class="dim">single writer per file</span>
+
+ <span class="step">object_mapping table (per data node)</span>
+   object_id | file   | offset | size
+   ----------+--------+--------+-----
+   uuid-F    | f1     | 4_096  | 1_024        <span class="note">-&gt; read = open file, pread(offset, size), verify checksum</span>
+</pre></div>
+
+        <p class="mini-heading">Finding an object inside a file</p>
+        <p>Each data node keeps an <code>object_mapping</code> table: object id, file name, offset, size. The access pattern is point lookups with relatively few writes, so a B-tree style engine suits it, and an embedded relational database such as SQLite is a good fit (an LSM engine such as RocksDB is the alternative when write rates are very high). The key design choice is <em>where</em> the mapping lives. A separate shared database cluster would need aggressive scaling and adds a network hop on every read. Because a data node only ever needs the mappings for its own objects, embed the database on the node itself. Losing the node means losing its mapping, but the replicas have their own copies, and in a pinch the table can be rebuilt by scanning the self-describing records in the sealed files, which is why each record on disk should carry its id, length and checksum.</p>
+        <p>The updated write path on a data node is therefore: append the object to the active file, then insert the mapping row. Reads look up the row and issue one positional read. With the mapping in memory or in the page cache, a read costs a single disk access.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 2</span>
+        <h2>Durability: replication, failure domains, erasure coding</h2>
+        <p>Six nines is a statement about probabilities across every failure you can name: a disk dies, a machine dies, a rack loses power, a top-of-rack switch fails, an availability zone burns down, a firmware bug corrupts a batch of drives, an operator deletes the wrong thing. Plan against each.</p>
+        <p class="mini-heading">Replication and the naive math</p>
+        <p>Take an annual failure rate of about 0.81% per disk. If three copies lived on independent disks and a lost copy were never repaired within the year, you would lose an object with probability 0.0081<sup>3</sup> ≈ 5.3×10<sup>-7</sup>, i.e. about 99.99995%, a bit over six nines. That is the back-of-envelope that makes three copies look "enough". It is optimistic on two counts. Failures are not independent (same rack, same batch, same power feed), and the real risk is about overlapping failures during the repair window. In practice the repair time, not the annual rate, drives the number: faster re-replication after a failure shortens the exposure window and raises durability dramatically.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+ <span class="step">Failure-domain isolation</span>
+   AZ-1: rack1 [A] ........ rack2 [ ]
+   AZ-2: rack3 [B] ........ rack4 [ ]       <span class="ok">one replica per domain</span>
+   AZ-3: rack5 [C] ........ rack6 [ ]
+   A rack, a switch or an entire AZ failing costs at most one copy.
+</pre></div>
+        <p>So place replicas across racks, power domains, and ideally AZs or datacenters. The placement service's virtual cluster map exists precisely to encode these boundaries. Separate replicas by software-version and hardware-batch diversity if you can, since correlated bugs are a real source of data loss.</p>
+
+        <p class="mini-heading">Erasure coding</p>
+        <p>Replication stores whole copies, so three copies cost 200% overhead (3x raw for 1x data). Erasure coding splits the object into <em>k</em> data chunks and computes <em>m</em> parity chunks so that <em>any k of the k+m chunks</em> reconstruct the original. With <strong>8+4</strong> you store 12 chunks for 8 chunks of data: 1.5x raw, 50% overhead, yet you survive the loss of any four chunks, which is better fault tolerance than three-way replication (which survives two). The chunks are spread over 12 different failure domains.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+ object (e.g. 64 MB)  --split--&gt;  d1 d2 d3 d4 d5 d6 d7 d8     <span class="dim">8 data chunks of 8 MB</span>
+                      --encode--&gt; p1 p2 p3 p4                   <span class="dim">4 parity chunks</span>
+ 12 chunks on 12 nodes in 12 failure domains.
+ Read: fetch any 8 (fastest 8 win)  |  Lose up to 4: rebuild from survivors.
+</pre></div>
+        <p>The mathematics is Reed-Solomon coding over a finite field such as GF(2<sup>8</sup>), where each byte position is treated as a polynomial evaluation or a row combination with a generator matrix. The runnable example below builds a Cauchy-matrix code and recovers a payload after dropping four of twelve shards.</p>
+        <table class="data-table">
+          <thead><tr><th>Dimension</th><th>3x replication</th><th>8+4 erasure coding</th></tr></thead>
+          <tbody>
+            <tr><td>Storage overhead</td><td>200% (3x raw)</td><td>50% (1.5x raw)</td></tr>
+            <tr><td>Losses tolerated</td><td>2 copies</td><td>Any 4 of 12 chunks</td></tr>
+            <tr><td>Durability (typical analyses)</td><td>Six to nine nines depending on repair speed</td><td>Often modeled at eleven or more nines with fast repair (assumption-heavy; see the Backblaze analysis)</td></tr>
+            <tr><td>Read latency</td><td>One node, no decoding</td><td>Gather 8 chunks from 8 nodes; tail latency is the slowest of 8 (hedge by requesting extra chunks)</td></tr>
+            <tr><td>Write cost</td><td>Copy bytes three times</td><td>Compute parity (CPU), write 12 chunks</td></tr>
+            <tr><td>Repair cost</td><td>Read one copy, write one copy</td><td>Read 8 chunks to rebuild 1 (8x repair read amplification) unless using locally repairable codes</td></tr>
+            <tr><td>Small objects</td><td>Fine</td><td>Poor: chunks become tiny; pack small objects into a stripe or keep them replicated</td></tr>
+            <tr><td>Complexity</td><td>Low</td><td>High</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>Rule of thumb used in practice:</strong> replicate hot and small objects for latency and simplicity, erasure-code large and cold objects for cost. Many systems write replicas first and convert to erasure-coded stripes in the background once an object is sealed and cooling (Azure Storage's "lazy" erasure coding with local reconstruction codes is the public example; Ceph and HDFS also offer both modes).</p></div>
+
+        <p class="mini-heading">Correctness verification</p>
+        <p>Disks fail loudly (a dead drive is obvious) and quietly (a flipped bit, a misdirected write, a torn sector). The defense is checksums: compute a hash of the bytes when you receive them, store it with the object, and verify on read and in a background scrubber that walks sealed files at low priority. Keep checksums at two levels: per object (end-to-end, so the client can compare too) and per file or chunk (so the scrubber can verify without parsing). With 8+4 coding, each chunk carries its own checksum, a read verifies the 8 chunks it fetched, and any mismatch is treated as an erasure: drop that chunk, decode from the others, and queue a repair. Use a fast non-cryptographic or hardware-assisted CRC for the scrubber and a stronger hash such as SHA-256 or an MD5 compatibility etag at the API layer. Checksum the request payload at the edge as well, since corruption can occur before the data store ever sees the bytes.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 3</span>
+        <h2>The metadata store</h2>
+        <p>Two logical tables carry the whole namespace: <code>bucket</code> (bucket id, name, owner, region, policy) and <code>object</code> (bucket id, object name, object id, version, size, checksum, creation time, user metadata). Queries to support: look up an object id by bucket and name; insert and delete by name; list objects in a bucket sharing a prefix.</p>
+        <p>Buckets per account are capped by policy, so the bucket table is small. A single replicated database handles it; scale read throughput with read replicas and caching. The object table is the one that explodes (billions of rows) and must be sharded.</p>
+        <p class="mini-heading">Choosing the shard key</p>
+        <table class="data-table">
+          <thead><tr><th>Shard key</th><th>Upside</th><th>Downside</th></tr></thead>
+          <tbody>
+            <tr><td><code>bucket_id</code></td><td>Listing a bucket hits one shard</td><td>Hot-spot: one popular bucket may hold billions of objects and most of the traffic</td></tr>
+            <tr><td><code>object_id</code></td><td>Even distribution</td><td>Almost every query is by name, not id, so we cannot route</td></tr>
+            <tr><td><code>hash(bucket_name, object_name)</code></td><td>Even distribution; the dominant queries (get, put, delete by name) route to exactly one shard</td><td>Listing now spans all shards</td></tr>
+          </tbody>
+        </table>
+        <p>The chosen key is the hash of bucket name plus object name, ideally with consistent hashing or a directory of virtual shards so you can split shards without rehashing everything.</p>
+        <p class="mini-heading">Listing objects</p>
+        <p>On one database the listing is a range scan, <code>WHERE bucket_id = ? AND object_name LIKE 'abc/%' ORDER BY object_name</code>. When the table is hash-sharded, matching names are scattered everywhere, so a prefix listing means querying every shard and merging. Pagination gets ugly because each shard has a different number of matching rows; you need per-shard cursors and a k-way merge to return a globally sorted page. Two ways out:</p>
+        <ul class="check-list">
+          <li>Accept slow listing: object stores are not optimized for it and real services document listing as eventually heavier than point reads. Return keys in lexicographic order, max 1,000 per page, with a continuation token, which is how S3 does it.</li>
+          <li>Maintain a second, denormalized <em>listing index</em> sharded by <code>bucket_id</code> and sorted by name, updated asynchronously or in the same write path. A hot bucket becomes a hot shard for listing only, which is much cheaper than for gets. Split such a bucket's index by key range when it grows.</li>
+        </ul>
+        <div class="warn-box"><p><strong>Hot key ranges.</strong> Sequential keys (timestamps, incrementing ids) concentrate writes on one shard of a range-partitioned index. Public S3 guidance has long advised spreading key prefixes for exactly this reason, and documents per-prefix request-rate limits that the service scales to as load grows. Hashing in the primary table avoids this; the sorted listing index is where it re-appears.</p></div>
+
+        <p class="mini-heading">Versioning</p>
+        <p>With versioning on, the object table gains an <code>object_version</code> column, typically a time-ordered id (TIMEUUID or ULID), so a key's versions sort newest-first. Each PUT creates a new row with a new object id; the older versions stay. A plain GET returns the latest version; a GET with a version id returns that one. DELETE does not remove data: it inserts a <em>delete marker</em> as the newest version, a row pointing at a special tombstone object id, and a plain GET that hits it returns 404. Deleting a specific version id permanently removes that version. Undeleting is just removing the marker. Lifecycle rules then expire old versions to bound cost.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+ key: report.pdf
+   v3 (newest) : <span class="warn">DELETE MARKER</span>     -&gt; GET report.pdf =&gt; 404
+   v2          : object_id=9b1e...
+   v1          : object_id=41ac...         -&gt; GET report.pdf?versionId=v1 =&gt; 200
+</pre></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive 4</span>
+        <h2>Large uploads, garbage collection and compaction</h2>
+        <p class="mini-heading">Multipart upload</p>
+        <p>Uploading a 50 GB object in one HTTP request is fragile (any hiccup restarts everything) and slow (one TCP stream). Multipart upload splits the work:</p>
+        <ol>
+          <li>The client calls initiate; the service returns an <code>upload_id</code>.</li>
+          <li>The client slices the file into parts and uploads them independently and in parallel, each tagged with the upload id and a part number. Each response carries an <strong>etag</strong>, a checksum of that part.</li>
+          <li>The client calls complete with the upload id and the ordered list of (part number, etag).</li>
+          <li>The service verifies the etags, stitches the parts into one logical object (often by recording an ordered list of part locations in the metadata rather than copying bytes, though finalizing can still take some time), writes the object row, and returns success.</li>
+        </ol>
+        <p>For S3 specifically, parts are 5 MB to 5 GB (the last part may be smaller), up to 10,000 parts, and the final etag is the MD5 of the concatenated binary MD5s of the parts followed by a dash and the part count. The example computes exactly that. A failed part is retried alone; abandoned uploads leave orphan parts, which is where garbage collection comes in. Always add a lifecycle rule to abort incomplete multipart uploads after a few days; they silently accrue storage cost.</p>
+
+        <p class="mini-heading">Garbage collection</p>
+        <p>Three kinds of garbage accumulate: <strong>lazily deleted objects</strong> (marked deleted but still occupying disk), <strong>orphans</strong> (bytes written for an upload that never got a metadata row, abandoned multipart parts, data from a crash between the data write and the metadata insert), and <strong>corrupted chunks</strong> that failed verification and were superseded by repaired copies. The collector also reclaims space on replicas: with three-way replication delete from the primary and both secondaries; with 8+4 coding delete all 12 chunks.</p>
+        <p class="mini-heading">Compaction</p>
+        <p>Because data files are append-only and sealed, deleting an object cannot punch a hole in the middle of a file cheaply. Compaction rewrites files instead. The collector picks sealed files with a high garbage ratio, copies the live objects into a new file, updates the mapping rows to the new file and offsets in one database transaction, and only then deletes the old files. Run it in the background with an IO budget, and set a threshold so you do not keep producing lots of small files. Crash safety falls out of ordering: the new file is complete before the mapping commits, and until the commit the old file is still valid.</p>
+        <div class="diagram-box"><pre style="margin:0;padding:0;border:0;box-shadow:none;background:none;color:inherit;font:inherit;line-height:inherit">
+ before:  <span class="hi">f1</span> [A][<span class="warn">B</span>][C][<span class="warn">D</span>]     <span class="dim">B, D deleted</span>        mapping: A,C -&gt; f1
+ copy:    <span class="hi">f9</span> [A][C]                                         mapping: A,C -&gt; f9   <span class="note">(txn commit)</span>
+ after:   <span class="dim">f1 deleted</span>, space reclaimed
+</pre></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decisions and what they cost</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Metadata / data split</h4><ul><li>Scale each plane independently</li><li>Immutable data is simple to replicate and cache</li><li>Metadata fits a conventional sharded DB</li></ul></div>
+          <div class="trade-col cons"><h4>What it costs</h4><ul><li>Two-step commit with an ordering to get right</li><li>Orphans and dangling pointers need GC and repair jobs</li><li>Metadata is the availability bottleneck</li></ul></div>
+          <div class="trade-col pros"><h4>Append-only packed files</h4><ul><li>Sequential I/O, few inodes, no block waste</li><li>One seek per read with an index</li><li>Sealed files are easy to checksum and copy</li></ul></div>
+          <div class="trade-col cons"><h4>What it costs</h4><ul><li>Deletes need compaction (write amplification)</li><li>Single writer per file needs core pinning</li><li>Index loss needs rebuild-by-scan support</li></ul></div>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Pick</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>Replication vs erasure coding</td><td>Both, by size and temperature</td><td>Latency for small and hot, cost for large and cold</td></tr>
+            <tr><td>Ack on primary vs quorum vs all</td><td>Quorum or all, fsynced</td><td>Durability is the product</td></tr>
+            <tr><td>Where the object index lives</td><td>Embedded on each data node</td><td>No extra network hop, no shared hot cluster</td></tr>
+            <tr><td>Metadata shard key</td><td>hash(bucket, object)</td><td>Name-based point queries dominate; listing handled with a secondary index</td></tr>
+            <tr><td>Listing speed vs write cost</td><td>Denormalized listing index</td><td>Listing fast enough without making every shard participate</td></tr>
+            <tr><td>Consistency</td><td>Strong, read-after-write</td><td>Modern expectation; achieved via a consistent metadata store and a metadata-last commit</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What breaks and what you do about it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Detection</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>Disk dies</td><td>I/O errors, SMART, missing heartbeat stats</td><td>Mark drive down; re-create its replicas or chunks elsewhere from survivors; rate-limit repair traffic so it does not starve foreground reads</td></tr>
+            <tr><td>Data node dies</td><td>Heartbeats stop at the placement service</td><td>Remove from cluster map after a grace period (avoid flapping), re-replicate all its groups</td></tr>
+            <tr><td>Rack or AZ outage</td><td>Correlated heartbeat loss</td><td>Replicas in other domains continue serving; delay mass re-replication to avoid a repair storm</td></tr>
+            <tr><td>Silent corruption</td><td>Checksum mismatch on read or in the scrubber</td><td>Serve from another replica or decode from other chunks; rewrite the bad copy; alert if rates spike</td></tr>
+            <tr><td>Crash between data write and metadata insert</td><td>Reconciliation scan of data nodes vs metadata</td><td>Treat unreferenced bytes as orphans; GC after a safety delay</td></tr>
+            <tr><td>Placement service loses quorum</td><td>Raft leader elections failing</td><td>Reads continue using cached maps; writes pause; 5 or 7 members across domains make this rare</td></tr>
+            <tr><td>Metadata shard overloaded or down</td><td>Latency, errors on a key range</td><td>Replicas and failover; split hot shards; cache bucket policy and recent lookups</td></tr>
+            <tr><td>Accidental delete</td><td>Customer report</td><td>Versioning, delete markers, delayed physical deletion, object lock for compliance</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and Production Gotchas</span>
+        <h2>Things that bite after launch</h2>
+        <ul class="check-list">
+          <li><strong>Repair storms:</strong> when a rack disappears, naive re-replication can saturate the network and hurt customers. Prioritize groups with the fewest remaining copies and throttle the rest.</li>
+          <li><strong>Erasure-coded read tail:</strong> a read of 8 chunks is as slow as the slowest. Hedged requests (ask 9 or 10, use the first 8) cut p99.</li>
+          <li><strong>Small objects at scale:</strong> metadata cost per object is fixed, so a bucket with billions of 1 KB objects is expensive in metadata and request count even if it is tiny in bytes. Batching or aggregating in the application is often the right advice.</li>
+          <li><strong>Pre-signed URLs and direct upload:</strong> push bytes straight to the data plane with a time-limited signed URL so the API tier is not a bandwidth proxy.</li>
+          <li><strong>Hot objects:</strong> a viral object hammers three disks. Put a CDN or an object cache in front, and replicate hot data more widely.</li>
+          <li><strong>Encryption:</strong> server-side encryption with per-object data keys wrapped by a KMS key; make sure crypto-erase is possible for compliance deletes.</li>
+          <li><strong>Rolling upgrades and format evolution:</strong> data file and record formats outlive many software versions. Version every on-disk structure.</li>
+          <li><strong>Cost control:</strong> lifecycle policies (transition to colder tiers, expire old versions, abort stale multipart uploads) matter as much as raw efficiency.</li>
+          <li><strong>Bucket names and DNS:</strong> bucket names are a global namespace, so you need a strongly consistent create path (a single source of truth for names) and DNS-compatible naming rules if you support virtual-hosted-style URLs.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Wrap-up</span>
+        <h2>What the design covered</h2>
+        <p>We compared block, file and object storage; settled the API flows for bucket creation, upload, download, listing and versioning; and went deep on the data store (routing, placement, nodes, append-only files, object mapping), durability (replication, failure domains, erasure coding, checksums), the sharded metadata store, multipart upload, garbage collection and compaction. If time remains, discuss cross-region replication (asynchronous, per-bucket rules, eventually consistent), storage classes and lifecycle tiering, event notifications on object creation, and access models such as pre-signed URLs and bucket policies.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code · Runnable</span>
+        <h2>A data node, a Reed-Solomon code, and a multipart etag</h2>
+        <p>One file, three ideas. <code>DataNode</code> appends objects into size-bounded files, keeps an offset index with a checksum per object, detects a flipped bit on read, and compacts sealed files by copying live records into a new file and swapping the index. <code>rsEncode</code> and <code>rsDecode</code> implement a true Reed-Solomon style erasure code over GF(2<sup>8</sup>) with a Cauchy matrix (any k shards recover the data) and are exercised with the chapter's 8+4 layout. <code>multipartEtag</code> shows how the combined etag of a multipart object is derived. Only <code>node:crypto</code> and <code>node:assert</code> are used.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Object-store core: (1) append-only data files + offset index + checksums + compaction,
+// (2) Reed-Solomon erasure coding over GF(256), (3) multipart etags.
+import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
+
+const md5 = (b) =&gt; createHash('md5').update(b).digest('hex');
+const sha = (b) =&gt; createHash('sha256').update(b).digest('hex');
+
+// ===== 1. Log-structured data node =====
+class DataNode {
+  constructor(maxFile = 64) { this.maxFile = maxFile; this.files = new Map(); this.active = 'f0'; this.files.set('f0', []); this.index = new Map(); this.n = 0; }
+  put(bytes) {
+    let f = this.files.get(this.active);
+    if (f.reduce((s, r) =&gt; s + r.data.length, 0) + bytes.length &gt; this.maxFile &amp;&amp; f.length) {   // roll to a new file
+      this.active = `f${++this.n}`; this.files.set(this.active, []); f = this.files.get(this.active);
+    }
+    const id = randomUUID();
+    const offset = f.reduce((s, r) =&gt; s + r.data.length, 0);
+    f.push({ id, data: Buffer.from(bytes), deleted: false });            // sequential append only
+    this.index.set(id, { file: this.active, offset, size: bytes.length, sum: sha(bytes) });
+    return id;
+  }
+  get(id) {
+    const m = this.index.get(id); if (!m) return null;
+    const rec = this.files.get(m.file).find((r) =&gt; r.id === id);
+    if (sha(rec.data) !== m.sum) throw new Error('checksum mismatch: ' + id);   // bit-rot detection
+    return rec.data;
+  }
+  delete(id) { const m = this.index.get(id); this.files.get(m.file).find((r) =&gt; r.id === id).deleted = true; this.index.delete(id); }
+  compact() {                       // copy live records of sealed files into a fresh file, then swap the index
+    const sealed = [...this.files.keys()].filter((k) =&gt; k !== this.active);
+    const out = []; let off = 0;
+    const name = `c${++this.n}`;
+    for (const k of sealed) for (const r of this.files.get(k)) if (!r.deleted &amp;&amp; this.index.has(r.id)) {
+      out.push(r); this.index.set(r.id, { ...this.index.get(r.id), file: name, offset: off }); off += r.data.length;
+    }
+    sealed.forEach((k) =&gt; this.files.delete(k)); this.files.set(name, out);   // "transaction" commit
+    return { reclaimedFiles: sealed.length, liveRecords: out.length };
+  }
+}
+
+// ===== 2. Reed-Solomon (k data + m parity) over GF(2^8), poly 0x11d =====
+const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+for (let i = 0, x = 1; i &lt; 255; i++) { EXP[i] = x; LOG[x] = i; x &lt;&lt;= 1; if (x &amp; 256) x ^= 0x11d; }
+for (let i = 255; i &lt; 512; i++) EXP[i] = EXP[i - 255];
+const mul = (a, b) =&gt; (a &amp;&amp; b ? EXP[LOG[a] + LOG[b]] : 0);
+const inv = (a) =&gt; EXP[255 - LOG[a]];
+// Cauchy matrix rows: every square submatrix of [I; C] is invertible =&gt; any k shards rebuild the data.
+const cauchy = (k, m) =&gt; Array.from({ length: m }, (_, i) =&gt; Array.from({ length: k }, (_, j) =&gt; inv((i + k) ^ j)));
+
+function rsEncode(data, k, m) {                         // returns k+m equal-length shards
+  const len = Math.ceil(data.length / k), shards = [];
+  for (let i = 0; i &lt; k; i++) { const s = Buffer.alloc(len); data.copy(s, 0, i * len, Math.min(data.length, (i + 1) * len)); shards.push(s); }
+  for (const row of cauchy(k, m)) {
+    const p = Buffer.alloc(len);
+    for (let j = 0; j &lt; k; j++) for (let b = 0; b &lt; len; b++) p[b] ^= mul(row[j], shards[j][b]);
+    shards.push(p);
+  }
+  return shards;
+}
+function rsDecode(shards, k, m, size) {                  // shards: array with `null` for lost ones
+  const rows = [...Array(k).keys()].map((i) =&gt; Array.from({ length: k }, (_, j) =&gt; (i === j ? 1 : 0)));
+  const C = cauchy(k, m); C.forEach((r) =&gt; rows.push(r));
+  const have = shards.map((s, i) =&gt; (s ? i : -1)).filter((i) =&gt; i &gt;= 0).slice(0, k);
+  assert(have.length === k, 'not enough shards');
+  const A = have.map((i) =&gt; [...rows[i]]), Y = have.map((i) =&gt; Buffer.from(shards[i]));
+  const len = Y[0].length;
+  for (let c = 0; c &lt; k; c++) {                          // Gauss-Jordan elimination in GF(256)
+    let p = c; while (A[p][c] === 0) p++;
+    [A[c], A[p]] = [A[p], A[c]]; [Y[c], Y[p]] = [Y[p], Y[c]];
+    const iv = inv(A[c][c]);
+    A[c] = A[c].map((v) =&gt; mul(v, iv)); for (let b = 0; b &lt; len; b++) Y[c][b] = mul(Y[c][b], iv);
+    for (let r = 0; r &lt; k; r++) if (r !== c &amp;&amp; A[r][c]) {
+      const f = A[r][c];
+      A[r] = A[r].map((v, j) =&gt; v ^ mul(f, A[c][j])); for (let b = 0; b &lt; len; b++) Y[r][b] ^= mul(f, Y[c][b]);
+    }
+  }
+  return Buffer.concat(Y).subarray(0, size);
+}
+
+// ===== 3. Multipart upload: object etag = md5(concat(part md5 digests)) + "-" + partCount =====
+function multipartEtag(parts) {
+  const digests = Buffer.concat(parts.map((p) =&gt; createHash('md5').update(p).digest()));
+  return `${md5(digests)}-${parts.length}`;
+}
+
+// ---------------- self-test ----------------
+const node = new DataNode(64);
+const ids = ['alpha-object-'.repeat(2), 'bravo-object-'.repeat(2), 'charlie-obj-'.repeat(2), 'delta-object-'.repeat(2)].map((s) =&gt; node.put(Buffer.from(s)));
+console.log('files before compaction:', [...node.files.keys()].join(','));
+node.delete(ids[0]);
+console.log('compaction:', node.compact(), '-&gt; files:', [...node.files.keys()].join(','));
+assert.equal(node.get(ids[1]).toString(), 'bravo-object-'.repeat(2));
+assert.equal(node.get(ids[3]).toString(), 'delta-object-'.repeat(2));
+assert.equal(node.get(ids[0]), null);
+node.files.get(node.index.get(ids[1]).file).find((r) =&gt; r.id === ids[1]).data[0] ^= 1;   // flip one bit
+assert.throws(() =&gt; node.get(ids[1]), /checksum mismatch/);
+console.log('bit-flip detected by checksum');
+
+const K = 8, M = 4, payload = Buffer.from('The quick brown fox jumps over the lazy dog. '.repeat(40));
+const shards = rsEncode(payload, K, M);
+console.log(`RS(${K}+${M}): ${shards.length} shards x ${shards[0].length}B; overhead ${(M / K * 100)}% vs 200% for 3x replication`);
+const damaged = shards.map((s, i) =&gt; ([0, 3, 9, 11].includes(i) ? null : s));           // lose 4 shards (any 4 are survivable)
+assert.ok(rsDecode(damaged, K, M, payload.length).equals(payload));
+console.log('recovered payload after losing shards 0,3,9,11: OK');
+assert.throws(() =&gt; rsDecode(shards.map((s, i) =&gt; (i &lt; 5 ? null : s)), K, M, payload.length), /not enough shards/);
+console.log('5 losses (&gt; m=4): unrecoverable, as expected');
+
+const parts = [Buffer.alloc(5, 'a'), Buffer.alloc(5, 'b'), Buffer.alloc(3, 'c')];
+console.log('multipart etag:', multipartEtag(parts));
+assert.match(multipartEtag(parts), /^[0-9a-f]{32}-3$/);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Prints the file list before and after compaction, confirms a single flipped bit is caught by the checksum, shows 8+4 recovery after losing shards 0, 3, 9 and 11 (and a clean failure when five are lost), prints a multipart etag ending in "-3", and finishes with "all assertions passed". Run with <code>node store.mjs</code> (Node 20+).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview checklist</h2>
+        <ul class="check-list">
+          <li>Position object storage against block and file storage; call out immutability and flat namespace.</li>
+          <li>Show the estimate: average object size, 0.68 billion objects, 0.68 TB of metadata, drive counts for replication versus EC.</li>
+          <li>Separate metadata and data; draw API service, IAM, metadata store, data store.</li>
+          <li>Upload data first, then commit metadata; explain orphans.</li>
+          <li>Data store: routing service, placement service (Raft, 5 or 7 nodes), data nodes with heartbeats.</li>
+          <li>Pack objects into append-only files with an embedded offset index; mention core pinning.</li>
+          <li>Durability: failure domains, quorum acks, replication versus 8+4 erasure coding, checksums and scrubbing.</li>
+          <li>Metadata: shard by hash of bucket and object name; listing via scatter-gather or a denormalized listing index.</li>
+          <li>Versioning with delete markers, multipart upload with etags, garbage collection with compaction.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not store objects in a database or distributed file system?</summary><p>A database makes every byte pass through a general-purpose engine tuned for small rows, and a distributed file system pays for hierarchical namespace semantics and in-place mutation you do not need. By restricting the model to immutable blobs and flat keys you unlock append-only layouts, erasure coding and trivially partitionable metadata, which is where the cost and scale advantage comes from.</p></details>
+        <details><summary>How do you make sure an upload is either fully visible or not at all?</summary><p>Write the data and make it durable first, then insert the metadata row as the single commit point. Readers only discover objects via metadata, so a half-finished upload is invisible. Crashes leave orphan bytes which a reconciliation job and the garbage collector remove after a safety delay.</p></details>
+        <details><summary>Can you update part of an object?</summary><p>Not in place. Objects are immutable. You upload a new object or version. For large objects, applications use multipart upload with a server-side copy of unchanged ranges, or they split data into many smaller objects so rewrites are cheap.</p></details>
+        <details><summary>How would you handle a 5 TB object?</summary><p>Multipart upload with, say, 10,000 parts of about 500 MB uploaded in parallel and retried individually. On the data side the object is stored as many chunks across many replication groups; the object row records the ordered chunk list, so reads can fetch ranges in parallel. Erasure code each chunk or stripe independently.</p></details>
+        <details><summary>How do you rebalance when new nodes are added?</summary><p>The placement service updates the cluster map and assigns new replication groups to the new nodes; existing groups can be migrated gradually by copying sealed files (immutable, so safe to copy while serving) and flipping the group membership. Consistent hashing with virtual nodes bounds how much moves.</p></details>
+        <details><summary>Why is erasure coding hard in practice?</summary><p>The math is the easy part. The cost is operational: partial-stripe writes, small objects, repair read amplification, hedged reads, placement constraints across 12 domains, and the CPU for encoding. That is why systems often start with replication and move cold data to erasure-coded stripes later.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./23-distributed-email-service.html">Chapter 23: Distributed Email Service</a> — previous chapter; the attachment store there is this service.</li>
+          <li><a href="./25-gaming-leaderboard.html">Chapter 25: Real-time Gaming Leaderboard</a> — next chapter; from bytes to ranked in-memory data.</li>
+          <li><a href="./15-google-drive.html">Chapter 15: Google Drive</a> — block-level sync and dedup on top of an object store.</li>
+          <li><a href="./05-consistent-hashing.html">Chapter 5: Consistent Hashing</a> — how replication groups and metadata shards are chosen.</li>
+          <li><a href="./06-key-value-store.html">Chapter 6: Key-Value Store</a> — quorum replication and LSM trees, the building blocks inside the metadata plane.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — the placement primitive.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — shard keys and hot partitions for the object table.</li>
+          <li><a href="../../system-design/cdn.html">CDN</a> — caching hot objects at the edge.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Object storage is a metadata database married to a pile of append-only files. Commit metadata last, pack small objects together, spread copies or erasure-coded chunks across failure domains, checksum everything and scrub continuously, shard metadata by name hash with a separate listing index, and let compaction and garbage collection pay the deferred cost of immutability.</p>
+      </section>
+    </main>
+  </body>
+</html>

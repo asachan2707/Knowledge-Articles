@@ -1,46 +1,56 @@
 /**
- * Learning Hub Agent — Express + Groq RAG server
+ * Learning Hub Agent — Express + Claude RAG server
  *
  * On startup:
- *   - Crawls ../topics/**\/*.html (and a few root-level HTML pages) via ARTICLES_GLOB
+ *   - Crawls ../topics/**\/*.html (and sources/) via loadArticles()
  *   - Strips HTML to clean text using node-html-parser
  *   - Builds a BM25 index over all articles
  *
  * On POST /chat:
  *   - Scores every article against the user query with BM25
- *   - Injects the top-K article chunks as context
+ *   - Injects the top-K article chunks as context into the system prompt
  *   - Maintains per-session conversation history (in-memory, TTL 30 min)
- *   - Streams the Groq response back to the client via SSE
+ *   - If ANTHROPIC_BEDROCK_BASE_URL is set: calls the Bedrock /invoke endpoint
+ *     directly (Salesforce proxy format: /model/{modelId}/invoke)
+ *   - Otherwise: uses the standard Anthropic SDK streaming API
+ *   - Streams the response back to the client via SSE
+ *
+ * Config (env vars, loaded from .env if present):
+ *   ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY — required
+ *   ANTHROPIC_BEDROCK_BASE_URL — set to use Salesforce/Bedrock proxy
+ *   CLAUDE_MODEL       — model ID (e.g. global.anthropic.claude-sonnet-4-6)
+ *   PORT               — optional, default 3030
  */
 
 'use strict';
 
-const fs      = require('fs');
-const path    = require('path');
-const express = require('express');
-const cors    = require('cors');
-const Groq    = require('groq-sdk');
+require('dotenv').config();
+
+const fs        = require('fs');
+const path      = require('path');
+const express   = require('express');
+const cors      = require('cors');
+const Anthropic = require('@anthropic-ai/sdk');
 const { parse } = require('node-html-parser');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const PORT        = process.env.PORT || 3030;
-const GROQ_API_KEY= process.env.GROQ_API_KEY || '';
-const MODEL       = 'llama-3.3-70b-versatile';
-const TOP_K       = 3;       // articles to inject per query
-const MAX_CHUNK   = 2500;    // characters per article in the context
-const SESSION_TTL = 30 * 60 * 1000;  // 30 minutes
+const PORT              = process.env.PORT || 3030;
+// Support both standard key (ANTHROPIC_API_KEY) and Salesforce proxy token (ANTHROPIC_AUTH_TOKEN)
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+const BEDROCK_BASE_URL  = process.env.ANTHROPIC_BEDROCK_BASE_URL || '';
+const MODEL             = process.env.CLAUDE_MODEL || 'claude-haiku-4-5-20251001';
+const TOP_K            = 3;
+const MAX_CHUNK        = 3000;   // chars per article injected into context
+const SESSION_TTL      = 30 * 60 * 1000;  // 30 minutes
 
-// Root of the Learning Hub (one level up from agent/)
 const HUB_ROOT = path.resolve(__dirname, '..');
 
 // ── HTML → text ───────────────────────────────────────────────────────────────
 
 function htmlToText(html) {
   const root = parse(html);
-  // Remove script / style nodes
   root.querySelectorAll('script, style, noscript').forEach(n => n.remove());
-  // Grab meaningful text
   return root.structuredText
     .replace(/\s{3,}/g, '\n\n')
     .replace(/\n{4,}/g, '\n\n\n')
@@ -52,21 +62,18 @@ function htmlToText(html) {
 function loadArticles() {
   const articles = [];
 
-  // Recursively find every .html file under topics/
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        // skip node_modules
         if (entry.name === 'node_modules') continue;
         walk(full);
       } else if (entry.name.endsWith('.html')) {
         try {
-          const html  = fs.readFileSync(full, 'utf8');
-          const text  = htmlToText(html);
-          if (text.length < 100) continue; // skip stubs
+          const html = fs.readFileSync(full, 'utf8');
+          const text = htmlToText(html);
+          if (text.length < 100) continue;
 
-          // Build a human-readable title from the <title> tag or filename
           const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/is);
           const title = titleMatch
             ? titleMatch[1].replace(/\s*\|\s*Learning Hub\s*/i, '').trim()
@@ -81,7 +88,6 @@ function loadArticles() {
 
   walk(path.join(HUB_ROOT, 'topics'));
 
-  // Also load any externally ingested pages (from ingest.js → sources/)
   const sourcesDir = path.join(__dirname, 'sources');
   if (fs.existsSync(sourcesDir)) walk(sourcesDir);
 
@@ -129,7 +135,7 @@ function bm25Score(queryTokens, artTokens, idf, k1 = 1.5, b = 0.75, avgLen = 500
   let score = 0;
   for (const t of queryTokens) {
     if (!(t in freqs)) continue;
-    const tf  = freqs[t];
+    const tf   = freqs[t];
     const idfT = idf[t] || 0;
     score += idfT * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * len / avgLen));
   }
@@ -149,11 +155,11 @@ function retrieve(query, articles, idf, k = TOP_K) {
 
 // ── Session store ─────────────────────────────────────────────────────────────
 
-const sessions = new Map();   // sessionId → { history: [], lastSeen: Date }
+const sessions = new Map();
 
 function getSession(id) {
-  const now = Date.now();
-  let sess = sessions.get(id);
+  const now  = Date.now();
+  let sess   = sessions.get(id);
   if (!sess) {
     sess = { history: [], lastSeen: now };
     sessions.set(id, sess);
@@ -162,7 +168,6 @@ function getSession(id) {
   return sess;
 }
 
-// Evict stale sessions every 10 minutes
 setInterval(() => {
   const cutoff = Date.now() - SESSION_TTL;
   for (const [id, sess] of sessions) {
@@ -180,7 +185,6 @@ function buildSystemPrompt(contextArticles, topicMode) {
     : 'No specific articles matched. Answer from general knowledge.';
 
   if (topicMode) {
-    // Focused tutor prompt — answers must stay within this article's content
     const article = contextArticles[0];
     return `You are a focused tutor for the article "${article ? article.title : 'this topic'}" \
 in the Learning Hub.
@@ -191,23 +195,23 @@ If the user asks about something not covered in this article, say: \
 "That topic isn't covered in this article — try asking the Hub Agent from the home page for a broader answer."
 
 Do NOT answer from general knowledge when the article doesn't cover the topic. \
-Keep responses well-structured with bullet points or numbered steps where it helps clarity.
+Keep responses well-structured with bullet points or numbered steps where it helps clarity. \
+Use markdown formatting — **bold** for key terms, bullet lists, code blocks where relevant.
 
 ARTICLE CONTENT:
 ${ctx}`;
   }
 
-  // General hub-wide prompt
-  return `You are the Learning Hub Agent — a knowledgeable assistant for the Learning Hub, \
-a curated collection of technical articles covering AI, Python, system design, Salesforce, \
-cloud infrastructure, career development, and more.
+  return `You are the Learning Hub Agent — a knowledgeable assistant for a curated personal \
+knowledge base covering AI, system design, prompt engineering, JavaScript, Python, \
+infrastructure, databases, and related engineering topics.
 
-Your job is to answer the user's questions using the article excerpts provided below as your \
-primary source of knowledge. Be clear, concrete, and cite the article title when you draw \
-from it. If the answer isn't in the articles, say so and give a brief general answer.
+Answer the user's questions using the article excerpts below as your primary source. \
+Be clear and concrete. Cite the article title when you draw from it directly. \
+If the answer isn't in the articles, say so briefly and then give a concise general answer.
 
-Keep responses well-structured: use bullet points or numbered steps where it helps clarity. \
-Avoid being verbose — the user is a practising engineer.
+Use markdown formatting — **bold** for key terms, bullet lists, code blocks for code examples. \
+Keep responses tight and practical — the user is a practicing engineer.
 
 RELEVANT ARTICLES:
 ${ctx}`;
@@ -215,8 +219,38 @@ ${ctx}`;
 
 // ── Express app ───────────────────────────────────────────────────────────────
 
-const app     = express();
-const groq    = new Groq({ apiKey: GROQ_API_KEY });
+const app       = express();
+// Standard Anthropic SDK — only used when BEDROCK_BASE_URL is NOT set
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+// ── Bedrock proxy call ────────────────────────────────────────────────────────
+// Salesforce proxy speaks AWS Bedrock format: POST /model/{modelId}/invoke
+// Body uses anthropic_version + system + messages (same as Anthropic Messages API).
+// Returns the full response JSON; we then chunk it back to the client as SSE.
+
+async function callBedrockInvoke(systemPrompt, messages, model, baseUrl, apiKey) {
+  const endpoint = `${baseUrl}/model/${encodeURIComponent(model)}/invoke`;
+
+  const body = JSON.stringify({
+    anthropic_version: 'bedrock-2023-05-31',
+    system:     systemPrompt,
+    messages,
+    max_tokens: 1024,
+  });
+
+  const res = await fetch(endpoint, {
+    method:  'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key':    apiKey,
+    },
+    body,
+  });
+
+  const json = await res.json();
+  if (!res.ok) throw new Error(`${res.status} ${JSON.stringify(json)}`);
+  return json;
+}
 
 app.use(cors());
 app.use(express.json());
@@ -235,7 +269,7 @@ try {
 // ── Health check ──────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', articles: articles.length });
+  res.json({ status: 'ok', articles: articles.length, model: MODEL });
 });
 
 // ── Chat endpoint (streaming SSE) ─────────────────────────────────────────────
@@ -249,14 +283,14 @@ app.post('/chat', async (req, res) => {
   if (!sessionId || typeof sessionId !== 'string') {
     return res.status(400).json({ error: 'sessionId is required' });
   }
-  if (!GROQ_API_KEY) {
-    return res.status(500).json({ error: 'GROQ_API_KEY is not set on the server' });
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({
+      error: 'No API key set. Add ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to agent/.env and restart.'
+    });
   }
 
-  // Topic-page mode: pin to that single article; skip BM25.
-  // Global mode: BM25 retrieval across all articles.
-  let relevant;
-  let topicMode = false;
+  // Retrieve relevant articles
+  let relevant, topicMode = false;
   if (topicRel && typeof topicRel === 'string') {
     const pinned = articles.find(a => a.rel === topicRel);
     relevant  = pinned ? [pinned] : retrieve(message, articles, idf);
@@ -265,14 +299,14 @@ app.post('/chat', async (req, res) => {
     relevant = retrieve(message, articles, idf);
   }
 
-  // Build messages array
-  const sess = getSession(sessionId);
+  const sess         = getSession(sessionId);
   const systemPrompt = buildSystemPrompt(relevant, topicMode);
 
+  // Anthropic requires alternating user/assistant turns only in messages[];
+  // system prompt is a separate top-level parameter.
   const messages = [
-    { role: 'system', content: systemPrompt },
     ...sess.history,
-    { role: 'user',   content: message.trim() }
+    { role: 'user', content: message.trim() }
   ];
 
   // Stream SSE response
@@ -284,32 +318,57 @@ app.post('/chat', async (req, res) => {
   let fullReply = '';
 
   try {
-    const stream = await groq.chat.completions.create({
-      model:       MODEL,
-      messages,
-      stream:      true,
-      temperature: 0.3,
-      max_tokens:  1024
-    });
+    if (BEDROCK_BASE_URL) {
+      // ── Bedrock proxy path (Salesforce internal gateway) ──────────────────
+      // The proxy only supports /invoke (non-streaming), so we fetch the full
+      // response then emit it in small SSE chunks so the UI still animates.
+      const bedrockRes = await callBedrockInvoke(
+        systemPrompt, messages, MODEL, BEDROCK_BASE_URL, ANTHROPIC_API_KEY
+      );
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices?.[0]?.delta?.content || '';
-      if (delta) {
-        fullReply += delta;
+      fullReply = bedrockRes?.content?.[0]?.text || '';
+      if (!fullReply) throw new Error('Empty response from Bedrock proxy');
+
+      // Emit in ~60-char chunks so the chat bubble fills progressively
+      const CHUNK = 60;
+      for (let i = 0; i < fullReply.length; i += CHUNK) {
+        const delta = fullReply.slice(i, i + CHUNK);
         res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+      }
+
+    } else {
+      // ── Standard Anthropic SDK streaming path ─────────────────────────────
+      const stream = anthropic.messages.stream({
+        model:      MODEL,
+        system:     systemPrompt,
+        messages,
+        max_tokens: 1024,
+      });
+
+      for await (const event of stream) {
+        if (
+          event.type === 'content_block_delta' &&
+          event.delta?.type === 'text_delta'
+        ) {
+          const delta = event.delta.text;
+          if (delta) {
+            fullReply += delta;
+            res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+          }
+        }
       }
     }
 
-    // Persist to session history (keep last 20 turns to avoid token explosion)
+    // Persist to session history (keep last 20 turns)
     sess.history.push({ role: 'user',      content: message.trim() });
     sess.history.push({ role: 'assistant', content: fullReply });
     if (sess.history.length > 40) sess.history = sess.history.slice(-40);
 
-    // Send source metadata
     const sources = relevant.map(a => ({ title: a.title, rel: a.rel }));
     res.write(`data: ${JSON.stringify({ done: true, sources })}\n\n`);
+
   } catch (err) {
-    console.error('[agent] Groq error:', err.message);
+    console.error('[agent] Claude error:', err.message);
     res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
   } finally {
     res.end();
@@ -327,6 +386,10 @@ app.delete('/session/:id', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`[agent] Listening on http://localhost:${PORT}`);
-  console.log(`[agent] Model: ${MODEL}`);
-  console.log(`[agent] Articles indexed: ${articles.length}`);
+  console.log(`[agent] Model:    ${MODEL}`);
+  console.log(`[agent] Backend:  ${BEDROCK_BASE_URL || 'Anthropic API (direct)'}`);
+  console.log(`[agent] Articles: ${articles.length} indexed`);
+  if (!ANTHROPIC_API_KEY) {
+    console.warn('[agent] ⚠  No API key set — chat requests will fail until .env is configured');
+  }
 });

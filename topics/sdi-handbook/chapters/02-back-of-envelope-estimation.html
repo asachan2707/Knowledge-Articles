@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Back-of-the-Envelope Estimation | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 2 of the System Design Interview Handbook (created 2026-10-15 from liquidslr/system-design-notes ch.02). Teaches back-of-envelope estimation - powers of two, latency numbers, availability nines and composite availability, the QPS/storage/bandwidth/cache/server method, a worked micro-blog example (3,500 QPS, 30 TB/day media, about 55 PB over 5 years) - plus a runnable JavaScript estimator executed with node. Related pages - 01 scale from zero, 03 interview framework, caching, load balancing. Read time about 13 min.</div>
+        <h1>Back-of-the-Envelope Estimation</h1>
+        <p class="summary">Estimation turns a vague scale statement into QPS, storage, bandwidth, cache and server counts, so you can pick an architecture that matches the load instead of guessing. This chapter covers powers of two, latency numbers, the nines of availability, a worked micro-blog example, and a reusable method with the arithmetic shown.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">2 of 28 · Part 1 Foundations</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">13 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">powers of two, latency numbers, availability nines, QPS, peak factor, storage, bandwidth, cache sizing</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Jeff Dean latency list, AWS SLAs, Twitter-style timeline, Redis, Kafka</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">An estimate answers one question: which order of magnitude are we in? The difference between 100 QPS and 100,000 QPS is the difference between one small database and a sharded fleet. Nobody needs the third significant digit; everybody needs the exponent.</p>
+        <div class="callout"><p><strong>Core idea:</strong> do the arithmetic out loud, with round numbers and labelled units, then convert the result into an architectural decision. The process is graded, not the final number.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known source</span>
+        <h2>"Numbers everyone should know"</h2>
+        <p>The habit comes from Jeff Dean, a Google Senior Fellow, who publicly described using thought experiments and a short list of latency and throughput constants to decide whether a design is even plausible before building it. His list, later popularised as "latency numbers every programmer should know", has been updated by others as hardware changed. The exact values drift; the ratios (memory is orders of magnitude faster than disk; a datacenter round trip is orders of magnitude faster than a cross-continent one) have stayed remarkably stable, and the ratios are what drive design.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Tool 1</span>
+        <h2>Powers of two and data sizes</h2>
+        <p>Computers count in powers of two, but when estimating, treat each step as roughly a factor of a thousand. The binary and decimal figures differ by under 10 percent at the TB level and under 13 percent at the PB level, which is below the noise of your assumptions.</p>
+        <table class="data-table">
+          <thead><tr><th>Power</th><th>Approx. value</th><th>Name</th><th>Think of it as</th></tr></thead>
+          <tbody>
+            <tr><td>2<sup>10</sup></td><td>1 thousand</td><td>1 KB</td><td>A short text message</td></tr>
+            <tr><td>2<sup>20</sup></td><td>1 million</td><td>1 MB</td><td>A small photo or a minute of compressed audio</td></tr>
+            <tr><td>2<sup>30</sup></td><td>1 billion</td><td>1 GB</td><td>A feature-length SD video; fits in RAM trivially</td></tr>
+            <tr><td>2<sup>40</sup></td><td>1 trillion</td><td>1 TB</td><td>One commodity disk; a large single-node database</td></tr>
+            <tr><td>2<sup>50</sup></td><td>1 quadrillion</td><td>1 PB</td><td>A storage cluster, not a server</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Seconds and per-unit shortcuts worth memorising</p>
+        <ul class="check-list">
+          <li>A day has 86,400 seconds. Round to <strong>10<sup>5</sup></strong> when mental math must be fast: 1 million events per day is about 10 per second (exactly 11.6).</li>
+          <li>A month is about 2.5 million seconds; a year is about 31.5 million (roughly pi times 10<sup>7</sup>).</li>
+          <li>1 million per day is about 12 per second; 100 million per day is about 1,200 per second; 1 billion per day is about 12,000 per second.</li>
+          <li>1 Gbps is about 125 MB/s; 10 Gbps is about 1.25 GB/s. Network is quoted in bits, storage in bytes, so check which one you are holding.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Tool 2</span>
+        <h2>Latency numbers and what they imply</h2>
+        <table class="data-table">
+          <thead><tr><th>Operation</th><th>Approx. latency</th><th>Relative to memory read</th></tr></thead>
+          <tbody>
+            <tr><td>L1 cache reference</td><td>0.5 ns</td><td>1/200</td></tr>
+            <tr><td>L2 cache reference</td><td>7 ns</td><td>1/14</td></tr>
+            <tr><td>Main memory reference</td><td>100 ns</td><td>1x</td></tr>
+            <tr><td>SSD random read</td><td>about 150 µs</td><td>1,500x</td></tr>
+            <tr><td>Round trip within a data center</td><td>about 500 µs</td><td>5,000x</td></tr>
+            <tr><td>HDD seek</td><td>about 10 ms</td><td>100,000x</td></tr>
+            <tr><td>Round trip between continents</td><td>about 150 ms</td><td>1,500,000x</td></tr>
+          </tbody>
+        </table>
+        <p>These are order-of-magnitude figures for modern (circa 2020) hardware; cloud NVMe can be faster than the SSD figure and congested networks slower than the data-center one. Do not quote them as constants; use them as ratios. Five design rules fall out directly:</p>
+        <ol>
+          <li><strong>Memory is fast, disk is slow.</strong> Serve the hot working set from RAM; that is the whole case for caches.</li>
+          <li><strong>Avoid random disk seeks.</strong> Sequential IO on a spinning disk is hundreds of times faster than random IO, which is why log-structured storage (chapter 6) appends and merges instead of updating in place.</li>
+          <li><strong>Network hops cost real time.</strong> A page that makes 40 sequential service calls at 0.5 ms each spends 20 ms just on round trips, before any work. Batch, parallelise, or co-locate.</li>
+          <li><strong>Crossing regions is expensive.</strong> A synchronous cross-region write adds on the order of 100+ ms to every request. This is why multi-region systems replicate asynchronously and accept anomalies.</li>
+          <li><strong>Compress before sending over a slow or metered link.</strong> CPU is cheap compared with bytes on the wire, especially across regions.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Tool 3</span>
+        <h2>Availability and the nines</h2>
+        <p>Availability is the fraction of time a service is usable, quoted in nines. Convert it into an allowed downtime budget, because the budget is what you plan operations against.</p>
+        <table class="data-table">
+          <thead><tr><th>Availability</th><th>Nines</th><th>Downtime per year</th><th>Per month (30 d)</th></tr></thead>
+          <tbody>
+            <tr><td>99%</td><td>2</td><td>about 3.65 days</td><td>about 7.2 hours</td></tr>
+            <tr><td>99.9%</td><td>3</td><td>about 8.8 hours</td><td>about 43 minutes</td></tr>
+            <tr><td>99.99%</td><td>4</td><td>about 52.6 minutes</td><td>about 4.3 minutes</td></tr>
+            <tr><td>99.999%</td><td>5</td><td>about 5.3 minutes</td><td>about 26 seconds</td></tr>
+            <tr><td>99.9999%</td><td>6</td><td>about 32 seconds</td><td>about 2.6 seconds</td></tr>
+          </tbody>
+        </table>
+        <p>Major cloud providers typically publish service-level agreements around three to four nines for individual services; they do not promise five for a single zone. Remember the vocabulary: an SLI is a measurement (successful requests / total), an SLO is your internal target for it, and an SLA is the contractual promise with penalties, usually looser than the SLO.</p>
+        <p class="mini-heading">Composite availability: the arithmetic interviewers love</p>
+        <ul>
+          <li><strong>In series</strong> (a request needs A and B): multiply. Two 99.9% components give 0.999 x 0.999 = 99.8%. A chain of ten 99.9% dependencies is only about 99.0%, which is 3.65 days a year.</li>
+          <li><strong>In parallel</strong> (either A or B suffices, failures independent): 1 minus the product of failure rates. Two independent 99% replicas give 1 - 0.01 x 0.01 = 99.99%.</li>
+        </ul>
+        <div class="insight-box"><strong>Independence is the catch.</strong> Replicas in the same rack, behind the same deploy pipeline, or sharing the same bug do not fail independently. Real availability gains come from separating fault domains (zones, regions, release rings), not merely from adding copies.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Worked example</span>
+        <h2>A micro-blog service: QPS and storage</h2>
+        <p class="mini-heading">Assumptions (write them down first)</p>
+        <ul>
+          <li>300 million monthly active users (MAU); 50 percent use it on a given day.</li>
+          <li>Each active user posts 2 times per day on average.</li>
+          <li>10 percent of posts carry one media item averaging 1 MB.</li>
+          <li>Data is retained 5 years.</li>
+        </ul>
+        <p class="mini-heading">Traffic</p>
+        <div class="diagram-box">DAU          = 300M x 50%                    = 150M
+posts/day    = 150M x 2                      = 300M
+write QPS    = 300M / 86,400 s               ≈ 3,470   → say ~3,500
+peak QPS     = 2 x 3,500                     ≈ 7,000   (peak factor 2 is an assumption)</div>
+        <p class="mini-heading">Storage</p>
+        <div class="diagram-box">media/day    = 150M x 2 x 10% x 1 MB         = 30 TB/day
+5-year media = 30 TB x 365 x 5               ≈ 55 PB
+text/day     = 300M x ~200 B                 ≈ 60 GB/day   (≈ 0.1 PB in 5 years: noise next to media)
+x3 replicas  ≈ 165 PB raw  (or ~80 PB with erasure coding at ~1.5x)</div>
+        <p class="mini-heading">Bandwidth, the number people forget</p>
+        <div class="diagram-box">ingress     = 30 TB / 86,400 s               ≈ 350 MB/s ≈ 2.8 Gbps average, ~6 Gbps at peak
+egress      = assume each media item is viewed 100 times:
+              30 TB x 100 = 3 PB/day ≈ 35 GB/s ≈ 280 Gbps average.
+              That is 100x ingress and far beyond one origin: a CDN is non-optional.</div>
+        <p>Takeaways: 3,500 write QPS is modest for a partitioned store but not for one primary; the 55 PB number says object storage plus CDN, not a database; and media dominates, so the text path can be designed for speed and the media path for cost. A note on the source figures: a tweet identifier is normally a 64-bit integer, i.e. 8 bytes, not 64 bytes, and 140 characters has long since become 280. Neither changes the conclusion because the media term swamps both, which is itself a lesson in noticing what dominates.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Method</span>
+        <h2>A repeatable estimation recipe</h2>
+        <table class="data-table">
+          <thead><tr><th>Step</th><th>Formula</th><th>Design decision it drives</th></tr></thead>
+          <tbody>
+            <tr><td>1. Users</td><td>DAU = MAU x active ratio</td><td>Everything below scales from this.</td></tr>
+            <tr><td>2. Average QPS</td><td>DAU x actions per user per day / 86,400</td><td>Number of app servers, DB write capacity.</td></tr>
+            <tr><td>3. Peak QPS</td><td>average x peak factor (2 to 10; consumer apps spike with events)</td><td>Capacity you must provision or autoscale to; queues to flatten bursts.</td></tr>
+            <tr><td>4. Read/write ratio</td><td>assume it explicitly (feeds read heavily, logging write heavily)</td><td>Replicas, cache, CQRS, choice of storage engine.</td></tr>
+            <tr><td>5. Storage</td><td>records/day x bytes/record x retention days x replication</td><td>SQL vs object store; sharding; tiering hot/cold.</td></tr>
+            <tr><td>6. Bandwidth</td><td>bytes/s = QPS x payload size</td><td>NIC limits, CDN need, compression.</td></tr>
+            <tr><td>7. Cache</td><td>hot 20 percent of daily read bytes (the 80/20 rule), then check it fits RAM</td><td>Cache cluster size and whether caching is viable at all.</td></tr>
+            <tr><td>8. Servers</td><td>peak QPS / per-server QPS, plus N+1 or N+2 headroom</td><td>Fleet size, autoscaling bounds.</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">How many servers? Little's law</p>
+        <p>Concurrency in flight = arrival rate x latency. At 7,000 QPS and 50 ms average service time, there are about 350 requests in flight. If one server comfortably runs 100 concurrent requests, you need 4 plus headroom, so call it 6 to 8. The same law sizes connection pools and thread pools. Utilisation above roughly 70 percent makes queueing delay grow sharply, so size for 50 to 60 percent at peak, not 100.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Tips</span>
+        <h2>Habits that separate good estimates from bad ones</h2>
+        <ul class="check-list">
+          <li><strong>Round aggressively.</strong> 99,987 / 9.1 is 100,000 / 10 = 10,000. Nobody is checking the fifth digit.</li>
+          <li><strong>Write assumptions first and label units.</strong> "5" is meaningless; "5 MB" and "5 million per day" are not. Unit errors (bits vs bytes, per second vs per day) are the usual cause of an estimate that is off by 8x or 86,400x.</li>
+          <li><strong>Find the dominant term.</strong> In the micro-blog, media is 99.9 percent of bytes. Spend your precision there and ignore the rest.</li>
+          <li><strong>Cross-check two ways.</strong> Estimate storage from users x items and from throughput x time; if they disagree by 10x, an assumption is wrong.</li>
+          <li><strong>Be conservative with peaks and generous with growth.</strong> Plan for 2 to 3 years of growth unless told otherwise, and state the planning horizon.</li>
+          <li><strong>End with a decision.</strong> "That is 55 PB, so object storage with tiering" is the sentence that scores points.</li>
+        </ul>
+        <div class="warn-box"><strong>Traps.</strong> Forgetting replication (x3); forgetting indexes (often 20 to 100 percent extra on relational stores); confusing DAU with concurrent users (concurrency is usually a few percent of DAU); treating average QPS as capacity; ignoring read amplification (one feed read may fan out to dozens of backend calls).</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable example: a small estimator with assertions</h2>
+        <p>The script encodes the recipe above as one function, reproduces the micro-blog example, converts nines into downtime, and sizes a hot-set cache with the 80/20 rule. Every number printed in the worked example can be regenerated by changing the inputs.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+
+const SEC_PER_DAY = 86_400, DAYS_PER_YEAR = 365;
+const KB = 1e3, MB = 1e6, GB = 1e9, TB = 1e12, PB = 1e15;   // decimal, as used when estimating
+const human = b =&gt; b &gt;= PB ? (b / PB).toFixed(1) + ' PB' : b &gt;= TB ? (b / TB).toFixed(1) + ' TB'
+  : b &gt;= GB ? (b / GB).toFixed(1) + ' GB' : b &gt;= MB ? (b / MB).toFixed(1) + ' MB' : b + ' B';
+
+// Downtime allowed per year for N nines
+const downtime = nines =&gt; {
+  const s = (10 ** -nines) * DAYS_PER_YEAR * SEC_PER_DAY;
+  return s &gt;= 3600 ? (s / 3600).toFixed(2) + ' h' : s &gt;= 60 ? (s / 60).toFixed(1) + ' min' : s.toFixed(1) + ' s';
+};
+for (const n of [2, 3, 4, 5, 6]) console.log(`${n} nines -&gt; ${downtime(n)}/year`);
+
+// Generic write-heavy estimator
+function estimate({ mau, dauRatio, actionsPerUserDay, peakFactor, bytesPerAction, mediaRatio = 0, mediaBytes = 0,
+                    retentionYears, replication = 1, readWriteRatio = 1, rpsPerServer = 1000 }) {
+  const dau = mau * dauRatio;
+  const writesPerDay = dau * actionsPerUserDay;
+  const qps = writesPerDay / SEC_PER_DAY;
+  const peakQps = qps * peakFactor;
+  const bytesPerDay = writesPerDay * (bytesPerAction + mediaRatio * mediaBytes);
+  const mediaPerDay = writesPerDay * mediaRatio * mediaBytes;
+  const total = bytesPerDay * DAYS_PER_YEAR * retentionYears * replication;
+  const readPeak = peakQps * readWriteRatio;
+  return { dau, qps, peakQps, mediaPerDay, bytesPerDay, total, readPeak,
+           servers: Math.ceil((peakQps + readPeak) / rpsPerServer) };
+}
+
+// The classic micro-blog example: 300M MAU, 50% DAU, 2 posts/day, 10% with 1 MB media, 5 years
+const r = estimate({ mau: 300e6, dauRatio: 0.5, actionsPerUserDay: 2, peakFactor: 2,
+                     bytesPerAction: 204, mediaRatio: 0.1, mediaBytes: MB, retentionYears: 5 });
+console.log('DAU            ', r.dau / 1e6, 'M');
+console.log('write QPS      ', Math.round(r.qps), '(peak', Math.round(r.peakQps) + ')');
+console.log('media per day  ', human(r.mediaPerDay));
+console.log('5y media       ', human(r.mediaPerDay * DAYS_PER_YEAR * 5));
+console.log('5y total x3    ', human(estimate({ mau: 300e6, dauRatio: .5, actionsPerUserDay: 2, peakFactor: 2,
+  bytesPerAction: 204, mediaRatio: .1, mediaBytes: MB, retentionYears: 5, replication: 3 }).total));
+
+assert.equal(r.dau, 150e6);
+assert.ok(Math.abs(r.qps - 3472) &lt; 1);              // ~3,500 QPS
+assert.ok(Math.abs(r.mediaPerDay - 30e12) &lt; 1);     // 30 TB/day
+assert.ok(Math.abs(r.mediaPerDay * 365 * 5 / PB - 54.75) &lt; 0.01); // ~55 PB
+assert.equal(downtime(3), '8.76 h'); assert.equal(downtime(5).startsWith('5.3'), true);
+// Cache sizing via the 80/20 rule: cache the hot 20% of one day's read volume
+const readsPerDay = r.dau * 10 /* timeline reads/user/day */, bytesPerRead = 2 * KB;
+console.log('80/20 cache    ', human(0.2 * readsPerDay * bytesPerRead));
+console.log('all checks passed');</code></pre>
+        <p class="code-caption">Prints downtime for 2 to 6 nines (for example "3 nines -&gt; 8.76 h/year"), then DAU 150 M, write QPS 3472 (peak 6944), 30 TB per day, about 54.8 PB over 5 years, 164.6 PB with 3x replication, and a 600 GB 80/20 cache, ending with "all checks passed". Executed with node.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>How estimates go wrong</h2>
+        <table class="data-table">
+          <thead><tr><th>Mistake</th><th>Consequence</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td>Sizing for average, not peak</td><td>Falls over at the daily or event peak</td><td>Always apply a peak factor; examine the traffic shape (diurnal, flash sales)</td></tr>
+            <tr><td>Ignoring read amplification and fan-out</td><td>Underestimates internal QPS by 10x or more</td><td>Estimate backend calls per user request</td></tr>
+            <tr><td>Forgetting replication, indexes, overhead</td><td>Storage plan 3x too small</td><td>Multiply by replication and an overhead factor</td></tr>
+            <tr><td>Assuming perfect independence for availability</td><td>Overstates nines</td><td>Identify shared dependencies and common-cause failures</td></tr>
+            <tr><td>Using cache size without hit-rate reasoning</td><td>Cache that thrashes</td><td>Estimate the working set, not total data</td></tr>
+            <tr><td>Mixing bits and bytes, days and seconds</td><td>Error of 8x or 86,400x</td><td>Label every unit</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Production</span>
+        <h2>From estimate to capacity plan</h2>
+        <ul class="check-list">
+          <li><strong>Validate with load tests.</strong> The per-server QPS figure is the most guessed number in any plan; measure it with a realistic mix, not hello-world.</li>
+          <li><strong>Plan for N+2.</strong> One node in maintenance and one failing should still leave you above peak.</li>
+          <li><strong>Watch the knees.</strong> Latency does not degrade linearly; it climbs steeply past 70 to 80 percent utilisation on CPU, connection pools or disks. Alert on saturation, not only on errors.</li>
+          <li><strong>Revisit after launch.</strong> Compare estimates with metrics, record the error, and correct your priors. Teams that do this get better quickly.</li>
+          <li><strong>Cost is a dimension.</strong> 55 PB at a cloud object-storage list price is a very large monthly bill; tiering and compression are architectural choices driven by the estimate.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Estimation checklist</h2>
+        <ul class="check-list">
+          <li>Assumptions written down and confirmed with the interviewer.</li>
+          <li>DAU, average QPS, peak QPS, read/write ratio computed.</li>
+          <li>Storage includes retention, replication and overhead.</li>
+          <li>Bandwidth computed in the right unit; CDN need judged.</li>
+          <li>Cache sized from the hot working set.</li>
+          <li>Server count includes headroom.</li>
+          <li>Availability target converted to a downtime budget.</li>
+          <li>Each result linked to a design decision.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>How precise do I need to be?</summary><p>One significant digit and the right power of ten. State that you are rounding and move on; spending two minutes on exact division reads as poor prioritisation.</p></details>
+        <details><summary>What peak factor should I assume?</summary><p>Say 2 to 3 for steady consumer traffic, 5 to 10 for event-driven spikes (flash sales, live sports, push notification blasts), and confirm with the interviewer. Name the factor out loud; the exact value matters less than showing you considered peaks.</p></details>
+        <details><summary>Should storage numbers use binary or decimal units?</summary><p>Decimal is fine and simpler (1 TB = 10<sup>12</sup> bytes). The binary difference is under 10 percent at TB scale, smaller than your assumption error. Only care when quoting disk specs versus OS-reported capacity.</p></details>
+        <details><summary>How do I estimate cache size?</summary><p>Take daily read volume in bytes, assume 20 percent of the content generates 80 percent of the reads, and cache that 20 percent. Then check it fits across a reasonable number of nodes (a few hundred GB to a few TB is a normal cache cluster); if it does not, cache a smaller slice or cache derived data.</p></details>
+        <details><summary>Why does the estimate matter if architecture is a judgement call?</summary><p>Because it picks the branch. Under about a thousand QPS and a few TB, a replicated relational database is likely enough. At hundreds of thousands of QPS or petabytes, you need partitioning, tiered storage and CDNs. The estimate tells you which regime you are in.</p></details>
+        <details><summary>How do I go from a user count to concurrent connections for a chat or presence system?</summary><p>Concurrent users are typically a small fraction of DAU, often 5 to 20 percent at peak depending on the product. Multiply by per-connection memory (tens of KB for a lean WebSocket server) to size the gateway fleet; see the WebSocket page for connection-limits detail.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./01-scale-from-zero.html">Chapter 1: Scale From Zero to Millions of Users</a> — the architecture these numbers choose between.</li>
+          <li><a href="./03-interview-framework.html">Chapter 3: A Framework for System Design Interviews</a> — where in the 45 minutes estimation belongs.</li>
+          <li><a href="../../system-design/caching.html">Caching</a> — apply the 80/20 working-set idea to real cache design.</li>
+          <li><a href="../../system-design/load-balancing.html">Load Balancing</a> — turn peak QPS into a fleet behind a balancer.</li>
+          <li><a href="../../system-design/cap-theorem.html">CAP Theorem</a> — availability targets and their consistency price.</li>
+        </ul>
+      </section>
+
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p></section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>Estimation is a decision tool, not a math test. Round aggressively, label units, state assumptions, and always finish by translating the number into a design consequence: one machine or a fleet, memory or disk, one region or two. A number that does not change the design was not worth computing.</p></section>
+    </main>
+  </body>
+</html>

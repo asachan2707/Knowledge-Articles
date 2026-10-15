@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Notification System | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 10 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.10 (Alex Xu Vol 1). Covers a multi-channel notification platform (APNs, FCM, SMS, email): requirements and QPS arithmetic, contact-info model, the SPOF-ridden first design and the queue-per-channel redesign, reliability (persisted log, at-least-once plus dedup, retries with backoff and DLQ), templates, opt-out settings, rate limiting, event tracking, security and provider failure modes. Includes an executed Node.js pipeline example (dedup, opt-out, token bucket, retry, DLQ). About 20 min read. Related: instagram-notification-fanout, message-queue, idempotency, rate-limiting, delayed-job-scheduler.</div>
+        <h1>Design a Notification System</h1>
+        <p class="summary">A notification platform is a thin, boring-looking router in front of four very opinionated external providers. The hard parts are not sending, but never losing, never duplicating, never spamming and never melting a provider.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">10 of 28 · Part 3 Product Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">18 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Queue per channel, at-least-once plus dedup, backoff and DLQ, opt-out, rate limits</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">APNs, FCM, Twilio, SendGrid, Amazon SES, Kafka, SQS, Redis</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every product eventually needs to tell users something: a payment cleared, a driver arrived, a friend replied, a password reset was requested. Left to individual teams, each service grows its own half-working integration with APNs, an SMS vendor and an email provider, with no shared opt-out list, no shared rate limits and no shared audit trail. A notification system exists to centralise that integration once, so that product teams emit an intent ("order shipped, user 42") and the platform handles channels, preferences, retries and proof of delivery.</p>
+        <div class="callout"><p><strong>Core idea:</strong> treat a notification as a durable, idempotent job that flows through a pipeline (validate, dedupe, check preferences, rate limit, enqueue, send, record) with a separate queue and worker pool per channel, because each channel fails, throttles and costs differently.</p></div>
+      </section>
+
+      <section class="story-card">
+        <h2>A public anchor: how the big platforms look at it</h2>
+        <p>Apple and Google both run the last mile for mobile push. Your servers never talk to a phone directly: you hand a payload and a device token to APNs (over HTTP/2) or FCM, and the OS vendor holds the one always-on connection to the device that makes cheap push possible. Email and SMS follow the same pattern with carriers and mailbox providers behind Amazon SES, SendGrid or Twilio. The lesson is architectural: your system is a broker between your event sources and a set of external gateways you do not control. Everything in this chapter is a consequence of that: the gateways rate-limit you, go down, return ambiguous errors, and punish you if you misbehave (spam complaints hurt your sender reputation; invalid tokens must be pruned).</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>What we are building and how big it is</h2>
+        <p>The scenario is a soft real-time system: a notification should arrive quickly, but a few seconds of delay under load is acceptable, and delays are preferable to loss. It must support three channels (mobile push on iOS and Android, SMS, email), plus desktop push, be triggered either by client-side actions or by server-side schedules, and let a user opt out of individual categories and channels.</p>
+        <table class="data-table">
+          <thead><tr><th>Channel</th><th>Per day</th><th>Average per second</th><th>Arithmetic</th></tr></thead>
+          <tbody>
+            <tr><td>Push</td><td>10 M</td><td>about 116</td><td>10,000,000 / 86,400</td></tr>
+            <tr><td>SMS</td><td>1 M</td><td>about 12</td><td>1,000,000 / 86,400</td></tr>
+            <tr><td>Email</td><td>5 M</td><td>about 58</td><td>5,000,000 / 86,400</td></tr>
+            <tr><td><strong>Total</strong></td><td>16 M</td><td>about 185</td><td>sum of the above</td></tr>
+          </tbody>
+        </table>
+        <p>Averages lie. Notification traffic is bursty by nature: a marketing blast, a breaking-news alert or a flash sale concentrates volume into minutes. If a campaign sends the 5 M daily emails inside a 10 minute window, that is 5,000,000 / 600 ≈ 8,300 emails per second, roughly 140 times the daily average. Plan the queue and worker tier for the burst and the provider quota, not the mean. A sensible planning number is a 10x peak factor over the average (about 2,000/s) plus an explicit "campaign mode" with its own capacity and lower priority.</p>
+        <p class="mini-heading">Storage back-of-envelope</p>
+        <p>The notification log (one row per notification with state transitions) at roughly 500 bytes per record is 16,000,000 x 500 B = 8 GB per day, about 2.9 TB per year before replication. That is small enough for a sharded SQL or wide-column store, but you will want TTL or cold-tier archiving after 30-90 days. Contact info is cheaper still: a few hundred million device tokens at about 100 bytes each is tens of gigabytes.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-Level Design</span>
+        <h2>Channels, providers and contact data</h2>
+        <table class="data-table">
+          <thead><tr><th>Channel</th><th>Gateway</th><th>What you must know</th></tr></thead>
+          <tbody>
+            <tr><td>iOS push</td><td>APNs</td><td>HTTP/2, per-device token, roughly 4 KB payload limit, priority and collapse-id headers; a 410 response means the token is dead and must be deleted.</td></tr>
+            <tr><td>Android push</td><td>FCM</td><td>HTTP v1 API, collapse keys, TTL, data vs notification messages; unregistered tokens return an explicit error.</td></tr>
+            <tr><td>SMS</td><td>Twilio, Vonage (Nexmo), carrier aggregators</td><td>Priced per segment, country-specific sender registration rules, mandatory STOP handling, delivery receipts arrive asynchronously via webhook.</td></tr>
+            <tr><td>Email</td><td>SendGrid, Amazon SES, Mailchimp</td><td>SPF, DKIM and DMARC alignment, bounce and complaint feedback, suppression lists, warm-up of sending IPs.</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Contact info gathering</p>
+        <p>Contact data is collected at signup or first app launch: email and phone go on the user record; each installed app instance registers a device token that is stored in a separate device table keyed by user. A user has many devices, and a device row carries platform, token, app version, last-seen timestamp and a "valid" flag. Keep devices in their own table because the lifecycle differs: tokens rotate on reinstall or OS restore, and stale ones are the main cause of wasted sends.</p>
+        <div class="diagram-box"><pre>
+<span class="hi">users</span>                        <span class="hi">devices</span>
+-----                        -------
+user_id   PK                 device_id PK
+email     (verified?)        user_id   FK  -- many devices per user
+phone     (verified?)        platform  ios | android | web
+locale, tz                   token     (rotates!)
+                             last_seen, valid
+<span class="hi">notification_settings</span>         <span class="hi">notification_log</span>
+---------------------        ----------------
+user_id, channel, category   notification_id PK
+enabled, quiet_hours         event_id (idempotency key)
+                             user_id, channel, state, attempts
+                             provider_msg_id, ts
+</pre></div>
+        <p class="mini-heading">First design, and why it breaks</p>
+        <p>The naive version has trigger services (billing, shipping, a cron job) calling one notification server, which looks up contact info, renders a message and calls APNs, FCM, SMS and email providers inline.</p>
+        <div class="diagram-box"><pre>
+<span class="dim">Trigger services</span>             <span class="warn">1 Notification Server (with DB + cache inside)</span>
+ billing  --+                          |--> APNs  --> iOS
+ shipping --+--- HTTP ---------------> |--> FCM   --> Android
+ cron     --+                          |--> SMS vendor
+                                       |--> Email vendor
+<span class="warn">Problems:</span> SPOF, can't scale DB/cache/workers independently,
+          a slow provider blocks the request thread, bursts = dropped events
+</pre></div>
+        <p>It has three structural flaws: a single point of failure, no way to scale the stateful pieces (database, cache) independently of the compute that does the sending, and tight coupling between the caller's latency and the slowest provider. Under a burst there is nowhere to buffer, so work is either dropped or the callers time out and retry, which amplifies the burst.</p>
+        <p class="mini-heading">Improved design</p>
+        <p>Pull the database and cache out of the server, run N stateless notification servers behind a load balancer, and put a message queue between acceptance and delivery with one queue per channel (and ideally per priority). Workers per channel pull from their queue and call the matching third-party service. This is the textbook decoupling: acceptance is fast and cheap (validate, persist, enqueue, return 202), and delivery rate is governed by worker count and provider limits instead of by the caller.</p>
+        <div class="diagram-box"><pre>
+<span class="dim">Triggers</span> --> <span class="hi">LB</span> --> <span class="hi">Notification Servers (stateless xN)</span>
+                         |  1 validate, authn, fetch template + prefs (cache/DB)
+                         |  2 dedupe on event_id, rate-limit, write log row
+                         v
+        +-------+---------------+----------------+
+        v       v               v                v
+   <span class="step">[push-ios q]</span> <span class="step">[push-android q]</span>  <span class="step">[sms q]</span>        <span class="step">[email q]</span>
+        |       |               |                |
+   workers  workers         workers          workers  <span class="dim">(autoscale on queue depth)</span>
+        v       v               v                v
+      <span class="ok">APNs</span>    <span class="ok">FCM</span>         <span class="ok">Twilio</span>          <span class="ok">SendGrid/SES</span>
+        \       |               |                /
+         +------+---- status / receipts ---------+--> notification_log + analytics
+</pre></div>
+        <div class="insight-box"><strong>Why a queue per channel:</strong> a single shared queue lets a stalled email provider back up and starve push, which is the most time-sensitive channel. Separate queues give you isolation (bulkheads), independent autoscaling, independent rate limiting against each provider's quota, and independent retry policies.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Reliability</span>
+        <h2>Never lose it, never send it twice</h2>
+        <p class="mini-heading">Preventing data loss</p>
+        <p>The book's answer is to persist every notification in a log before delivery and to retry from that log. Make this precise: on accept, the notification server writes a row (state QUEUED) and publishes to the queue. Doing these as two separate writes creates a dual-write gap: crash between them and the row exists but nothing is sent, or the message is sent with no row. Close the gap with a transactional outbox: write the log row and an outbox record in one transaction, and have a relay publish outbox rows to the queue (or use CDC from the log table). Workers then ack a queue message only after the provider call returns, so a crashed worker causes redelivery rather than loss. That yields at-least-once delivery.</p>
+        <p class="mini-heading">Can we get exactly-once?</p>
+        <p>Not end to end. The provider call is an external side effect: if the worker sends to FCM, then dies before acking, the queue redelivers and the user may receive two pushes. What you can do is shrink the window and make duplicates harmless. Layered defences:</p>
+        <ul class="check-list">
+          <li>Dedup at the door: every trigger supplies an event_id (or you derive a hash of user, template, entity and time bucket). An atomic "insert if absent" with a TTL in Redis (SET NX EX) or a unique constraint on the log table discards replays from retrying callers.</li>
+          <li>Dedup at the worker: before sending, check the log state; if it is already SENT, ack and skip.</li>
+          <li>Provider-side collapse: APNs collapse-id and FCM collapse keys make the device show one notification even if two are delivered. Email has no such luxury, so be stricter there.</li>
+          <li>Provider idempotency keys where offered (several email and SMS APIs accept a client-supplied message or idempotency key).</li>
+        </ul>
+        <div class="warn-box"><strong>Ambiguous failures:</strong> a timeout from the provider tells you nothing about whether the message was accepted. For low-stakes channels retry (the user may rarely see two). For high-stakes ones such as OTP codes, prefer a fresh code on retry so the duplicate is harmless, and for money movement alerts record the provider message id and reconcile via delivery receipts.</div>
+        <p class="mini-heading">Retry mechanism</p>
+        <p>Classify errors. Permanent errors (invalid token, malformed number, hard bounce, unsubscribed) must not be retried: mark the device invalid or add the address to a suppression list. Transient errors (5xx, timeouts, 429) are retried with exponential backoff plus jitter (for example 1 s, 2 s, 4 s, ... capped at a few minutes, with random spread so thousands of failed jobs do not retry in lockstep), honouring Retry-After headers. After a bounded number of attempts or a deadline (a "your ride arrived" push is worthless after ten minutes) the message goes to a dead-letter queue for inspection and the log shows FAILED. Retries should happen via delay queues or scheduled redelivery, not by sleeping inside a worker, which wastes capacity (see the delayed job scheduler article).</p>
+        <p class="mini-heading">Ordering and priority</p>
+        <p>Do not promise global ordering; it is not worth the throughput cost. Where order matters (a "shipped" update must not arrive after "delivered"), key the queue partition by user or entity id so related events are serialised, and attach a version so the client can drop stale ones. Use priority tiers: OTP and security alerts in a high-priority queue with reserved worker capacity; transactional in the middle; marketing and digests lowest, throttled and pausable.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep Dive · Additional Components</span>
+        <h2>Templates, settings, rate limiting, tracking, security</h2>
+        <p class="mini-heading">Templates</p>
+        <p>Callers should send a template id plus parameters, never raw copy. Centralised templates give consistent branding, localisation by user locale, safe variable escaping, A/B variants, and one place for legal wording (unsubscribe footers). Version templates and render at send time in the worker (not at acceptance) so a retry hours later uses the same version it was accepted with, pinned by version id.</p>
+        <p class="mini-heading">User settings and opt-out</p>
+        <p>A settings table keyed by (user, channel, category) answers "may we send this?". Check it in the notification server to reject early and again in the worker, because a user may opt out while the message sits in the queue. Opt-outs are also a compliance matter: SMS STOP keywords and email unsubscribe (including one-click List-Unsubscribe headers) have legal force in many jurisdictions. Honour quiet hours and time zones by deferring rather than dropping. Transactional and security messages typically bypass marketing opt-outs, but that exception must be explicit in the category model, not an accident.</p>
+        <p class="mini-heading">Rate limiting</p>
+        <p>Two different limiters are needed. The user-protection limiter caps how many notifications a person gets per channel per window (a token bucket per user and channel is the standard shape, refilling slowly so bursts are allowed but sustained spam is not). The provider-protection limiter shapes your outbound rate toward each gateway to stay within its quota. For deep treatment see the rate limiter chapter. Also add coalescing: if ten "new comment" events hit one user in a minute, send one digest rather than ten pushes.</p>
+        <p class="mini-heading">Monitoring queues</p>
+        <p>Queue depth and oldest-message age are the two numbers that matter. Depth alone hides a slow consumer; age tells you the user-visible delay. Autoscale workers on age/lag, alarm when the age exceeds the latency SLO, and monitor per-provider error ratios so you can fail over (a second SMS vendor, or SES as backup for SendGrid).</p>
+        <p class="mini-heading">Event tracking</p>
+        <p>Analytics services want funnel data: queued, sent, delivered, opened, clicked, converted, unsubscribed. Providers return delivery receipts and bounce events through webhooks; opens use tracking pixels or app callbacks; clicks go through redirect links. Publish all of these to an event stream feeding analytics, and use them operationally: a spike in bounces should auto-pause a campaign before your domain reputation is damaged. Note that Apple's mail privacy features make email open rates unreliable as a signal.</p>
+        <p class="mini-heading">Security</p>
+        <p>Only authenticated, authorised services should be able to trigger sends: use an app key and secret (or better, short-lived signed tokens / mTLS between internal services) and scope them per sender service, with per-key quotas. Otherwise an internal bug or leaked credential becomes a spam cannon. Never log full payloads for sensitive categories, store provider credentials in a secrets manager, and sign webhook callbacks from providers so receipts cannot be forged.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">The full flow</span>
+        <h2>Updated end-to-end design</h2>
+        <div class="diagram-box"><pre>
+ 1 <span class="hi">Trigger</span>  POST /notify {event_id, user_id, template, params, category}
+ 2 <span class="hi">Notif server</span>  authn -> validate -> dedupe(event_id) -> load prefs + devices (cache)
+ 3                 -> opt-out check -> user rate limit -> log(QUEUED)+outbox (1 txn)
+ 4 <span class="hi">Relay</span>   outbox -> channel queue (priority tier, partition by user)
+ 5 <span class="hi">Worker</span>  re-check state/prefs -> render template -> call provider
+ 6          success: log(SENT), ack | transient: delay+retry | permanent: prune token/suppress
+ 7          attempts exhausted: DLQ + log(FAILED)
+ 8 <span class="hi">Receipts</span> provider webhook -> log(DELIVERED/BOUNCED) -> analytics stream
+</pre></div>
+        <p>Scheduled notifications (a reminder at 9 am local time) add a scheduler in front: store the job with its fire time, and a poller or timing wheel enqueues it when due. Do not park far-future messages in the main queue.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Optimisations</span>
+        <h2>Scaling levers and the book's optimisation list</h2>
+        <p>Horizontal scaling of the stateless servers, queues to absorb bursts, caching of templates, preferences and device lookups (all read-heavy, rarely mutated, invalidate on write) are the standard levers. One item in the source notes lists "distributed crawling" as an optimisation; that is clearly a copy-paste slip from the web crawler chapter. The relevant idea for a notification platform is geographic distribution: run worker pools and provider connections in regions near both the user and the provider endpoints, keep per-region queues so a regional outage does not stall everyone, and route SMS through region-appropriate carriers because delivery quality and price vary enormously by country.</p>
+        <p>More levers that matter in practice: batch provider calls (FCM and email APIs accept multiple recipients per request; APNs multiplexes streams over a long-lived HTTP/2 connection, so reuse connections rather than reconnecting, which Apple penalises), fan out large campaigns lazily by segment so you never materialise 50 M queue messages at once, and shard the log by user id.</p>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Option A</th><th>Option B</th><th>Pick when</th></tr></thead>
+          <tbody>
+            <tr><td>Queue topology</td><td>One queue per channel and priority</td><td>One shared queue</td><td>A unless you have tiny volume; isolation beats simplicity at scale.</td></tr>
+            <tr><td>Delivery semantics</td><td>At-least-once plus dedup</td><td>At-most-once</td><td>At-most-once only for disposable, high-volume tips; losing an OTP is a bug.</td></tr>
+            <tr><td>Own senders vs vendor</td><td>Third-party gateways</td><td>Self-run SMTP / SMSC</td><td>Vendors until cost or deliverability control justifies the heavy operational burden.</td></tr>
+            <tr><td>Rendering</td><td>At accept time</td><td>At send time (versioned)</td><td>Send time keeps freshness and cuts queue message size.</td></tr>
+            <tr><td>Preference check</td><td>Only at accept</td><td>Accept and send</td><td>Both; queues create a window where prefs change.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>A runnable notification pipeline</h2>
+        <p>The example below implements the pipeline stages in miniature: event-id dedup, opt-out check, per-user token bucket, per-channel queues, a worker with exponential backoff and a dead-letter queue. Time is a manual clock so retries are deterministic. Provider calls are injected functions, standing in for APNs, Twilio and so on.</p>
+        <span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">import assert from 'node:assert/strict';
+
+// Minimal notification pipeline: validate -&gt; dedup -&gt; opt-out -&gt; rate limit -&gt; queue -&gt; worker w/ retry + DLQ
+class TokenBucket {
+  constructor(cap, refillPerSec, now) { this.cap = cap; this.rate = refillPerSec; this.tokens = cap; this.t = now; }
+  take(now) {
+    this.tokens = Math.min(this.cap, this.tokens + ((now - this.t) / 1000) * this.rate);
+    this.t = now;
+    if (this.tokens &gt;= 1) { this.tokens -= 1; return true; }
+    return false;
+  }
+}
+
+class Pipeline {
+  constructor({ providers, prefs, maxAttempts = 4, baseDelayMs = 100 }) {
+    this.providers = providers; this.prefs = prefs;
+    this.maxAttempts = maxAttempts; this.base = baseDelayMs;
+    this.seen = new Set();          // dedup store (Redis SETNX w/ TTL in prod)
+    this.buckets = new Map();       // per user+channel limiter
+    this.queues = { push: [], sms: [], email: [] };
+    this.dlq = []; this.log = [];   // notification log
+    this.clock = 0;
+  }
+  accept(evt) {
+    const { eventId, userId, channel } = evt;
+    if (!this.queues[channel]) return this.#drop(evt, 'bad_channel');
+    if (this.seen.has(eventId)) return this.#drop(evt, 'duplicate');
+    this.seen.add(eventId);
+    if (this.prefs[userId]?.[channel] === false) return this.#drop(evt, 'opted_out');
+    const key = userId + ':' + channel;
+    if (!this.buckets.has(key)) this.buckets.set(key, new TokenBucket(2, 1 / 60, this.clock));
+    if (!this.buckets.get(key).take(this.clock)) return this.#drop(evt, 'rate_limited');
+    this.queues[channel].push({ ...evt, attempts: 0, notBefore: 0 });
+    this.log.push({ eventId, state: 'queued' });
+    return 'queued';
+  }
+  #drop(evt, why) { this.log.push({ eventId: evt.eventId, state: why }); return why; }
+  // one worker tick for a channel: process everything that is due
+  drain(channel) {
+    const q = this.queues[channel]; const pending = [];
+    for (const m of q.splice(0)) {
+      if (m.notBefore &gt; this.clock) { pending.push(m); continue; }
+      try {
+        this.providers[channel](m);
+        this.log.push({ eventId: m.eventId, state: 'sent' });
+      } catch (e) {
+        m.attempts++;
+        if (m.attempts &gt;= this.maxAttempts) { this.dlq.push(m); this.log.push({ eventId: m.eventId, state: 'dead' }); continue; }
+        const backoff = this.base * 2 ** (m.attempts - 1);
+        m.notBefore = this.clock + backoff;          // full jitter omitted for determinism
+        pending.push(m);
+      }
+    }
+    q.push(...pending);
+  }
+}
+
+// --- self-test ---
+const sent = []; let smsFailures = 2;
+const p = new Pipeline({
+  providers: {
+    push: (m) =&gt; sent.push(m.eventId),
+    email: (m) =&gt; sent.push(m.eventId),
+    sms: (m) =&gt; { if (smsFailures-- &gt; 0) throw new Error('503'); sent.push(m.eventId); },
+  },
+  prefs: { u2: { email: false } },
+});
+assert.equal(p.accept({ eventId: 'e1', userId: 'u1', channel: 'push' }), 'queued');
+assert.equal(p.accept({ eventId: 'e1', userId: 'u1', channel: 'push' }), 'duplicate');
+assert.equal(p.accept({ eventId: 'e2', userId: 'u2', channel: 'email' }), 'opted_out');
+assert.equal(p.accept({ eventId: 'e3', userId: 'u1', channel: 'push' }), 'queued');
+assert.equal(p.accept({ eventId: 'e4', userId: 'u1', channel: 'push' }), 'rate_limited');
+assert.equal(p.accept({ eventId: 'e5', userId: 'u3', channel: 'sms' }), 'queued');
+p.drain('push'); p.drain('sms');
+assert.deepEqual(sent, ['e1', 'e3']);            // sms failed once
+p.clock = 100; p.drain('sms');                   // 2nd failure, next retry at 100+200
+assert.equal(p.queues.sms.length, 1);
+p.clock = 300; p.drain('sms');                   // succeeds
+assert.deepEqual(sent, ['e1', 'e3', 'e5']);
+
+// permanent failure -&gt; DLQ
+const q = new Pipeline({ providers: { push() { throw new Error('down'); }, sms() {}, email() {} }, prefs: {}, maxAttempts: 3 });
+q.accept({ eventId: 'x', userId: 'u', channel: 'push' });
+for (const t of [0, 100, 300, 700]) { q.clock = t; q.drain('push'); }
+assert.equal(q.dlq.length, 1);
+console.log('states:', p.log.map(l =&gt; l.eventId + '=' + l.state).join(' '));
+console.log('dlq size:', q.dlq.length, '| all assertions passed');</code></pre>
+        <p class="code-caption">Prints the final state of each event (queued, duplicate, opted_out, rate_limited, sent) and "dlq size: 1 | all assertions passed". Executed with Node 20+.</p>
+        <p>In production the Set becomes Redis SET NX with TTL, the arrays become Kafka topics or SQS queues, backoff gets jitter, and the log is a durable table. The control flow stays the same.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure Modes</span>
+        <h2>What breaks and what you do about it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Provider outage or throttling (429)</td><td>Queue age grows, error ratio spikes</td><td>Backoff with jitter, circuit breaker, failover vendor, shed low-priority traffic first.</td></tr>
+            <tr><td>Worker crash after send, before ack</td><td>Duplicate delivery</td><td>Log-state check, collapse keys, idempotency keys; accept rare dupes on soft channels.</td></tr>
+            <tr><td>Dual-write gap on accept</td><td>Row without message or vice versa</td><td>Transactional outbox or CDC.</td></tr>
+            <tr><td>Stale device tokens</td><td>Wasted sends, provider penalties</td><td>Delete on 410/Unregistered, refresh token on app launch, prune by last_seen.</td></tr>
+            <tr><td>Poison message</td><td>Same job crashes workers repeatedly</td><td>Attempt counter, DLQ, schema validation at accept.</td></tr>
+            <tr><td>Retry storm</td><td>Recovery overwhelms the provider again</td><td>Jitter, capped concurrency, token bucket on outbound rate.</td></tr>
+            <tr><td>Campaign floods transactional traffic</td><td>OTPs delayed</td><td>Separate priority queues and reserved worker capacity.</td></tr>
+            <tr><td>Hot trigger bug (loop emitting events)</td><td>Users spammed</td><td>Per-user limits, per-key quotas, kill switch per template.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Production Gotchas</span>
+        <h2>Scaling constraints and things interviews skip</h2>
+        <ul>
+          <li><strong>Sender reputation is shared state.</strong> Spam complaints and hard bounces on marketing mail hurt deliverability of password resets. Use separate sending domains or IP pools for transactional and promotional mail.</li>
+          <li><strong>SMS is a regulated, expensive channel.</strong> Sender ID rules differ per country, messages split into segments (long or non-GSM text costs more), and delivery receipts are best effort. Prefer push or email where you can, and use SMS for OTP and critical alerts.</li>
+          <li><strong>Time zones and quiet hours.</strong> A campaign sent "at 9 am" is 9 am in many places; that is a fan-out over staggered schedules, not one burst, which also flattens your load.</li>
+          <li><strong>Silent push is not a guaranteed channel.</strong> OS vendors throttle and may drop data messages for battery reasons. Do not build correctness on push delivery; the app must reconcile on open (pull the inbox).</li>
+          <li><strong>An in-app inbox</strong> is often the source of truth, with push as a hint. That also solves "I never saw it" support tickets.</li>
+          <li><strong>Privacy:</strong> lock-screen previews can leak content; allow sensitive templates to send a neutral prompt instead.</li>
+          <li><strong>Multi-tenant fairness.</strong> If many internal teams share the platform, give each its own quota and weighted-fair queueing so one team's batch does not starve the rest.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview and design review checklist</h2>
+        <ul class="check-list">
+          <li>Requirements stated with numbers: 16 M per day, about 185/s average, plan for 10x peak plus campaign bursts.</li>
+          <li>Separate device, user and settings data; tokens treated as perishable.</li>
+          <li>Stateless servers, external cache and DB, queue per channel and priority.</li>
+          <li>Durable log written before delivery, via outbox or CDC.</li>
+          <li>At-least-once delivery with dedup on event id and provider-side collapse.</li>
+          <li>Error classification, exponential backoff with jitter, DLQ, deadlines.</li>
+          <li>Opt-out checked at accept and at send; quiet hours; legal unsubscribe.</li>
+          <li>User rate limits and provider rate limits are separate mechanisms.</li>
+          <li>Queue age alarms, per-provider error dashboards, failover vendor.</li>
+          <li>Authenticated triggers with per-service quotas.</li>
+          <li>Receipts and events feed analytics and auto-pause logic.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not call APNs/FCM directly from the service that triggers the event?</summary><p>Because every service would then need its own credential management, retry logic, preference lookup and rate limiting, and a slow provider would block business requests. A central platform gives one place for opt-outs, observability and quotas, and a queue to absorb bursts.</p></details>
+        <details><summary>How do you guarantee a notification is not sent twice?</summary><p>You cannot guarantee it across an external provider, but you can make it very rare and harmless: idempotent event ids at the door, a state check in the worker, collapse keys on push, and provider idempotency keys. Design the message so a duplicate is tolerable, for example a fresh OTP rather than a re-sent one.</p></details>
+        <details><summary>What happens when the user opts out while their notification is in the queue?</summary><p>The worker re-reads preferences just before sending and drops the message with a SUPPRESSED state. Checking only at accept time leaves a race, and for SMS and email that race can be a compliance violation.</p></details>
+        <details><summary>How would you send a 20-million-user campaign?</summary><p>Do not enqueue 20 M messages synchronously. Store a campaign with a segment query, have a campaign service page through the segment and enqueue in batches into the low-priority queue, rate-limit by provider quota, stagger by time zone, and allow pause and cancel. Track progress per batch so a restart resumes where it stopped.</p></details>
+        <details><summary>How do you add a new channel such as WhatsApp or Slack?</summary><p>Add a channel adapter behind the common worker interface, a new queue and settings category, and a provider rate limiter. Because the pipeline stages upstream are channel-agnostic, nothing else changes. That is the extensibility payoff of per-channel queues.</p></details>
+        <details><summary>Push versus webhook callbacks for status: how do you reconcile?</summary><p>Sending returns only "accepted by gateway". Delivery truth arrives later via receipts or webhooks, which may be duplicated or out of order. Make receipt handling idempotent and monotonic (a state never moves backwards from DELIVERED to SENT) and store the provider message id to correlate.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./09-web-crawler.html">Chapter 9: Design a Web Crawler</a> — previous chapter.</li>
+          <li><a href="./11-news-feed.html">Chapter 11: Design a News Feed System</a> — next chapter; its fanout service also triggers notifications.</li>
+          <li><a href="../../instagram-notification-fanout.html">Instagram Notification Fanout</a> — a worked fanout scenario for push at scale.</li>
+          <li><a href="../../system-design/message-queue.html">Message Queues</a> — the buffering and redelivery backbone of the pipeline.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — the technique behind deduplication.</li>
+          <li><a href="../../system-design/rate-limiting.html">Rate Limiting</a> — user and provider limiters.</li>
+          <li><a href="../../delayed-job-scheduler-system-design.html">Delayed Job Scheduler</a> — scheduled sends and retry delays.</li>
+          <li><a href="../../system-design/webhooks.html">Webhooks</a> — how providers report receipts back.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The repository lists no additional resources specific to this chapter.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>A notification system is a reliability pipeline wrapped around unreliable third parties. Accept fast, persist first, queue per channel, deliver at-least-once, deduplicate and collapse to hide the duplicates, retry only what is retryable, respect the user's preferences twice, and measure queue age rather than just depth. Do those, and the senders themselves are the easy part.</p>
+      </section>
+    </main>
+  </body>
+</html>

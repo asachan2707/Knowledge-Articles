@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Agents That Resume After Failure | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .confirm-box{background:#f0fdf4;border-left:4px solid #22c55e;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .confirm-box strong{color:#15803d}
+      .arch-table{width:100%;border-collapse:collapse;font-size:.88rem;margin:1rem 0}
+      .arch-table th{background:#f1f5f9;text-align:left;padding:.5rem .75rem;border-bottom:2px solid #e2e8f0;font-family:Arial,sans-serif;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:#64748b}
+      .arch-table td{padding:.5rem .75rem;border-bottom:1px solid #f1f5f9;vertical-align:top}
+      .arch-table tr:last-child td{border-bottom:none}
+      .flow-steps{counter-reset:step;list-style:none;padding:0;margin:1rem 0}
+      .flow-steps li{counter-increment:step;display:flex;gap:.85rem;padding:.65rem 0;border-bottom:1px solid #f1f5f9}
+      .flow-steps li:last-child{border-bottom:none}
+      .flow-steps li::before{content:counter(step);display:flex;align-items:center;justify-content:center;min-width:28px;height:28px;border-radius:50%;background:#0f766e;color:#fff;font-family:Arial,sans-serif;font-size:.78rem;font-weight:800;flex-shrink:0;margin-top:.1rem}
+      .flow-steps li strong{display:block;color:#1e293b;font-size:.92rem}
+      .flow-steps li span{font-size:.86rem;color:#64748b}
+      .tag-row{display:flex;flex-wrap:wrap;gap:.45rem;margin:.6rem 0}
+      .tag{font-family:Arial,sans-serif;font-size:.75rem;font-weight:700;padding:.18rem .55rem;border-radius:999px;border:1px solid #e2e8f0;background:#f8fafc;color:#475569}
+      .tag.red{background:#fef2f2;border-color:#fca5a5;color:#b91c1c}
+      .tag.green{background:#f0fdf4;border-color:#86efac;color:#15803d}
+      .tag.blue{background:#eff6ff;border-color:#93c5fd;color:#1d4ed8}
+      .tag.purple{background:#f5f3ff;border-color:#c4b5fd;color:#6d28d9}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1518770660439-4636190af475?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Circuit board close-up representing agent state and memory persistence"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">Agents · AI · Engineering · Architecture · 18 min</span>
+          </div>
+        </figure>
+
+        <h1>How to Build AI Agents That Pick Up Where They Left Off After Failure</h1>
+        <p class="summary">
+          Long-running AI agents crash — networks timeout, rate limits kick in, processes die. The difference between a demo and a production agent is whether it restarts from scratch or resumes from exactly where it failed. This guide covers durable execution, checkpoint design, idempotent tool calls, and the Redis-backed resumable agent loop pattern used in real production systems.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: agents / reliability</span>
+          <span class="meta-item" data-added="2026-09-03">Published: 2026-09-03</span>
+          <span class="meta-item">Source: lets-code-future · Medium</span>
+        </div>
+      </header>
+
+      <!-- Lead -->
+      <section class="content-card">
+        <p class="lead">Every multi-step AI agent is a distributed system in miniature — and distributed systems fail. A 12-step research agent that crashes on step 11 and re-runs every LLM call from scratch is not just slow; it is dangerous. It may email duplicates, make double charges, or create ghost tickets. Production-grade agents treat failure as a first-class concern by persisting state after each step and making every tool invocation replay-safe.</p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> Durable execution means saving a checkpoint after every significant step so that a resume path can replay only the failed tail of the plan — never the already-committed head. Idempotency ensures that replaying a step that partially completed does not double-apply its side effects.</p>
+        </div>
+      </section>
+
+      <!-- Story -->
+      <section class="story-card">
+        <span class="section-label">Story · The $40k duplicate payout</span>
+        <p>A fintech startup built a reconciliation agent: it would pull ledger rows, call an LLM to classify each transaction, then issue correction payouts via a payments API. The agent ran nightly on 2,000 transactions. One night, their cloud provider had a transient networking blip at step 1,847. The agent crashed. The on-call engineer restarted it — from step 1 — because there was no checkpoint. The first 1,846 payouts ran again. By the time anyone noticed, $40k in duplicate payouts had hit customer accounts. Reversals took a week and strained customer trust permanently.</p>
+        <p>The fix was not more retries or better error handling. It was a three-line change: write a checkpoint after each payout, read it on startup, skip any step whose ID already existed in the checkpoint store. That pattern — checkpoint, resume, skip-if-done — is the entire subject of this article.</p>
+      </section>
+
+      <!-- Why agents fail -->
+      <section class="content-card">
+        <span class="section-label">Section 1 — Failure taxonomy</span>
+        <h2>Why Long-Running Agents Fail Mid-Task</h2>
+        <p>Understanding the failure modes informs which parts of the checkpoint and recovery stack you need to build.</p>
+        <table class="arch-table">
+          <thead>
+            <tr>
+              <th>Failure Type</th>
+              <th>Typical Cause</th>
+              <th>Recovery Complexity</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Network timeout</strong></td>
+              <td>LLM API, search tool, or downstream REST call exceeds socket timeout</td>
+              <td>Low — retry with same inputs if tool is read-only</td>
+            </tr>
+            <tr>
+              <td><strong>Rate limit (429)</strong></td>
+              <td>OpenAI, Anthropic, SerpAPI throttle at token or request limits</td>
+              <td>Low — exponential backoff, resume from checkpoint</td>
+            </tr>
+            <tr>
+              <td><strong>Context window overflow</strong></td>
+              <td>Accumulated tool outputs exceed model context; request rejected</td>
+              <td>Medium — need to summarise history before resuming</td>
+            </tr>
+            <tr>
+              <td><strong>Tool execution failure</strong></td>
+              <td>Code sandbox OOM, browser session drop, DB connection lost</td>
+              <td>Medium — re-provision the tool, replay from last checkpoint</td>
+            </tr>
+            <tr>
+              <td><strong>Process crash / OOM kill</strong></td>
+              <td>Container evicted, OOM killer, host reboot</td>
+              <td>High — in-memory state lost; checkpoint must be external</td>
+            </tr>
+            <tr>
+              <td><strong>Partial write side effect</strong></td>
+              <td>Tool call started a write (DB insert, email send) then crashed mid-flight</td>
+              <td>High — idempotency required on resume to avoid double-apply</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="warn-box">
+          <p><strong>The worst case:</strong> A non-idempotent write tool that crashed after the write committed but before the agent received confirmation. On resume, the agent will call the tool again. Without idempotency at the tool layer, the write runs twice.</p>
+        </div>
+      </section>
+
+      <!-- State persistence strategies -->
+      <section class="content-card">
+        <span class="section-label">Section 2 — Persistence strategies</span>
+        <h2>Where to Store Checkpoints: In-Memory vs Redis vs Database</h2>
+        <p>The choice of checkpoint backend determines your durability guarantee, query capability, and operational overhead.</p>
+        <table class="arch-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Survives Process Crash?</th>
+              <th>Survives Host Failure?</th>
+              <th>Best For</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>In-memory Map</strong></td>
+              <td>No</td>
+              <td>No</td>
+              <td>Development only; useful for unit-testing the resume logic</td>
+            </tr>
+            <tr>
+              <td><strong>Local file / SQLite</strong></td>
+              <td>Yes</td>
+              <td>No (unless volume-mounted)</td>
+              <td>Single-machine agents, CLI tools, short-lived jobs</td>
+            </tr>
+            <tr>
+              <td><strong>Redis (AOF + replica)</strong></td>
+              <td>Yes</td>
+              <td>Partial (replica lag risk)</td>
+              <td>High-throughput, low-latency step logging; TTL-based expiry</td>
+            </tr>
+            <tr>
+              <td><strong>PostgreSQL / DynamoDB</strong></td>
+              <td>Yes</td>
+              <td>Yes</td>
+              <td>Auditable, queryable checkpoints; long-running multi-day tasks</td>
+            </tr>
+            <tr>
+              <td><strong>Temporal / Durable Execution platform</strong></td>
+              <td>Yes</td>
+              <td>Yes</td>
+              <td>Complex branching workflows; built-in retry, versioning, signals</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>For most agentic use-cases, <strong>Redis with AOF persistence</strong> is the right starting point: sub-millisecond writes, TTL-based cleanup, and simple key namespacing by run ID. Graduate to PostgreSQL when you need cross-run analytics or compliance audit trails.</p>
+      </section>
+
+      <!-- Checkpoint design -->
+      <section class="content-card">
+        <span class="section-label">Section 3 — Checkpoint schema design</span>
+        <h2>What State to Capture in Each Checkpoint</h2>
+        <p>A checkpoint must contain enough information to reconstruct the agent's decision context at the point of failure — without relying on any in-memory state that no longer exists.</p>
+        <ul class="check-list">
+          <li><strong>Run ID</strong> — a UUID stable across restarts; used as the checkpoint namespace key</li>
+          <li><strong>Plan snapshot</strong> — the full ordered list of steps (or graph nodes) the agent planned at the start of the run</li>
+          <li><strong>Step cursor</strong> — the index (or node ID) of the last successfully completed step</li>
+          <li><strong>Tool call log</strong> — for each completed step: tool name, input args, output, timestamp, and idempotency key</li>
+          <li><strong>Partial outputs</strong> — any intermediate artefacts (scraped text, code output, transformed data) needed by later steps</li>
+          <li><strong>Context summary</strong> — a compressed narrative of what the agent has learned so far (prevents context-window overflow on resume)</li>
+          <li><strong>Error log</strong> — the last failure reason and retry count per step, to prevent infinite retry loops</li>
+        </ul>
+        <div class="insight-box">
+          <p><strong>Insight:</strong> Do not checkpoint the raw context window. The full message history grows O(n) with steps and will overflow the context on resume. Instead, checkpoint a summarised "agent memory" blob after every 5 steps. LangGraph's <code>MemorySaver</code> does exactly this under the hood.</p>
+        </div>
+        <p>Keep checkpoint writes atomic. In Redis, use a single <code>HSET</code> over a pipeline to write multiple fields in one round-trip. In PostgreSQL, wrap the checkpoint upsert in a transaction with the tool-output insert to avoid a partial checkpoint that records the step as done before its output is saved.</p>
+      </section>
+
+      <!-- Idempotency -->
+      <section class="content-card">
+        <span class="section-label">Section 4 — Idempotency</span>
+        <h2>Making Tool Calls Safe to Replay</h2>
+        <p>Checkpointing tells the agent where to resume. Idempotency makes the resume safe. These are two separate concerns — checkpointing without idempotency still causes duplicates on partial writes.</p>
+        <ol class="flow-steps">
+          <li>
+            <strong>Assign an idempotency key to every tool call before execution</strong>
+            <span>Derive it deterministically: <code>hash(runId + stepIndex + toolName + inputArgs)</code>. The same logical call always produces the same key.</span>
+          </li>
+          <li>
+            <strong>Check the key against a store before executing the tool</strong>
+            <span>If the key already exists and has a committed result, return the cached result immediately. Do not re-execute the tool.</span>
+          </li>
+          <li>
+            <strong>Write the key + result atomically after successful execution</strong>
+            <span>Use a two-field hash in Redis: <code>{ status: "done", result: "..." }</code>. Write status="pending" before the call so a crash mid-call is detectable.</span>
+          </li>
+          <li>
+            <strong>Treat pending keys as ambiguous on resume</strong>
+            <span>A step with status="pending" may or may not have committed its side effect. Either re-validate the external state or treat it as a re-run candidate guarded by the downstream system's own idempotency (e.g., Stripe's <code>Idempotency-Key</code> header).</span>
+          </li>
+          <li>
+            <strong>Pass idempotency keys to all external APIs that support them</strong>
+            <span>Stripe, Twilio, Mailgun, and most payment/notification APIs accept a caller-supplied idempotency key. Always pass it; never let the API auto-generate one.</span>
+          </li>
+        </ol>
+        <div class="confirm-box">
+          <p><strong>Rule:</strong> Read tools (search, fetch, classify) are naturally idempotent — re-running them produces the same result. Write tools (email, DB insert, payment) are never idempotent by default — you must make them so explicitly via key-based deduplication.</p>
+        </div>
+      </section>
+
+      <!-- Code example: resumable agent loop with Redis -->
+      <section class="content-card">
+        <span class="section-label">Section 5 — Code example</span>
+        <h2>Resumable Agent Loop with Redis Checkpointing</h2>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// resumable-agent.mjs  — Node 22+, ioredis, openai
+import OpenAI from "openai";
+import Redis from "ioredis";
+import crypto from "crypto";
+
+const redis = new Redis({ host: "localhost", port: 6379 });
+const openai = new OpenAI();
+
+// ── Deterministic idempotency key ────────────────────────────────────────────
+function idempKey(runId, stepIdx, toolName, args) {
+  const raw = `${runId}:${stepIdx}:${toolName}:${JSON.stringify(args)}`;
+  return `idem:${crypto.createHash("sha256").update(raw).digest("hex").slice(0, 24)}`;
+}
+
+// ── Checkpoint helpers ───────────────────────────────────────────────────────
+async function loadCheckpoint(runId) {
+  const raw = await redis.hgetall(`ckpt:${runId}`);
+  if (!raw || !raw.stepCursor) return null;
+  return {
+    stepCursor: parseInt(raw.stepCursor, 10),
+    toolLog: JSON.parse(raw.toolLog || "[]"),
+    contextSummary: raw.contextSummary || "",
+    errorCount: parseInt(raw.errorCount || "0", 10),
+  };
+}
+
+async function saveCheckpoint(runId, cursor, toolLog, contextSummary) {
+  const pipeline = redis.pipeline();
+  pipeline.hset(`ckpt:${runId}`, {
+    stepCursor: cursor,
+    toolLog: JSON.stringify(toolLog),
+    contextSummary,
+    updatedAt: Date.now(),
+  });
+  pipeline.expire(`ckpt:${runId}`, 60 * 60 * 24 * 7); // 7-day TTL
+  await pipeline.exec();
+}
+
+// ── Tool registry (each tool must declare its idempotency class) ─────────────
+const tools = {
+  async searchWeb({ query }) {
+    // idempotent: safe to replay
+    const results = await fakeSearch(query);
+    return { results };
+  },
+  async sendEmail({ to, subject, body }) {
+    // non-idempotent: guarded by external API idempotency key below
+    await fakeEmailAPI({ to, subject, body });
+    return { sent: true };
+  },
+};
+
+// ── Core resumable executor ──────────────────────────────────────────────────
+async function executeStep(runId, stepIdx, toolName, args) {
+  const iKey = idempKey(runId, stepIdx, toolName, args);
+  const stored = await redis.hgetall(iKey);
+
+  // Fast-path: already completed on a prior run
+  if (stored?.status === "done") {
+    console.log(`[RESUME] Step ${stepIdx} (${toolName}) — replaying cached result`);
+    return JSON.parse(stored.result);
+  }
+
+  // Mark as in-flight before calling tool (crash detection)
+  await redis.hset(iKey, { status: "pending", startedAt: Date.now() });
+  await redis.expire(iKey, 86400);
+
+  let result;
+  try {
+    result = await tools[toolName](args);
+  } catch (err) {
+    await redis.hset(iKey, { status: "failed", error: err.message });
+    throw err;
+  }
+
+  // Commit result atomically
+  await redis.hset(iKey, { status: "done", result: JSON.stringify(result) });
+  return result;
+}
+
+// ── Main agent loop ──────────────────────────────────────────────────────────
+async function runAgent(runId, initialGoal) {
+  console.log(`[START] run=${runId}`);
+  const checkpoint = await loadCheckpoint(runId);
+  let cursor = checkpoint?.stepCursor ?? -1;
+  let toolLog = checkpoint?.toolLog ?? [];
+  let contextSummary = checkpoint?.contextSummary ?? "";
+
+  if (cursor >= 0) {
+    console.log(`[RESUME] Continuing from step ${cursor + 1}`);
+  }
+
+  // Step 0: planning (always idempotent — same goal -> same plan if cached)
+  const planKey = `plan:${runId}`;
+  let plan;
+  const cachedPlan = await redis.get(planKey);
+  if (cachedPlan) {
+    plan = JSON.parse(cachedPlan);
+    console.log(`[RESUME] Using cached plan (${plan.length} steps)`);
+  } else {
+    plan = await buildPlan(openai, initialGoal);
+    await redis.set(planKey, JSON.stringify(plan), "EX", 86400);
+  }
+
+  // Execute remaining steps
+  for (let i = cursor + 1; i < plan.length; i++) {
+    const step = plan[i];
+    console.log(`[STEP ${i}] ${step.tool}(${JSON.stringify(step.args)})`);
+
+    let result;
+    try {
+      result = await executeStep(runId, i, step.tool, step.args);
+    } catch (err) {
+      console.error(`[FAIL] Step ${i}: ${err.message}`);
+      // Save checkpoint before bubbling error — next run resumes from i
+      await saveCheckpoint(runId, i - 1, toolLog, contextSummary);
+      throw err;
+    }
+
+    toolLog.push({ step: i, tool: step.tool, args: step.args, result });
+
+    // Summarise context every 5 steps to prevent window overflow
+    if (i % 5 === 0) {
+      contextSummary = await summariseToolLog(openai, toolLog, contextSummary);
+    }
+
+    // Checkpoint after every successful step
+    await saveCheckpoint(runId, i, toolLog, contextSummary);
+  }
+
+  console.log(`[DONE] run=${runId}`);
+  await redis.del(`ckpt:${runId}`); // clean up on success
+  return { toolLog, contextSummary };
+}
+
+// ── Stubs (replace with real implementations) ────────────────────────────────
+async function buildPlan(client, goal) {
+  const response = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "Return a JSON array of {tool, args} steps." },
+      { role: "user", content: goal },
+    ],
+    response_format: { type: "json_object" },
+  });
+  return JSON.parse(response.choices[0].message.content).steps;
+}
+
+async function summariseToolLog(client, log, prior) {
+  const response = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "Summarise the agent progress so far in 3 sentences." },
+      { role: "user", content: `Prior: ${prior}\nNew steps: ${JSON.stringify(log.slice(-5))}` },
+    ],
+  });
+  return response.choices[0].message.content;
+}
+
+async function fakeSearch(query) { return [`Result for "${query}"`]; }
+async function fakeEmailAPI(opts) { /* stub */ }
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+const RUN_ID = process.env.RUN_ID ?? crypto.randomUUID();
+await runAgent(RUN_ID, "Research the top 5 AI orchestration frameworks and email a summary.");
+await redis.quit();
+</code></pre>
+        <p>To resume a crashed run, simply re-invoke with the same <code>RUN_ID</code> environment variable. The agent reads the checkpoint, rebuilds context from the tool log summary, and executes only the remaining steps. All already-committed tool calls return their cached results instantly.</p>
+      </section>
+
+      <!-- Re-entry strategies -->
+      <section class="content-card">
+        <span class="section-label">Section 6 — Re-entry strategies</span>
+        <h2>Full Restart vs Mid-Task Resume vs Rollback</h2>
+        <p>Not every failure should trigger a resume from the last checkpoint. Choose the re-entry strategy based on what failed and whether the world state changed while the agent was down.</p>
+        <table class="arch-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>When to Use</th>
+              <th>Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Full restart</strong></td>
+              <td>Plan was invalid, goal changed, or checkpoint is corrupt / older than TTL</td>
+              <td>Re-runs side effects unless every tool is idempotent</td>
+            </tr>
+            <tr>
+              <td><strong>Mid-task resume</strong></td>
+              <td>Process crash or transient API error after writing a valid checkpoint</td>
+              <td>World state may have changed (external data freshness); re-validate if critical</td>
+            </tr>
+            <tr>
+              <td><strong>Rollback to Nth checkpoint</strong></td>
+              <td>An LLM reasoning error was detected downstream; need to undo and re-plan from step N</td>
+              <td>Must reverse or compensate committed side effects (Saga-style compensation)</td>
+            </tr>
+            <tr>
+              <td><strong>Partial replay with override</strong></td>
+              <td>A specific tool call returned a bad result due to a transient data issue</td>
+              <td>Must bust the idempotency key for that step before replaying</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="insight-box">
+          <p><strong>LangGraph's StateGraph</strong> enables rollback by storing every node's output as a versioned message in the graph state. You can call <code>graph.update_state(config, values, as_node="plan_step")</code> to inject a corrected value at any node and re-run the downstream subgraph only.</p>
+        </div>
+      </section>
+
+      <!-- Production frameworks -->
+      <section class="content-card">
+        <span class="section-label">Section 7 — Production frameworks</span>
+        <h2>Temporal, LangGraph, and Checkpointed Agent Loops Compared</h2>
+
+        <h3>Temporal Workflows</h3>
+        <p>Temporal treats every workflow function as automatically durable. Activity functions (the equivalent of tool calls) are retried by the Temporal server, not your code. State is event-sourced in Temporal's history log — the workflow replays the log to reconstruct in-memory state after any crash. The cost: you write your agent as a Temporal Workflow, which requires Temporal SDK idioms (no raw I/O in workflows, only in Activities).</p>
+        <p>Netflix uses Temporal to orchestrate multi-day content encoding pipelines. Each encoding step is a durable Activity; a process crash replays only the outstanding step. Uber's driver-lifecycle workflows run for months using the same model.</p>
+
+        <h3>LangGraph State Machines</h3>
+        <p>LangGraph's <code>StateGraph</code> is a directed graph where each node is a Python (or JS) function that transforms the shared state object. The built-in <code>MemorySaver</code> checkpointer serialises the full graph state after every node execution to an in-process store; <code>PostgresSaver</code> and <code>RedisSaver</code> are drop-in replacements for durable storage. Resume is a one-liner: call <code>graph.invoke(None, config={"configurable": {"thread_id": run_id}})</code> — LangGraph loads the checkpoint and re-enters the graph at the interrupted node automatically.</p>
+
+        <h3>Custom Checkpointed Loop (the pattern shown in the code example)</h3>
+        <p>For teams not yet on Temporal or LangGraph, a hand-rolled checkpointed loop in Node or Python gives you 80% of the value with no framework dependency. The pattern: plan once, checkpoint after each step, check idempotency key before each tool call, save a context summary every N steps. Add a dead-letter queue for steps that fail beyond max retries.</p>
+
+        <div class="tag-row">
+          <span class="tag green">Temporal: full durability, event sourcing</span>
+          <span class="tag blue">LangGraph: graph-native, built-in checkpointers</span>
+          <span class="tag purple">Custom loop: zero deps, maximum control</span>
+        </div>
+      </section>
+
+      <!-- Observability -->
+      <section class="content-card">
+        <span class="section-label">Section 8 — Observability</span>
+        <h2>Tracing and Dead-Letter Queues for Failed Agents</h2>
+        <p>An agent that silently fails and does not resume is worse than one that crashes loudly. Build observability in from day one.</p>
+
+        <h3>Structured Step Traces</h3>
+        <p>Emit a structured JSON log line for every step: <code>{ runId, stepIdx, tool, status, durationMs, tokenCost, errorCode }</code>. This feeds dashboards that show agent health across runs — which steps fail most, which tools are slowest, which runs exceed token budgets. OpenTelemetry's <code>AgentSpan</code> pattern is the emerging standard; LangSmith and Langfuse both ingest it natively.</p>
+
+        <h3>Dead-Letter Queue</h3>
+        <p>When a step exceeds its max retry count, push the entire checkpoint — runId, stepIdx, last error, serialised state — to a dead-letter queue (Redis stream, SQS, or Kafka). A separate consumer alerts on-call, stores the artefact for manual inspection, and can replay the step after a human fix. This prevents silent agent death and gives you a recovery workflow for systemic failures (e.g., a tool's API changing its response schema).</p>
+
+        <h3>Stale Checkpoint Detection</h3>
+        <p>A checkpoint with <code>updatedAt</code> older than 2× the expected step duration but <code>status != done</code> is a zombie agent — it crashed and never cleaned up. A cron job that scans for stale checkpoints and alerts (or auto-resumes) is a cheap reliability win. AWS Step Functions calls this "execution heartbeat timeout."</p>
+      </section>
+
+      <!-- Failure modes -->
+      <section class="content-card">
+        <span class="section-label">Section 9 — Failure modes</span>
+        <h2>What Goes Wrong Even With Checkpointing</h2>
+
+        <div class="warn-box">
+          <p><strong>Non-deterministic planning:</strong> If the LLM re-generates the plan on resume (because plan generation was not checkpointed), the new plan may differ. Step indices shift; cached tool outputs map to the wrong steps. Always checkpoint the plan on first generation.</p>
+        </div>
+        <div class="warn-box">
+          <p><strong>Stale world state:</strong> A checkpoint saved 6 hours ago may reference data that has since changed. A resumed agent that uses cached search results from before a breaking news event will reason incorrectly. Add a staleness TTL to data-fetching steps — if the checkpoint for a read step is older than N minutes, re-run it even if cached.</p>
+        </div>
+        <div class="warn-box">
+          <p><strong>Context window desync:</strong> If you restore a summarised context but some tool outputs were summarised away, the LLM may re-derive facts it already established. Include a "facts proven" section in the summary that is never compressed.</p>
+        </div>
+        <div class="warn-box">
+          <p><strong>Idempotency key collision:</strong> If two different logical calls hash to the same key (birthday collision or insufficient entropy in the key derivation), one call's result will be silently returned for the other's input. Use SHA-256 over the full input JSON, not just a truncated hash.</p>
+        </div>
+        <div class="warn-box">
+          <p><strong>Infinite resume loop:</strong> A step that always fails (broken tool, malformed args) will be retried on every resume. Cap retries per step (3 is a common default) and send to a dead-letter queue on exhaustion rather than crashing the whole agent.</p>
+        </div>
+      </section>
+
+      <!-- Scaling -->
+      <section class="content-card">
+        <span class="section-label">Section 10 — Scaling constraints</span>
+        <h2>Production Gotchas at Scale</h2>
+        <ul>
+          <li><strong>Checkpoint write latency:</strong> At hundreds of agents/second, synchronous Redis writes add up. Use fire-and-forget writes (acknowledge-then-write) only for non-critical checkpoints; use synchronous writes for steps with irreversible side effects.</li>
+          <li><strong>Checkpoint size:</strong> Tool outputs can be large (HTML pages, code files, image URLs). Store large artefacts in S3 and checkpoint only the S3 key, not the raw bytes. A checkpoint entry over 1 MB is a smell.</li>
+          <li><strong>Run ID fan-out:</strong> A single agent may spawn sub-agents. Use a hierarchical run ID scheme: <code>parent-uuid/child-uuid/grandchild-uuid</code>. Each level has its own checkpoint; the parent resumes by re-checking whether each child run completed.</li>
+          <li><strong>Clock skew on multi-host:</strong> If agents run across multiple hosts without synchronised clocks, timestamp-based staleness detection is unreliable. Use logical step counters, not wall-clock times, as the primary ordering signal.</li>
+          <li><strong>Checkpoint TTL expiry mid-run:</strong> A run that takes longer than the checkpoint TTL will lose its state mid-flight. Either extend the TTL on every write or use absolute expiry (expire-at a far-future timestamp set on run start).</li>
+        </ul>
+      </section>
+
+      <!-- Checklist -->
+      <section class="content-card">
+        <span class="section-label">Section 11 — Production checklist</span>
+        <h2>Resumable Agent Launch Checklist</h2>
+        <ul class="check-list">
+          <li>Stable run ID assigned at job creation, not at process start</li>
+          <li>Plan generated once and checkpointed; never regenerated on resume</li>
+          <li>Checkpoint written after every completed step (not just at the end)</li>
+          <li>Checkpoint includes: cursor, tool log, context summary, error count</li>
+          <li>Every tool call prefixed with an idempotency key check</li>
+          <li>Write tools marked "pending" before execution, "done" after commit</li>
+          <li>External write APIs receive a caller-controlled idempotency key header</li>
+          <li>Context summarised every N steps to prevent window overflow on resume</li>
+          <li>Max retry count per step with dead-letter queue on exhaustion</li>
+          <li>Structured trace emitted per step (runId, tool, status, durationMs)</li>
+          <li>Stale checkpoint detector (cron or scheduled scan) alerts on zombie runs</li>
+          <li>Checkpoint TTL set to at least 2× expected maximum run duration</li>
+          <li>Large tool outputs stored in object storage; checkpoint holds only the key</li>
+        </ul>
+      </section>
+
+      <!-- FAQ -->
+      <section class="content-card">
+        <span class="section-label">Section 12 — FAQ</span>
+        <h2>Frequently Asked Questions</h2>
+
+        <details>
+          <summary>Do I need Temporal or can I roll my own?</summary>
+          <p>For agents with under 20 steps and no branching, a hand-rolled Redis-backed loop is sufficient and far easier to operate. Temporal pays off when you need durable timers (wait for human approval for up to 30 days), complex branching with compensation logic, or multi-tenant workflow isolation. Do not add Temporal as a dependency just for checkpointing — the operational overhead is real.</p>
+        </details>
+
+        <details>
+          <summary>How does LangGraph's MemorySaver differ from my own Redis checkpoint?</summary>
+          <p>LangGraph's <code>MemorySaver</code> stores the entire graph state (all node outputs) in-process, which means it does not survive a process crash. <code>PostgresSaver</code> and <code>RedisSaver</code> write state to an external store after every node execution and are production-safe. The key difference from a hand-rolled solution: LangGraph automatically handles the re-entry point — you do not write resume logic; the framework replays the graph from the correct node. The trade-off is that your agent must be expressed as a LangGraph StateGraph.</p>
+        </details>
+
+        <details>
+          <summary>What if my tool does not support idempotency keys?</summary>
+          <p>Wrap the tool in a proxy that checks your own idempotency store before forwarding the call. If the proxy finds a "done" record, it returns the cached output without calling the upstream API. If it finds "pending" (a prior crash), it re-calls the API but catches duplicate-resource errors (HTTP 409 or provider-specific conflict codes) and treats them as success. This pattern is the same one Stripe's server uses internally for its own idempotency layer.</p>
+        </details>
+
+        <details>
+          <summary>How do I handle an LLM reasoning mistake discovered after 10 completed steps?</summary>
+          <p>This is a rollback scenario. In LangGraph, inject a correction at the step where the error was introduced using <code>graph.update_state</code>, then re-invoke from that node. In a custom loop, delete the idempotency keys and checkpoint entries for steps N through current, reset the cursor to N-1, and re-run. For steps with committed side effects (emails sent, DB rows written), you need explicit compensation: send a corrective email, soft-delete the rows, etc. This is exactly the Saga compensating transaction pattern.</p>
+        </details>
+
+        <details>
+          <summary>How should I handle context window overflow mid-resume?</summary>
+          <p>At resume time, do not reconstruct the full tool log as messages. Instead, load only the <code>contextSummary</code> blob from the checkpoint as a single system message, then add the outputs of only the last 2-3 steps as user messages before continuing. The summary should contain the proven facts and completed artefact references. This keeps the resume context well under the model's limit regardless of how many prior steps ran.</p>
+        </details>
+      </section>
+
+      <!-- Related Topics -->
+      <section class="content-card">
+        <span class="section-label">Related Topics</span>
+        <h2>Keep Learning</h2>
+        <ul>
+          <li><a href="ai-agent-fundamentals-guide.html">AI Agent Fundamentals Guide</a> — planning loops, tool calling, and memory architecture</li>
+          <li><a href="agent-memory-evals-guardrails.html">Agent Memory, Evals, and Guardrails</a> — the three layers for production agents</li>
+          <li><a href="agentic-engineering-concepts.html">Agentic Engineering Concepts</a> — orchestration, multi-agent patterns, and trust boundaries</li>
+          <li><a href="5-backend-system-design-patterns.html">Backend System Design Patterns</a> — idempotency, saga, outbox, and exactly-once semantics</li>
+        </ul>
+      </section>
+
+      <!-- Takeaway -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Durable execution is the difference between an agent that runs in demos and one that runs in production. The core pattern is deceptively simple — checkpoint after every step, check idempotency before every write, resume from cursor on restart — but the devil is in the details: checkpointing the plan before the run, summarising context before window overflow, capping retries before the loop becomes infinite, and propagating idempotency keys all the way to external APIs. Get these five things right and your agent handles any failure mode — from a transient 429 to a full host reboot — without ever repeating work it already completed or silently losing progress the user was counting on.</p>
+      </section>
+    </main>
+  </body>
+</html>

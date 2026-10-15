@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rate Limiting: Circuit Breakers and Pacers — Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>.diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}</style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Resource guide created 2026-10-15 from liquidslr/system-design-notes Additional Resources (Rate Limiting). Covers Fowler Circuit Breaker (read) and Uber ratelimit.go (API page read; implementation inferred). Explains closed/open/half-open, leaky bucket pacer with slack, how they relate to chapter 4. JavaScript example with fake clock executed with node. About 12 minute read. Related: chapter 04-rate-limiter, system-design/rate-limiting.</div>
+        <h1>Rate Limiting: Circuit Breakers and Pacers — Reading Guide</h1>
+        <p class="summary">A reading guide to Fowler's circuit breaker note and Uber's Go rate limiter, with commentary, a runnable breaker and pacer, and an exercise.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 4</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">9 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">circuit breaker, leaky bucket, slack, backoff</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Resilience4j, Hystrix, uber-go/ratelimit, Envoy</span></div>
+        </div>
+      </header>
+<section class="content-card"><p class="lead">Two short resources sit under the rate-limiter chapter, and they teach complementary halves of the same discipline. Fowler's circuit-breaker note is about protecting <em>yourself</em> from a dependency that is failing. Uber's <code>ratelimit</code> library is about protecting <em>others</em> (or yourself) from too much traffic by pacing calls. Together they cover both directions of load-shedding.</p>
+<div class="callout"><p><strong>Core idea:</strong> a limiter decides <em>how fast</em> work may flow; a breaker decides <em>whether</em> work should flow at all. Production systems need both, and they should be tuned to fail in different, predictable ways.</p></div></section>
+<section class="content-card"><span class="section-label">How to use this guide</span><h2>Scope and reading order</h2>
+<p>The handbook's <a href="../chapters/04-rate-limiter.html">Rate Limiter chapter</a> covers token bucket, leaky bucket, fixed and sliding windows, and the distributed Redis design. These two resources do not repeat that; they fill gaps the chapter only touches: what a client should do when the server says no, and what an in-process pacing implementation looks like in real code. Read Fowler first (15 minutes, no code needed), then skim the Uber source (10 minutes), then build the exercise at the end.</p>
+<table class="data-table"><thead><tr><th>Resource</th><th>Read?</th><th>Time</th><th>Why</th></tr></thead><tbody>
+<tr><td>Circuit Breaker Algorithm</td><td>Read fully</td><td>15 min</td><td>Defines the vocabulary every resilience library uses</td></tr>
+<tr><td>Uber Rate Limiter</td><td>Skim API, read the options</td><td>10 min</td><td>Shows a leaky-bucket pacer with bounded burst in a real library</td></tr></tbody></table></section>
+<section class="content-card"><span class="section-label">Resource 1</span><h2>Circuit Breaker Algorithm</h2>
+
+<p class="mini-heading">What it is</p>
+<p>A short article on Martin Fowler's bliki (2014) describing a pattern popularised by Michael Nygard's book <em>Release It!</em>. I fetched and read the page for this guide.</p>
+<p class="mini-heading">The mechanism, in my words</p>
+<p>Wrap every remote call in an object that counts consecutive failures. While the count is under a threshold the wrapper is transparent. Once the threshold is hit, it stops calling the dependency at all and fails immediately. That is the whole trick: the expensive part of a failing dependency is not the error, it is the <em>waiting</em> for a timeout while threads, sockets and queue slots stay pinned. Failing in microseconds instead of seconds frees those resources and also stops you from hammering a service that is already on its knees.</p>
+<div class="diagram-box"><span class="hi">CLOSED</span> --(failures >= threshold)--> <span class="warn">OPEN</span> --(reset timeout elapsed)--> <span class="step">HALF-OPEN</span>
+  ^                                                              |
+  |------------------ trial call succeeds -----------------------|
+                       <span class="dim">trial call fails: back to OPEN, timer restarts</span></div>
+<p>Three states: <strong>closed</strong> (normal, success resets the counter), <strong>open</strong> (reject instantly), and <strong>half-open</strong> (after a cool-down, let a single probe through; success closes the breaker, failure re-opens it and restarts the timer).</p>
+<p class="mini-heading">The refinements Fowler lists</p>
+<ul class="check-list"><li>Trip on an <em>error rate</em> instead of a raw count, or use different thresholds per error class (timeouts versus connection refused).</li>
+<li>Do not count business errors (a 404, a validation failure) as breaker failures; they say nothing about dependency health.</li>
+<li>Bound concurrency with a thread pool or semaphore so a flood of slow calls trips the breaker by exhausting the pool, not by exhausting the process.</li>
+<li>For asynchronous messaging, trip when the outbound queue fills.</li>
+<li>Log every state change, expose the state to monitoring, and let operators trip or reset it by hand.</li>
+<li>Decide at the caller what a rejected call means: fail the request, serve stale data, or queue the work for later.</li></ul>
+<p class="mini-heading">Senior commentary</p>
+<p>The article's pseudo-code counts failures; the production versions (Hystrix, Resilience4j, Envoy outlier detection, Polly) use a rolling window with a minimum request volume. Without that minimum, one failure out of two requests looks like a 50% error rate and the breaker flaps. The half-open state is where most home-grown implementations are wrong: if you let <em>all</em> waiting callers through at the moment the timer expires you recreate the thundering herd you were trying to prevent. Allow one probe, or a small percentage, and make the others keep failing fast.</p>
+<div class="insight-box"><strong>Still true today:</strong> everything. The three-state model is unchanged. <strong>Dated:</strong> the Hystrix reference (Netflix put it into maintenance mode, and the community moved to Resilience4j and service-mesh policies). Today the breaker often lives in the sidecar or gateway, not the application, which shifts tuning from code to configuration.</div>
+<p class="mini-heading">Connection to the handbook</p>
+<p>The <a href="../chapters/04-rate-limiter.html">rate limiter chapter</a> answers "what do we return when a client is over quota" with HTTP 429 and <code>Retry-After</code>. The breaker is what a <em>well-behaved client</em> does with that signal and with 5xx/timeouts: stop sending. Pair it with exponential backoff plus jitter, otherwise a hundred clients with identical timers reopen in the same millisecond. It also fits beside the <a href="../../system-design/api-gateway.html">API gateway</a>, where per-upstream breakers are a standard feature.</p>
+
+<p><a href="https://martinfowler.com/bliki/CircuitBreaker.html" target="_blank" rel="noopener">Circuit Breaker Algorithm ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Resource 2</span><h2>Uber Rate Limiter</h2>
+
+<p class="mini-heading">What it is</p>
+<p>The public API file of <code>uber-go/ratelimit</code>, a small Go library. The page I fetched is the interface layer: the implementation sits in a separate file the page only references, so what follows about internals is limited to what the API and its option names make clear, plus general knowledge of the leaky-bucket technique.</p>
+<p class="mini-heading">The contract</p>
+<p>The caller invokes <code>Take()</code> before each unit of work. <code>Take()</code> blocks until it is time to proceed and returns the time at which the caller was released. There is no "rejected" outcome: this is a <em>pacer</em>, not a gatekeeper. That single design decision is the lesson. A limiter that blocks smooths traffic with no error handling at the call site, but it also ties up the calling goroutine, so it belongs on the <em>client</em> side of an outbound call or in a worker that is allowed to wait. A server-side limiter that blocks would simply convert overload into a growing pile of parked connections; there you want fast rejection.</p>
+<p class="mini-heading">Options and what they teach</p>
+<table class="data-table"><thead><tr><th>Option</th><th>Meaning</th><th>Lesson</th></tr></thead><tbody>
+<tr><td><code>New(rate)</code></td><td>Rate per second by default</td><td>Rate is turned into a fixed spacing between requests (1s divided by rate)</td></tr>
+<tr><td><code>Per(d)</code></td><td>Change the time unit</td><td>Rates like 2 per minute still become even spacing</td></tr>
+<tr><td><code>WithSlack(n)</code> / default</td><td>Bank unused capacity, default of 10 requests' worth</td><td>Strict pacing punishes bursty callers; slack allows a bounded catch-up burst</td></tr>
+<tr><td><code>WithoutSlack</code></td><td>Slack of zero</td><td>Perfectly even spacing, at the cost of throughput after idle periods</td></tr>
+<tr><td><code>WithClock</code></td><td>Inject a clock</td><td>Time-dependent code must be testable without sleeping</td></tr>
+<tr><td><code>NewUnlimited()</code></td><td>Never blocks</td><td>A null object so call sites need no <code>if limiter != nil</code></td></tr></tbody></table>
+<p class="mini-heading">Senior commentary</p>
+<p>The constructor name in the source (an "atomic int64"-based implementation) tells you the state is a single timestamp updated with compare-and-swap, not a mutex-guarded structure. That is the right shape for a hot-path limiter: the entire state of a leaky bucket with a fixed spacing is "when may the next request run", one integer. It is why this library is cheap even under heavy contention, and it is the same insight behind GCRA (the generic cell rate algorithm), which Redis-based limiters such as Redis Cell use for distributed enforcement.</p>
+<p>Slack is the bridge to the token bucket from the handbook chapter. A leaky bucket with 10 slack and a token bucket with capacity 10 allow almost the same behaviour: after quiet time, a burst of about ten, then steady spacing. The difference is framing: the bucket models <em>credit for lateness</em>, not tokens. In my example below, after half a second of idleness at 100/s, eleven calls go through instantly and the twelfth waits 10 ms.</p>
+<div class="warn-box"><strong>Caveat:</strong> this is a single-process limiter. Ten replicas each configured for 100/s give 1,000/s against a shared downstream. For global limits use the shared-counter design in the chapter, or divide the quota by instance count and accept some slack in the autoscaling case.</div>
+<p class="mini-heading">Still true versus dated</p>
+<p>The technique is timeless; the library's specifics (default slack, clock abstraction) may have changed since I could verify them, so check the current source before relying on defaults.</p>
+<p class="mini-heading">Connection to the handbook</p>
+<p>It is a concrete instance of the leaky bucket in <a href="../chapters/04-rate-limiter.html">chapter 4</a> and complements the algorithm tour on the <a href="../../system-design/rate-limiting.html">rate limiting hub page</a>.</p>
+<div class="warn-box"><strong>Reading note:</strong> The implementation file was not part of the fetched page; internals described here are inferred from the API surface and the standard technique.</div>
+<p><a href="https://github.com/uber-go/ratelimit/blob/master/ratelimit.go" target="_blank" rel="noopener">Uber Rate Limiter ↗</a></p>
+</section>
+<section class="content-card"><span class="section-label">Synthesis</span><h2>How the two resources fit together</h2>
+<p>Picture a service A calling service B. A uses a pacer (Uber style) to keep its outbound rate under B's published quota, so it rarely gets 429s. B applies a server-side limiter that rejects excess quickly. When B degrades anyway (a bad deploy, a full disk), A's breaker notices timeouts, opens, and A stops adding load while B recovers. The half-open probe finds out B is back. Each layer has a distinct job:</p>
+<table class="data-table"><thead><tr><th>Mechanism</th><th>Protects</th><th>Failure signal</th><th>Response</th></tr></thead><tbody>
+<tr><td>Server-side limiter</td><td>The server, from too many requests</td><td>Request rate over quota</td><td>429 + Retry-After, fast</td></tr>
+<tr><td>Client-side pacer</td><td>The downstream, from this caller</td><td>Local rate over budget</td><td>Block briefly</td></tr>
+<tr><td>Circuit breaker</td><td>The caller, from a sick dependency</td><td>Errors and timeouts</td><td>Fail fast, probe later</td></tr>
+<tr><td>Bulkhead / concurrency cap</td><td>The caller's thread pool</td><td>In-flight count</td><td>Reject at the cap</td></tr></tbody></table>
+<p><strong>Order of operations on the client:</strong> bulkhead check, breaker check, pacer wait, call, record result. Putting the pacer after the breaker avoids spending budget on calls you know will be rejected.</p>
+<ul class="check-list"><li>Read first: Fowler. Skim: Uber's options. Skip: nothing; both are short.</li>
+<li>Always send <code>Retry-After</code> (or similar) so clients can back off intelligently instead of guessing.</li>
+<li>Add jitter to every timer: breaker reset, retry backoff, pacer start.</li>
+<li>Alert on breaker state changes, not just on error counts.</li>
+<li>Treat 429 as backpressure, not as a failure that trips the breaker, unless the quota is clearly exhausted for a long period.</li></ul></section>
+<section class="content-card"><span class="section-label">Code</span><h2>Runnable example</h2><span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Circuit breaker (closed/open/half-open) guarding a leaky-bucket pacer with slack.
+class Clock { constructor(){ this.t = 1_000_000_000n; } now(){ return this.t; } advance(ms){ this.t += BigInt(ms) * 1_000_000n; } }
+
+class Pacer {                       // inspired by the "perRequest + maxSlack" leaky bucket idea
+  constructor(clock, ratePerSec, slack = 10) {
+    this.c = clock; this.per = 1_000_000_000n / BigInt(ratePerSec);
+    this.maxSlack = -BigInt(slack) * this.per; this.last = 0n; this.sleptFor = 0n;
+  }
+  take() {                          // returns ns the caller must wait (0 = go now)
+    const now = this.c.now();
+    if (this.last === 0n) { this.last = now; return 0n; }
+    this.sleptFor += this.per - (now - this.last);
+    if (this.sleptFor &gt; 0n) { const wait = this.sleptFor; this.last = now + wait; this.sleptFor = 0n; return wait; }
+    if (this.sleptFor &lt; this.maxSlack) this.sleptFor = this.maxSlack;  // cap banked slack
+    this.last = now; return 0n;
+  }
+}
+
+class CircuitBreaker {
+  constructor(clock, { threshold = 3, resetMs = 100 } = {}) {
+    this.c = clock; this.threshold = threshold; this.resetNs = BigInt(resetMs) * 1_000_000n;
+    this.failures = 0; this.openedAt = 0n; this.trialInFlight = false;
+  }
+  get state() {
+    if (this.failures &lt; this.threshold) return 'closed';
+    return this.c.now() - this.openedAt &gt;= this.resetNs ? 'half-open' : 'open';
+  }
+  call(fn) {
+    const s = this.state;
+    if (s === 'open') throw new Error('circuit open');
+    try { const r = fn(); this.failures = 0; return r; }
+    catch (e) { this.failures++; if (this.failures &gt;= this.threshold) this.openedAt = this.c.now(); throw e; }
+  }
+}
+
+const clock = new Clock();
+const pacer = new Pacer(clock, 100, 10);            // 100 req/s =&gt; 10ms spacing
+const waits = [];
+for (let i = 0; i &lt; 5; i++) waits.push(Number(pacer.take() / 1_000_000n));
+console.log('burst of 5 at t=0, waits(ms):', waits.join(','));
+clock.advance(500);                                  // idle: bank slack
+const after = [];
+for (let i = 0; i &lt; 12; i++) after.push(Number(pacer.take() / 1_000_000n));
+console.log('after idle, 12 back-to-back waits(ms):', after.join(','));
+
+const cb = new CircuitBreaker(clock, { threshold: 3, resetMs: 100 });
+let up = false; const dep = () =&gt; { if (!up) throw new Error('boom'); return 'ok'; };
+const log = [];
+for (let i = 0; i &lt; 5; i++) { try { cb.call(dep); } catch (e) { log.push(`${e.message}-&gt;${cb.state}`); } }
+console.log(log.join(' | '));
+clock.advance(120); console.log('after reset timeout:', cb.state);
+up = true; console.log('trial call:', cb.call(dep), '-&gt;', cb.state);
+console.assert(cb.state === 'closed');</code></pre>
+<p class="code-caption">Prints a burst that is paced at 10 ms steps, an idle period followed by 11 instant calls using banked slack and then pacing again, and a breaker going closed to open to half-open to closed. Executed with node; the asserts pass.</p></section>
+<section class="content-card"><span class="section-label">Exercise</span><h2>What to build</h2>
+ <ol><li>Wrap the pacer and breaker into one <code>ResilientClient.call(fn)</code> and test it against a fake dependency that fails for the first 2 seconds of simulated time, then recovers.</li>
+<li>Replace the consecutive-failure count with a sliding window of the last 20 calls and a 50% threshold with a minimum of 10 calls. Prove with a test that flapping disappears.</li>
+<li>Limit half-open probes to one in-flight call; show that concurrent callers during the probe still fail fast.</li>
+<li>Honour a <code>Retry-After</code> header by pushing the pacer's next-allowed timestamp forward.</li></ol>
+</section>
+<section class="content-card"><span class="section-label">Checklist</span><h2>Before you ship</h2>
+ <ul class="check-list"><li>Every outbound call has a timeout shorter than the caller's own deadline.</li><li>Breaker state is a metric and a log line.</li><li>Fallback behaviour is a conscious product decision (stale data, queue, error).</li><li>Limits are per-dependency, not global.</li><li>Tests use an injected clock; none of them sleep.</li></ul>
+</section>
+<section class="content-card takeaways"><h2>Key Takeaway</h2><p>Limiting and breaking are two ends of one control loop. Pace what you send, reject what you cannot serve, and stop calling what is already failing. The resources are tiny, but the vocabulary they set (slack, half-open, fail fast) is what you will use in every incident review.</p></section>
+      <section class="content-card"><span class="section-label">FAQ · Common Questions</span><h2>Frequently Asked Questions</h2>
+<details><summary>Why does a breaker need a half-open state?</summary><p>Without it the breaker either never recovers or reopens for everyone at once. Half-open sends a single probe so recovery is detected without a stampede.</p></details>
+<details><summary>Pacer or token bucket for client-side limiting?</summary><p>Same family. A pacer with slack is a token bucket expressed as spacing plus credit. Use whichever gives the cleanest code; both need a single timestamp or counter.</p></details>
+<details><summary>Should a 429 trip the breaker?</summary><p>Usually no. A 429 means the server is healthy but you are over quota, so slow down. Tripping the breaker conflates overload with failure and can cut off a healthy dependency.</p></details>
+<details><summary>Where should the breaker live, app or mesh?</summary><p>Both exist. A mesh gives uniform policy and metrics; in-app lets you choose fallbacks. Many teams use mesh outlier detection for coarse protection and in-app breakers where a fallback matters.</p></details>
+<details><summary>How do you rate limit across many instances?</summary><p>Shared counters (Redis with Lua or GCRA), or static per-instance shares. See chapter 4.</p></details>
+</section>
+      <section class="content-card"><h2>Related Topics</h2><ul><li><a href="../chapters/04-rate-limiter.html">Chapter 4: Design a Rate Limiter</a> — the algorithms and distributed design these resources complement.</li><li><a href="../../system-design/rate-limiting.html">Rate Limiting</a> — hub page on the algorithms.</li><li><a href="../../system-design/api-gateway.html">API Gateway</a> — where limits and breakers are commonly enforced.</li><li><a href="../../system-design/idempotency.html">Idempotency</a> — makes retries after a rejection safe.</li></ul></section>
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the "Additonal Resources" list in <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a>, a companion to study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu. The commentary is original; follow the links to read the primary sources.</p><ul><li><a href="https://martinfowler.com/bliki/CircuitBreaker.html" target="_blank" rel="noopener">Circuit Breaker Algorithm</a> — https://martinfowler.com/bliki/CircuitBreaker.html</li><li><a href="https://github.com/uber-go/ratelimit/blob/master/ratelimit.go" target="_blank" rel="noopener">Uber Rate Limiter</a> — https://github.com/uber-go/ratelimit/blob/master/ratelimit.go</li></ul></section>
+    </main>
+  </body>
+</html>

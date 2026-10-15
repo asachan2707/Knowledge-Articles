@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Search Autocomplete Reading Guide | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Reading guide for the two Search Autocomplete resources (How We Built Prefixy; Prefix Hash Tree paper). Both were fetched; the paper PDF was text-extracted locally. Covers prefix-keyed top-K storage, Redis sorted sets, K-limit eviction, PHT lookup by binary search on prefix length, range queries, trie versus tree on a DHT. Includes an executed Node example. Related: chapter 13, Elasticsearch, sharding. Created 2026-10-15 from the Additional Resources section of liquidslr/system-design-notes. Read time about 12 min.</div>
+        <h1>Search Autocomplete: Reading Guide</h1>
+        <p class="summary">A reading guide to Prefixy's Redis and MongoDB prefix service and the Prefix Hash Tree paper, with a top-K prefix store and a PHT over a DHT-like map.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Type</span><span class="meta-value">Resource guide · related chapters: Chapter 13</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">12 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Prefix to top-K, sorted sets, PHT binary search, range queries</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Redis, MongoDB, DHT, Elasticsearch</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Chapter 13's standard answer is a trie with the top-k completions cached at every node, plus an offline pipeline that rebuilds it from query logs. The two resources attached to the chapter come from opposite ends of the design space. One is a practitioner write-up of a hosted autocomplete service built from Redis and MongoDB. The other is an academic paper on indexing a trie over a distributed hash table. Reading them together shows what the trie actually becomes when it must be sharded, persisted, and updated live.</p>
+        <div class="callout"><p><strong>Core idea:</strong> a trie is a logical structure; in a distributed system you almost never store it as pointers. You store <em>prefix to ranked-completions</em> entries in a key-value store, and the real design questions become how many prefixes, how many completions each, and how updates reach them.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Reading order</span>
+        <h2>Both Resources at a Glance</h2>
+        <table class="data-table">
+          <thead><tr><th>Resource</th><th>Type</th><th>Main contribution</th><th>Priority</th></tr></thead>
+          <tbody>
+            <tr><td>How We Built Prefixy</td><td>Engineering blog post</td><td>Prefix-keyed storage, Redis sorted sets, a bounded-size ranking rule</td><td>Read first</td></tr>
+            <tr><td>Prefix Hash Tree</td><td>Research paper (Ramabhadran, Ratnasamy, Hellerstein, Shenker)</td><td>A trie laid over a DHT; lookup by binary search on prefix length; range queries</td><td>Read the design sections; skim the evaluation</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><p><strong>How these were read:</strong> both were fetched. The Prefixy post was read via the web fetcher; the PHT paper's PDF was converted to text locally and its data-structure and operations sections read. I did not independently verify the measurements in the paper.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 1</span>
+        <h2>How We Built Prefixy</h2>
+        <h3>What it is</h3>
+        <p>A blog post (hosted on Medium) by the team behind Prefixy, a multi-tenant prefix-search service that developers embed to power autocomplete. It walks through the reasoning rather than just the result, which makes it a good case study of trade-offs under one stated priority: reads must be extremely fast, and the post is willing to spend space and write cost to get that.</p>
+
+        <h3>The approaches it compares</h3>
+        <ul class="check-list">
+          <li><strong>Plain trie.</strong> Finding a prefix is proportional to its length, but collecting completions means traversing the whole subtree below it, and that cost grows with dataset size. Fine for a toy, bad for a latency budget.</li>
+          <li><strong>Trie with precomputed completions.</strong> Store each node's best completions at the node. Reads no longer traverse; writes now have to touch every ancestor and storage grows because each word appears under every one of its prefixes.</li>
+          <li><strong>Cap the lengths.</strong> The post limits the stored prefix length to about twenty characters and the completions kept per prefix to about fifty, of which only the top handful are shown. With both bounded, the work per request is constant.</li>
+          <li><strong>Hash instead of tree.</strong> The chosen layout keys each prefix directly, so a lookup is a single hash probe. The post accepts losing the memory sharing of a trie in return. (The post names this approach after the PHT paper; note it is a simplification of it, as discussed below.)</li>
+        </ul>
+
+        <h3>Storage choices</h3>
+        <p>Redis is the primary read path, with an eviction policy that keeps it behaving like a cache of recently used prefixes. Each prefix maps to a sorted set whose members are completions and whose scores are popularity counts. The post compares this with a list: a list makes the read trivial but makes increments expensive (several round trips, application-side sorting and dedup, concurrency hazards), while a sorted set lets one atomic increment command update a completion's rank and lets the server maintain order and uniqueness. MongoDB holds the full set of prefixes as the durable system of record, one collection per tenant; a Redis miss falls through to Mongo and repopulates Redis.</p>
+
+        <h3>The ranking rule</h3>
+        <p>When a completion is selected, the service increments it under every relevant prefix. If a prefix's set is already full and the completion is new, the post uses an eviction rule it attributes to Redis's creator: remove the lowest-scoring entry and insert the newcomer with the evicted score plus one. The newcomer is therefore not instantly the lowest, which would doom it to be evicted by the next newcomer, and it has a chance to climb. It is an approximation of a heavy-hitters algorithm: counts become upper bounds for rarely seen items, but the head of the distribution is accurate, and the head is all anyone sees.</p>
+        <div class="diagram-box"><pre>
+  type "tr"  -->  Redis ZRANGE tenant:tr        (miss? read Mongo, refill Redis, retry)
+  pick "track" -->  for p in ["t","tr","tra","trac","track"]:
+                       ZINCRBY tenant:p 1 "track"        (if full: evict min, insert at min+1)
+                    then persist the changed sets to Mongo
+        </pre></div>
+
+        <h3>Multi-tenancy</h3>
+        <p>Each customer gets a tenant identifier embedded in a signed token; Redis keys are namespaced by tenant and Mongo uses a collection per tenant. This is secondary to the interview question but is a realistic detail: autocomplete-as-a-service must keep one customer's vocabulary from leaking into another's.</p>
+
+        <h3>Strengths, gaps, and what is dated</h3>
+        <ul class="check-list">
+          <li><strong>Strengths:</strong> clear statement of priorities; the sorted-set versus list comparison is the right way to decide a data type; the bounded-K rule is practical.</li>
+          <li><strong>Gaps:</strong> few hard performance numbers beyond the sub-100 ms target; no discussion of sharding the keyspace (a commenter asks); the write amplification of one selection touching up to twenty keys is accepted but not analysed; popularity is a raw counter with no time decay, so yesterday's trend never ages out.</li>
+          <li><strong>Dated:</strong> the post is from the early days of hosted search-as-you-type. Modern stacks often use a finite-state transducer in a search engine's completion suggester, or a learned ranker over candidate generation, but the prefix-to-top-K idea still underlies most of them.</li>
+        </ul>
+
+        <h3>How it connects to Chapter 13</h3>
+        <p>The chapter's "store top-k at each trie node" optimisation is exactly Prefixy's precomputation, and the chapter's concern about update cost is the write amplification noted above. Prefixy answers "how do I store the trie in a distributed store": as keys, not as pointers. The cap on prefix length is the same trade-off the chapter makes when it restricts query length. Missing from Prefixy is the chapter's offline aggregation pipeline (log, aggregate weekly, rebuild snapshots): Prefixy updates online per selection, a different freshness/cost point.</p>
+        <p class="source-link">Original: <a href="https://medium.com/@prefixyteam/how-we-built-prefixy-a-scalable-prefix-search-service-for-powering-autocomplete-c20f98e2eff1" target="_blank" rel="noopener">How We Built Prefixy</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Resource 2</span>
+        <h2>Prefix Hash Tree</h2>
+        <h3>What it is</h3>
+        <p>A short academic paper, <em>Prefix Hash Tree: An Indexing Data Structure over Distributed Hash Tables</em>, by Sriram Ramabhadran, Sylvia Ratnasamy, Joseph Hellerstein and Scott Shenker (UC San Diego, Intel Research and UC Berkeley; a mid-2000s paper, and I did not confirm the venue from the PDF text). It is about peer-to-peer DHTs, which support only exact-match put and get. The goal is range queries on top of them without changing the DHT.</p>
+
+        <h3>The structure</h3>
+        <p>Keys are fixed-length binary strings. The PHT is a binary trie over them: every node has zero or two children, a leaf holds at most B keys, and a key lives in the unique leaf whose label is a prefix of it. Leaves are also threaded in a doubly linked list. Internal nodes merge back into a leaf if their subtree shrinks below B+1 keys. The shape adapts to the data: deep where keys are dense, shallow where they are sparse.</p>
+        <p>The novelty is how the trie is distributed. Each node is stored in the DHT under the hash of its label. So any node can be fetched with one DHT lookup if you know its prefix. There are no parent/child pointers to follow, and the structure uses nothing but the DHT's own get/put.</p>
+        <div class="diagram-box"><pre>
+  key 00110101 (D=8)  candidate leaf labels:  "", 0, 00, 001, 0011, 00110, ...
+  binary search on prefix length:
+     probe len 4 ("0011"): internal?  -> try longer
+     probe len 6 ("001101"): not found -> try shorter
+     probe len 5 ("00110"): leaf!       -> done      ~ log2(D) DHT gets, not D
+        </pre></div>
+
+        <h3>Operations and costs</h3>
+        <ul class="check-list">
+          <li><strong>Lookup.</strong> A key has D+1 possible prefixes; one of them is its leaf. Linear scan tries them in order; binary search on length exploits the fact that "is this prefix an internal node" is monotone, giving about log D DHT lookups. The paper also notes the D+1 probes can be issued in parallel for lower latency, and that parallel probing is a fallback when an internal node has failed (binary search could be misled by a missing internal node).</li>
+          <li><strong>Range query.</strong> Find the leaf containing the lower bound and walk the threaded leaves to the upper bound (simple, sequential, high latency for wide ranges), or find the smallest prefix covering the range and fan out in parallel down the subtree (lower latency, but a tiny range straddling the midpoint would start at the root, so the paper splits ranges into two roughly query-sized pieces).</li>
+          <li><strong>Insert and delete.</strong> One lookup to find the leaf, then possibly a split or merge. A split can cascade if all keys land on one side, bounded by D. The paper suggests staggering updates (one split per insert) so cost stays near a lookup, at the price of leaves temporarily exceeding capacity.</li>
+        </ul>
+
+        <h3>Why a trie rather than a B-tree on a DHT</h3>
+        <p>The paper's argument is the part worth remembering. A trie partitions <em>space</em>, so you know a key's possible homes without consulting the data; a B-tree partitions <em>data</em>, so you must descend from the root. On a DHT, which gives you random access to any named node, tries therefore win on three counts: lookup cost (about log D versus log N hops from the root; the paper's example is 6 versus 20 for a million 32-bit keys), load (no root bottleneck, since lookups probe many different labels), and fault resilience (losing an internal node does not make unrelated data unreachable; correctness really depends only on the leaf list).</p>
+
+        <h3>What is still true, and what is dated</h3>
+        <ul class="check-list">
+          <li><strong>Still true:</strong> the idea of addressing logical tree nodes by hashed labels is everywhere: geohash and S2 cell prefixes as keys, Bigtable/HBase row-key prefixes, Cassandra partition keys composed of a prefix. The binary-search-on-length trick is a clean pattern for "which level of the hierarchy exists".</li>
+          <li><strong>Dated:</strong> the DHT setting (Chord-like peer-to-peer, best-effort puts and gets) is not how autocomplete is run today. Production systems have a coordinator, replicated shards, and strongly consistent stores, so the paper's fault model is more pessimistic than you need.</li>
+          <li><strong>Caveat:</strong> the Prefixy post borrows the PHT's flavour, "prefix as hash key", but Prefixy materialises <em>every</em> prefix up to a cap, not just leaves, and stores ranked completions rather than raw keys. It is a different and simpler structure with similar spirit.</li>
+        </ul>
+
+        <h3>How it connects to Chapter 13</h3>
+        <p>When the chapter says "if the trie does not fit on one machine, shard it", the PHT is the careful version of that sentence. Sharding by first character gives hot shards (the chapter notes this); hashing every prefix balances load but loses locality for range scans; the PHT's leaf-splitting adapts shard boundaries to the data. For autocomplete you rarely need ranges, so the parts you can borrow are: key-by-prefix, bounded leaf size, and probing prefix lengths by binary search.</p>
+        <p class="source-link">Original: <a href="https://people.eecs.berkeley.edu/~sylvia/papers/pht.pdf" target="_blank" rel="noopener">Prefix Hash Tree</a></p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Synthesis</span>
+        <h2>How the Two Resources Fit Together</h2>
+        <table class="data-table">
+          <thead><tr><th>Question</th><th>Prefixy</th><th>PHT</th><th>What to do</th></tr></thead>
+          <tbody>
+            <tr><td>How is the trie stored?</td><td>Every prefix (capped) is a key with a ranked set</td><td>Only trie nodes, leaves hold keys; node label hashed to a DHT key</td><td>For autocomplete use the Prefixy layout; for range scans consider PHT leaves</td></tr>
+            <tr><td>Bounding growth</td><td>Cap prefix length and K</td><td>Leaf capacity B with split/merge</td><td>Do both: cap L and K, and split hot prefixes into sub-keys</td></tr>
+            <tr><td>Updates</td><td>Online increments with min-eviction</td><td>Insert with staggered split</td><td>Online for trends, offline rebuild for correctness</td></tr>
+            <tr><td>Failure</td><td>Redis miss falls back to Mongo</td><td>Leaf list preserves correctness</td><td>Have a slow-but-correct fallback path</td></tr>
+          </tbody>
+        </table>
+        <p class="mini-heading">Reading order</p>
+        <ol>
+          <li>Chapter 13 first.</li>
+          <li>Prefixy: read in full, it is short and practical.</li>
+          <li>PHT: read the introduction and Section 2 (data structure and operations). Skim the evaluation and related work unless you plan to work on DHTs.</li>
+        </ol>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Prefix Store with K-Limit Ranking, and a Prefix Hash Tree over a Map</h2>
+        <p>Part one implements the Prefixy-style rule: each selection increments the word under all prefixes up to a length cap; a full set evicts its minimum and gives the newcomer min+1. Part two is a small PHT whose "DHT" is a plain Map that counts gets, so you can see binary search on prefix length use fewer probes than a linear scan. Range queries here walk the logical trie in order; a real PHT follows the threaded leaf pointers.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">// Part 1: Prefixy-style prefix -&gt; top-K store with the "K-limit" replacement rule.
+class PrefixStore {
+  constructor(K = 3, L = 20) { this.K = K; this.L = L; this.map = new Map(); }
+  select(word) {
+    for (let i = 1; i &lt;= Math.min(word.length, this.L); i++) {
+      const p = word.slice(0, i);
+      const z = this.map.get(p) ?? new Map(); this.map.set(p, z);
+      if (z.has(word)) z.set(word, z.get(word) + 1);
+      else if (z.size &lt; this.K) z.set(word, 1);
+      else { // evict lowest, newcomer inherits its score + 1 so it can climb
+        let [lw, ls] = [...z].reduce((a, b) =&gt; (b[1] &lt; a[1] ? b : a));
+        z.delete(lw); z.set(word, ls + 1);
+      }
+    }
+  }
+  suggest(prefix) {
+    return [...(this.map.get(prefix.slice(0, this.L)) ?? [])].sort((a, b) =&gt; b[1] - a[1] || (a[0] &lt; b[0] ? -1 : 1)).map(([w, c]) =&gt; `${w}:${c}`);
+  }
+}
+const ps = new PrefixStore(3);
+for (const w of ["tree","tree","tree","trie","trie","track","track","track","track","trap"]) ps.select(w);
+console.log("tr -&gt;", ps.suggest("tr"));
+console.assert(ps.suggest("tr")[0] === "track:4");
+console.assert(ps.suggest("tri").join() === "trie:2");
+
+// Part 2: Prefix Hash Tree over a plain Map standing in for a DHT (only get/put by label).
+const D = 8, B = 2;
+const dht = new Map(); let lookups = 0;
+const get = (label) =&gt; { lookups++; return dht.get(label); };
+dht.set("", { leaf: true, keys: [] });
+const bits = (n) =&gt; n.toString(2).padStart(D, "0");
+function lookupLeaf(key) { // binary search over prefix length
+  let lo = 0, hi = D;
+  while (lo &lt;= hi) {
+    const mid = (lo + hi) &gt;&gt; 1, n = get(key.slice(0, mid));
+    if (n?.leaf) return key.slice(0, mid);
+    if (n &amp;&amp; !n.leaf) lo = mid + 1; else hi = mid - 1;
+  }
+  throw new Error("lookup failed");
+}
+function split(label) { // split an overfull leaf; recurse if all keys fall on one side
+  const node = dht.get(label);
+  if (node.keys.length &lt;= B || label.length &gt;= D) return;
+  const l = { leaf: true, keys: node.keys.filter((k) =&gt; k[label.length] === "0") };
+  const r = { leaf: true, keys: node.keys.filter((k) =&gt; k[label.length] === "1") };
+  dht.set(label, { leaf: false }); dht.set(label + "0", l); dht.set(label + "1", r);
+  split(label + "0"); split(label + "1");
+}
+function insert(key) {
+  const label = lookupLeaf(key), node = dht.get(label);
+  node.keys.push(key); node.keys.sort();
+  split(label);
+}
+function range(lo, hi) { // locate leaf(lo), then walk leaves left to right (here: DFS in order over labels)
+  const out = [];
+  (function walk(label) {
+    const n = dht.get(label);
+    if (n.leaf) { out.push(...n.keys.filter((k) =&gt; k &gt;= lo &amp;&amp; k &lt;= hi)); return; }
+    walk(label + "0"); walk(label + "1");
+  })("");
+  return out;
+}
+const data = [3, 7, 9, 40, 41, 42, 130, 200, 201, 255].map(bits);
+data.forEach(insert);
+lookups = 0; const leaf = lookupLeaf(bits(41));
+console.log("leaf for 41:", leaf, "DHT gets:", lookups, "(linear scan would be up to", D + 1, ")");
+console.log("range [40,130]:", range(bits(40), bits(130)).map((b) =&gt; parseInt(b, 2)));
+console.assert(range(bits(40), bits(130)).map((b) =&gt; parseInt(b, 2)).join() === "40,41,42,130");
+console.assert(lookups &lt;= Math.ceil(Math.log2(D + 1)) + 1);</code></pre>
+        <p class="code-caption">Executed with Node 24. Prints the top three completions for "tr" (track:4, trap:3, tree:3 - note the inflated score for "trap", the K-limit side effect), the leaf found for key 41 with 3 DHT gets instead of up to 9, and the range result [40, 41, 42, 130].</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Build exercise</span>
+        <h2>What to Build</h2>
+        <ul class="check-list">
+          <li>Feed the Prefixy-style store a Zipf-distributed stream of 1M selections, then compare its top-5 for common prefixes to exact counts. Measure how much the min+1 rule distorts ranks as K shrinks.</li>
+          <li>Add time decay (multiply scores by a factor per hour, or use a sliding window) and show a trending term overtaking an old favourite.</li>
+          <li>Shard the keyspace across 8 simulated nodes by hash of the prefix, and compare load balance with sharding by first character.</li>
+          <li>Make the PHT leaf list real (store left/right neighbour labels) and implement the paper's sequential range query; compare the number of gets with the DFS version.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Reading Checklist</h2>
+        <ul class="check-list">
+          <li>I can state, for each resource, the one problem it solves and the one number or mechanism that proves it.</li>
+          <li>I know which resources I read in full and which I only know by title.</li>
+          <li>I can map each resource to the handbook chapter section it extends.</li>
+          <li>I have run the code example and changed one parameter to see its behaviour change.</li>
+        </ul>
+      </section>
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul><li><a href="../chapters/13-search-autocomplete.html">Chapter 13: Search Autocomplete</a> — the chapter these resources extend.</li><li><a href="../../elasticsearch.html">Elasticsearch</a> — completion suggesters as the managed alternative.</li><li><a href="../../system-design/sharding.html">Sharding</a> — how to split a prefix keyspace.</li><li><a href="../../system-design/caching.html">Caching</a> — the Redis-in-front pattern.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Resources listed in the “Additonal Resources” section of <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu). Summaries are in my own words and are not a substitute for the originals:</p>
+        <ul><li><a href="https://medium.com/@prefixyteam/how-we-built-prefixy-a-scalable-prefix-search-service-for-powering-autocomplete-c20f98e2eff1" target="_blank" rel="noopener">How We Built Prefixy</a> — https://medium.com/@prefixyteam/how-we-built-prefixy-a-scalable-prefix-search-service-for-powering-autocomplete-c20f98e2eff1</li><li><a href="https://people.eecs.berkeley.edu/~sylvia/papers/pht.pdf" target="_blank" rel="noopener">Prefix Hash Tree</a> — https://people.eecs.berkeley.edu/~sylvia/papers/pht.pdf</li></ul>
+      </section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>An autocomplete trie in production is a map from prefix to a short ranked list. Cap the prefix length and the list size, pick a ranking rule that tolerates approximation, and keep a slow correct fallback. The PHT adds the idea of addressing tree nodes by hashed label and probing prefix lengths by binary search.</p></section>
+    </main>
+  </body>
+</html>

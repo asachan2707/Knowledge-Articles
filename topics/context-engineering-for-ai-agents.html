@@ -194,6 +194,129 @@
           discard — so the model only ever sees information it can actually use.
         </p>
       </section>
+
+      <!-- ─── LONG-RUNNING AGENT CONTEXT (Emily Hustle NYC, Medium 2026) ─── -->
+      <section class="content-card">
+        <h2>Context Management for Long-Running Agents</h2>
+        <p>
+          Agents that run for hours across hundreds of turns face a different problem than single-session
+          agents: the context limit is exceeded many times over, sessions must pause/resume across machines,
+          and the agent must act correctly on old information — not just recent information.
+        </p>
+
+        <div class="callout">
+          <p><strong>The key distinction:</strong> A cache miss degrades latency. A context miss degrades
+          <em>correctness — silently</em>. The agent doesn't report forgetting. It proceeds as if the
+          forgotten fact never existed.</p>
+        </div>
+
+        <h3>Four Retention Strategies Compared</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.88rem;margin:1rem 0">
+          <thead><tr style="background:#f1f5f9"><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Strategy</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">How It Works</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Key Weakness</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Sliding Window</strong></td><td style="padding:.55rem .8rem">Keep recent N turns verbatim</td><td style="padding:.55rem .8rem">"Cliff" — perfect then suddenly zero recall</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Summarize &amp; Drop</strong></td><td style="padding:.55rem .8rem">Compress old turns to gist</td><td style="padding:.55rem .8rem">~33% detail retained; reads as complete</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Retrieval Only</strong></td><td style="padding:.55rem .8rem">Archive all, fetch on demand</td><td style="padding:.55rem .8rem">Worse than hybrid at short range (~72% recall)</td></tr>
+            <tr><td style="padding:.55rem .8rem"><strong>Hybrid ✓</strong></td><td style="padding:.55rem .8rem">Verbatim window + retrieval archive</td><td style="padding:.55rem .8rem">Best overall; ~7× better recall on older turns at identical cost</td></tr>
+          </tbody>
+        </table>
+
+        <h3>What Compaction Must Never Drop (Pinned Region)</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.88rem;margin:1rem 0">
+          <thead><tr style="background:#f1f5f9"><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Category</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Why It Must Survive Compaction</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Task goal &amp; user constraints</strong></td><td style="padding:.55rem .8rem">Referenced constantly; losing them produces confidently wrong behavior</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Irreversible actions log</strong></td><td style="padding:.55rem .8rem">Files written, messages sent — agent will repeat them if forgotten</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Open commitments</strong></td><td style="padding:.55rem .8rem">A dropped commitment looks identical to a completed one</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Corrections</strong></td><td style="padding:.55rem .8rem">Must outlive the thing they corrected — or the error recurs</td></tr>
+            <tr><td style="padding:.55rem .8rem"><strong>Identifiers / handles</strong></td><td style="padding:.55rem .8rem">Session tokens, branch names, file paths — impossible to reconstruct</td></tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-javascript">// Two-tier context manager: pinned region (never compacted) + compressible window
+class LongRunningAgentContext {
+  constructor({ maxWindowTokens = 16_000, archiveStore }) {
+    this.pinnedItems    = [];      // never compacted — pinned region
+    this.windowItems    = [];      // verbatim recent turns
+    this.archive        = archiveStore; // durable indexed store for retrieval
+    this.maxWindowTokens = maxWindowTokens;
+    this.compactionGeneration = 0;
+    this.irreversibleActions  = []; // always pinned
+  }
+
+  // Classify items at arrival, not at eviction
+  addItem(item) {
+    if (this.isPinnable(item)) {
+      this.pinnedItems.push(item);
+    } else {
+      this.windowItems.push(item);
+      this.archive.append(item); // always archive everything
+      this.maybeCompact();
+    }
+  }
+
+  isPinnable(item) {
+    return (
+      item.type === "task_goal"         ||
+      item.type === "user_constraint"   ||
+      item.type === "irreversible_action" ||
+      item.type === "open_commitment"   ||
+      item.type === "correction"        ||
+      item.type === "identifier"
+    );
+  }
+
+  recordIrreversibleAction(action) {
+    const entry = { type: "irreversible_action", action, timestamp: new Date().toISOString() };
+    this.pinnedItems.push(entry);
+    this.irreversibleActions.push(entry);
+    // Tell the user — silent irreversible actions are the worst failure mode
+    console.log(`[PINNED] Irreversible action recorded: ${JSON.stringify(action)}`);
+  }
+
+  maybeCompact() {
+    const windowTokens = this.estimateTokens(this.windowItems);
+    if (windowTokens < this.maxWindowTokens) return;
+
+    // Compact only the compressible window — pinned region stays byte-identical
+    const toArchive = this.windowItems.splice(0, Math.floor(this.windowItems.length / 2));
+    // Note: compaction invalidates prefix cache — budget for fresh input prices
+    this.compactionGeneration++;
+    console.log(`[COMPACTION gen=${this.compactionGeneration}] Archived ${toArchive.length} items`);
+    // TELL THE USER — silent forgetting is the hardest failure to forgive
+  }
+
+  estimateTokens(items) {
+    return items.reduce((sum, item) => sum + Math.ceil(JSON.stringify(item).length / 4), 0);
+  }
+
+  // For resumption: persist pinned region + archive
+  serialize() {
+    return { pinned: this.pinnedItems, generation: this.compactionGeneration };
+  }
+
+  // Resume: treat window as derived/rebuildable from archive
+  // Budget for cold cache on resume — first turn pays fresh prices for everything
+  static resume(serialized, archiveStore) {
+    const ctx = new LongRunningAgentContext({ archiveStore });
+    ctx.pinnedItems = serialized.pinned;
+    ctx.compactionGeneration = serialized.generation;
+    return ctx;
+  }
+}</code></pre>
+
+        <div style="background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem">
+          <strong>Cost insight:</strong> 75% of the long-running agent bill comes from new tokens —
+          compaction timing optimizes only ~25% of cost. Therefore: choose compaction threshold for
+          <em>recall quality</em>, not cost. Optimize cost by reducing new tokens per turn.
+        </div>
+      </section>
+          <section class="content-card">
+        <h2>Related Reading</h2>
+        <ul>
+          <li><a href="./claude-foundation/05-working-memory.html">Claude Foundation: Working Memory</a> — the Academy&rsquo;s lost-in-the-middle and context-placement lessons, with a runnable context builder.</li>
+        </ul>
+      </section>
     </main>
   </body>
 </html>

@@ -3,11 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Event-Driven Architecture: The Complete Guide to Building Loosely Coupled Distributed Systems | Learning Hub</title>
+    <title>Event-Driven Architecture for Microservices: Complete Guide to Scalable, Resilient Systems | Learning Hub</title>
     <link rel="stylesheet" href="../styles.css" />
     <script src="../read-state.js" defer></script>
     <script src="../highlight.js" defer></script>
     <script src="../chat-widget.js" defer></script>
+    <style>
+      .code-label{display:inline-block;font-family:Arial,sans-serif;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#0f766e;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:.15rem .45rem;margin-bottom:.5rem}
+    </style>
   </head>
   <body>
     <main class="page container">
@@ -19,19 +22,21 @@
             alt="Network of connected nodes representing event-driven architecture" loading="lazy" />
           <div class="article-hero-overlay"></div>
           <div class="article-hero-content">
-            <span class="article-hero-kicker">Architecture · System Design · Backend · 30 min</span>
+            <span class="article-hero-kicker">Architecture · System Design · Backend · 35 min</span>
           </div>
         </figure>
-        <h1>Event-Driven Architecture: The Complete Guide to Building Loosely Coupled Distributed Systems</h1>
+        <h1>Event-Driven Architecture for Microservices: The Complete Guide to Scalable, Resilient, Loosely Coupled Systems</h1>
         <p class="summary">
-          When EDA is right, how it works, all the patterns you need to build resilient async systems.
-          Full deep dive: domain events vs integration events, Kafka vs RabbitMQ vs SQS, delivery guarantees,
-          dead letter queues, choreography vs orchestration, schema evolution, CQRS integration,
-          and a complete Node.js example wiring it all together.
+          When EDA is right, how it works, and all the patterns you need to build scalable, resilient async
+          microservices. Covers the five core EDA properties (immutability, producer independence, broker
+          intermediary, consumer groups, replay), event types, Kafka vs RabbitMQ vs SQS, delivery guarantees,
+          idempotent consumers, dead letter queues, choreography vs orchestration, schema evolution, CQRS,
+          out-of-order events, and complete Node.js examples.
         </p>
         <div class="article-meta">
           <span class="meta-item">Domain: Architecture · Distributed Systems · Async Messaging</span>
           <span class="meta-item">Published: 2026-07-29</span>
+          <span class="meta-item">Sources: EDA Complete Guide; Chinmaya Kumar Biswal · LinkedIn · 2024 (Event-Driven Microservices: Scalability, Resilience &amp; Efficiency)</span>
         </div>
       </header>
 
@@ -99,6 +104,24 @@
           a response. An event is a broadcast fact — <code>OrderPlaced</code>, <code>CardCharged</code>.
           It implies nothing about what should happen next; that is the consumer's concern. Commands
           have one handler. Events can have zero, one, or many handlers.</p>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <h2>The Five Core Properties of EDA</h2>
+        <p>
+          Five properties make event-driven microservices scale and stay resilient. Each one removes a
+          specific kind of coupling from the synchronous model.
+        </p>
+        <ol>
+          <li><strong>Immutability</strong> — events are facts: "OrderCreated at 14:23:01 with these items at this amount." They never change, so consumers can replay from any point, retroactively build new projections, and reconstruct state at any past timestamp. Mutable state is a projection, not the source of truth.</li>
+          <li><strong>Producer independence</strong> — producers publish an event and return. They do not wait, do not know who consumes the event, and do not care if consumption fails. A producer can deploy a new version without consumers deploying simultaneously.</li>
+          <li><strong>Event intermediary</strong> — the broker (Kafka, RabbitMQ, SQS) is the only shared dependency. Producers and consumers are each coupled only to the broker, so adding a new consumer (for example an analytics service) needs no producer change.</li>
+          <li><strong>Consumer groups</strong> — multiple instances of a consumer form a group and the broker distributes events across them so each event is processed by exactly one instance. Scaling means adding instances to the group; no producer changes needed.</li>
+          <li><strong>Replay</strong> — Kafka retains events for a configurable period (default 7 days, configurable to infinite). Any consumer can reset its offset and replay history to backfill a new service, fix a processing bug, or build a new read model.</li>
+        </ol>
+        <div class="callout">
+          <p><strong>Net effect:</strong> replacing synchronous calls with event publication eliminates cascading timeouts, enables horizontal consumer scaling, and makes the system's state history observable.</p>
         </div>
       </section>
 
@@ -173,6 +196,18 @@
               <td>Millions of messages/sec per partition</td>
               <td>Tens of thousands/sec per queue</td>
               <td>Unlimited (managed); SQS scales automatically</td>
+            </tr>
+            <tr>
+              <td><strong>Retention</strong></td>
+              <td>Configurable (7 days to infinite)</td>
+              <td>Until consumed (or TTL)</td>
+              <td>14 days max</td>
+            </tr>
+            <tr>
+              <td><strong>Consumer model</strong></td>
+              <td>Pull (poll)</td>
+              <td>Push (subscribe)</td>
+              <td>Pull (poll)</td>
             </tr>
             <tr>
               <td><strong>Replay</strong></td>
@@ -283,6 +318,91 @@ async function handleOrderPlaced(event) {
     );
   });
 }</code></pre>
+      </section>
+
+      <section class="content-card">
+        <h2>Kafka Consumers: Idempotent Processing, Offsets and Replay</h2>
+        <p>
+          Because Kafka guarantees at-least-once delivery by default, handlers <em>must</em> be
+          idempotent. The class below wraps a handler with a processed-events store (Redis SET or a DB
+          table keyed by <code>eventId</code>), only marks an event processed after the handler succeeds,
+          and rethrows on failure so the offset is not committed and the message is retried. A second
+          function shows how a new service replays history from offset 0.
+        </p>
+
+        <span class="code-label">JavaScript Example — Idempotent Kafka Consumer + Replay</span>
+        <pre><code>// Idempotent Kafka consumer — safe to replay or process twice
+class IdempotentKafkaConsumer {
+  constructor(topic, handler, processedEventsStore) {
+    this.topic = topic;
+    this.handler = handler;
+    this._processed = processedEventsStore; // Redis SET or DB table
+  }
+
+  async processMessage(message) {
+    const event = JSON.parse(message.value.toString());
+    const { eventId, eventType, payload } = event;
+
+    // Idempotency check: skip if already processed
+    const alreadyProcessed = await this._processed.exists(eventId);
+    if (alreadyProcessed) {
+      console.log(`[consumer] skipping duplicate event: ${eventId}`);
+      return;
+    }
+
+    try {
+      await this.handler(eventType, payload);
+      // Mark as processed AFTER successful handling
+      await this._processed.add(eventId, { ttl: 7 * 24 * 3600 }); // 7 days
+    } catch (err) {
+      // Don't mark processed — will be retried on next poll
+      console.error(`[consumer] failed to process ${eventId}:`, err.message);
+      throw err; // let Kafka know to retry (don't commit offset)
+    }
+  }
+}
+
+// Event handlers by type
+const handlers = {
+  'order.confirmed': async (payload) => {
+    await emailService.sendConfirmation(payload.userId, payload.orderId);
+  },
+  'order.cancelled': async (payload) => {
+    await inventoryService.release(payload.orderId, payload.items);
+    await emailService.sendCancellation(payload.userId, payload.orderId);
+  },
+  'payment.failed': async (payload) => {
+    await orderService.markPaymentFailed(payload.orderId, payload.reason);
+  },
+};
+
+async function handleEvent(eventType, payload) {
+  const handler = handlers[eventType];
+  if (!handler) {
+    console.warn(`[consumer] no handler for event type: ${eventType}`);
+    return;
+  }
+  await handler(payload);
+}
+
+// Replay from offset 0 to rebuild state (e.g. for a new analytics service)
+async function replayFromBeginning(kafkaConsumer, topic, handler) {
+  // In kafkajs: set fromBeginning: true when subscribing
+  await kafkaConsumer.subscribe({ topic, fromBeginning: true });
+  await kafkaConsumer.run({
+    eachMessage: async ({ message }) => {
+      const event = JSON.parse(message.value.toString());
+      await handler(event.eventType, event.payload);
+    },
+  });
+}</code></pre>
+
+        <div class="callout">
+          <p><strong>At-least-once vs exactly-once:</strong> Kafka transactions give exactly-once within a
+          Kafka-to-Kafka pipeline but are expensive. Idempotent handlers keyed by <code>eventId</code> are
+          simpler and sufficient for most use cases. Replay (resetting offsets) is what makes idempotency
+          non-negotiable: reprocessing history must never double-apply side effects.</p>
+        </div>
       </section>
 
       <section class="content-card">
@@ -759,6 +879,169 @@ kafkaClient.consume('inventory.reserved', async (event) => {
         </table>
       </section>
 
+      <!-- ─── WHEN TO AVOID EDA ─────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>When to Avoid EDA (Even When You Need to Scale)</h2>
+        <p>
+          Scalability pressure alone does not justify event-driven architecture. The wrong reasons
+          to adopt EDA introduce more complexity than the scale problem they claimed to solve.
+        </p>
+
+        <h3>Anti-Patterns: When EDA Is the Wrong Choice</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.9rem;margin:1rem 0">
+          <thead><tr style="background:#f1f5f9"><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Scenario</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Why EDA Fails</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Better Choice</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem">Payment debit + inventory reservation must succeed or fail atomically</td><td style="padding:.55rem .8rem">Eventual consistency breaks transactional guarantees; split-brain payment risk</td><td style="padding:.55rem .8rem">Database transaction or saga with compensating actions</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem">User expects immediate, synchronous confirmation</td><td style="padding:.55rem .8rem">Async processing forces polling or long-poll — worse UX than synchronous</td><td style="padding:.55rem .8rem">Synchronous API call with response</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem">Simple CRUD with one consumer</td><td style="padding:.55rem .8rem">Broker overhead for no decoupling benefit — adds ops complexity with no gain</td><td style="padding:.55rem .8rem">Direct API call</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem">Events that require strict total ordering across all partitions</td><td style="padding:.55rem .8rem">Kafka guarantees order within a partition — multi-partition total order is O(n) sync cost</td><td style="padding:.55rem .8rem">Single partition with explicit sequence numbers</td></tr>
+            <tr><td style="padding:.55rem .8rem">Team has no broker operations experience</td><td style="padding:.55rem .8rem">DLQ management, consumer lag monitoring, schema registry — operational complexity is real</td><td style="padding:.55rem .8rem">Start synchronous, introduce EDA incrementally when pain points are proven</td></tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-javascript">// The checkout atomicity problem — EDA breaks this
+// Payment + inventory must succeed or fail together
+
+// ❌ Wrong: EDA for atomic checkout
+async function checkoutWithEvents(orderId, paymentDetails) {
+  await eventBus.publish("payment.initiated", { orderId, ...paymentDetails });
+  // If payment succeeds but inventory publish fails → double charge
+  await eventBus.publish("inventory.reserved", { orderId });
+  // Now stuck in inconsistent state with no clean recovery path
+}
+
+// ✅ Right: saga pattern with compensation
+async function checkoutWithSaga(orderId, paymentDetails) {
+  const saga = new Saga([
+    {
+      execute:    () => paymentService.charge(paymentDetails),
+      compensate: (txId) => paymentService.refund(txId)
+    },
+    {
+      execute:    () => inventoryService.reserve(orderId),
+      compensate: (reservationId) => inventoryService.release(reservationId)
+    },
+    {
+      execute:    () => orderService.confirm(orderId),
+      compensate: (orderId) => orderService.cancel(orderId)
+    }
+  ]);
+
+  return await saga.execute(); // Automatically compensates on any step failure
+}
+
+class Saga {
+  constructor(steps) { this.steps = steps; this.executed = []; }
+
+  async execute() {
+    for (const step of this.steps) {
+      try {
+        const result = await step.execute();
+        this.executed.unshift({ step, result });
+      } catch (err) {
+        await this.compensate();
+        throw new Error(`Saga failed at step ${this.steps.indexOf(step)}: ${err.message}`);
+      }
+    }
+    return { success: true };
+  }
+
+  async compensate() {
+    for (const { step, result } of this.executed) {
+      await step.compensate(result).catch(e => console.error("Compensation failed:", e));
+    }
+  }
+}</code></pre>
+      </section>
+
+      <!-- ─── OUT-OF-ORDER EVENTS ────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Guaranteeing Business Consistency When Events Arrive Out of Order</h2>
+        <p>
+          "The broker orders it for me" is not a real guarantee. Partition reassignment, consumer
+          group rebalancing, and network delays cause out-of-order delivery. Application-level
+          sequencing — not broker-level assumptions — is what provides true business consistency.
+        </p>
+
+        <h3>Three Common-but-Flawed Approaches</h3>
+        <ul>
+          <li><strong>Ignore ordering:</strong> Works until it doesn't — inventory goes negative, account balances corrupt.</li>
+          <li><strong>Lock until in-order:</strong> Kills throughput; deadlock risk under partition reassignment.</li>
+          <li><strong>Last-write-wins:</strong> Loses updates for legitimate concurrent events.</li>
+        </ul>
+
+        <pre><code class="language-javascript">// Versioned aggregate pattern for out-of-order event handling
+class VersionedAggregate {
+  constructor(id, initialState = {}) {
+    this.id      = id;
+    this.version = 0;
+    this.state   = initialState;
+    this.pendingEvents = []; // out-of-order holding store
+  }
+
+  // Apply an event — rejects or parks events that arrive out of sequence
+  applyEvent(event) {
+    const expectedVersion = this.version + 1;
+
+    if (event.sequenceNumber === expectedVersion) {
+      // In order — apply immediately
+      this.state   = this.reduce(this.state, event);
+      this.version = event.sequenceNumber;
+      // Try to apply any parked events that are now in order
+      this.drainPendingEvents();
+    } else if (event.sequenceNumber > expectedVersion) {
+      // Future event arrived early — park it
+      this.pendingEvents.push(event);
+      this.pendingEvents.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+      console.log(`Parked event seq=${event.sequenceNumber}, waiting for seq=${expectedVersion}`);
+    } else {
+      // Duplicate or stale — discard (idempotency: already applied)
+      console.log(`Discarded stale event seq=${event.sequenceNumber}, current=${this.version}`);
+    }
+  }
+
+  drainPendingEvents() {
+    while (this.pendingEvents.length > 0 &&
+           this.pendingEvents[0].sequenceNumber === this.version + 1) {
+      const next = this.pendingEvents.shift();
+      this.state   = this.reduce(this.state, next);
+      this.version = next.sequenceNumber;
+    }
+  }
+
+  reduce(state, event) {
+    switch (event.type) {
+      case "INVENTORY_RESERVED":
+        return { ...state, available: state.available - event.quantity };
+      case "INVENTORY_RELEASED":
+        return { ...state, available: state.available + event.quantity };
+      case "ORDER_CONFIRMED":
+        return { ...state, pendingOrders: state.pendingOrders - 1 };
+      default:
+        return state;
+    }
+  }
+}
+
+// Simulate out-of-order delivery
+const inventory = new VersionedAggregate("product-42", { available: 100, pendingOrders: 0 });
+
+// Events arrive out of order — seq 3 before seq 2
+inventory.applyEvent({ type: "INVENTORY_RESERVED", sequenceNumber: 1, quantity: 5 });
+inventory.applyEvent({ type: "ORDER_CONFIRMED",    sequenceNumber: 3, quantity: 1 }); // parks
+inventory.applyEvent({ type: "INVENTORY_RESERVED", sequenceNumber: 2, quantity: 3 }); // unlocks seq 3
+
+console.log("Final state:", inventory.state);
+console.log("Version:", inventory.version); // 3 — all three events applied correctly</code></pre>
+
+        <div style="background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem">
+          <strong>Design principle:</strong> "Eventual consistency is a business problem, not just
+          a technical one." Out-of-sequence events can break inventory counts, account balances,
+          and user entitlements. The versioned aggregate pattern treats this as an application-level
+          invariant, not a broker configuration problem.
+        </div>
+      </section>
+
       <section class="content-card takeaways">
         <h2>Key Takeaway</h2>
         <p>
@@ -767,7 +1050,9 @@ kafkaClient.consume('inventory.reserved', async (event) => {
           idempotency requirements, schema evolution discipline, and operational investment
           in broker infrastructure and DLQ monitoring. The core principle is simple: producers
           emit immutable facts; consumers react independently; the broker guarantees delivery.
-          Start with at-least-once delivery and idempotent consumers. Use choreography for
+          The five properties that make it work are immutability, producer independence,
+          the broker intermediary, consumer groups, and replay; Kafka's replay in particular lets you build new
+          services retroactively and fix processing bugs without data loss. Start with at-least-once delivery and idempotent consumers. Use choreography for
           simple reactive flows; introduce an orchestrator only when compensation logic demands
           it. Treat your event schemas as public APIs and version them accordingly. The systems
           that do EDA well are not the ones that adopted it everywhere — they are the ones that

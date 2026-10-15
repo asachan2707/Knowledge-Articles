@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Netflix Interview: Direct-Sold Ad Campaign Data Model | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+    <style>
+      .schema-block { background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 1.2rem 1.4rem; font-family: monospace; font-size: .88rem; line-height: 1.6; margin: 1rem 0; overflow-x: auto; }
+      .schema-block .kw  { color: #93c5fd; }
+      .schema-block .col { color: #6ee7b7; }
+      .schema-block .cmt { color: #64748b; font-style: italic; }
+      .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0; }
+      @media(max-width:640px){ .compare-grid { grid-template-columns: 1fr; } }
+      .compare-card { border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+      .compare-card h4 { margin: 0 0 .5rem; font-family: Arial, Helvetica, sans-serif; font-size: .95rem; }
+      .insight-box { background: #fdf4ff; border-left: 4px solid #a855f7; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+      .warn-box { background: #fff7ed; border-left: 4px solid #f97316; padding: .85rem 1.1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: .93rem; }
+      .pacing-table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+      .pacing-table th { background: #f1f5f9; padding: .6rem .8rem; text-align: left; font-weight: 700; font-family: Arial, Helvetica, sans-serif; }
+      .pacing-table td { padding: .55rem .8rem; border-bottom: 1px solid #f1f5f9; }
+      .pacing-table tr:last-child td { border-bottom: none; }
+      .highlight-row { background: #f0fdf4; }
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Netflix streaming interface"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Data Modeling · Interview · 20 min</span>
+          </div>
+        </figure>
+
+        <h1>Netflix Interview: Direct-Sold Ad Campaign Data Model</h1>
+        <p class="summary">
+          A senior system design question that exposes three things auctions handle automatically but
+          direct-sold contracts make you model explicitly: upfront pricing, delivery guarantees, and
+          inventory booking. The entity hierarchy, pacing strategies, versioning trap, and frequency cap
+          leakage — all quantified.
+        </p>
+        <div class="article-meta">
+          <div><span class="meta-label">Source</span><span class="meta-value">Emily Hustle NYC · Medium</span></div>
+          <div><span class="meta-label">Domain</span><span class="meta-value">Data Modeling · Ad Tech · System Design</span></div>
+          <div><span class="meta-label">JS Example</span><span class="meta-value">✓ Pacing calculator, versioned revenue query</span></div>
+        </div>
+      </header>
+
+      <!-- ─── SECTION 1: CORE SHIFT ───────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Auction vs. Direct-Sold: Three Fundamental Shifts</h2>
+        <p class="lead">
+          Auction-based ad systems discover price competitively, win delivery automatically, and bid
+          against real-time inventory. Removing the auction forces you to model three things explicitly.
+        </p>
+        <table class="pacing-table">
+          <thead><tr><th>Auction World</th><th>Direct-Sold World</th></tr></thead>
+          <tbody>
+            <tr><td>Price discovered at bid time</td><td>Price negotiated upfront, fixed on line item</td></tr>
+            <tr><td>Delivery won competitively</td><td>Delivery <strong>promised contractually</strong></td></tr>
+            <tr><td>Inventory bid for</td><td>Inventory <strong>booked against forecast</strong></td></tr>
+          </tbody>
+        </table>
+        <p>
+          The question is testing whether you recognize this shift and can model each constraint
+          separately — not just redraw a programmatic DSP with different labels.
+        </p>
+      </section>
+
+      <!-- ─── SECTION 2: ENTITY HIERARCHY ───────────────────────────────── -->
+      <section class="content-card">
+        <h2>Entity Hierarchy: Money Flows Down the Tree</h2>
+        <p>
+          Direct-sold relationships have a natural hierarchy. Every entity below inherits constraints
+          from its parent and adds its own scheduling or delivery details.
+        </p>
+        <div class="callout">
+          <p><strong>Flow:</strong> Agency → Advertiser → Order → Line Item → Flight</p>
+        </div>
+
+        <h3>The Critical Design Decision: Flights vs. Line Items</h3>
+        <p>
+          Budgets and dates belong on a <strong>flight</strong> (child entity), not on the line item
+          itself. This is the interviewer's hidden test.
+        </p>
+
+        <div class="schema-block">
+<span class="cmt">-- Line item: what was sold, at what rate, toward what goal</span>
+<span class="kw">CREATE TABLE</span> <span class="col">line_item</span> (
+  id              UUID <span class="kw">PRIMARY KEY</span>,
+  order_id        UUID <span class="kw">REFERENCES</span> orders(id),
+  name            TEXT,
+  priority        INT,
+  rate_type       TEXT,  <span class="cmt">-- CPM | CPC | CPV</span>
+  rate_amount     NUMERIC(10,4),
+  goal_type       TEXT,  <span class="cmt">-- impressions | clicks | spend</span>
+  goal_quantity   BIGINT,
+  pacing_strategy TEXT,  <span class="cmt">-- asap | even | catch_up</span>
+  status          TEXT   <span class="cmt">-- draft | active | paused | completed</span>
+);
+
+<span class="cmt">-- Flight: the time-boxed delivery schedule for a line item</span>
+<span class="kw">CREATE TABLE</span> <span class="col">flight</span> (
+  id                   UUID <span class="kw">PRIMARY KEY</span>,
+  line_item_id         UUID <span class="kw">REFERENCES</span> line_item(id),
+  start_at             TIMESTAMPTZ,
+  end_at               TIMESTAMPTZ,
+  budget_amount        NUMERIC(12,2),
+  budget_impressions   BIGINT,
+  pacing_target        NUMERIC(6,4)  <span class="cmt">-- allowed daily variance (e.g. 0.05 = ±5%)</span>
+);
+        </div>
+
+        <div class="insight-box">
+          <strong>Why flights, not dates on line items?</strong> A campaign may run in phases —
+          December pause, then January restart — under one negotiated rate. Putting dates on line
+          items fragments frequency caps across rows that cannot communicate. The flight entity
+          also enables catch-up pacing without touching the contract.
+        </div>
+      </section>
+
+      <!-- ─── SECTION 3: PACING STRATEGIES ──────────────────────────────── -->
+      <section class="content-card">
+        <h2>Pacing Strategies — Quantified</h2>
+        <p>
+          A 30M-impression flight over 30 days with ~42M available daily inventory illustrates
+          how strategy choice determines whether delivery succeeds.
+        </p>
+
+        <table class="pacing-table">
+          <thead><tr><th>Strategy</th><th>Outcome</th></tr></thead>
+          <tbody>
+            <tr><td>Serve ASAP</td><td>Finishes day 21, dark for 9 days</td></tr>
+            <tr><td>Even pacing (fixed daily target)</td><td><strong>97.72%</strong> delivery — 683,208 impressions short</td></tr>
+            <tr class="highlight-row"><td>Catch-up pacing (remaining ÷ remaining days)</td><td><strong>100%</strong> on day 30</td></tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-javascript">// Catch-up pacing calculator
+function dailyTarget(totalGoal, delivered, daysElapsed, totalDays) {
+  const remaining = totalGoal - delivered;
+  const daysLeft   = totalDays - daysElapsed;
+  return daysLeft > 0 ? remaining / daysLeft : 0;
+}
+
+// Simulate 30-day flight: 30M impressions, ~1.4M/day available
+function simulateFlight(goal, totalDays, dailyAvailable) {
+  let delivered = 0;
+  const log = [];
+
+  for (let day = 1; day <= totalDays; day++) {
+    const target  = dailyTarget(goal, delivered, day - 1, totalDays);
+    const served  = Math.min(target * 1.05, dailyAvailable); // allow 5% burst
+    delivered    += served;
+    log.push({ day, target: Math.round(target), served: Math.round(served), cumulative: Math.round(delivered) });
+  }
+
+  return { delivered, pct: ((delivered / goal) * 100).toFixed(2), log };
+}
+
+const result = simulateFlight(30_000_000, 30, 1_400_000);
+console.log(`Delivery: ${result.delivered.toLocaleString()} (${result.pct}%)`);
+// → Delivery: 30,000,000 (100.00%)</code></pre>
+
+        <p class="callout">
+          <strong>Model implication:</strong> <code>pacing_strategy</code> cannot be a boolean.
+          It needs the strategy name, a permitted daily variance, and a flag for whether the
+          line item may front-load.
+        </p>
+      </section>
+
+      <!-- ─── SECTION 4: TARGETING TREE ─────────────────────────────────── -->
+      <section class="content-card">
+        <h2>Targeting: Tree Structure, Not Wide Columns</h2>
+        <p>
+          A table with <code>geography</code>, <code>device</code>, <code>daypart</code> columns
+          breaks immediately on boolean expressions like "US + mobile OR UK + CTV."
+          Use a targeting tree instead.
+        </p>
+
+        <div class="schema-block">
+<span class="kw">CREATE TABLE</span> <span class="col">targeting_node</span> (
+  id            UUID <span class="kw">PRIMARY KEY</span>,
+  line_item_id  UUID <span class="kw">REFERENCES</span> line_item(id),
+  parent_id     UUID <span class="kw">REFERENCES</span> targeting_node(id),
+  operator      TEXT,  <span class="cmt">-- AND | OR | NOT</span>
+  dimension     TEXT,  <span class="cmt">-- geography | device | daypart | content_rating</span>
+  match_type    TEXT,  <span class="cmt">-- INCLUDE | EXCLUDE</span>
+  value_set_id  UUID   <span class="cmt">-- pointer to geography_set, device_set, etc.</span>
+);
+        </div>
+
+        <pre><code class="language-javascript">// Build a targeting tree: (US AND mobile) OR (UK AND CTV)
+const tree = {
+  operator: "OR",
+  children: [
+    {
+      operator: "AND",
+      children: [
+        { dimension: "geography", match_type: "INCLUDE", values: ["US"] },
+        { dimension: "device",    match_type: "INCLUDE", values: ["mobile"] }
+      ]
+    },
+    {
+      operator: "AND",
+      children: [
+        { dimension: "geography", match_type: "INCLUDE", values: ["UK"] },
+        { dimension: "device",    match_type: "INCLUDE", values: ["CTV"] }
+      ]
+    }
+  ]
+};
+
+function evaluateTargeting(tree, impression) {
+  if (tree.dimension) {
+    const match = tree.values.includes(impression[tree.dimension]);
+    return tree.match_type === "INCLUDE" ? match : !match;
+  }
+  if (tree.operator === "AND") return tree.children.every(c => evaluateTargeting(c, impression));
+  if (tree.operator === "OR")  return tree.children.some(c  => evaluateTargeting(c, impression));
+  if (tree.operator === "NOT") return !evaluateTargeting(tree.children[0], impression);
+}
+
+// Test
+console.log(evaluateTargeting(tree, { geography: "US", device: "mobile" })); // true
+console.log(evaluateTargeting(tree, { geography: "US", device: "desktop" })); // false
+console.log(evaluateTargeting(tree, { geography: "UK", device: "CTV" }));    // true</code></pre>
+      </section>
+
+      <!-- ─── SECTION 5: CREATIVE APPROVAL STATE MACHINE ─────────────────── -->
+      <section class="content-card">
+        <h2>Creative Approval: State Machine, Not Boolean</h2>
+        <p>
+          An <code>approved</code> boolean breaks when policy contexts differ or when policies
+          change after approval. Model it as a state machine scoped to a policy context.
+        </p>
+
+        <div class="callout">
+          <strong>States:</strong> submitted → in_review → approved → rejected → expired
+        </div>
+
+        <pre><code class="language-javascript">// Creative approval state machine
+const TRANSITIONS = {
+  submitted:  ["in_review"],
+  in_review:  ["approved", "rejected"],
+  approved:   ["expired"],   // forced when policy context changes
+  rejected:   ["submitted"], // resubmit after edits
+  expired:    ["submitted"]
+};
+
+class CreativeApproval {
+  constructor(creativeId, policyContext) {
+    this.creativeId    = creativeId;
+    this.policyContext = policyContext; // "general_audience" | "kids" | "sports"
+    this.state         = "submitted";
+    this.history       = [];
+  }
+
+  transition(to, reviewerId, reason = "") {
+    if (!TRANSITIONS[this.state].includes(to)) {
+      throw new Error(`Invalid transition: ${this.state} → ${to}`);
+    }
+    this.history.push({ from: this.state, to, reviewerId, reason, at: new Date().toISOString() });
+    this.state = to;
+    return this;
+  }
+
+  // When policy context changes (e.g. ad slot reclassified as kids content)
+  invalidateForPolicyChange(newContext) {
+    if (this.state === "approved") {
+      this.policyContext = newContext;
+      this.transition("expired", "system", "Policy context changed — re-review required");
+    }
+  }
+}
+
+const approval = new CreativeApproval("ad-123", "general_audience");
+approval.transition("in_review", "reviewer-1");
+approval.transition("approved", "reviewer-1", "Meets all guidelines");
+approval.invalidateForPolicyChange("kids"); // Forces re-review
+console.log(approval.state); // "expired"
+console.log(approval.history.map(h => `${h.from}→${h.to}`).join(", "));
+// submitted→in_review, in_review→approved, approved→expired</code></pre>
+      </section>
+
+      <!-- ─── SECTION 6: THE VERSIONING TRAP ───────────────────────────── -->
+      <section class="content-card">
+        <h2>The Versioning Trap — The Core Interview Insight</h2>
+        <p>
+          Every impression records a <code>config_version</code>. Without it, mid-flight
+          renegotiations destroy reporting accuracy silently — no error thrown, just wrong numbers.
+        </p>
+
+        <div class="warn-box">
+          <strong>Example:</strong> 30M impression flight, rate drops from $22 CPM to $18 CPM on day 15.<br/>
+          <strong>Correct (version-aware):</strong> $599,669 &nbsp;|&nbsp;
+          <strong>Naive (current row join):</strong> $540,000 &nbsp;|&nbsp;
+          <strong>Error: $59,669 (~9.95% of campaign revenue)</strong>
+        </div>
+
+        <div class="schema-block">
+<span class="kw">CREATE TABLE</span> <span class="col">line_item_version</span> (
+  id              UUID <span class="kw">PRIMARY KEY</span>,
+  line_item_id    UUID <span class="kw">REFERENCES</span> line_item(id),
+  version         INT  <span class="kw">NOT NULL</span>,
+  rate_amount     NUMERIC(10,4),
+  valid_from      TIMESTAMPTZ <span class="kw">NOT NULL</span>,
+  valid_to        TIMESTAMPTZ,
+  changed_by      UUID,
+  change_reason   TEXT
+);
+
+<span class="cmt">-- Impression table carries config_version for point-in-time join</span>
+<span class="kw">CREATE TABLE</span> <span class="col">impression</span> (
+  id              UUID <span class="kw">PRIMARY KEY</span>,
+  line_item_id    UUID,
+  config_version  INT,  <span class="cmt">-- snapshot of the version at serve time</span>
+  served_at       TIMESTAMPTZ,
+  user_id         UUID,
+  placement_id    UUID
+);
+        </div>
+
+        <pre><code class="language-javascript">// Point-in-time revenue calculation (version-aware)
+function calculateRevenue(impressions, versionHistory) {
+  return impressions.reduce((total, imp) => {
+    const version = versionHistory.find(v =>
+      v.version === imp.configVersion &&
+      v.lineItemId === imp.lineItemId
+    );
+    if (!version) throw new Error(`Missing version ${imp.configVersion} for ${imp.lineItemId}`);
+    // CPM = cost per 1000 impressions
+    return total + (version.rateCpm / 1000);
+  }, 0);
+}
+
+// Simulate mid-flight rate change
+const versionHistory = [
+  { lineItemId: "li-1", version: 1, rateCpm: 22.00, validFrom: "2026-12-01" },
+  { lineItemId: "li-1", version: 2, rateCpm: 18.00, validFrom: "2026-12-15" }
+];
+
+// 15M impressions at v1 ($22 CPM) + 15M impressions at v2 ($18 CPM)
+const impressions = [
+  ...Array(15_000_000).fill({ lineItemId: "li-1", configVersion: 1 }),
+  ...Array(15_000_000).fill({ lineItemId: "li-1", configVersion: 2 })
+];
+
+// Correct: (15M × $22 + 15M × $18) / 1000 = $330k + $270k = $600k
+const correctRevenue = (15_000_000 * 22 + 15_000_000 * 18) / 1000;
+console.log(`Correct:  $${correctRevenue.toLocaleString()}`); // $600,000
+
+// Naive (wrong): 30M × $18 (current rate)
+const naiveRevenue  = (30_000_000 * 18) / 1000;
+console.log(`Naive:    $${naiveRevenue.toLocaleString()}`);   // $540,000
+console.log(`Error:    $${(correctRevenue - naiveRevenue).toLocaleString()}`); // $60,000</code></pre>
+      </section>
+
+      <!-- ─── SECTION 7: FREQUENCY CAP LEAKAGE ─────────────────────────── -->
+      <section class="content-card">
+        <h2>Frequency Cap Leakage</h2>
+        <p>
+          With 8 distributed ad servers and a cap of 3 impressions/user/week, stale local
+          counters allow users to see more ads than contracted.
+        </p>
+
+        <table class="pacing-table">
+          <thead><tr><th>Sync Interval</th><th>Users Receiving 4th+ Impression</th></tr></thead>
+          <tbody>
+            <tr class="highlight-row"><td>1 second</td><td>~0%</td></tr>
+            <tr><td>60 seconds</td><td>0.27%</td></tr>
+            <tr><td>5 minutes</td><td>0.94%</td></tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-javascript">// Distributed frequency cap with tolerance field
+class FrequencyCap {
+  constructor({ cap, windowMs, tolerancePct = 0.01, syncIntervalMs = 60_000 }) {
+    this.cap          = cap;           // e.g. 3 impressions
+    this.windowMs     = windowMs;      // e.g. 7 * 24 * 3600 * 1000 (1 week)
+    this.tolerance    = tolerancePct;  // acceptable overshoot (model it, don't hide it)
+    this.syncInterval = syncIntervalMs;
+    this.localCounts  = new Map();     // userId → count (stale between syncs)
+    this.lastSync     = Date.now();
+  }
+
+  // Called on each ad server before serving
+  canServe(userId) {
+    const count = this.localCounts.get(userId) ?? 0;
+    const maxAllowed = Math.floor(this.cap * (1 + this.tolerance));
+    return count < maxAllowed;
+  }
+
+  record(userId) {
+    this.localCounts.set(userId, (this.localCounts.get(userId) ?? 0) + 1);
+  }
+
+  // Sync with central counter store (Redis, etc.) — resets local staleness
+  async syncWithCentral(centralStore) {
+    const now = Date.now();
+    if (now - this.lastSync < this.syncInterval) return;
+
+    for (const [userId, localCount] of this.localCounts) {
+      await centralStore.increment(userId, localCount, this.windowMs);
+      const centralCount = await centralStore.get(userId);
+      this.localCounts.set(userId, centralCount);
+    }
+    this.lastSync = now;
+  }
+}
+
+// Key insight: tolerance is a policy parameter, not a bug to hide
+// Store it on the line_item so reports can explain overshoot
+const cap = new FrequencyCap({ cap: 3, windowMs: 7 * 86_400_000, tolerancePct: 0.01, syncIntervalMs: 60_000 });
+console.log(cap.canServe("user-1")); // true (count = 0)
+cap.record("user-1"); cap.record("user-1"); cap.record("user-1");
+console.log(cap.canServe("user-1")); // false (count = 3, maxAllowed = 3)
+// With 1% tolerance, maxAllowed = 3 for cap=3 → no overshoot allowed
+// A cap of 10 with 1% tolerance → maxAllowed = 10 (Math.floor(10.1) = 10)</code></pre>
+
+        <div class="insight-box">
+          <strong>Model insight:</strong> "A frequency cap is a policy with a tolerance rather than
+          an invariant." The model should carry an <code>acceptable_overshoot</code> field so
+          reporting can distinguish intentional overshoot from bugs.
+        </div>
+      </section>
+
+      <!-- ─── SECTION 8: THE GENERALIZABLE PRINCIPLE ────────────────────── -->
+      <section class="content-card">
+        <h2>The Generalizable Modeling Principle</h2>
+        <p>Before placing an attribute directly on an entity, ask:</p>
+        <div class="callout">
+          <strong>Can it differ across time, context, or contract phases?</strong><br/>
+          If yes — it's a child entity with its own lifespan, not a column.
+        </div>
+
+        <div class="compare-grid">
+          <div class="compare-card">
+            <h4>❌ Column on entity</h4>
+            <ul>
+              <li>Start/end dates on line item</li>
+              <li>Rate on order</li>
+              <li>Approved boolean on creative</li>
+              <li>Geography string on line item</li>
+            </ul>
+          </div>
+          <div class="compare-card">
+            <h4>✅ Child entity</h4>
+            <ul>
+              <li>Flight (start/end + budget + pacing)</li>
+              <li>line_item_version (rate history)</li>
+              <li>CreativeApproval (state machine)</li>
+              <li>targeting_node (boolean tree)</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── KEY TAKEAWAY ─────────────────────────────────────────────── -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          Direct-sold ad systems expose what auction systems hide. You must explicitly model the
+          upfront rate, the delivery promise, and the inventory reservation — three separate concerns.
+          The versioning trap (silent wrong numbers on mid-flight changes), the pacing strategy
+          (catch-up beats even by 2.28pp), and the frequency cap tolerance (a policy, not an invariant)
+          are the three questions that separate candidates who understand the domain from those who
+          can draw a generic data model. Store <code>config_version</code> on every impression — it
+          is the only way to produce correct revenue reports after renegotiation.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

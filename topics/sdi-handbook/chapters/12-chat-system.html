@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design a Chat System | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 12 of the System Design Interview Handbook, created 2026-10-15 from liquidslr/system-design-notes ch.12. Covers designing a chat system for 50M DAU: WebSocket vs polling vs long polling, stateless vs stateful tiers, KV-store message storage with per-channel sequence ids, service discovery for chat-server assignment, 1:1 and group flows, inbox-per-recipient fanout, multi-device sync with cur_max_message_id, heartbeat presence and presence fanout limits. Includes an executed JavaScript example (per-channel ids, device cursor sync, heartbeat presence, offline push queue). About 20 minute read. Related: websockets, pub-sub, service-discovery, discord-presence, notification system chapter.</div>
+        <h1>Design a Chat System</h1>
+        <p class="summary">A chat system is a connection-management problem wearing a messaging costume. This chapter builds 1:1 and group chat for 50M daily users with durable history, multi-device sync and presence, and spends its depth where the real difficulty is: millions of long-lived sockets, ordering, and fanout.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">12 of 28 · Part 3 Product Systems</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">19 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">WebSocket, stateful chat tier, per-channel sequence ids, inbox sync, heartbeat presence</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Discord, Slack Flannel, WhatsApp, Messenger, ZooKeeper, Cassandra</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Almost every other system in this handbook is request/response: the client asks, the server answers, and you can scale by adding stateless boxes. Chat breaks that model. Messages must be <em>pushed</em> to a receiver who never asked, and to push you must remember which of millions of sockets belongs to which user. The whole design is about taming that statefulness.</p>
+        <div class="callout"><p><strong>Core idea:</strong> keep exactly one tier stateful (the chat servers holding WebSocket connections), make everything else stateless, give every channel its own monotonically increasing message id, and let each device pull "everything after my last id" so that delivery, reconnects and multi-device sync collapse into a single mechanism.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design to anchor on</span>
+        <h2>How Discord stores billions of messages</h2>
+        <p>Discord has written publicly about moving its message store from MongoDB to Cassandra and later to ScyllaDB. The shape of the data is the lesson: messages are partitioned by channel (plus a time bucket so a busy channel does not create one unbounded partition) and clustered by a time-sortable id, so "the latest 50 messages in this channel" is a single-partition range read. That is exactly the (channel_id, message_id) key this chapter arrives at, and the reason a wide-column or key-value store beats a relational table with a giant secondary index for this workload. Slack's Flannel, listed in the sources below, solves the other half: an application-level edge cache so a client booting into a huge workspace does not fetch the whole member list.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Requirements</span>
+        <h2>What we are building</h2>
+        <ul class="check-list">
+          <li>One-on-one chat and group chat capped at 100 members.</li>
+          <li>Text messages, up to 100,000 characters each (large enough that you must think about row size and not assume tiny payloads).</li>
+          <li>Online/offline presence indicator.</li>
+          <li>Multiple devices per user, all converging on the same history.</li>
+          <li>Push notification when the recipient is not connected.</li>
+          <li>50 million daily active users; chat history stored permanently; low latency delivery.</li>
+        </ul>
+        <p class="mini-heading">Back-of-envelope (my assumptions, shown so you can change them)</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Arithmetic</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Messages per day</td><td>50M DAU × 40 messages each</td><td>2 billion/day</td></tr>
+            <tr><td>Average write rate</td><td>2×10<sup>9</sup> ÷ 86,400 s</td><td>about 23,000 msg/s</td></tr>
+            <tr><td>Peak write rate</td><td>3× average</td><td>about 70,000 msg/s</td></tr>
+            <tr><td>Concurrent sockets</td><td>assume 20% of DAU online at peak</td><td>10 million</td></tr>
+            <tr><td>Chat servers</td><td>10M ÷ 50,000 sockets per box (conservative)</td><td>about 200 servers</td></tr>
+            <tr><td>Storage growth</td><td>2×10<sup>9</sup> × ~100 bytes of text + ~100 bytes of metadata</td><td>about 400 GB/day, roughly 146 TB/year before replication</td></tr>
+          </tbody>
+        </table>
+        <p>The shape matters more than the digits. Write rate is modest by internet standards; the hard numbers are 10 million <em>idle-but-open</em> connections and the fanout multiplier on groups. A single well-tuned box can hold hundreds of thousands of idle sockets, but keeping headroom for reconnect storms is why you plan at a fraction of that.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Transport</span>
+        <h2>Getting messages to the receiver</h2>
+        <p>Sending is easy: an ordinary HTTP request over a keep-alive connection works, and plenty of production systems send over plain HTTPS. Receiving is the problem, because HTTP is client-initiated. Three options exist.</p>
+        <table class="data-table">
+          <thead><tr><th>Technique</th><th>How it works</th><th>Cost</th><th>Verdict</th></tr></thead>
+          <tbody>
+            <tr><td>Short polling</td><td>Client asks "anything new?" every N seconds</td><td>Most responses empty; latency up to N seconds; huge request volume from idle users</td><td>Fine for a prototype, wasteful at scale</td></tr>
+            <tr><td>Long polling</td><td>Server holds the request open until a message arrives or a timeout fires</td><td>Each delivery needs a re-request; the sender and receiver often land on different servers; connection churn even for silent users</td><td>Reasonable fallback behind restrictive proxies</td></tr>
+            <tr><td>WebSocket</td><td>One HTTP Upgrade handshake, then a bidirectional framed TCP channel</td><td>Stateful: server must track every open socket</td><td>Default choice for both directions</td></tr>
+          </tbody>
+        </table>
+<div class="diagram-box"><span class="dim">Short poll</span>   C ──?──▶ S ──none──▶ C   ──?──▶ S ──none──▶ C   ──?──▶ S ──msg──▶ C
+<span class="dim">Long poll</span>    C ──?──▶ S ·········(held)·········──msg──▶ C ──?──▶ S ···
+<span class="dim">WebSocket</span>    C ══ Upgrade ══▶ S   <span class="ok">◀══ msg ══</span>   <span class="hi">══ msg ══▶</span>   <span class="ok">◀══ msg ══</span>   (one TCP connection)</div>
+        <p>WebSocket's cost is operational, not conceptual. The connection is long-lived, so deploys, load balancer idle timeouts and NAT timeouts all become your problem. Run application-level pings so intermediaries do not silently drop a quiet socket, and have the client reconnect with jittered exponential backoff; without jitter, a chat-server restart turns into a synchronized reconnect stampede from every client it held.</p>
+        <div class="insight-box"><strong>Practical note:</strong> ship a long-polling or HTTP fallback anyway. Some corporate proxies still break Upgrade, and mobile OSes aggressively kill background sockets, which is why push notifications are not optional but a core part of the delivery path.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Stateless where possible, stateful where forced</h2>
+        <p>Split the system by whether it needs to remember a connection.</p>
+        <ul class="check-list">
+          <li><strong>Stateless tier</strong> (behind a normal load balancer): signup, login, profile, friend and group management. These are ordinary REST services and scale by adding instances. A service-discovery component also lives here; it hands a freshly logged-in client the address of a chat server.</li>
+          <li><strong>Stateful tier</strong>: the chat servers. Each holds the WebSocket connections of the users assigned to it and a local map from user id to socket.</li>
+          <li><strong>Presence servers</strong>: track who is online.</li>
+          <li><strong>Notification path</strong>: hands messages for offline users to APNs/FCM (see the notification system chapter).</li>
+          <li><strong>Message store</strong>: a key-value or wide-column database holding all history.</li>
+        </ul>
+<div class="diagram-box">                    <span class="dim">stateless</span>                                  <span class="dim">stateful</span>
+ client ──HTTPS──▶ LB ──▶ API servers (login, profile, groups)
+    │                          │
+    │                   <span class="step">service discovery</span> ──▶ "use chat-server-17"
+    │
+    └────WebSocket────────────▶ <span class="hi">chat servers</span> ◀─────▶ <span class="ok">message KV store</span>
+                                   │      │
+                                   │      └────▶ presence servers
+                                   └───────────▶ push notification (APNs / FCM) when offline</div>
+        <h3>Why a key-value or wide-column store for history</h3>
+        <p>The access pattern is overwhelmingly "append to a channel" and "read the tail of a channel, occasionally page backwards." There are no joins and no ad hoc queries on the hot path. Relational databases can do this, but the long tail hurts: months-old conversations are rarely read, so their index pages are cold, and a random read against a very large B-tree index becomes a disk seek. A partitioned store like Cassandra or HBase keeps each channel's messages contiguous on disk, scales by adding nodes, and gives predictable single-partition latency. Messenger and Discord both run on stores of this family. Search over history is a separate concern; feed messages into an inverted index such as Elasticsearch rather than abusing the primary store.</p>
+        <p class="mini-heading">Data model</p>
+        <table class="data-table">
+          <thead><tr><th>Table</th><th>Key</th><th>Columns</th></tr></thead>
+          <tbody>
+            <tr><td>1:1 messages</td><td>message_id (clustering) within a conversation partition</td><td>from_user, to_user, content, created_at</td></tr>
+            <tr><td>Group messages</td><td>(channel_id, message_id)</td><td>from_user, content, created_at</td></tr>
+          </tbody>
+        </table>
+        <p>The message id has two jobs: be unique and encode order, because <code>created_at</code> alone is unsafe (two messages can share a millisecond). How global does the id have to be? Not at all. You only need a total order <em>within a channel</em>; no one compares message 7 of channel A with message 9 of channel B. So a per-channel counter is sufficient, and it is cheaper than a globally coordinated Snowflake-style id (see the unique-id chapter), though a Snowflake id works too and gives you a time-sortable key without a per-channel sequencer. The trade is below.</p>
+        <table class="data-table">
+          <thead><tr><th>Id strategy</th><th>Pros</th><th>Cons</th></tr></thead>
+          <tbody>
+            <tr><td>Per-channel counter</td><td>Dense, small ids; gaps are detectable (a client can see that id 8 is missing); cheap ordering proof</td><td>Needs a single writer per channel (or a CAS) to hand out the next number; counter state to recover</td></tr>
+            <tr><td>Global time-sortable id (Snowflake)</td><td>No coordination on the hot path; any chat server can mint one</td><td>Order within a channel depends on clock quality; cannot detect gaps; larger ids</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Service discovery: which chat server do I talk to?</h2>
+        <p>After login the client needs one chat server. A discovery service (the classic answer is Apache ZooKeeper, with etcd and Consul as modern equivalents) maintains a registry of live chat servers and picks one using geography and current load. The flow is: client authenticates, the API tier asks discovery for the best server, the client opens a WebSocket to it. If that server dies, the client asks again.</p>
+        <p>An opinionated note: do not pick by pure round-robin, because connection count and bandwidth, not request rate, define load for a socket server. Pick by connection count with some randomness (power-of-two-choices works well), and drain a server by refusing new assignments before a deploy so connections migrate gradually. See the <a href="../../system-design/service-discovery.html">service discovery</a> and <a href="../../system-design/load-balancing.html">load balancing</a> pages.</p>
+
+        <h2>One-on-one flow</h2>
+<div class="diagram-box"> A's device ──ws──▶ <span class="hi">Chat server 1</span>
+                       │ <span class="step">1</span> assign message id (per channel)
+                       │ <span class="step">2</span> persist to KV store         <span class="warn">◀ persist BEFORE you deliver</span>
+                       │ <span class="step">3</span> publish to B's inbox / message-sync queue
+                       ▼
+                B online?  ──yes──▶ <span class="hi">Chat server 2</span> ══ws══▶ B's device
+                       └───no───▶ push notification service ──▶ APNs / FCM</div>
+        <p>The ordering of steps is the reliability guarantee. If you deliver before persisting and the server dies between the two, the receiver saw a message the history never recorded. Persist first, then deliver; if delivery fails, the message is still there for the receiver's next sync. Aim for at-least-once delivery with client-side de-duplication on (channel_id, message_id), because exactly-once over an unreliable network is not on offer. The client also attaches a client-generated id to each outgoing message so a retry after a lost acknowledgment is idempotent (the same trick as in the <a href="../../system-design/idempotency.html">idempotency</a> page).</p>
+        <p>How does server 1 know B is on server 2? Either a lookup in a shared session registry (user id to server id, in Redis, with a TTL refreshed by the socket's pings), or a pub/sub topic per user or per server. The registry is simple and precise; pub/sub removes the lookup but adds a broker on the hot path. Both are used in practice.</p>
+
+        <h2>Group chat flow</h2>
+<div class="diagram-box"> A sends to group G (members A, B, C)
+   Chat server ──▶ persist once in (channel=G, id)
+        │
+        ├──▶ <span class="ok">B's inbox queue</span> ──▶ B's chat server ──▶ B's devices
+        └──▶ <span class="ok">C's inbox queue</span> ──▶ C's chat server ──▶ C's devices</div>
+        <p>The chapter's approach is to copy the message into every recipient's inbox (a per-user message sync queue). Reading becomes trivial: each device drains one queue regardless of how many senders or groups feed it. The cost is write amplification of N−1 per message, which is why the group size is capped at 100 here. Be careful to separate two things: the message body is stored <em>once</em> in the channel table; the inbox holds only pointers (channel id plus message id), so the amplification is in small index entries, not full text.</p>
+        <p>This is the same push-versus-pull choice you meet in the news feed chapter. For groups of 100, push (fanout on write) is correct. For a 100,000-member community channel, per-recipient inboxes are absurd; those systems store once per channel and have clients fetch by cursor, pushing only a lightweight "channel has new messages" signal to members who are currently looking at it. That is the architecture behind large Discord and Slack channels.</p>
+
+        <h2>Multi-device sync</h2>
+        <p>Each device remembers <code>cur_max_message_id</code>: the highest message id it has seen. To sync, the device asks for messages in its channels with id greater than that value. A message is "new" for a device exactly when it was addressed to the logged-in user and its id exceeds the device's cursor. Because each device owns its own cursor, a phone that was off for a week and a laptop that was on all day each get the right delta with no per-device bookkeeping on the server. With per-channel ids, the cursor is really a map: channel to last seen id (the code below does this), and a cold-started device with an empty map simply fetches recent history per channel.</p>
+        <div class="insight-box"><strong>Insight:</strong> live delivery and reconnect catch-up are the <em>same code path</em>. The server never "sends a message"; it tells the connected device "your channel advanced, pull from your cursor." Dropped packets, a socket that died mid-delivery and a brand-new device all heal identically.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Online presence</h2>
+        <p>On login the client connects and the presence server records the user as online with a timestamp; on a clean logout it records offline. The hard part is the unclean case: a phone enters a tunnel, the TCP connection never sends a FIN, and the server believes the user is online forever. Closing that gap is why presence is built on heartbeats rather than on socket state alone.</p>
+        <ul class="check-list">
+          <li>The client sends a heartbeat every few seconds (say every 5).</li>
+          <li>The presence server stores <code>last_active</code>. If no heartbeat arrives within a timeout (the notes use 30 seconds), the user is considered offline.</li>
+          <li>The timeout must exceed several heartbeat intervals so one dropped packet, or a user flicking between Wi-Fi and cellular, does not make the status flap.</li>
+        </ul>
+        <p>Presence fanout is where this gets expensive. The chapter's design uses a publish/subscribe channel per friend pair: when A's status changes, A publishes on channels A-B, A-C and A-D, and B, C and D are each subscribed to their channel with A. That is fine for a small friend list but costs one publish per friend per transition, and every login, logout and flap is a transition. For large groups or big social graphs, do not push. Instead, fetch presence lazily: clients request status only for users currently visible on screen, and the server returns a cached last-seen value. Discord's public writing on presence describes bounding exactly this fanout; see the existing <a href="../../discord-presence-system-design.html">Discord presence design</a> page for a worked treatment.</p>
+        <div class="warn-box"><strong>Gotcha:</strong> debounce presence. Publishing "offline" the instant one heartbeat is missed, then "online" two seconds later, burns fanout capacity and makes the UI blink. Require the timeout to elapse before announcing offline, and consider announcing online immediately but offline only after the grace period.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable core: per-channel ids, cursor sync, presence</h2>
+        <p>This model captures the mechanics that matter: persist-first delivery, per-channel sequence ids, per-device cursors that make reconnect and multi-device identical, heartbeat expiry using an injected clock, and an offline push queue. The WebSocket layer is deliberately replaced with callbacks; the algorithms are the same.</p>
+        <span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Mini chat core: per-channel sequence ids, durable store, inbox sync by cur_max_message_id, heartbeat presence.
+import assert from 'node:assert/strict';
+
+class MessageStore {                       // stands in for a KV store keyed (channel_id, message_id)
+  #rows = new Map();                       // channel -&gt; array of {id, from, text}
+  #seq = new Map();                        // channel -&gt; last id (local sequence per channel)
+  append(channel, from, text) {
+    const id = (this.#seq.get(channel) ?? 0) + 1;
+    this.#seq.set(channel, id);
+    if (!this.#rows.has(channel)) this.#rows.set(channel, []);
+    const row = { channel, id, from, text };
+    this.#rows.get(channel).push(row);
+    return row;
+  }
+  since(channel, afterId) { return (this.#rows.get(channel) ?? []).filter(r =&gt; r.id &gt; afterId); }
+}
+
+class Presence {
+  constructor(timeoutMs, now) { this.timeoutMs = timeoutMs; this.now = now; this.last = new Map(); }
+  heartbeat(user) { this.last.set(user, this.now()); }
+  isOnline(user) { const t = this.last.get(user); return t !== undefined &amp;&amp; this.now() - t &lt;= this.timeoutMs; }
+}
+
+class ChatService {
+  constructor(store, presence) {
+    this.store = store; this.presence = presence;
+    this.members = new Map();              // channel -&gt; Set(users)
+    this.sockets = new Map();              // user -&gt; [{device, cursor: Map(channel-&gt;curMax), push(msg)}]
+    this.pushQueue = [];                   // offline push notifications
+  }
+  join(channel, users) { this.members.set(channel, new Set(users)); }
+  connect(user, device, onMessage) {
+    const dev = { device, cursors: new Map(), push: onMessage };
+    (this.sockets.get(user) ?? this.sockets.set(user, []).get(user)).push(dev);
+    this.presence.heartbeat(user);
+    // reconnect: pull everything newer than this device's cursor for each channel
+    for (const [channel, users] of this.members) if (users.has(user)) this.sync(user, dev, channel);
+    return dev;
+  }
+  sync(user, dev, channel) {
+    const after = dev.cursors.get(channel) ?? 0;
+    for (const m of this.store.since(channel, after)) { dev.push(m); dev.cursors.set(channel, m.id); }
+  }
+  send(channel, from, text) {
+    const row = this.store.append(channel, from, text);       // persist first, then deliver
+    for (const u of this.members.get(channel)) {
+      if (u === from) continue;
+      const devs = this.sockets.get(u) ?? [];
+      if (this.presence.isOnline(u) &amp;&amp; devs.length) devs.forEach(d =&gt; this.sync(u, d, channel));
+      else this.pushQueue.push({ to: u, channel, id: row.id });
+    }
+    return row;
+  }
+}
+
+let clock = 0;
+const store = new MessageStore(), presence = new Presence(30_000, () =&gt; clock);
+const svc = new ChatService(store, presence);
+svc.join('dm:a-b', ['a', 'b']); svc.join('grp:1', ['a', 'b', 'c']);
+
+const phone = [], laptop = [];
+svc.connect('b', 'phone', m =&gt; phone.push(`${m.channel}#${m.id}:${m.text}`));
+presence.heartbeat('a');
+svc.send('dm:a-b', 'a', 'hi');
+svc.send('grp:1', 'a', 'hello group');
+assert.deepEqual(phone, ['dm:a-b#1:hi', 'grp:1#1:hello group']);
+assert.equal(svc.pushQueue.length, 1);                         // c was never online -&gt; push notification
+assert.equal(svc.pushQueue[0].to, 'c');
+
+// laptop logs in later and catches up from cursor 0; ids are per-channel so they restart at 1
+svc.connect('b', 'laptop', m =&gt; laptop.push(`${m.channel}#${m.id}`));
+assert.deepEqual(laptop, ['dm:a-b#1', 'grp:1#1']);
+
+// presence: b stops heartbeating
+clock = 20_000; assert.equal(presence.isOnline('b'), true);
+clock = 31_000; assert.equal(presence.isOnline('b'), false);
+svc.send('dm:a-b', 'a', 'are you there?');
+assert.equal(svc.pushQueue.at(-1).to, 'b');                    // offline -&gt; push
+// b reconnects: only the missed message is replayed
+const phone2 = []; svc.connect('b', 'tablet', m =&gt; phone2.push(m.text));
+assert.deepEqual(phone2, ['hi', 'are you there?', 'hello group']);   // new device replays every channel from cursor 0
+console.log('phone:', phone); console.log('laptop:', laptop);
+console.log('push queue:', svc.pushQueue); console.log('tablet replay:', phone2);
+console.log('all assertions passed');</code></pre>
+        <p class="code-caption">Run with <code>node chat.mjs</code> (Node 20+, no dependencies). It prints what each device received, the offline push queue (user c on first send, user b after its heartbeat expires) and the tablet's full replay, then "all assertions passed". Executed and verified.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decisions and what they cost</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Choice</th><th>Alternative</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>Receive transport</td><td>WebSocket</td><td>Long polling</td><td>One persistent bidirectional channel; accept the statefulness</td></tr>
+            <tr><td>History store</td><td>Wide-column / KV</td><td>Relational + index</td><td>Channel-contiguous reads; horizontal scale; cold data stays cheap</td></tr>
+            <tr><td>Message id</td><td>Per-channel sequence</td><td>Global Snowflake</td><td>Ordering only needs to hold inside a channel</td></tr>
+            <tr><td>Group delivery</td><td>Inbox per recipient</td><td>Cursor on shared channel</td><td>Simple sync for small groups; breaks past a few hundred members</td></tr>
+            <tr><td>Presence</td><td>Heartbeat + timeout</td><td>Socket close events only</td><td>Detects silent network death</td></tr>
+            <tr><td>Presence propagation</td><td>Pub/sub push for small circles</td><td>Lazy pull for visible users</td><td>Push cost grows with friend count times churn</td></tr>
+          </tbody>
+        </table>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Stateful chat servers: wins</h4><ul><li>Instant push with no polling overhead</li><li>Per-connection state enables backpressure and batching</li><li>Cheap per-message cost once connected</li></ul></div>
+          <div class="trade-col cons"><h4>Stateful chat servers: costs</h4><ul><li>Deploys and crashes drop thousands of sockets</li><li>Sticky routing; load balancing by connections, not requests</li><li>Reconnect storms need jitter and rate limits</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks and how to survive it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Chat server crash</td><td>Its users' sockets vanish; session registry points to a dead node</td><td>Registry TTL expires; clients reconnect through discovery to a new node and pull from their cursors; nothing was lost because history is persisted first</td></tr>
+            <tr><td>Reconnect stampede after deploy or outage</td><td>New servers crushed by simultaneous handshakes and syncs</td><td>Jittered backoff, connection-accept rate limits, rolling restarts that drain connections slowly</td></tr>
+            <tr><td>Message store partition hot</td><td>One very busy channel overloads one node</td><td>Time-bucket the partition key; cache the channel tail; split mega-channels</td></tr>
+            <tr><td>Duplicate delivery</td><td>Retry after lost ack shows a message twice</td><td>Client-generated id plus (channel, id) de-dup on the device and the server</td></tr>
+            <tr><td>Out-of-order arrival</td><td>Message 6 shows before 5</td><td>Clients sort by channel id; a visible gap triggers a fetch of the missing range</td></tr>
+            <tr><td>Presence flap</td><td>Users blink online/offline, fanout spikes</td><td>Heartbeat timeout several times the interval; debounce</td></tr>
+            <tr><td>Push provider outage</td><td>Offline users miss the nudge</td><td>Retry with backoff; messages remain in history so the next app open syncs anyway</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Where the knees are</h2>
+        <ul class="check-list">
+          <li><strong>File descriptors and memory, not CPU.</strong> Raise ulimits, tune kernel socket buffers and keep per-connection state tiny. Idle connection memory is dominated by buffers; trim them for quiet sockets.</li>
+          <li><strong>Sharding the message store.</strong> Partition by channel id, using consistent hashing so adding nodes moves little data; see <a href="../../system-design/consistent-hashing.html">consistent hashing</a> and <a href="../../system-design/sharding.html">sharding</a>.</li>
+          <li><strong>Cache the tail.</strong> Most reads are the latest page of an active channel; keep it in a cache and let the store serve scrollback.</li>
+          <li><strong>Flannel-style edge caching.</strong> Large workspaces should not ship their full member list to every client; serve lazily from a regional cache close to the user.</li>
+          <li><strong>Media.</strong> Do not send photos through the chat server: upload to object storage, compress and thumbnail, and send a reference in the message.</li>
+          <li><strong>Privacy.</strong> End-to-end encryption moves the trust boundary to the devices, which means the server can no longer search or moderate content, and multi-device sync needs per-device keys. Decide early; retrofitting is painful.</li>
+          <li><strong>Observability.</strong> Track connected sockets per server, delivery latency from persist to device ack, sync-delta sizes, push failure rate and reconnect rate. A rising reconnect rate is the earliest warning of a bad deploy or a network event.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Before you leave the whiteboard</h2>
+        <ul class="check-list">
+          <li>WebSocket chosen with a fallback, and the reconnect behaviour (jitter, cursors) stated.</li>
+          <li>Stateless and stateful tiers clearly separated; discovery assigns chat servers.</li>
+          <li>Persist-then-deliver ordering explained; at-least-once with de-dup.</li>
+          <li>Per-channel id and why a global order is unnecessary.</li>
+          <li>Group size limit tied to inbox write amplification, with the large-channel alternative.</li>
+          <li>Device cursor sync handles multi-device and reconnect with one mechanism.</li>
+          <li>Heartbeat presence with timeout and a plan for fanout cost.</li>
+          <li>Offline path through push notifications; media via object storage.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not use Kafka as the message store?</summary><p>Kafka is excellent as the transport between chat servers, the persistence worker and the search indexer, but it is a log, not a random-access store. Reading the last 50 messages of one of millions of channels would mean one partition per channel, which Kafka does not tolerate. Use it as a pipe and use a partitioned KV or wide-column database as the system of record.</p></details>
+        <details><summary>How do you guarantee ordering when two people type at once?</summary><p>Ordering is defined by the sequencer for that channel, not by wall-clock time. Whichever message reaches the channel's single writer first gets the lower id, and every client renders by id. Both senders may briefly see their own message first (optimistic UI) and then reorder once the server ids arrive.</p></details>
+        <details><summary>What happens when the recipient is connected to a different data center?</summary><p>Route through an inter-region bus: the sending region persists, then publishes to the region where the recipient's session lives, or the recipient's region pulls from a replicated store. Keep a home region per channel to preserve a single sequencer, and accept extra latency for cross-region conversations.</p></details>
+        <details><summary>Why is a read receipt harder than delivery?</summary><p>It is another event type flowing the other way, with its own fanout (in a group, up to N receipts per message). Store it as a per-user read cursor per channel, not per message, so "read up to id 40" is one tiny write and receipts compress dramatically.</p></details>
+        <details><summary>How would you add message search?</summary><p>Stream persisted messages to a search cluster (Elasticsearch or similar) partitioned by workspace or user. Keep it eventually consistent and out of the send path; the primary store never serves full-text queries.</p></details>
+        <details><summary>Why cap group size at 100 here?</summary><p>Because the design pushes a pointer into every member's inbox, so write cost per message is proportional to membership. The cap is a design constraint, not a product statement; beyond it you switch to shared-channel cursors.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./11-news-feed.html">Chapter 11: News Feed</a> — the same fanout-on-write versus on-read decision, applied to posts.</li>
+          <li><a href="./13-search-autocomplete.html">Chapter 13: Search Autocomplete</a> — next chapter, another latency-critical read path.</li>
+          <li><a href="./10-notification-system.html">Chapter 10: Notification System</a> — the push path used for offline recipients.</li>
+          <li><a href="../../system-design/websockets.html">WebSockets</a> — handshake, framing and scaling of long-lived connections.</li>
+          <li><a href="../../system-design/pub-sub.html">Pub/Sub</a> — the pattern behind presence and cross-server delivery.</li>
+          <li><a href="../../discord-presence-system-design.html">Discord presence system design</a> — a deeper look at presence fanout.</li>
+          <li><a href="../../system-design/service-discovery.html">Service discovery</a> — how clients find a chat server.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. Additional resources from the repository:</p>
+        <ul>
+          <li><a href="https://discord.com/blog/how-discord-stores-billions-of-messages">How Discord stores billions of messages</a></li>
+          <li><a href="https://slack.engineering/flannel-an-application-level-edge-cache-to-make-slack-scale/">Flannel: An Application-Level Edge Cache to Make Slack Scale</a></li>
+        </ul>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Chat is a statefulness problem. Confine state to a thin tier of WebSocket servers, persist every message under a per-channel sequence before delivering it, and let each device pull from its own cursor so that delivery, reconnects and new devices are one mechanism. Treat presence as an expensive, lossy, lazily-fetched signal and you will not drown in fanout.</p>
+      </section>
+    </main>
+  </body>
+</html>

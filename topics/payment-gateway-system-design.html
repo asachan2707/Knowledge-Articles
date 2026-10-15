@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Designing a Payment Gateway System: Multi-Provider Aggregation, Smart Routing &amp; Merchant Onboarding | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+        <figure class="article-hero">
+          <img class="article-hero-img"
+            src="https://images.unsplash.com/photo-1563013544-824ae1b704d3?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Credit card payment terminal with circuits — payment gateway system design"
+            loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">System Design · Architecture · Finance · 30 min</span>
+          </div>
+        </figure>
+        <h1>Designing a Payment Gateway System: Multi-Provider Aggregation, Smart Routing &amp; Merchant Onboarding</h1>
+        <p class="summary">
+          A production payment gateway is not a thin proxy to Stripe — it is a routing engine, a card vault,
+          a compliance boundary, a settlement ledger, and a fraud oracle simultaneously.
+          This deep-dive covers how companies like Adyen, Checkout.com, and Razorpay architect the full stack:
+          PSP adapters, cost-based smart routing, PCI-DSS tokenization, idempotency at every hop, 3DS2 liability shift,
+          and T+1 reconciliation.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Domain: System Design · Payments · Backend Architecture · Finance</span>
+          <span class="meta-item" data-added="2026-09-03">Published: 2026-09-03</span>
+        </div>
+      </header>
+
+      <!-- Lead -->
+      <section class="content-card">
+        <p class="lead">
+          Every major e-commerce company eventually builds its own payment gateway layer — not because Stripe is bad,
+          but because at scale you need to route intelligently across PSPs, negotiate better rates, survive a PSP outage
+          on Black Friday, and own your reconciliation story. The gateway layer is what separates commodity payment
+          acceptance from a strategic financial infrastructure.
+        </p>
+        <div class="callout">
+          <p><strong>Core idea:</strong> A payment gateway aggregates multiple Payment Service Providers (PSPs) behind
+          a single, merchant-facing API, adding smart routing, card tokenization, idempotency, 3DS2, and
+          settlement reconciliation as first-class concerns — none of which any single PSP gives you end-to-end.</p>
+        </div>
+      </section>
+
+      <!-- Story -->
+      <section class="story-card">
+        <span class="section-label">Story · Razorpay &amp; the 2021 Black Friday Outage</span>
+        <p>
+          In late 2021 one of India's largest PSPs experienced a 40-minute partial outage during a major sale window.
+          Merchants using a naive single-PSP integration saw checkout failure rates spike above 30%.
+          Merchants behind Razorpay's internal gateway — which routes across multiple PSP banks, UPI rails, and wallet providers —
+          saw automatic failover kick in within 8 seconds: the circuit breaker tripped on the primary rail, and the routing
+          engine promoted a secondary PSP that had a slightly higher MDR (Merchant Discount Rate) but a 99.2% current
+          success rate. Net failure rate for those merchants: under 2%.
+        </p>
+        <p>
+          That 8-second failover window was not accidental. The routing engine maintained rolling 5-minute success-rate
+          windows per PSP per card-network per currency, and the circuit breaker threshold was calibrated at 15% error
+          rate over a 60-second window — a deliberate tradeoff between false-positive trips and MTTD on real outages.
+          The story illustrates why multi-provider aggregation is not a nice-to-have; it is the core value proposition.
+        </p>
+      </section>
+
+      <!-- Architecture Overview -->
+      <section class="content-card">
+        <span class="section-label">Architecture · System Layers</span>
+        <h2>Core Architecture: The Five Planes</h2>
+        <p>
+          A production gateway decomposes into five logical planes that can be scaled independently:
+        </p>
+        <ol>
+          <li><strong>Merchant API Plane</strong> — REST/gRPC ingress; authentication, rate limiting, idempotency key ingestion.</li>
+          <li><strong>Routing Engine</strong> — scores each available PSP route and selects the optimal one per transaction.</li>
+          <li><strong>PSP Adapter Layer</strong> — thin, stateless adapters that translate internal canonical request/response to PSP-specific wire formats.</li>
+          <li><strong>Card Vault (Token Service)</strong> — PCI-DSS Level 1 component; stores PANs, issues internal tokens and network tokens.</li>
+          <li><strong>Settlement &amp; Reconciliation Plane</strong> — consumes PSP settlement files, reconciles against internal ledger, manages merchant payouts.</li>
+        </ol>
+        <p>
+          Critically, the Card Vault runs in a separate network segment with stricter egress rules —
+          only the PSP adapter can call the vault during authorization, and the vault never touches merchant-facing
+          infrastructure. This is the blast radius boundary that keeps PCI scope manageable.
+        </p>
+      </section>
+
+      <!-- PSP Adapter Interface -->
+      <section class="content-card">
+        <span class="section-label">Design Pattern · PSP Adapter Interface</span>
+        <h2>Abstracting Stripe, Adyen, Braintree &amp; PayU Behind One Interface</h2>
+        <p>
+          Each PSP has wildly different API contracts: Stripe uses idempotency keys in headers, Adyen uses merchant
+          reference in the body, Braintree uses GraphQL, PayU has a checksum-based POST form. The adapter pattern
+          resolves this: you define a canonical internal interface, and each adapter is responsible for mapping
+          to/from that shape. The routing engine speaks only canonical — it has zero knowledge of PSP-specific fields.
+        </p>
+        <span class="code-label">JavaScript Example — PSP Adapter Interface &amp; Stripe Implementation</span>
+        <pre><code class="language-javascript">// ---- Canonical types --------------------------------------------------------
+/**
+ * @typedef {Object} ChargeRequest
+ * @property {string} merchantId
+ * @property {string} idempotencyKey        // UUID v4, gateway-level
+ * @property {number} amountMinorUnits      // e.g. 1099 = $10.99
+ * @property {string} currency             // ISO 4217: "USD", "EUR"
+ * @property {string} paymentMethodToken   // internal vault token, NOT raw PAN
+ * @property {Object} [metadata]           // arbitrary k/v for reconciliation
+ */
+
+/**
+ * @typedef {Object} ChargeResponse
+ * @property {'success'|'declined'|'error'} status
+ * @property {string} pspTransactionId     // PSP-native reference
+ * @property {string} internalTxnId        // gateway-assigned UUID
+ * @property {string|null} declineCode     // normalised code, null on success
+ * @property {number} processingFeeMinorUnits
+ * @property {string} rawResponse          // serialised PSP response for audit
+ */
+
+// ---- Base adapter contract --------------------------------------------------
+class PspAdapter {
+  /** @returns {string} */
+  get name() { throw new Error('not implemented'); }
+
+  /**
+   * @param {ChargeRequest} req
+   * @returns {Promise&lt;ChargeResponse&gt;}
+   */
+  async charge(req) { throw new Error('not implemented'); }
+
+  /**
+   * @param {string} pspTransactionId
+   * @param {number} amountMinorUnits  // partial refund supported
+   * @returns {Promise&lt;{status: string, refundId: string}&gt;}
+   */
+  async refund(pspTransactionId, amountMinorUnits) { throw new Error('not implemented'); }
+
+  /**
+   * Resolve internal vault token to PSP-specific payment method token.
+   * Each PSP stores its own customer/card reference — the vault maps them.
+   * @param {string} internalToken
+   * @returns {Promise&lt;string&gt;}
+   */
+  async resolvePaymentMethod(internalToken) { throw new Error('not implemented'); }
+}
+
+// ---- Stripe adapter implementation -----------------------------------------
+import Stripe from 'stripe';
+
+class StripeAdapter extends PspAdapter {
+  #client;
+  #vault;
+
+  constructor({ apiKey, vaultService }) {
+    super();
+    this.#client = new Stripe(apiKey, { apiVersion: '2023-10-16', timeout: 8000 });
+    this.#vault = vaultService;
+  }
+
+  get name() { return 'stripe'; }
+
+  async resolvePaymentMethod(internalToken) {
+    // Vault stores PSP-specific payment method ID per PSP
+    const mapping = await this.#vault.getPspMapping(internalToken, 'stripe');
+    if (!mapping) throw new Error(`No Stripe mapping for token ${internalToken}`);
+    return mapping.pspPaymentMethodId; // pm_XXXX
+  }
+
+  async charge(req) {
+    const stripePaymentMethodId = await this.resolvePaymentMethod(req.paymentMethodToken);
+
+    let stripeResponse;
+    try {
+      stripeResponse = await this.#client.paymentIntents.create(
+        {
+          amount: req.amountMinorUnits,
+          currency: req.currency.toLowerCase(),
+          payment_method: stripePaymentMethodId,
+          confirm: true,
+          metadata: { gateway_idempotency_key: req.idempotencyKey, ...req.metadata },
+        },
+        { idempotencyKey: req.idempotencyKey } // Stripe header-level idempotency
+      );
+    } catch (err) {
+      return {
+        status: 'error',
+        pspTransactionId: null,
+        internalTxnId: req.idempotencyKey,
+        declineCode: err.code ?? 'unknown_error',
+        processingFeeMinorUnits: 0,
+        rawResponse: JSON.stringify({ error: err.message }),
+      };
+    }
+
+    const status = stripeResponse.status === 'succeeded' ? 'success'
+                 : stripeResponse.status === 'requires_action' ? 'pending_3ds'
+                 : 'declined';
+
+    return {
+      status,
+      pspTransactionId: stripeResponse.id,
+      internalTxnId: req.idempotencyKey,
+      declineCode: stripeResponse.last_payment_error?.code ?? null,
+      processingFeeMinorUnits: 0, // Stripe fees arrive in settlement file
+      rawResponse: JSON.stringify(stripeResponse),
+    };
+  }
+
+  async refund(pspTransactionId, amountMinorUnits) {
+    const refund = await this.#client.refunds.create({
+      payment_intent: pspTransactionId,
+      amount: amountMinorUnits,
+    });
+    return { status: refund.status, refundId: refund.id };
+  }
+}
+
+// ---- Adyen adapter (abbreviated) -------------------------------------------
+class AdyenAdapter extends PspAdapter {
+  get name() { return 'adyen'; }
+
+  async charge(req) {
+    const pmToken = await this.resolvePaymentMethod(req.paymentMethodToken);
+    // Adyen uses recurringDetailReference + shopperReference
+    const body = {
+      merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
+      amount: { value: req.amountMinorUnits, currency: req.currency },
+      reference: req.idempotencyKey,          // used as Adyen merchant reference
+      paymentMethod: { type: 'scheme', recurringDetailReference: pmToken },
+      shopperInteraction: 'ContAuth',
+      recurringProcessingModel: 'Subscription',
+    };
+    // ... fetch to Adyen API, map response to ChargeResponse
+  }
+}</code></pre>
+        <p>
+          The key discipline: <strong>decline codes must be normalised</strong>. Stripe uses <code>card_declined</code>,
+          Adyen uses <code>Refused</code> with a sub-code, Braintree uses numeric codes. Define a canonical
+          decline taxonomy (<code>insufficient_funds</code>, <code>do_not_honor</code>, <code>fraud_suspected</code>,
+          <code>expired_card</code>, <code>3ds_required</code>) and map each PSP's native code on ingress.
+          Downstream fraud systems and retry logic must never see PSP-specific codes.
+        </p>
+      </section>
+
+      <!-- Smart Routing Engine -->
+      <section class="content-card">
+        <span class="section-label">Core Engine · Smart Routing</span>
+        <h2>Smart Routing: Cost, Reliability, and Geography in One Decision</h2>
+        <p>
+          The routing engine runs per-transaction, within the latency budget of the API request (target: under 10ms
+          for route selection). It scores each candidate PSP route along three axes and returns the highest scorer
+          that is not circuit-broken.
+        </p>
+        <h3>Routing Dimensions</h3>
+        <ul>
+          <li><strong>Cost score</strong>: Effective MDR for this card-type/currency combination. Domestic Visa debit
+          through a local acquirer might be 0.9% vs 2.9% through Stripe. Cost score = 1 / effective_mdr, normalised.</li>
+          <li><strong>Reliability score</strong>: Rolling 5-minute success rate per PSP per card-network.
+          Pulled from a Redis sorted set updated by every webhook event. A PSP at 95% success scores higher
+          than one at 88%, even if cheaper.</li>
+          <li><strong>Latency score</strong>: P95 PSP response latency over the last 5 minutes. Less important than
+          reliability but acts as a tiebreaker.</li>
+          <li><strong>Geographic affinity</strong>: Issuing bank country vs. acquiring bank country.
+          Cross-border transactions incur interchange uplift. Route to a locally-acquiring PSP when the
+          issuer is domestic — Stripe's European entity for EU cards, Adyen's Singapore entity for SEA.</li>
+        </ul>
+        <span class="code-label">JavaScript Example — Smart Routing Decision Function</span>
+        <pre><code class="language-javascript">/**
+ * @typedef {Object} RouteCandidate
+ * @property {string} pspName
+ * @property {number} effectiveMdrBps       // basis points, e.g. 290 = 2.90%
+ * @property {number} successRatePct        // 0-100, last 5 min
+ * @property {number} p95LatencyMs
+ * @property {boolean} supportsGeography    // domestic acquirer match
+ * @property {boolean} circuitOpen          // if true, skip this PSP
+ */
+
+/**
+ * Scoring weights — tune per merchant risk profile.
+ * High-risk: weight reliability more. Budget merchants: weight cost more.
+ */
+const DEFAULT_WEIGHTS = { cost: 0.35, reliability: 0.50, latency: 0.10, geography: 0.05 };
+
+/**
+ * @param {RouteCandidate[]} candidates
+ * @param {{ issuerCountry: string, currency: string, cardNetwork: string }} txnContext
+ * @param {typeof DEFAULT_WEIGHTS} [weights]
+ * @returns {RouteCandidate | null}
+ */
+function selectRoute(candidates, txnContext, weights = DEFAULT_WEIGHTS) {
+  const eligible = candidates.filter(c => !c.circuitOpen);
+  if (eligible.length === 0) return null;
+
+  // Normalise each dimension to [0, 1]
+  const maxMdr = Math.max(...eligible.map(c => c.effectiveMdrBps));
+  const minLatency = Math.min(...eligible.map(c => c.p95LatencyMs));
+  const maxLatency = Math.max(...eligible.map(c => c.p95LatencyMs));
+
+  const scored = eligible.map(c => {
+    const costScore      = maxMdr === 0 ? 1 : 1 - (c.effectiveMdrBps / maxMdr);
+    const reliabilityScore = c.successRatePct / 100;
+    const latencyRange   = maxLatency - minLatency || 1;
+    const latencyScore   = 1 - (c.p95LatencyMs - minLatency) / latencyRange;
+    const geoScore       = c.supportsGeography ? 1 : 0;
+
+    const total = (
+      costScore       * weights.cost +
+      reliabilityScore * weights.reliability +
+      latencyScore    * weights.latency +
+      geoScore        * weights.geography
+    );
+
+    return { ...c, score: total };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0];
+}
+
+// ---- Circuit breaker state machine (Redis-backed) ---------------------------
+class PspCircuitBreaker {
+  #redis;
+  #thresholds;
+
+  constructor(redis, thresholds = { errorRatePct: 15, windowSec: 60, halfOpenAfterSec: 30 }) {
+    this.#redis = redis;
+    this.#thresholds = thresholds;
+  }
+
+  async record(pspName, success) {
+    const key = `cb:${pspName}:${Math.floor(Date.now() / 1000 / this.#thresholds.windowSec)}`;
+    const field = success ? 'ok' : 'err';
+    await this.#redis.hincrby(key, field, 1);
+    await this.#redis.expire(key, this.#thresholds.windowSec * 3);
+  }
+
+  async isOpen(pspName) {
+    const windowKey = `cb:${pspName}:${Math.floor(Date.now() / 1000 / this.#thresholds.windowSec)}`;
+    const [ok, err] = await this.#redis.hmget(windowKey, 'ok', 'err');
+    const total = (Number(ok) || 0) + (Number(err) || 0);
+    if (total < 20) return false; // insufficient sample
+    const errorRate = ((Number(err) || 0) / total) * 100;
+    return errorRate >= this.#thresholds.errorRatePct;
+  }
+}</code></pre>
+        <p>
+          One production nuance: weight the routing decision differently for <strong>retries</strong>.
+          If Stripe just returned a timeout, you must route the retry to a different PSP entirely —
+          you cannot be certain whether Stripe processed the original. The idempotency key must be
+          preserved but the PSP must change. This is why idempotency is a gateway-layer concern, not a PSP-layer concern.
+        </p>
+      </section>
+
+      <!-- Idempotency -->
+      <section class="content-card">
+        <span class="section-label">Correctness · Idempotency at the Gateway Layer</span>
+        <h2>Idempotent Payment Submission: Why One Key Is Not Enough</h2>
+        <p>
+          The merchant sends an <code>Idempotency-Key</code> header (UUID v4) with every charge request.
+          The gateway must guarantee: given the same key, it returns the same terminal result, regardless
+          of how many times the merchant retries, regardless of which PSP was used, and regardless of whether
+          the original request timed out mid-flight.
+        </p>
+        <p>
+          This decomposes into two separate deduplication problems:
+        </p>
+        <ul>
+          <li><strong>Gateway-level dedup</strong>: If the merchant's idempotency key is seen again while
+          the original is still in-flight (<code>PROCESSING</code>), return <code>409 Conflict</code> immediately.
+          If the original reached a terminal state (<code>SUCCESS</code>/<code>FAILED</code>), return the
+          original response without calling any PSP.</li>
+          <li><strong>PSP-level dedup</strong>: When routing a retry to a different PSP (because the original
+          PSP timed out), generate a <em>new</em> PSP-scoped idempotency key. Store the mapping:
+          merchant key → [psp1_key (abandoned), psp2_key (succeeded)] in the idempotency log.</li>
+        </ul>
+        <span class="code-label">JavaScript Example — Idempotent Payment Submission</span>
+        <pre><code class="language-javascript">// Idempotency store backed by PostgreSQL (advisory locks avoid duplicate inserts)
+class IdempotencyStore {
+  #db;
+  constructor(db) { this.#db = db; }
+
+  /**
+   * Atomically insert or fetch an idempotency record.
+   * Uses INSERT ... ON CONFLICT DO NOTHING + SELECT to avoid races.
+   * @returns {{ isNew: boolean, record: IdempotencyRecord }}
+   */
+  async getOrCreate(merchantId, idempotencyKey, requestFingerprint) {
+    await this.#db.query('BEGIN');
+    try {
+      // Advisory lock on hash of (merchantId, key) to serialise concurrent requests
+      const lockId = hashToBigint(`${merchantId}:${idempotencyKey}`);
+      await this.#db.query('SELECT pg_advisory_xact_lock($1)', [lockId]);
+
+      const existing = await this.#db.query(
+        'SELECT * FROM idempotency_records WHERE merchant_id=$1 AND key=$2',
+        [merchantId, idempotencyKey]
+      );
+
+      if (existing.rows.length > 0) {
+        await this.#db.query('COMMIT');
+        const rec = existing.rows[0];
+        // Fingerprint mismatch = merchant reused key with different payload — reject
+        if (rec.request_fingerprint !== requestFingerprint) {
+          throw Object.assign(new Error('Idempotency key reused with different request body'), { code: 'IDEMPOTENCY_CONFLICT' });
+        }
+        return { isNew: false, record: rec };
+      }
+
+      const { rows } = await this.#db.query(
+        `INSERT INTO idempotency_records (merchant_id, key, request_fingerprint, status, created_at)
+         VALUES ($1, $2, $3, 'PROCESSING', NOW()) RETURNING *`,
+        [merchantId, idempotencyKey, requestFingerprint]
+      );
+      await this.#db.query('COMMIT');
+      return { isNew: true, record: rows[0] };
+    } catch (err) {
+      await this.#db.query('ROLLBACK');
+      throw err;
+    }
+  }
+
+  async markComplete(merchantId, idempotencyKey, responsePayload, status) {
+    await this.#db.query(
+      `UPDATE idempotency_records
+       SET status=$3, response_payload=$4, completed_at=NOW()
+       WHERE merchant_id=$1 AND key=$2`,
+      [merchantId, idempotencyKey, status, JSON.stringify(responsePayload)]
+    );
+  }
+}
+
+// ---- Gateway charge handler with full idempotency ---------------------------
+async function handleChargeRequest(req, res) {
+  const { merchantId, idempotencyKey, amountMinorUnits, currency, paymentMethodToken, metadata } = req.body;
+  const requestFingerprint = sha256(JSON.stringify({ amountMinorUnits, currency, paymentMethodToken }));
+
+  const { isNew, record } = await idempotencyStore.getOrCreate(merchantId, idempotencyKey, requestFingerprint);
+
+  if (!isNew) {
+    if (record.status === 'PROCESSING') {
+      return res.status(409).json({ error: 'request_in_progress', message: 'Original request still processing — retry after 2s' });
+    }
+    // Terminal state: replay the original response
+    return res.status(200).json({ replayed: true, ...record.response_payload });
+  }
+
+  // New request: run routing + PSP call
+  try {
+    const candidates = await routingEngine.getCandidates({ currency, paymentMethodToken });
+    const route = selectRoute(candidates, { currency });
+    if (!route) throw Object.assign(new Error('No available PSP routes'), { code: 'NO_ROUTE' });
+
+    const adapter = pspRegistry.get(route.pspName);
+    const chargeResp = await adapter.charge({ merchantId, idempotencyKey, amountMinorUnits, currency, paymentMethodToken, metadata });
+
+    await circuitBreaker.record(route.pspName, chargeResp.status === 'success');
+
+    const status = chargeResp.status === 'success' ? 'SUCCESS' : 'FAILED';
+    await idempotencyStore.markComplete(merchantId, idempotencyKey, chargeResp, status);
+    return res.status(200).json(chargeResp);
+  } catch (err) {
+    await idempotencyStore.markComplete(merchantId, idempotencyKey, { error: err.message }, 'FAILED');
+    throw err;
+  }
+}</code></pre>
+      </section>
+
+      <!-- Card Vault & Tokenization -->
+      <section class="content-card">
+        <span class="section-label">Security · PCI-DSS Card Vault &amp; Network Tokenization</span>
+        <h2>Tokenization: PCI Scope Reduction and Network Tokens</h2>
+        <p>
+          Storing raw PANs (Primary Account Numbers) requires PCI-DSS Level 1 compliance — a multi-million-dollar
+          annual audit burden. Most gateways use a two-tier tokenization strategy to minimise scope:
+        </p>
+        <ol>
+          <li><strong>Internal vault token</strong>: A random UUID issued by your card vault service.
+          The raw PAN is encrypted (AES-256-GCM) with a key managed by AWS KMS or GCP Cloud KMS —
+          keys never leave the HSM-backed key management service. The vault maps UUID → encrypted PAN.
+          Only the vault service and PSP adapters ever see cleartext PANs, and only transiently.</li>
+          <li><strong>Network token</strong>: Issued by Visa (VTS) or Mastercard (MDES) — a 16-digit
+          surrogate PAN tied to a specific merchant and device. Network tokens reduce interchange by
+          ~15 bps on average and automatically update when the physical card is reissued.
+          Adyen and Checkout.com offer network tokenisation as a managed service; building it natively
+          requires direct certification with the card networks.</li>
+        </ol>
+        <p>
+          The vault's threat model assumes database compromise is inevitable. Even if an attacker
+          exfiltrates the vault database, they get only AES-256 ciphertext — useless without the
+          KMS key. The KMS key is protected by IAM policy: only the vault service's execution role
+          can call <code>kms:Decrypt</code>, and all decrypt calls are logged to CloudTrail with
+          a 30-day anomaly-detection alert on &gt;1000 decrypts/minute.
+        </p>
+        <div class="callout">
+          <p><strong>PCI scope boundary:</strong> The vault, PSP adapters, and the network path between
+          them are in-scope for PCI. Everything else in the gateway — routing engine, merchant API,
+          settlement service — handles only opaque tokens and is out of PCI scope. This dramatically
+          simplifies your compliance surface area.</p>
+        </div>
+      </section>
+
+      <!-- 3DS2 -->
+      <section class="content-card">
+        <span class="section-label">Authentication · 3DS2 and Liability Shift</span>
+        <h2>3DS2 Authentication Flow and Liability Shift</h2>
+        <p>
+          3D Secure 2 (EMV 3DS) is the protocol that authenticates the cardholder with the issuing bank
+          before authorisation. The critical business reason to implement it: <strong>liability shift</strong>.
+          When a transaction is authenticated via 3DS2 and later disputed as fraud, liability shifts from
+          the merchant to the issuing bank. For merchants with high fraud rates, this is the single highest-ROI
+          payment infrastructure investment.
+        </p>
+        <h3>3DS2 Flow in a Gateway Context</h3>
+        <ol>
+          <li><strong>Device data collection</strong>: The merchant's SDK/JS sends ~150 browser/device fingerprint
+          fields to the gateway's 3DS requestor server.</li>
+          <li><strong>Authentication request (AReq)</strong>: The requestor server sends AReq to the card
+          network's Directory Server (Visa's 3DS Server, Mastercard's DS). The DS routes to the issuer's
+          ACS (Access Control Server).</li>
+          <li><strong>Frictionless vs. challenge</strong>: The issuer's ACS scores the transaction using
+          its own risk model. Low-risk: frictionless auth returns an authentication value (CAVV) immediately.
+          High-risk: challenge flow — a step-up prompt (OTP, biometric) is shown to the cardholder.</li>
+          <li><strong>Authorisation</strong>: The CAVV + ECI (Electronic Commerce Indicator) value are
+          included in the authorisation message to the issuer. ECI 05 (Visa) / 02 (Mastercard) = full
+          liability shift. ECI 07 = attempted authentication, partial shift.</li>
+        </ol>
+        <p>
+          Gateway implementation note: 3DS2 adds 1–3 seconds to checkout for frictionless, 15–60 seconds for
+          challenge. Most gateways implement 3DS2 as an <em>optional pre-authorisation step</em> that can be
+          bypassed for low-value or recurring transactions where the liability calculation makes bypassing
+          economically rational.
+        </p>
+        <div class="callout">
+          <p><strong>SCA exemptions (EU PSD2):</strong> Transactions under €30, low-risk based on the PSP's
+          Transaction Risk Analysis (TRA), and merchant-initiated transactions (MITs) are exempt from SCA.
+          Your routing engine should embed SCA exemption logic to minimise unnecessary challenges —
+          each challenge degrades conversion by 5–15%.</p>
+        </div>
+      </section>
+
+      <!-- Merchant Onboarding -->
+      <section class="content-card">
+        <span class="section-label">Compliance · Merchant Onboarding &amp; KYB</span>
+        <h2>Merchant Onboarding: KYB, Settlement Accounts, Webhooks, API Keys</h2>
+        <p>
+          Onboarding a merchant onto a payment gateway is a compliance-heavy, multi-day workflow — not a
+          registration form. The four pillars:
+        </p>
+        <h3>1. Know Your Business (KYB)</h3>
+        <p>
+          Regulatory requirement in all major jurisdictions. At minimum: legal business name, registration number,
+          beneficial ownership (UBO &gt;25%), business category (MCC code), and website review. High-risk MCCs
+          (gambling, nutraceuticals, adult content) require manual underwriting and may need a cash reserve.
+          Most gateways integrate with Persona, Onfido, or a direct Companies House / IRS EIN verification API.
+          KYB failures are the #1 cause of merchant onboarding drop-off — optimise the UX but never skip the check.
+        </p>
+        <h3>2. Settlement Accounts</h3>
+        <p>
+          Each merchant has one or more bank accounts for settlement. These are verified via micro-deposit
+          (two sub-$1 deposits + confirmation) or instant bank verification (Plaid, Yodlee). Settlement
+          account records are immutable after verification — changes require re-verification and a 72-hour
+          cooling-off period to prevent account-takeover fraud.
+        </p>
+        <h3>3. Webhook Management</h3>
+        <p>
+          Merchants register webhook endpoints to receive asynchronous payment events (payment.succeeded,
+          payment.failed, refund.created, dispute.created). Gateway responsibilities: HMAC-SHA256 signature
+          on every delivery, retry with exponential backoff up to 72 hours, a delivery log UI, and
+          a manual replay API. Webhook payloads must be idempotent — merchants will receive duplicates
+          during failover, and they must deduplicate on <code>event.id</code>.
+        </p>
+        <h3>4. API Key Rotation</h3>
+        <p>
+          Keys are issued as pairs (publishable + secret). Secret keys should have an expiry date
+          (90-day default, configurable). The rotation workflow: issue new key → dual-read period (both
+          old and new accepted for 7 days) → deprecate old key → revoke. Revoking immediately without
+          a dual-read period causes outages — this is a common mistake in gateway implementations.
+        </p>
+      </section>
+
+      <!-- Settlement & Reconciliation -->
+      <section class="content-card">
+        <span class="section-label">Finance · Settlement &amp; Reconciliation</span>
+        <h2>T+1 / T+2 Settlement, Ledger Reconciliation, and Failed Settlement Handling</h2>
+        <p>
+          Settlement is the process by which funds flow from the issuing bank to the merchant's bank account.
+          The gateway sits in the middle of a multi-day float:
+        </p>
+        <ul>
+          <li><strong>T+0</strong>: Transaction authorised. Funds reserved on cardholder account. Not yet captured.</li>
+          <li><strong>T+0 to T+1</strong>: Batch capture file submitted to PSP. Authorisation converted to capture.</li>
+          <li><strong>T+1 to T+2</strong>: PSP submits to card network. Interchange settled between issuer and acquirer.</li>
+          <li><strong>T+2 to T+3</strong>: Acquirer nets PSP fees, deposits gross amount minus MDR into gateway's
+          omnibus account.</li>
+          <li><strong>T+2 to T+5</strong>: Gateway nets its fees, settles net amount to merchant's registered bank account.</li>
+        </ul>
+        <h3>Ledger Reconciliation</h3>
+        <p>
+          Every PSP provides a settlement report (CSV or SFTP) at the end of each settlement day.
+          The reconciliation service:
+        </p>
+        <ol>
+          <li>Ingests PSP settlement files (Stripe Balance Transactions API, Adyen settlement detail report).</li>
+          <li>Matches each PSP line item against the internal transaction ledger by PSP transaction ID.</li>
+          <li>Flags discrepancies: missing transactions (PSP settled but no internal record — possible
+          duplicate charge), fee discrepancies (&gt;5 bps difference from contracted rate triggers alert),
+          currency conversion variances.</li>
+          <li>Generates a reconciliation summary per merchant: gross volume, processing fees, net settlement amount.</li>
+        </ol>
+        <h3>Failed Settlement Handling</h3>
+        <p>
+          Bank transfers fail for three reasons: incorrect account details, account closed, or bank holiday timing.
+          The gateway must: park the funds in a suspense ledger, notify the merchant, re-attempt after re-verification,
+          and hold for a maximum of 90 days before triggering a compliance escalation. All suspense ledger entries
+          must be auditable — regulators will ask.
+        </p>
+      </section>
+
+      <!-- Chargeback Management -->
+      <section class="content-card">
+        <span class="section-label">Risk · Chargeback Management Workflow</span>
+        <h2>Chargeback Management: From Dispute Notification to Evidence Submission</h2>
+        <p>
+          A chargeback occurs when a cardholder disputes a transaction with their issuing bank.
+          The issuer automatically debits the acquirer, who debits the gateway, who debits the merchant.
+          The merchant has a limited window (typically 7–20 days depending on card network) to submit
+          evidence to fight the dispute.
+        </p>
+        <p>The gateway chargeback workflow:</p>
+        <ol>
+          <li><strong>Dispute notification</strong>: PSP pushes dispute event via webhook. Gateway creates
+          a dispute record, freezes funds from next settlement cycle, notifies merchant.</li>
+          <li><strong>Evidence collection</strong>: Merchant submits evidence (order confirmation, shipping
+          proof, 3DS authentication record, customer communication). Gateway assembles the evidence bundle.</li>
+          <li><strong>Representment</strong>: Gateway submits evidence to PSP, who submits to the card
+          network's dispute resolution process (Visa's VROL, Mastercard's MATCH).</li>
+          <li><strong>Outcome processing</strong>: If won, the funds are reinstated in the next settlement.
+          If lost, the debit stands. Either way, the dispute record is closed and the merchant's chargeback
+          rate metric is updated.</li>
+        </ol>
+        <p>
+          Merchant chargeback rate above 1% (Visa) or 1.5% (Mastercard) triggers the card network's
+          dispute monitoring program — escalating fees and eventually account termination.
+          Your gateway must surface chargeback-rate dashboards per MCC category to merchants
+          and alert when they approach the threshold.
+        </p>
+      </section>
+
+      <!-- Failure Modes -->
+      <section class="content-card">
+        <span class="section-label">Reliability · Failure Modes</span>
+        <h2>Production Failure Modes and Mitigations</h2>
+        <ul>
+          <li><strong>PSP timeout on authorisation</strong>: Never know if the PSP processed it.
+          Solution: always store the PSP idempotency key before calling, so a retry with the same key
+          is safe. If the PSP returns 200 on retry, the charge happened once — not twice.</li>
+          <li><strong>Webhook delivery failure</strong>: Merchant endpoint is down. Funds are in limbo
+          from merchant's perspective. Solution: aggressive retry schedule (immediate, 5m, 30m, 2h, 12h,
+          24h, 72h) + manual replay endpoint in the merchant dashboard.</li>
+          <li><strong>Split-brain idempotency store</strong>: During a Postgres failover, the idempotency
+          table may be unavailable for 10–30 seconds. Solution: fail-open for reads (allow the charge
+          through) but fail-closed for writes (return 503 if you cannot mark PROCESSING atomically).
+          Better: use a hot-standby with synchronous replication for the idempotency table specifically.</li>
+          <li><strong>Currency mismatch in settlement files</strong>: PSP settles in a different currency
+          than the transaction currency due to DCC (Dynamic Currency Conversion). Solution: always reconcile
+          on the PSP's settlement currency, not the transaction currency. Map FX rates from the settlement file.</li>
+          <li><strong>Card vault KMS key rotation</strong>: If the encryption key is rotated without
+          re-encrypting existing vault records, decryption of old records fails. Solution: envelope encryption —
+          each card record has its own data key (DEK) encrypted by the master key (KEK). Rotate only the KEK,
+          and re-encrypt DEKs lazily on read.</li>
+          <li><strong>Duplicate settlement file ingestion</strong>: PSP re-delivers a settlement file.
+          Solution: hash each file on arrival, skip if already processed. Never ingest the same file twice.</li>
+        </ul>
+      </section>
+
+      <!-- Scaling Constraints -->
+      <section class="content-card">
+        <span class="section-label">Scale · Production Constraints</span>
+        <h2>Scaling Constraints and Production Gotchas</h2>
+        <ul>
+          <li><strong>PSP rate limits</strong>: Stripe caps at ~1,000 API calls/second per account.
+          At $100M annual GMV running at $50 average order value = ~2M transactions/month = ~70 TPS peak.
+          Fine for Stripe. At $10B GMV you need enterprise agreements and multiple sub-accounts.</li>
+          <li><strong>Idempotency store hot rows</strong>: High-traffic merchants will create hot spots on
+          the idempotency table keyed by merchant_id. Partition the table by (merchant_id % 64) to distribute writes.</li>
+          <li><strong>Routing engine latency budget</strong>: 10ms for route selection means no synchronous
+          DB reads — all PSP health data must be in Redis with TTL ≤ 5s. Use a background job to refresh,
+          not inline reads.</li>
+          <li><strong>Webhook fan-out at scale</strong>: 10M transactions/day = 10M+ webhook deliveries.
+          Use a dedicated webhook delivery queue (Kafka topic or SQS FIFO per merchant) with consumer-side
+          rate limiting per merchant endpoint. Treat webhook delivery as a separate microservice, not a
+          side-effect of the payment service.</li>
+          <li><strong>Settlement reconciliation file sizes</strong>: Stripe's settlement file for 1M daily
+          transactions is ~200MB CSV. Stream-parse, do not load into memory. Use COPY into Postgres from S3
+          for bulk inserts — 10x faster than individual INSERTs.</li>
+          <li><strong>3DS2 authentication server capacity</strong>: The requestor server must handle peak
+          checkout traffic. During flash sales, authentication requests can spike 100x. Run the 3DS requestor
+          server behind an auto-scaling group with pre-warmed capacity 15 minutes before known sale events.</li>
+        </ul>
+      </section>
+
+      <!-- Checklist -->
+      <section class="content-card">
+        <span class="section-label">Checklist · Production Readiness</span>
+        <h2>Payment Gateway Production Readiness Checklist</h2>
+        <ul class="check-list">
+          <li>PSP adapter canonical interface defined; decline codes normalised across all PSPs.</li>
+          <li>Circuit breakers configured per PSP with calibrated error-rate thresholds.</li>
+          <li>Routing engine reads PSP health from Redis, not live DB; p95 latency under 10ms.</li>
+          <li>Idempotency store uses advisory locks; request fingerprint validates payload consistency.</li>
+          <li>Card vault in separate network segment; KMS envelope encryption with lazy DEK re-encryption on rotation.</li>
+          <li>Network tokens enrolled for top 5 issuing banks by volume (significant MDR reduction).</li>
+          <li>3DS2 integrated; SCA exemption logic reduces unnecessary challenges for low-risk transactions.</li>
+          <li>KYB integrated with third-party provider; high-risk MCCs flagged for manual review.</li>
+          <li>Settlement accounts verified via micro-deposit; 72-hour cooling-off on changes.</li>
+          <li>Webhook delivery with HMAC-SHA256 signature, 7-tier retry schedule, and manual replay endpoint.</li>
+          <li>API key rotation supports dual-read period (7-day overlap) before revocation.</li>
+          <li>Settlement reconciliation streams PSP files; discrepancies alert within 30 minutes of file arrival.</li>
+          <li>Suspense ledger for failed settlements with 90-day compliance escalation timer.</li>
+          <li>Chargeback rate dashboard surfaced to merchants; alert at 0.8% (before card network threshold).</li>
+          <li>Idempotency table partitioned by merchant_id to avoid hot rows at scale.</li>
+          <li>Webhook delivery decoupled into independent microservice with per-merchant rate limiting.</li>
+        </ul>
+      </section>
+
+      <!-- FAQ -->
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details>
+          <summary>Why build a custom gateway instead of using Stripe Connect or Adyen for Platforms?</summary>
+          <p>
+            Stripe Connect and Adyen for Platforms are excellent for most platforms.
+            You build a custom aggregation layer when: (1) your volume warrants directly negotiated interchange rates
+            (typically $500M+ GMV/year), (2) you need to route across PSPs that are not in a single provider's
+            network (e.g., a domestic PSP for a specific country), (3) you need full control over your
+            reconciliation and financial reporting, or (4) regulatory requirements mandate you hold a payment
+            institution licence in a jurisdiction where the platform PSP is not licensed.
+          </p>
+        </details>
+        <details>
+          <summary>How do you handle a PSP that responds with a timeout — did the charge happen or not?</summary>
+          <p>
+            This is the classic "two generals problem" in payments. The answer: you don't know.
+            Your strategy: store the PSP idempotency key before calling. If the call times out,
+            retry with the <em>same PSP idempotency key</em> on the same PSP. If the PSP returns success,
+            the charge happened once (idempotency guaranteed). If the PSP returns a "not found" or a new
+            failure, the charge did not happen and you can retry on a different PSP with the same merchant
+            idempotency key. Never route a timed-out request to a different PSP without confirming the
+            original PSP did not process it — that causes double-charges.
+          </p>
+        </details>
+        <details>
+          <summary>What is the difference between a network token and a gateway token?</summary>
+          <p>
+            A gateway token (internal vault token) is a UUID you issue to abstract raw PANs within
+            your own system — it has no meaning outside your gateway. A network token is issued by
+            Visa (VTS) or Mastercard (MDES) and is accepted directly at any acquirer on that network —
+            it functions like a PAN but is tied to a specific merchant and device. Network tokens are
+            superior: they auto-update on card reissue (eliminating failed recurring charges from
+            card expiry), reduce interchange by ~15 bps, and provide higher authorization rates because
+            issuers trust them more. Building network tokenization requires direct certification with
+            card networks — budget 6–12 months.
+          </p>
+        </details>
+        <details>
+          <summary>How do you handle multi-currency transactions and FX risk?</summary>
+          <p>
+            Three models: (1) let the PSP handle FX — simplest, PSP takes margin (0.5–2%);
+            (2) present-to-consumer in local currency but settle in a base currency — you own the
+            FX risk for the settlement lag (T+2 to T+3); (3) hold multi-currency settlement accounts
+            and net in each currency before converting — reduces FX exposure but requires banking
+            relationships in each currency. For most gateways, model (1) until $1B GMV, then
+            model (2) or (3) with a dedicated treasury function.
+          </p>
+        </details>
+        <details>
+          <summary>What database guarantees do you need for the ledger?</summary>
+          <p>
+            The internal transaction ledger must be append-only (no updates to posted entries —
+            corrections are compensating entries), serializable isolation (no dirty reads of
+            in-flight transactions), and durable before acknowledgement (fsync = true in Postgres,
+            synchronous_commit = on). Do not use eventual-consistency stores (DynamoDB, Cassandra)
+            for the primary ledger — the accounting invariants require strong consistency.
+            Postgres with read replicas for reporting is the industry default at mid-scale;
+            Vitess or Aurora Global for global scale.
+          </p>
+        </details>
+      </section>
+
+      <!-- Related Topics -->
+      <section class="content-card">
+        <span class="section-label">Related Topics</span>
+        <h2>Related Topics in This Learning Hub</h2>
+        <ul>
+          <li>
+            <a href="ecommerce-order-processing-system.html">E-Commerce Order Processing, Saga Pattern and Distributed Transactions — Architecture and Interview Guide</a>
+            — How compensating transactions and the Transactional Outbox pattern handle distributed atomicity when
+            the payment gateway returns success but the order service fails.
+          </li>
+          <li>
+            <a href="system-design-interview-prevent-duplicate-payment.html">System Design: Preventing Duplicate Payments</a>
+            — Deep dive on idempotency keys, database-level deduplication, and network retry storms —
+            the same problems the gateway idempotency store solves.
+          </li>
+          <li>
+            <a href="paytm-qr-architecture.html">Paytm QR Code Payment Architecture</a>
+            — How UPI-based QR payment rails work at the PSP adapter level — a concrete example of
+            one PSP integration within a multi-provider gateway.
+          </li>
+          <li>
+            <a href="whatsapp-duplicate-messages-idempotency.html">WhatsApp Duplicate Messages &amp; Idempotency</a>
+            — Same idempotency patterns applied to messaging; the at-least-once delivery vs. exactly-once
+            semantics tradeoff is directly analogous to webhook delivery in payment gateways.
+          </li>
+          <li>
+            <a href="kafka-ordering-duplicates-offset-management.html">Kafka Ordering, Duplicates &amp; Offset Management</a>
+            — Kafka is a common backbone for gateway event streaming (payment events, webhook delivery queues,
+            settlement file ingestion pipelines).
+          </li>
+        </ul>
+      </section>
+
+      <!-- Key Takeaway -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          A payment gateway is not a routing proxy with a nice API — it is a financial system with
+          correctness invariants that money depends on. The canonical adapter interface plus smart routing
+          engine gives you resilience and cost optimisation; idempotency at the gateway layer (not at the
+          PSP layer) is what prevents double-charges when networks are unreliable; the card vault's
+          network-segment isolation is what makes PCI compliance tractable; and T+2 reconciliation
+          against PSP settlement files is what keeps your ledger honest. Miss any one of these and
+          you have either an outage, a double-charge, a data breach, or a regulatory finding.
+          Build them right in that order — routing first, idempotency second, tokenization third,
+          reconciliation fourth — and you have an infrastructure that scales from $1M to $10B GMV
+          without a rewrite.
+        </p>
+      </section>
+
+    </main>
+  </body>
+</html>

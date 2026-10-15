@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Temporal: The JavaScript Date Problem Is Finally Being Fixed | Learning Hub</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="../read-state.js" defer></script>
+    <script src="../highlight.js" defer></script>
+    <script src="../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../index.html">← Back to Learning Hub</a>
+
+        <figure class="article-hero">
+          <img
+            class="article-hero-img"
+            src="https://images.unsplash.com/photo-1501139083538-0139583c060f?w=1600&h=700&fit=crop&auto=format&q=80"
+            alt="Clock face with blurred motion representing time and JavaScript date handling"
+            loading="lazy"
+          />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content">
+            <span class="article-hero-kicker">JavaScript · Web · Fundamentals · 14 min</span>
+          </div>
+        </figure>
+
+        <h1>Temporal: The JavaScript Date Problem Is Finally Being Fixed</h1>
+        <p class="summary">
+          JavaScript's <code>Date</code> object has been broken since 1995 — mutable, timezone-unaware,
+          zero-indexed months, locale-dependent parsing, and silent DST bugs that only surface in production.
+          Temporal, now at TC39 Stage 4 and shipping in Chrome 144, replaces it entirely with nine
+          immutable types that force explicit timezone handling and provide nanosecond precision.
+        </p>
+        <div class="article-meta">
+          <span class="meta-item">Source: lets-code-future · Medium</span>
+          <span class="meta-item">Domain: JavaScript / Web Standards</span>
+          <span class="meta-item" data-added="2026-09-03">Published: 2026-09-03</span>
+        </div>
+      </header>
+
+      <!-- Lead insight -->
+      <section class="content-card">
+        <p class="lead">
+          Every senior JavaScript engineer has a war story involving <code>Date</code>. A
+          billing system that charged wrong amounts across daylight saving transitions. A
+          scheduler that skipped tasks because <code>new Date("2024-03-10")</code> resolved to
+          a different day depending on the server's local timezone. A data pipeline where
+          <code>date.getMonth() === 0</code> meant January and nobody remembered. These are not
+          edge cases — they are the predictable consequences of a 29-year-old API copied from
+          Java 1.0 before the web knew what timezones were.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Core idea:</strong> <code>Date</code> is a single mutable type that conflates
+            exact time, local wall-clock time, and calendar date into one ambiguous object.
+            Temporal separates those concerns into nine distinct immutable types, making the
+            wrong thing impossible to express accidentally.
+          </p>
+        </div>
+      </section>
+
+      <!-- Production story -->
+      <section class="story-card">
+        <span class="section-label">Story · The DST billing outage</span>
+        <p>
+          In March 2019, a European e-commerce platform processed recurring subscriptions using
+          <code>Date</code>. The renewal logic calculated the next billing date by adding 30 days
+          to <code>new Date()</code>. On the night clocks moved forward, two time zones in the
+          customer database interpreted the epoch millisecond threshold differently — the server
+          ran UTC, customer records stored local dates as strings, and
+          <code>new Date("2019-03-31")</code> silently shifted by one hour when parsed on the
+          server. Roughly 4 000 subscriptions renewed a day early or were skipped entirely.
+          Finance noticed the revenue gap 48 hours later. The root cause: <code>Date.parse()</code>
+          treats bare date strings as UTC in modern engines but as local time in older ones — and
+          the production fleet had mixed Node versions.
+        </p>
+        <p>
+          A rewrite using <code>Temporal.PlainDate</code> three months later eliminated the class
+          entirely. <code>PlainDate</code> carries no timezone at all — it is just a calendar date.
+          The conversion to an exact moment happens at a clearly marked boundary, with an explicit
+          timezone argument the compiler will not let you omit.
+        </p>
+      </section>
+
+      <!-- Problems with Date -->
+      <section class="content-card">
+        <h2>The Seven Deadly Sins of JavaScript <code>Date</code></h2>
+        <span class="section-label">Root cause analysis</span>
+
+        <h3>1. Months are zero-indexed, days are not</h3>
+        <p>
+          <code>new Date(2024, 0, 1)</code> is January 1st. <code>new Date(2024, 1, 1)</code>
+          is February 1st. But <code>date.getDate()</code> returns 1 for the first day.
+          There is no justification — it was copied from the Java 1.0 <code>java.util.Date</code>
+          API which itself had this bug. ESLint rules like
+          <code>no-restricted-syntax</code> can catch it, but thousands of codebases have latent
+          off-by-one errors in their month arithmetic.
+        </p>
+
+        <h3>2. Mutable by default</h3>
+        <p>
+          Every <code>set*</code> method mutates the original object. Passing a
+          <code>Date</code> to a function and calling <code>date.setHours(0)</code> inside it
+          changes the caller's value. Libraries like Moment.js inherited this design and spent
+          years adding <code>.clone()</code> calls everywhere. Temporal objects have no setters —
+          <code>with()</code>, <code>add()</code>, and <code>subtract()</code> always return new
+          instances.
+        </p>
+
+        <h3>3. No "date without time" concept</h3>
+        <p>
+          When you need to represent "the user's birthday" or "the invoice date", you want a
+          pure calendar date with no time component. <code>Date</code> cannot express this —
+          you get <code>2024-01-15T00:00:00.000Z</code> at best, which carries an implicit UTC
+          midnight that shifts the displayed date across timezones.
+        </p>
+
+        <h3>4. toString() output is implementation-defined</h3>
+        <p>
+          <code>new Date().toString()</code> produces different strings across browsers, Node
+          versions, and operating system locales. V8 on macOS, Spidermonkey on Linux, and Hermes
+          on React Native each produce subtly different formats. Code that splits on this string
+          is silently locale-fragile.
+        </p>
+
+        <h3>5. Date.parse() is unreliable for non-ISO strings</h3>
+        <p>
+          The spec only requires <code>Date.parse()</code> to handle ISO 8601. Everything else —
+          <code>"March 15, 2024"</code>, <code>"15/03/2024"</code> — is implementation-dependent.
+          MDN recommends never using <code>Date.parse()</code> outside ISO strings. In practice,
+          production code is full of it.
+        </p>
+
+        <h3>6. DST arithmetic is silently wrong</h3>
+        <p>
+          Adding 24 hours to a <code>Date</code> near a daylight saving boundary does not always
+          produce "tomorrow". If the clocks skip forward at 2 AM, that day has only 23 hours.
+          <code>date.setDate(date.getDate() + 1)</code> is the correct approach — but the
+          difference between "add 1 day" and "add 24 hours" is not obvious and
+          <code>Date</code> provides no type-level distinction.
+        </p>
+
+        <h3>7. Millisecond precision only</h3>
+        <p>
+          High-frequency trading systems, distributed tracing, and database timestamps routinely
+          need microsecond or nanosecond precision. <code>Date</code> stores only milliseconds.
+          <code>Temporal.Instant</code> stores nanoseconds as a <code>BigInt</code>
+          (<code>epochNanoseconds</code>), making it suitable for any precision requirement.
+        </p>
+      </section>
+
+      <!-- Classic Date bugs with code -->
+      <section class="content-card">
+        <h2>Classic Date Bugs: Live Code Examples</h2>
+        <span class="section-label">Reproducible failures</span>
+
+        <span class="code-label">JavaScript Example — Bug 1: Month off-by-one</span>
+        <pre><code class="language-javascript">// BROKEN: Date month is 0-indexed
+const birthday = new Date(1990, 12, 25); // December? No — January of 1991!
+console.log(birthday.getFullYear()); // 1991  ← silent wrong year
+console.log(birthday.getMonth());    // 0     ← January, not December
+console.log(birthday.getDate());     // 25
+
+// FIXED: Temporal uses 1-indexed months
+import { Temporal } from "@js-temporal/polyfill";
+const bdayFixed = Temporal.PlainDate.from({ year: 1990, month: 12, day: 25 });
+console.log(bdayFixed.month);  // 12  ← December, correct
+console.log(bdayFixed.year);   // 1990
+
+// String construction still trips people up
+const fromString = new Date("2024-01-15"); // parsed as UTC midnight
+const local = new Date(2024, 0, 15);       // local midnight — different instant!
+// On a UTC+5:30 server: fromString is Jan 14 at 18:30 local time
+console.log(fromString.toLocaleDateString("en-IN")); // "14/1/2024" — wrong day!</code></pre>
+
+        <span class="code-label">JavaScript Example — Bug 2: Mutation and aliasing</span>
+        <pre><code class="language-javascript">// BROKEN: Date mutation through aliasing
+function getStartOfDay(date) {
+  date.setHours(0, 0, 0, 0); // mutates the original!
+  return date;
+}
+
+const now = new Date();
+const startOfDay = getStartOfDay(now); // now is also changed!
+console.log(now === startOfDay); // true — same object
+console.log(now.getHours());     // 0  ← caller's date was silently zeroed
+
+// FIXED: Temporal is always immutable
+const nowTemporal = Temporal.Now.plainDateTimeISO();
+const startOfDayTemporal = nowTemporal.with({ hour: 0, minute: 0, second: 0, millisecond: 0 });
+console.log(nowTemporal === startOfDayTemporal);  // false — new object
+console.log(nowTemporal.hour);  // original hour unchanged</code></pre>
+
+        <span class="code-label">JavaScript Example — Bug 3: DST addition error</span>
+        <pre><code class="language-javascript">// BROKEN: Adding 24 hours is NOT the same as adding 1 day
+// In America/New_York, March 10 2024 has only 23 hours (DST spring forward at 2 AM)
+const march9 = new Date("2024-03-09T12:00:00-05:00"); // noon EST
+
+// "Add one day" via milliseconds — WRONG near DST boundary
+const wrong = new Date(march9.getTime() + 24 * 60 * 60 * 1000);
+console.log(wrong.toLocaleTimeString("en-US", { timeZone: "America/New_York" }));
+// "1:00:00 PM" — off by 1 hour because of DST!
+
+// FIXED: Temporal ZonedDateTime handles DST automatically
+const march9Zdt = Temporal.ZonedDateTime.from("2024-03-09T12:00:00-05:00[America/New_York]");
+const march10Zdt = march9Zdt.add({ days: 1 });
+console.log(march10Zdt.toString());
+// "2024-03-10T12:00:00-04:00[America/New_York]" — noon EDT, correct!
+// The offset changed from -05:00 to -04:00, keeping local time the same</code></pre>
+
+        <span class="code-label">JavaScript Example — Bug 4: Sorting dates as strings</span>
+        <pre><code class="language-javascript">// BROKEN: Non-ISO dates sort incorrectly as strings
+const dates = ["March 5, 2024", "January 15, 2024", "February 28, 2024"];
+dates.sort(); // lexicographic — "February" < "January" < "March" ← alphabetical not chronological!
+console.log(dates); // ["February 28...", "January 15...", "March 5..."] — WRONG
+
+// ALSO BROKEN: Even with Date objects, sorting numbers works but loses meaning
+const dateTimes = [
+  new Date("2024-03-15T22:00:00-05:00"),
+  new Date("2024-03-15T08:00:00+09:00"),
+];
+dateTimes.sort((a, b) => a - b); // works numerically but requires manual coercion
+
+// FIXED: Temporal has a static compare() method for direct use in sort()
+const temporalDates = [
+  Temporal.Instant.from("2024-03-15T22:00:00-05:00"),
+  Temporal.Instant.from("2024-03-15T08:00:00+09:00"),
+  Temporal.Instant.from("2024-03-16T03:00:00Z"),
+];
+temporalDates.sort(Temporal.Instant.compare);
+// Sorted by exact moment, not string, not locale, not coercion</code></pre>
+      </section>
+
+      <!-- Temporal API Overview -->
+      <section class="content-card">
+        <h2>The Temporal API: Nine Types, One Right Tool Each Time</h2>
+        <span class="section-label">Type system design</span>
+        <p>
+          Temporal's design principle: each type represents exactly one concept, and conversion
+          between types is explicit. You cannot accidentally treat an exact moment as a wall-clock
+          time. The type lattice enforces this at the API level — calling <code>.year</code> on a
+          <code>Temporal.Instant</code> throws a <code>TypeError</code>, forcing you to first
+          convert it to a timezone-aware type.
+        </p>
+
+        <table style="width:100%; border-collapse:collapse; font-size:0.9rem; margin-top:1rem;">
+          <thead>
+            <tr style="background:var(--surface-2,#f4f4f5);">
+              <th style="padding:8px 12px; text-align:left; border-bottom:2px solid var(--border,#e4e4e7);">Type</th>
+              <th style="padding:8px 12px; text-align:left; border-bottom:2px solid var(--border,#e4e4e7);">What it represents</th>
+              <th style="padding:8px 12px; text-align:left; border-bottom:2px solid var(--border,#e4e4e7);">Has timezone?</th>
+              <th style="padding:8px 12px; text-align:left; border-bottom:2px solid var(--border,#e4e4e7);">Has time?</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.Instant</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">A unique point in time (nanoseconds from epoch)</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Implicit (UTC)</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.ZonedDateTime</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Date + time + timezone + calendar</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Yes (IANA)</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Yes</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.PlainDateTime</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Date + wall-clock time, no timezone</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Yes</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.PlainDate</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Calendar date only (year/month/day)</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.PlainTime</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Wall-clock time only</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Yes</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.PlainYearMonth</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Year + month (e.g., "October 2024")</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.PlainMonthDay</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">Month + day (e.g., recurring birthday)</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">No</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.Duration</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">A length of time for arithmetic</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">N/A</td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);">N/A</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;"><code>Temporal.Now</code></td>
+              <td style="padding:8px 12px;">Utility namespace for current time</td>
+              <td style="padding:8px 12px;">—</td>
+              <td style="padding:8px 12px;">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- Type selection guide -->
+      <section class="content-card">
+        <h2>Which Type Do You Actually Need?</h2>
+        <span class="section-label">Decision guide</span>
+
+        <h3>Use <code>Temporal.Instant</code> when:</h3>
+        <p>
+          You need an exact point in time that is unambiguous regardless of timezone — log
+          timestamps, event sourcing records, <code>created_at</code> database fields,
+          payment timestamps. Store as <code>epochNanoseconds</code> (BigInt) or ISO string
+          with UTC offset. Never display to users without first converting to their timezone.
+        </p>
+
+        <h3>Use <code>Temporal.ZonedDateTime</code> when:</h3>
+        <p>
+          You need to do arithmetic that must respect DST rules — scheduling recurring events,
+          calculating "the next Sunday at 9 AM in Tokyo", showing a user-facing datetime for
+          a calendar event. This is the type to use when both "what exact moment" and "what
+          wall-clock time in what place" both matter.
+        </p>
+
+        <h3>Use <code>Temporal.PlainDate</code> when:</h3>
+        <p>
+          The timezone is irrelevant — invoice dates, birthdays, business logic that operates
+          purely on calendar days ("expire in 30 days", "bill on the 15th of each month").
+          Converting to a timezone-aware instant happens at the boundary (e.g., "expire at
+          midnight in the customer's timezone") and should be an explicit step.
+        </p>
+
+        <h3>Use <code>Temporal.PlainDateTime</code> when:</h3>
+        <p>
+          You have date and time but the timezone is unknown or not yet decided — user input
+          forms before the user has confirmed their timezone, database rows that store local
+          time without offset. Be careful: <code>PlainDateTime</code> arithmetic does not
+          account for DST; use <code>ZonedDateTime</code> if DST matters.
+        </p>
+
+        <h3>Use <code>Temporal.Duration</code> when:</h3>
+        <p>
+          You need to represent a span of time: "2 hours 30 minutes", "3 months", "P1Y2M3DT4H".
+          Durations are not normalized automatically — <code>{ hours: 90 }</code> stays as 90
+          hours unless you call <code>.round()</code>. This is intentional; "3 months" and "90
+          days" are semantically different near month boundaries.
+        </p>
+      </section>
+
+      <!-- Migration from Date to Temporal -->
+      <section class="content-card">
+        <h2>Migrating from <code>Date</code> to Temporal</h2>
+        <span class="section-label">Before / after patterns</span>
+
+        <span class="code-label">JavaScript Example — Migration: common Date patterns</span>
+        <pre><code class="language-javascript">import { Temporal } from "@js-temporal/polyfill";
+
+// ─── Current time ─────────────────────────────────────────────────────────────
+// BEFORE
+const nowDate = new Date();
+const epochMs = nowDate.getTime();
+const isoString = nowDate.toISOString();
+
+// AFTER
+const nowInstant   = Temporal.Now.instant();           // exact time, no TZ
+const nowZdt       = Temporal.Now.zonedDateTimeISO();  // current TZ from system
+const nowPlainDate = Temporal.Now.plainDateISO();      // today as PlainDate
+const nowEpochMs   = nowInstant.epochMilliseconds;     // same as Date.now()
+
+// ─── Parse a date-only string ──────────────────────────────────────────────────
+// BEFORE: BUG — "2024-01-15" is parsed as UTC midnight, so in UTC-5 it becomes Jan 14
+const wrong = new Date("2024-01-15").toLocaleDateString(); // May show "1/14/2024"!
+
+// AFTER: PlainDate has no timezone, so "2024-01-15" is always January 15
+const correct = Temporal.PlainDate.from("2024-01-15");
+console.log(correct.toString()); // "2024-01-15" — always
+
+// ─── Interop: Date ↔ Temporal ──────────────────────────────────────────────────
+// From legacy Date to Temporal
+const legacyDate = new Date("2024-06-15T10:30:00Z");
+const asInstant = legacyDate.toTemporalInstant();               // built-in bridge
+const asZdt     = asInstant.toZonedDateTimeISO("America/New_York");
+const asPlain   = asZdt.toPlainDate(); // "2024-06-15"
+
+// From Temporal back to Date (when you need legacy compatibility)
+const backToDate = new Date(asInstant.epochMilliseconds);
+
+// ─── Format for display ────────────────────────────────────────────────────────
+// BEFORE: locale-dependent
+new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+
+// AFTER: same Intl integration, but source is unambiguous
+Temporal.Now.plainDateISO().toLocaleString("en-US", { dateStyle: "long" });
+// "September 3, 2026"</code></pre>
+
+        <span class="code-label">JavaScript Example — Duration arithmetic</span>
+        <pre><code class="language-javascript">import { Temporal } from "@js-temporal/polyfill";
+
+// ─── Adding months (respects month-end overflow) ──────────────────────────────
+const jan31 = Temporal.PlainDate.from("2024-01-31");
+const oneMonthLater = jan31.add({ months: 1 });
+console.log(oneMonthLater.toString()); // "2024-02-29" (2024 is leap year)
+
+const jan31NonLeap = Temporal.PlainDate.from("2023-01-31");
+console.log(jan31NonLeap.add({ months: 1 }).toString()); // "2023-02-28" — clamped!
+
+// BEFORE with Date: you had to handle this manually
+const wrongFeb = new Date(2023, 0, 31);
+wrongFeb.setMonth(wrongFeb.getMonth() + 1);
+console.log(wrongFeb.toISOString()); // "2023-03-03T..." — WRONG! overflowed into March
+
+// ─── Difference between two dates ─────────────────────────────────────────────
+const start = Temporal.PlainDate.from("2024-01-15");
+const end   = Temporal.PlainDate.from("2024-09-03");
+const diff  = start.until(end, { largestUnit: "month" });
+console.log(diff.toLocaleString()); // "P7M19D" — 7 months and 19 days
+
+// In specific units
+const inDays  = start.until(end).days; // just days component
+const inTotal = start.until(end, { largestUnit: "day" }).days; // total days: 232
+
+// ─── Flight duration across timezones ─────────────────────────────────────────
+const departure = Temporal.ZonedDateTime.from("2024-06-15T09:30:00+08:00[Asia/Hong_Kong]");
+const arrival   = Temporal.ZonedDateTime.from("2024-06-15T08:20:00-07:00[America/Los_Angeles]");
+const flightDuration = departure.until(arrival, { largestUnit: "hour" });
+console.log(`Flight: ${flightDuration.hours}h ${flightDuration.minutes}m`);
+// "Flight: 14h 50m" — correct regardless of timezone difference
+
+// ─── Countdown timer (human-readable) ─────────────────────────────────────────
+function countdown(targetISO) {
+  const target = Temporal.Instant.from(targetISO);
+  const now    = Temporal.Now.instant();
+  const diff   = now.until(target, { largestUnit: "hour" });
+  return `${diff.hours}h ${diff.minutes}m ${diff.seconds}s`;
+}
+console.log(countdown("2026-12-31T23:59:59Z"));</code></pre>
+      </section>
+
+      <!-- Timezone-aware scheduling -->
+      <section class="content-card">
+        <h2>Timezone-Aware Scheduling: The Real-World Use Case</h2>
+        <span class="section-label">ZonedDateTime in production</span>
+        <p>
+          Building a calendar scheduler (think Google Calendar, Calendly, or a cron-based task
+          runner) is where <code>Temporal.ZonedDateTime</code> earns its complexity. The key
+          insight: store future events as <em>wall-clock time + IANA timezone identifier</em>,
+          not as an epoch millisecond. DST rules can and do change — countries periodically
+          abolish or modify their clocks — and storing an epoch locks in the old rule.
+        </p>
+
+        <span class="code-label">JavaScript Example — Timezone-aware recurring events</span>
+        <pre><code class="language-javascript">import { Temporal } from "@js-temporal/polyfill";
+
+// Daily standup at 9 AM in user's timezone, DST-safe
+// Store this as a PlainTime + IANA timezone string, not an epoch offset
+function* dailyStandupInstants(startDate, localHour, timeZone, count) {
+  let date = Temporal.PlainDate.from(startDate);
+  const time = new Temporal.PlainTime(localHour, 0, 0);
+
+  for (let i = 0; i < count; i++) {
+    // toZonedDateTime converts local time to exact moment accounting for DST
+    const zdt = date.toZonedDateTime({ plainTime: time, timeZone });
+    yield zdt.toInstant().epochMilliseconds; // store in DB as epoch ms
+    date = date.add({ days: 1 });
+  }
+}
+
+// Generate next 5 standup times for a NY team
+const standups = [...dailyStandupInstants("2024-03-09", 9, "America/New_York", 5)];
+// March 10 is DST spring forward — the 9 AM on that day maps to a different offset
+// Temporal handles this automatically
+
+// ─── Convert event time across timezones for participants ─────────────────────
+function convertMeetingTime(zdtString, participantTimezone) {
+  const original = Temporal.ZonedDateTime.from(zdtString);
+  const converted = original.withTimeZone(participantTimezone);
+  return {
+    original: original.toLocaleString("en-US", {
+      dateStyle: "short",
+      timeStyle: "short",
+      timeZone: original.timeZoneId,
+    }),
+    converted: converted.toLocaleString("en-US", {
+      dateStyle: "short",
+      timeStyle: "short",
+      timeZone: participantTimezone,
+    }),
+    sameInstant: Temporal.Instant.compare(original.toInstant(), converted.toInstant()) === 0,
+  };
+}
+
+const result = convertMeetingTime(
+  "2024-06-20T14:00:00-04:00[America/New_York]",
+  "Asia/Kolkata"
+);
+console.log(result);
+// { original: "6/20/24, 2:00 PM", converted: "6/20/24, 11:30 PM", sameInstant: true }
+
+// ─── Check if business is currently open (overnight hours handled) ─────────────
+function isOpen(openTime, closeTime, timeZone) {
+  const now       = Temporal.Now.zonedDateTimeISO(timeZone).toPlainTime();
+  const open      = Temporal.PlainTime.from(openTime);
+  const close     = Temporal.PlainTime.from(closeTime);
+  const overnight = Temporal.PlainTime.compare(close, open) < 0;
+
+  if (overnight) {
+    // e.g., 22:00 to 06:00 — wraps midnight
+    return Temporal.PlainTime.compare(now, open) >= 0 ||
+           Temporal.PlainTime.compare(now, close) < 0;
+  }
+  return Temporal.PlainTime.compare(now, open) >= 0 &&
+         Temporal.PlainTime.compare(now, close) < 0;
+}
+
+console.log(isOpen("09:00", "17:00", "America/Chicago")); // regular hours
+console.log(isOpen("22:00", "06:00", "Asia/Tokyo"));       // overnight restaurant</code></pre>
+      </section>
+
+      <!-- Polyfill and current status -->
+      <section class="content-card">
+        <h2>Current Status and Polyfill Setup</h2>
+        <span class="section-label">TC39 Stage 4 · Chrome 144 · polyfill available</span>
+        <p>
+          Temporal reached <strong>TC39 Stage 4</strong> and shipped natively in
+          <strong>Chrome 144</strong> (released 2025). Firefox and Safari implementations are
+          underway. For production use today, there are two mature polyfills:
+        </p>
+        <ul>
+          <li>
+            <strong><code>@js-temporal/polyfill</code></strong> — maintained by the TC39 Temporal
+            champions. Full spec compliance. Use for greenfield projects.
+          </li>
+          <li>
+            <strong><code>temporal-polyfill</code></strong> — by the FullCalendar team. Optimized
+            for bundle size. Good for frontend apps where every KB matters.
+          </li>
+        </ul>
+
+        <pre><code class="language-javascript">// Install
+// npm install @js-temporal/polyfill
+// or
+// npm install temporal-polyfill
+
+// Usage (polyfill does not auto-install on globalThis in all environments)
+import { Temporal, Intl, toTemporalInstant } from "@js-temporal/polyfill";
+
+// In environments where Temporal is native (Chrome 144+), skip the import:
+// const now = Temporal.Now.instant(); // works natively
+
+// Feature detection
+const hasNativeTemporal = typeof globalThis.Temporal !== "undefined";
+if (!hasNativeTemporal) {
+  // load polyfill dynamically
+  const { Temporal: TPolyfill } = await import("@js-temporal/polyfill");
+  globalThis.Temporal = TPolyfill;
+}</code></pre>
+
+        <div class="callout">
+          <p>
+            <strong>Performance note:</strong> The <code>@js-temporal/polyfill</code> is ~50 KB
+            minified+gzipped. For a frontend app serving 10 M users, you will want to tree-shake
+            it or use <code>temporal-polyfill</code> (roughly 15 KB). On Node.js 22+, run with
+            the native V8 Temporal when available to eliminate the polyfill cost entirely.
+          </p>
+        </div>
+      </section>
+
+      <!-- Migration from date-fns / Moment / Luxon -->
+      <section class="content-card">
+        <h2>Migrating from date-fns, Moment.js, Luxon, and Day.js</h2>
+        <span class="section-label">Library migration path</span>
+        <p>
+          Temporal does not immediately make these libraries obsolete — they will remain
+          valuable for utilities (formatting, locale-aware display) that Temporal intentionally
+          delegates to <code>Intl</code>. The migration strategy is incremental:
+        </p>
+        <ol>
+          <li>Stop adding new <code>Date</code> objects; use Temporal for all new date logic.</li>
+          <li>Replace arithmetic and comparison calls (the most bug-prone category).</li>
+          <li>Keep library formatting calls short-term, replace with <code>.toLocaleString()</code>.</li>
+          <li>Remove the library when no more calls remain.</li>
+        </ol>
+
+        <table style="width:100%; border-collapse:collapse; font-size:0.88rem; margin-top:1rem;">
+          <thead>
+            <tr style="background:var(--surface-2,#f4f4f5);">
+              <th style="padding:8px 12px; text-align:left; border-bottom:2px solid var(--border,#e4e4e7);">Library pattern</th>
+              <th style="padding:8px 12px; text-align:left; border-bottom:2px solid var(--border,#e4e4e7);">Temporal equivalent</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>moment().add(1, 'month')</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.Now.plainDateISO().add({ months: 1 })</code></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>moment(a).diff(b, 'days')</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>a.until(b, { largestUnit: 'day' }).days</code></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>moment.tz(str, tz)</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.ZonedDateTime.from({ ...fields, timeZone: tz })</code></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>dayjs().isBefore(other)</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.Instant.compare(a, b) &lt; 0</code></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>dateFns.addMonths(date, 2)</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>date.add({ months: 2 })</code></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>dateFns.startOfDay(date)</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>zdt.startOfDay()</code></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>luxon.DateTime.local()</code></td>
+              <td style="padding:8px 12px; border-bottom:1px solid var(--border,#e4e4e7);"><code>Temporal.Now.zonedDateTimeISO()</code></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;"><code>luxon.Duration.fromObject()</code></td>
+              <td style="padding:8px 12px;"><code>Temporal.Duration.from()</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout" style="margin-top:1rem;">
+          <p>
+            <strong>Moment.js is in maintenance mode</strong> — the team officially recommends
+            migrating to alternatives. Temporal is the long-term answer for pure date logic;
+            date-fns remains useful for its extensive locale-aware formatting helpers while
+            <code>Intl.DateTimeFormat</code> continues to mature.
+          </p>
+        </div>
+      </section>
+
+      <!-- Failure modes -->
+      <section class="content-card">
+        <h2>Temporal Failure Modes and Gotchas</h2>
+        <span class="section-label">What can still go wrong</span>
+
+        <h3>Disambiguation ambiguity during DST</h3>
+        <p>
+          When clocks fall back, wall-clock times in the skipped hour are ambiguous — 1:30 AM
+          exists twice. <code>ZonedDateTime.from()</code> defaults to
+          <code>disambiguation: 'compatible'</code> which picks the earlier offset. For
+          scheduling code, use <code>'reject'</code> to throw on ambiguous times and force
+          explicit resolution.
+        </p>
+
+        <h3>Duration month arithmetic is relative, not absolute</h3>
+        <p>
+          <code>Temporal.Duration.from({ months: 1 })</code> is not "30 days". It means "one
+          calendar month". <code>jan31.add({ months: 1 })</code> gives Feb 28/29, not Mar 2.
+          This is usually the right behavior, but duration total calculations require a reference
+          date: <code>duration.total({ unit: 'day', relativeTo: someDate })</code>.
+        </p>
+
+        <h3>PlainDateTime arithmetic ignores DST</h3>
+        <p>
+          Adding <code>{ days: 1 }</code> to a <code>PlainDateTime</code> always adds exactly
+          24 hours. If you then convert to a <code>ZonedDateTime</code> near a DST boundary,
+          you may end up at the wrong local hour. Use <code>ZonedDateTime</code> from the start
+          for any arithmetic that must produce correct wall-clock results.
+        </p>
+
+        <h3>valueOf() throws intentionally</h3>
+        <p>
+          Temporal objects throw <code>TypeError</code> when coerced to a primitive. This means
+          <code>date > otherDate</code> will throw — you must use <code>Temporal.PlainDate.compare(a, b)</code>
+          or <code>a.until(b)</code>. This is by design to prevent the silent type coercion bugs
+          that plague <code>Date</code>, but it will break naive code that uses comparison
+          operators.
+        </p>
+
+        <h3>Polyfill bundle size</h3>
+        <p>
+          The reference polyfill includes timezone data. If you use IANA timezones and are
+          bundling for the browser, ensure you are not double-including timezone data from both
+          the polyfill and another library like Luxon or date-fns-tz.
+        </p>
+      </section>
+
+      <!-- Production checklist -->
+      <section class="content-card">
+        <h2>Production Checklist: Adopting Temporal</h2>
+        <ul class="check-list">
+          <li>Install <code>@js-temporal/polyfill</code> or <code>temporal-polyfill</code> and
+              add feature detection for native support in Chrome 144+.</li>
+          <li>Replace all <code>new Date("YYYY-MM-DD")</code> with
+              <code>Temporal.PlainDate.from("YYYY-MM-DD")</code> to eliminate the UTC midnight bug.</li>
+          <li>Replace month arithmetic (<code>setMonth(getMonth() + 1)</code>) with
+              <code>date.add({ months: 1 })</code> to get correct end-of-month behavior.</li>
+          <li>Store database timestamps as epoch milliseconds or ISO 8601 with UTC offset;
+              use <code>Temporal.Instant</code> as the canonical in-memory type.</li>
+          <li>Store future scheduled events as <code>PlainDateTime + IANA timezone string</code>,
+              not as epoch milliseconds, to survive government DST rule changes.</li>
+          <li>Use <code>disambiguation: 'reject'</code> in scheduling code to detect ambiguous
+              DST times at insertion rather than silently picking one.</li>
+          <li>Replace all <code>.sort((a,b) => a - b)</code> on dates with the static
+              <code>Temporal.*.compare</code> method.</li>
+          <li>Add ESLint rule to ban <code>new Date(string)</code> in the codebase
+              (except for Temporal interop bridge calls).</li>
+          <li>For duration display, use <code>Intl.DurationFormat</code> (Stage 4) rather than
+              manual string concatenation.</li>
+          <li>Test DST transitions explicitly: US spring-forward (March), US fall-back (November),
+              and any timezone your users are in.</li>
+        </ul>
+      </section>
+
+      <!-- FAQ -->
+      <section class="content-card">
+        <h2>Frequently Asked Questions</h2>
+
+        <details>
+          <summary>Is Temporal safe to use in production today?</summary>
+          <p>
+            Yes, with a polyfill. <code>@js-temporal/polyfill</code> is production-ready and
+            used by large applications. Natively it ships in Chrome 144. For Node.js, use the
+            polyfill on any version; native support will arrive with V8 updates. The polyfill
+            is spec-compliant and regularly fuzz-tested against the spec test suite.
+          </p>
+        </details>
+
+        <details>
+          <summary>Does Temporal replace Intl.DateTimeFormat?</summary>
+          <p>
+            No. Temporal handles the logic side (arithmetic, storage, comparison). Display
+            (localized formatting, relative time) is still delegated to <code>Intl</code>.
+            Temporal objects implement <code>.toLocaleString()</code> which uses
+            <code>Intl.DateTimeFormat</code> internally. Think of them as complementary.
+          </p>
+        </details>
+
+        <details>
+          <summary>Should I migrate an existing codebase all at once?</summary>
+          <p>
+            No. The incremental strategy works well: start with new features using Temporal,
+            migrate arithmetic code first (the highest-risk category), and leave display code
+            for last. The interop bridge <code>date.toTemporalInstant()</code> and
+            <code>new Date(instant.epochMilliseconds)</code> makes mixing old and new code
+            straightforward.
+          </p>
+        </details>
+
+        <details>
+          <summary>What happened to Moment.js and Luxon?</summary>
+          <p>
+            Moment.js is in long-term maintenance mode — no new features, security fixes only.
+            Luxon (by a Moment.js author) is well-maintained and a good bridge today. Both will
+            remain useful for formatting, but Temporal handles the core date logic more
+            correctly. The Luxon author has stated Temporal is the right long-term answer.
+          </p>
+        </details>
+
+        <details>
+          <summary>Does Temporal support non-Gregorian calendars?</summary>
+          <p>
+            Yes. All Temporal date types accept an optional <code>calendar</code> parameter
+            supporting ISO 8601, Hebrew, Islamic, Persian, Chinese, Buddhist, and others via
+            the <code>Intl.Calendar</code> identifiers. Date arithmetic respects the calendar's
+            rules for month lengths and year boundaries.
+          </p>
+        </details>
+
+        <details>
+          <summary>What is the RFC 9557 string format?</summary>
+          <p>
+            It extends ISO 8601 with a bracket notation for IANA timezone identifiers and
+            calendar annotations:
+            <code>2024-01-15T10:30:00+05:30[Asia/Kolkata][u-ca=hebrew]</code>.
+            This ensures the string carries both the exact offset (for the stored moment) and
+            the IANA identifier (for future DST calculations), preventing the class of bugs
+            where a stored UTC offset becomes wrong after a government DST rule change.
+          </p>
+        </details>
+      </section>
+
+      <!-- Related Topics -->
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><strong>TC39 Proposal Temporal</strong> — <a href="https://tc39.es/proposal-temporal/" target="_blank" rel="noopener">tc39.es/proposal-temporal</a> — full spec and cookbook</li>
+          <li><strong>MDN Temporal Reference</strong> — <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal" target="_blank" rel="noopener">MDN Web Docs</a></li>
+          <li><strong>@js-temporal/polyfill</strong> — <a href="https://www.npmjs.com/package/@js-temporal/polyfill" target="_blank" rel="noopener">npmjs.com/package/@js-temporal/polyfill</a></li>
+          <li><strong>Intl.DurationFormat</strong> (TC39 Stage 4) — locale-aware duration display</li>
+          <li><strong>date-fns v4</strong> — still valuable for formatting; compatible with Temporal via interop</li>
+          <li><strong>Luxon</strong> — Moment.js successor; migration-friendly bridge to Temporal</li>
+        </ul>
+      </section>
+
+      <!-- Takeaway -->
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>
+          The fundamental mistake in <code>Date</code> is conflating three separate concepts —
+          an exact moment in time, a wall-clock reading, and a calendar date — into one mutable
+          object with no type-level distinction. Every DST bug, every off-by-one-day error in
+          UTC parsing, every "works in staging, breaks in production" date issue traces back to
+          this conflation. Temporal enforces the distinction at the type level: you cannot
+          accidentally read <code>.year</code> off an <code>Instant</code>; you cannot skip
+          specifying a timezone when you need DST-correct arithmetic. The API is larger, but
+          each additional type is a bug class made unrepresentable. Adopt Temporal incrementally,
+          starting with the highest-risk arithmetic: month addition, DST-spanning date ranges,
+          and any code where a <code>Date</code> string parse result gets stored in a database.
+          Those three patterns account for the vast majority of production date bugs in
+          JavaScript applications.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

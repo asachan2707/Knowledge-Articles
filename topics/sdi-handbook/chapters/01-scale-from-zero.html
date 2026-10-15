@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scale From Zero to Millions of Users | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 1 of the System Design Interview Handbook (created 2026-10-15 from liquidslr/system-design-notes ch.01). Covers the single-server to millions-of-users growth path - DB split, load balancer, primary/replica replication, caching, CDN, stateless web tier, multi-data-center, message queues, observability, sharding - with trade-off tables, failure modes and a runnable JavaScript example (TTL-LRU cache-aside, replication lag, modulo-sharding remap) that was executed with node. Related pages - 02 back-of-envelope estimation, 05 consistent hashing, scaling-to-1-million-users, load-balancing, caching, sharding. Read time about 20 min.</div>
+        <h1>Scale From Zero to Millions of Users</h1>
+        <p class="summary">Every large system started as one box. This chapter walks the standard growth path tier by tier (split the database, add a load balancer, replicas, cache, CDN, stateless web tier, multiple data centers, queues, sharding) and explains what each step buys and what new problem it creates.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">1 of 28 · Part 1 Foundations</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">20 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">stateless web tier, replication, cache-aside, CDN, sharding, GeoDNS, queues</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">MySQL, PostgreSQL, Redis, Memcached, CloudFront, Kafka, SQS, Vitess</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">Nobody designs for ten million users on day one, and nobody should. The interesting skill is knowing which problem arrives next, and which component answers it. This chapter is the master map for the rest of the handbook: nearly every later chapter is a deep dive into one box on this map.</p>
+        <div class="callout"><p><strong>Core idea:</strong> scaling is a sequence of bottleneck removals. Each component (load balancer, replica, cache, CDN, queue, shard) exists because a specific resource ran out. If you cannot name the resource, you do not need the component yet.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known pattern</span>
+        <h2>The "one box to many tiers" path is the public record of most web companies</h2>
+        <p>Engineering write-ups from Instagram, Pinterest, Stack Overflow and many others tell a strikingly similar story: start with a monolith and one relational database, add a cache when reads dominate, add read replicas, then finally shard when a single primary cannot keep up. Pinterest and Instagram both described sharding MySQL or PostgreSQL by a user or object identifier rather than moving to an exotic datastore. The lesson is not that those choices are universal. It is that the path is incremental, and the early steps are cheap, boring and reversible.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 0</span>
+        <h2>The single-server stage and what a request really does</h2>
+        <p>On day one the web app, database, and maybe a cache all run on one machine. That is a perfectly good architecture for a prototype and even for a modest product: there are no network hops between tiers, no distributed failure modes, and deployment is one command. A request goes through four moves.</p>
+        <ol>
+          <li>The client resolves a domain name through DNS. DNS is a paid, third-party lookup service run outside your data center; it returns an IP address and caches it according to the record's TTL.</li>
+          <li>The browser or mobile app sends HTTP to that address.</li>
+          <li>The web server runs business logic, reads or writes the database, and returns HTML (for browsers) or JSON (for mobile and single-page clients).</li>
+          <li>The client renders the response.</li>
+        </ol>
+        <p>Two traffic sources exist: web clients (server-rendered pages plus JavaScript) and mobile apps (JSON over HTTP, usually behind a versioned API). Design the API as the product boundary from the start, because the mobile app version in the wild is something you can never force to upgrade.</p>
+        <div class="diagram-box" style="white-space:pre">  user ──DNS lookup──▶ DNS ──▶ 203.0.113.9
+   │
+   └─────── HTTP ──────▶ [ one box: web app + DB + cache ]
+   ◀──── HTML / JSON ───</div>
+        <div class="warn-box"><strong>Gotcha.</strong> DNS TTL is your slowest failover knob. If you set a 24 hour TTL and the box dies, clients keep sending traffic to the dead IP for hours. Use short TTLs (tens of seconds to minutes) on records you may need to move, and remember that some resolvers ignore low TTLs.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1</span>
+        <h2>Split the database from the web tier</h2>
+        <p>The first split is separating the data tier from the stateless compute tier. The two have opposite scaling profiles: web servers are cheap, CPU-bound and replaceable; databases are stateful, memory- and IO-bound and precious. Splitting lets you scale each independently and gives the database its own hardware, backup schedule and security zone (no public IP).</p>
+        <p class="mini-heading">Relational vs non-relational</p>
+        <p>The default for a new product is a relational database (PostgreSQL, MySQL). You get joins, transactions, constraints and thirty years of tooling. Reach for a non-relational store when one of these is genuinely true:</p>
+        <ul class="check-list">
+          <li>You need very low, predictable latency on simple lookups (key-value stores such as DynamoDB or Redis).</li>
+          <li>The data is unstructured or semi-structured and you mostly serialise and deserialise it (document stores such as MongoDB).</li>
+          <li>The data is huge and accessed by key or time range (wide-column stores such as Cassandra or Bigtable).</li>
+          <li>The data is a graph and traversals are the product (graph databases).</li>
+        </ul>
+        <p>"NoSQL scales better" is a lazy answer. Relational databases scale a long way with replicas and sharding. NoSQL stores scale easily because they give up joins and multi-row transactions, and you must be willing to give them up too.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2</span>
+        <h2>Vertical vs horizontal scaling, and the load balancer</h2>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Vertical (scale up)</h4><ul><li>Zero code change; the simplest fix when traffic is small.</li><li>No distributed-systems problems.</li></ul></div>
+          <div class="trade-col cons"><h4>Vertical limits</h4><ul><li>A hard ceiling: the biggest machine you can buy.</li><li>Cost grows faster than capacity at the top end.</li><li>One machine is still one failure domain: no redundancy.</li></ul></div>
+        </div>
+        <p>Horizontal scaling (add more machines) is the only path past the ceiling, and it requires something to spread requests across them. That something is the load balancer. Clients talk to the balancer's public IP; the web servers sit on private IPs reachable only from the balancer. If one server dies, the balancer stops routing to it (via active health checks, not wishful thinking), and if traffic spikes you add servers behind it. This one component delivers both redundancy and elasticity.</p>
+        <p class="mini-heading">Depth: what the balancer actually does</p>
+        <ul>
+          <li><strong>Layer 4 vs layer 7.</strong> An L4 balancer forwards TCP connections without reading HTTP; it is fast and protocol-agnostic. An L7 balancer parses HTTP, so it can route by path or header, terminate TLS, retry idempotent requests and do canary splits. Most product teams want L7 at the edge and L4 inside.</li>
+          <li><strong>Algorithms.</strong> Round robin is fine for uniform requests; least-connections or least-request is better when request cost varies; consistent hashing (chapter 5) is used when requests should stick to a backend for cache locality.</li>
+          <li><strong>The balancer itself must not be a single point of failure.</strong> Run it as an active-passive pair with a floating IP, or as a managed service that spans zones.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 3</span>
+        <h2>Database replication</h2>
+        <p>With a web tier that can grow, the database becomes the next ceiling. The standard answer is a primary (formerly called master) that accepts all writes and several replicas that copy its changes and serve reads. Because most applications read far more than they write, a typical system has one primary and many replicas, and read capacity scales almost linearly with replica count.</p>
+        <div class="diagram-box" style="white-space:pre">   writes ──▶ [ PRIMARY ] ──replication log──┬──▶ [ replica 1 ] ◀── reads
+                                            ├──▶ [ replica 2 ] ◀── reads
+                                            └──▶ [ replica 3 ] ◀── reads</div>
+        <p class="mini-heading">Failure handling, with the real-world caveats</p>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Response</th><th>Catch</th></tr></thead>
+          <tbody>
+            <tr><td>One replica dies (others alive)</td><td>Router stops sending reads to it; a replacement is provisioned and catches up.</td><td>Remaining replicas absorb its load; watch for cascading overload.</td></tr>
+            <tr><td>The only replica dies</td><td>Reads temporarily fall back to the primary.</td><td>Primary now carries read+write; it may not survive.</td></tr>
+            <tr><td>Primary dies</td><td>A replica is promoted (manually, or by an orchestrator such as Patroni, Orchestrator, or a managed service).</td><td>Replication is usually asynchronous, so the promoted replica may be missing the last few committed writes. Those need reconciliation.</td></tr>
+          </tbody>
+        </table>
+        <p>Asynchronous replication gives low write latency but allows data loss on failover; synchronous replication to at least one replica removes that loss window at the cost of write latency and write availability if that replica is down. Many production setups use semi-synchronous replication as a compromise. Multi-primary and circular replication exist but make write conflicts your problem; avoid them until you must.</p>
+        <div class="insight-box"><strong>Replication lag is a product bug, not a database detail.</strong> A user edits their profile, the page reloads from a lagging replica, and their edit appears lost. The usual cure is read-your-writes routing: for a short window after a write (or for the user's own data), read from the primary, or from a replica whose replication position has passed the write's position. The JavaScript example below shows the stale read and the fix.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 4</span>
+        <h2>Cache tier</h2>
+        <p>A cache is a fast, usually in-memory, store in front of the database for data that is read often and changed rarely. Memory access is hundreds of times faster than a disk-backed query, and every cache hit is a query the database never sees. The most common pattern is cache-aside: the application checks the cache; on a miss it reads the database and populates the cache; on a write it updates the database and invalidates the key. Redis and Memcached are the common engines.</p>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Guidance</th></tr></thead>
+          <tbody>
+            <tr><td>What to cache</td><td>Read-heavy, rarely-changing, expensive-to-compute data. Not data that must be exact on every read (balances, inventory at checkout).</td></tr>
+            <tr><td>Expiration</td><td>Always set a TTL. Without one, stale or orphaned entries live until eviction, and bugs in invalidation become permanent bugs. Too short a TTL gives a low hit ratio; too long gives staleness.</td></tr>
+            <tr><td>Consistency</td><td>The database write and the cache invalidation are not one transaction. Delete after the DB commit, keep TTLs as a safety net, and accept a small stale window. Updating (rather than deleting) the cache on write is more race-prone.</td></tr>
+            <tr><td>Eviction</td><td>LRU is the default and usually right; LFU suits skewed, stable popularity. The cache is full by design, so eviction is routine, not an error.</td></tr>
+            <tr><td>Availability</td><td>One cache node is a single point of failure and a cold-start cliff. Use several nodes, ideally across zones, and over-provision memory so a lost node does not melt the database.</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><strong>Cache stampede.</strong> When a hot key expires, thousands of concurrent requests miss together and all hit the database. Mitigate with request coalescing (single flight: one loader, the others wait), jittered TTLs, early refresh, or a short-lived lock. See the related caching page for the full catalogue.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 5</span>
+        <h2>CDN for static content</h2>
+        <p>A content delivery network is a geographically distributed set of cache servers for static assets (images, video segments, CSS, JavaScript, downloads). A user's request goes to the nearest edge; on a miss the edge pulls from your origin once and then serves everyone nearby. Latency drops because the speed of light is a hard floor: a cross-ocean round trip is on the order of 100+ ms before any server work.</p>
+        <ul class="check-list">
+          <li><strong>Cost.</strong> You pay for egress. Cache aggressively; do not serve rarely-requested content through a paid CDN.</li>
+          <li><strong>Expiry.</strong> Too long and users see stale assets; too short and the origin takes the load. The best practice is content-addressed (fingerprinted) filenames such as <code>app.3f9a1c.js</code> with year-long TTLs, so you never need invalidation for them.</li>
+          <li><strong>Invalidation.</strong> For URLs that must stay stable, use vendor purge APIs or versioned query/path segments.</li>
+          <li><strong>Fallback.</strong> Clients should be able to fall back to the origin if the CDN has an outage, and the origin must be sized for that worst case.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 6</span>
+        <h2>Make the web tier stateless</h2>
+        <p>If a web server stores the user's session in its own memory, then user A's next request must reach the same server (sticky sessions), which defeats load balancing, makes deployments disruptive, and loses sessions when the server dies. The fix is to move shared state out of the web tier into a shared store such as Redis, a database, or a signed token (JWT or an encrypted cookie) carried by the client. Now any server can handle any request, so servers become interchangeable and disposable.</p>
+        <div class="diagram-box" style="white-space:pre">  STATEFUL (fragile)                          STATELESS (elastic)
+  user A ─▶ server 1 (has A's session)        user A ─▶ any server ─┐
+  user B ─▶ server 2 (has B's session)        user B ─▶ any server ─┼─▶ [ shared session store ]
+  server 1 dies = A is logged out             a server dies = nobody notices</div>
+        <p>Statelessness is what makes autoscaling safe: scale out on CPU or request rate, scale in without draining sessions. It is the cheapest, highest-leverage change in this chapter, so do it before you need it. The trade-off is that you have introduced a dependency (the session store) that must itself be replicated and kept fast; a signed token avoids the dependency but makes immediate revocation harder.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 7</span>
+        <h2>Multiple data centers</h2>
+        <p>One region is one blast radius, and users far away pay a latency tax. The next step is a second data center. GeoDNS (for example latency-based or geolocation routing in Route 53 or similar) resolves the same hostname to the nearest healthy site. In a normal day traffic is split by geography; if one site fails, DNS or a global load balancer shifts everyone to the survivor.</p>
+        <div class="diagram-box" style="white-space:pre">             ┌── GeoDNS ──┐
+   US users ─┤            ├─ EU users
+             ▼            ▼
+        [ DC-US ]◀─async replication─▶[ DC-EU ]
+        web+cache+DB                  web+cache+DB</div>
+        <p>The hard parts are not routing but state:</p>
+        <ul>
+          <li><strong>Traffic redirection.</strong> You need health checks and a tested failover path. A failover you have never exercised is a hypothesis.</li>
+          <li><strong>Data synchronisation.</strong> Cross-region replication is asynchronous (the speed of light again), so a failover can lose recent writes and a user routed to another site may briefly see old data. Decide per dataset: active-passive with one write region, or active-active with explicit conflict handling (chapter 6 covers the tools).</li>
+          <li><strong>Deployment consistency.</strong> The same build, config and schema must roll out to every site, usually through automated pipelines and staged rollouts.</li>
+          <li><strong>Capacity.</strong> Each site must survive taking the other's traffic, or you have only moved the outage.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 8</span>
+        <h2>Message queues: decouple producers from consumers</h2>
+        <p>Some work should not happen inside the request: image resizing, email, report generation, fan-out to followers. A message queue lets the web tier publish a task and return immediately while workers consume at their own pace. Producers and consumers scale and fail independently, and the queue absorbs bursts: if the queue depth grows you add workers; if workers die the messages wait.</p>
+        <p>One correction to a common description: queues are not "stored in memory" by definition. Production brokers (Kafka, RabbitMQ with durable queues, SQS) persist messages so that a broker restart does not lose them. What the queue gives you is at-least-once delivery in most systems, which means consumers must be idempotent. The handbook's message-queue chapter (19) builds one from scratch.</p>
+        <table class="data-table">
+          <thead><tr><th>Use a queue when</th><th>Do not use one when</th></tr></thead>
+          <tbody><tr><td>The caller does not need the result now; load is bursty; a downstream service is slow or flaky; you want retry and dead-letter handling.</td><td>The caller needs a synchronous answer; ordering and exactly-once semantics are required but nobody has designed for them; the added operational surface outweighs the benefit.</td></tr></tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 9</span>
+        <h2>Logging, metrics and automation</h2>
+        <p>Once there are dozens of moving parts you cannot debug by SSH. Treat observability and automation as part of the architecture, not polish.</p>
+        <ul class="check-list">
+          <li><strong>Logs.</strong> Emit structured (JSON) logs with a request id, aggregate them centrally, and make them searchable. Per-server logs are useless the moment a request crosses a tier.</li>
+          <li><strong>Metrics.</strong> Collect host metrics (CPU, memory, disk), per-tier metrics (cache hit ratio, replication lag, queue depth, p99 latency, error rate) and business metrics (sign-ups, orders per minute). Alert on symptoms users feel, not on every cause.</li>
+          <li><strong>Automation.</strong> Continuous integration, automated deploys, infrastructure as code, and automatic scaling remove the human from the repeatable parts, which is where outages breed.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 10</span>
+        <h2>Scaling the data tier: sharding</h2>
+        <p>Replicas scale reads but every replica holds the full data set and the primary still takes every write. When the write rate or the data size exceeds one machine, you partition the data: sharding. Each shard is an independent database with the same schema holding a disjoint slice of rows, selected by a sharding key such as <code>user_id</code>. A router computes <code>shard = hash(user_id) mod N</code> (or consults a directory) and sends the query to the right place.</p>
+        <div class="diagram-box" style="white-space:pre">  app ─▶ shard router: shard = hash(user_id) mod 4
+            ├─▶ shard 0 (users 0,4,8..)  + its own replicas
+            ├─▶ shard 1
+            ├─▶ shard 2
+            └─▶ shard 3</div>
+        <p class="mini-heading">Choosing the key is the whole game</p>
+        <p>A good key has high cardinality, spreads load evenly, and keeps the common query on one shard. Sharding by <code>user_id</code> puts all of one user's data together; sharding by <code>created_at</code> sends all new writes to one hot shard. Once chosen, the key is very hard to change.</p>
+        <table class="data-table">
+          <thead><tr><th>Problem</th><th>Why it happens</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Resharding</td><td>A shard fills up, or data is skewed. With <code>mod N</code>, changing N remaps most keys (see the code below).</td><td>Consistent hashing (chapter 5), or many logical shards mapped onto fewer physical nodes so you move whole logical shards.</td></tr>
+            <tr><td>Celebrity / hot key</td><td>One entity gets orders of magnitude more traffic, overloading its shard.</td><td>Dedicate a shard or split the entity (key suffix salting), add a cache in front, replicate hot rows.</td></tr>
+            <tr><td>Cross-shard joins and transactions</td><td>Data for one query now lives on several machines.</td><td>Denormalise so common queries are single-shard; use application-level joins; use sagas instead of distributed transactions. Middleware such as Vitess or Citus hides routing.</td></tr>
+            <tr><td>Operational load</td><td>N databases to back up, migrate, monitor.</td><td>Automate schema changes and shard creation from day one.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Putting it together</span>
+        <h2>The 1M-user reference architecture, and the order to build it</h2>
+        <div class="diagram-box" style="white-space:pre">                     GeoDNS
+                       │
+           ┌───────────┴───────────┐
+           ▼                       ▼
+        [ CDN ]  static assets    (other DC, same shape)
+           │
+     [ load balancer ] ◀── health checks
+        │    │    │
+      web  web  web   (stateless, autoscaled)  ──▶ [ session / cache cluster ]
+        │                                     │
+        ├── writes ─▶ [ primary ] ─▶ replicas ◀── reads
+        │                shards 0..N
+        └── async tasks ─▶ [ message queue ] ─▶ workers
+   logging · metrics · alerting · CI/CD around everything</div>
+        <table class="data-table">
+          <thead><tr><th>Order</th><th>Add this</th><th>When the signal says</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>Separate DB, then LB + stateless web tier</td><td>CPU or memory contention on the box; need zero-downtime deploys.</td></tr>
+            <tr><td>2</td><td>Replicas and a cache</td><td>Read QPS or DB CPU is the bottleneck; hit ratio will be high.</td></tr>
+            <tr><td>3</td><td>CDN</td><td>Bandwidth or far-away users dominate latency.</td></tr>
+            <tr><td>4</td><td>Queues and workers</td><td>Slow side-effects hurt request latency; bursts need smoothing.</td></tr>
+            <tr><td>5</td><td>Multi data center</td><td>Availability target or global latency demands it.</td></tr>
+            <tr><td>6</td><td>Sharding</td><td>Write rate or data size exceeds the largest affordable primary.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable example: cache-aside, replication lag and why modulo sharding hurts</h2>
+        <p>This single file implements a TTL plus LRU cache using a <code>Map</code> (insertion order gives O(1) recency updates), a primary with lagging replicas, and a cache-aside service on top. It then measures how many keys move when a modulo-sharded fleet grows from 4 to 5 shards. It runs with Node 20+ and no dependencies.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+// 1) LRU cache with TTL (Map preserves insertion order -&gt; O(1) LRU)
+class TtlLru {
+  constructor(capacity, ttlMs, now = () =&gt; Date.now()) {
+    this.cap = capacity; this.ttl = ttlMs; this.now = now; this.m = new Map();
+  }
+  get(k) {
+    const e = this.m.get(k);
+    if (!e) return undefined;
+    if (e.exp &lt;= this.now()) { this.m.delete(k); return undefined; }
+    this.m.delete(k); this.m.set(k, e);           // refresh recency
+    return e.v;
+  }
+  set(k, v) {
+    this.m.delete(k);
+    this.m.set(k, { v, exp: this.now() + this.ttl });
+    if (this.m.size &gt; this.cap) this.m.delete(this.m.keys().next().value); // evict LRU
+  }
+  del(k) { this.m.delete(k); }
+}
+
+// 2) Primary + replicas with asynchronous replication lag
+class ReplicatedDb {
+  constructor(replicas) {
+    this.primary = new Map();
+    this.replicas = Array.from({ length: replicas }, () =&gt; new Map());
+    this.queue = [];                               // pending replication log
+    this.rr = 0; this.reads = { primary: 0, replica: 0 };
+  }
+  write(k, v) { this.primary.set(k, v); this.queue.push([k, v]); }
+  replicate() { for (const [k, v] of this.queue) this.replicas.forEach(r =&gt; r.set(k, v)); this.queue = []; }
+  read(k, { fresh = false } = {}) {
+    if (fresh || this.replicas.length === 0) { this.reads.primary++; return this.primary.get(k); }
+    this.reads.replica++;
+    return this.replicas[this.rr++ % this.replicas.length].get(k);
+  }
+}
+
+// 3) Cache-aside service on top of both
+let t = 0; const clock = () =&gt; t;
+const cache = new TtlLru(2, 1000, clock);
+const db = new ReplicatedDb(2);
+const get = k =&gt; {
+  let v = cache.get(k);
+  if (v === undefined) { v = db.read(k); if (v !== undefined) cache.set(k, v); }
+  return v;
+};
+const put = (k, v) =&gt; { db.write(k, v); cache.del(k); };   // invalidate, don't update
+
+put('user:1', 'alice'); db.replicate();
+assert.equal(get('user:1'), 'alice');                // miss -&gt; replica -&gt; fill
+assert.equal(get('user:1'), 'alice');                // hit
+assert.equal(db.reads.replica, 1);
+put('user:1', 'alicia');                             // replica not yet caught up
+assert.equal(db.read('user:1'), 'alice');            // stale replica read (lag)
+assert.equal(db.read('user:1', { fresh: true }), 'alicia'); // read-your-writes via primary
+db.replicate();
+assert.equal(get('user:1'), 'alicia');
+t += 1500; assert.equal(cache.get('user:1'), undefined);   // TTL expiry
+cache.set('a', 1); cache.set('b', 2); cache.get('a'); cache.set('c', 3);
+assert.equal(cache.get('b'), undefined);             // LRU victim was b
+assert.equal(cache.get('a'), 1);
+
+// 4) Why modulo sharding hurts: fraction of keys that move when shards go 4 -&gt; 5
+const h = s =&gt; createHash('md5').update(s).digest().readUInt32BE(0);
+let moved = 0; const K = 100000;
+for (let i = 0; i &lt; K; i++) { const x = h('user:' + i); if (x % 4 !== x % 5) moved++; }
+console.log('modulo 4-&gt;5 moved:', (100 * moved / K).toFixed(1) + '% of keys (ideal 20%)');
+assert.ok(moved / K &gt; 0.7);
+console.log('replica reads:', db.reads.replica, 'primary reads:', db.reads.primary);
+console.log('all checks passed');</code></pre>
+        <p class="code-caption">Prints: "modulo 4-&gt;5 moved: ~80% of keys (ideal 20%)", the replica/primary read counts, and "all checks passed" after the assertions on cache hits, TTL expiry, LRU eviction, stale replica reads and read-your-writes pass. Executed with node.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks at each tier</h2>
+        <table class="data-table">
+          <thead><tr><th>Component</th><th>Failure</th><th>Blast radius</th><th>Defence</th></tr></thead>
+          <tbody>
+            <tr><td>Load balancer</td><td>Misconfigured health check marks all servers unhealthy</td><td>Total outage</td><td>Panic mode (route to all if too many unhealthy), redundant balancers, config review</td></tr>
+            <tr><td>Web server</td><td>Slow dependency exhausts threads</td><td>Cascading timeouts</td><td>Timeouts, circuit breakers, bulkheads, load shedding</td></tr>
+            <tr><td>Cache</td><td>Node loss or mass expiry causes a miss storm</td><td>DB overload</td><td>Replicated cache, jittered TTLs, single-flight, DB admission control</td></tr>
+            <tr><td>Replica</td><td>Lag grows under write bursts</td><td>Stale reads, broken UX</td><td>Lag metric and alert, read-your-writes routing, fall back to primary</td></tr>
+            <tr><td>Primary</td><td>Crash or network partition</td><td>No writes; possible split brain</td><td>Automated failover with fencing, tested runbooks</td></tr>
+            <tr><td>Shard</td><td>One shard hot or down</td><td>Subset of users</td><td>Per-shard replicas, hot-key mitigation, graceful degradation</td></tr>
+            <tr><td>Data center</td><td>Region outage</td><td>Everything in it</td><td>Capacity headroom in survivors, rehearsed failover</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Scaling knees and gotchas</h2>
+        <ul class="check-list">
+          <li><strong>Connections are a resource.</strong> Every web server opening a pool to the database multiplies connections; a few hundred servers can exhaust a primary. Use a pooler (PgBouncer, ProxySQL).</li>
+          <li><strong>Autoscaling lags.</strong> New instances take minutes to start and warm caches; scale on leading indicators and keep headroom for spikes.</li>
+          <li><strong>Cold caches are outages.</strong> A restart or a new region begins with a zero hit ratio; pre-warm or throttle.</li>
+          <li><strong>Backups are not replicas.</strong> A replica faithfully replicates a bad <code>DELETE</code>. Keep point-in-time-recovery backups and test restores.</li>
+          <li><strong>Schema changes get harder with scale.</strong> Use expand-then-contract migrations so old and new code coexist.</li>
+          <li><strong>Prefer boring.</strong> Each new component is a new on-call burden; defer it until a metric demands it.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Before you say "it scales"</h2>
+        <ul class="check-list">
+          <li>Web tier is stateless; sessions live in a shared store or signed token.</li>
+          <li>No single point of failure at LB, cache, queue, primary or DNS.</li>
+          <li>Reads are absorbed by cache and replicas; read-your-writes is handled.</li>
+          <li>Static assets are on a CDN with fingerprinted names.</li>
+          <li>Slow work is asynchronous and consumers are idempotent.</li>
+          <li>Logs, metrics and alerts exist for every tier; deploys are automated.</li>
+          <li>Sharding key chosen deliberately, with a resharding plan.</li>
+          <li>Failover has been rehearsed, not just designed.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>When should I shard instead of just buying a bigger database?</summary><p>Shard when the write rate or data volume outgrows the largest primary you can run reliably, or when the cost curve of bigger machines turns steep. Before that, replicas, caching, query tuning, archiving old data and partitioning inside one database (table partitioning) are cheaper and reversible. Sharding is a one-way door because it changes your query model.</p></details>
+        <details><summary>Cache-aside, write-through or write-back?</summary><p>Cache-aside is the safe default: the database stays the source of truth and cache failure only costs speed. Write-through keeps the cache fresher but adds write latency and still needs eviction. Write-back (buffer writes in cache, flush later) is fastest but risks losing acknowledged writes; reserve it for data you can afford to lose or rebuild.</p></details>
+        <details><summary>How do you keep a cache consistent with the database?</summary><p>You cannot make them atomic without a transaction spanning both. In practice: write the database, then delete the cache key; keep a TTL as a backstop; for stricter needs, subscribe to the database change log (CDC) and invalidate from there. Accept and document a small staleness window.</p></details>
+        <details><summary>What breaks first if I add replicas but my users write right before reading?</summary><p>Replication lag shows up as lost updates in the UI. Route the writer's own reads to the primary for a short window, or track the write's log position and read only from replicas that have reached it.</p></details>
+        <details><summary>Active-active across regions: easy win or trap?</summary><p>Mostly a trap for stateful data. It halves latency and survives region loss, but you must resolve write conflicts (last-write-wins loses data; CRDTs or per-record home regions help). Start active-passive for the database, active-active for the stateless tier, and graduate deliberately.</p></details>
+        <details><summary>Is a message queue the same as a cache or a database?</summary><p>No. A queue moves work; a cache accelerates reads; a database stores truth. A durable log such as Kafka blurs the line with a database, but the access pattern (append, read in order, consume by offset) is what defines it.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./02-back-of-envelope-estimation.html">Chapter 2: Back-of-the-Envelope Estimation</a> — the next chapter; how to size every tier above.</li>
+          <li><a href="./05-consistent-hashing.html">Chapter 5: Consistent Hashing</a> — the fix for the resharding problem shown in the code.</li>
+          <li><a href="../../scaling-to-1-million-users.html">Scaling to 1 Million Users</a> — a hub walkthrough of the same growth path.</li>
+          <li><a href="../../system-design/load-balancing.html">Load Balancing</a> — algorithms and health checks in depth.</li>
+          <li><a href="../../system-design/caching.html">Caching</a> — patterns, stampedes and invalidation.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — partitioning strategies and trade-offs.</li>
+          <li><a href="../../system-design/statelessness.html">Statelessness</a> — why interchangeable servers matter.</li>
+        </ul>
+      </section>
+
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p></section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>Scale in the order your bottleneck appears, not the order a diagram suggests. Make the web tier stateless first because it is nearly free and unlocks everything else. Absorb reads with replicas, cache and CDN before you touch writes, and only shard when a single primary truly cannot hold the write rate or the data. Every tier you add trades simplicity for capacity, so add it only when the numbers force you.</p></section>
+    </main>
+  </body>
+</html>

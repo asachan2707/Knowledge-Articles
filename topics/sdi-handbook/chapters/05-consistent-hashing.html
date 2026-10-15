@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design Consistent Hashing | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Chapter 5 of the System Design Interview Handbook (created 2026-10-15 from liquidslr/system-design-notes ch.05). Explains the rehashing problem of hash(key) mod N, the hash ring with clockwise lookup, affected key ranges on add and remove, virtual nodes and measured load skew, replication preference lists, weighted nodes, and alternatives (rendezvous, jump consistent hash, Maglev, bounded loads). Includes a runnable JavaScript hash ring with vnodes that measures skew and key movement, executed with node. Related pages - hub consistent-hashing, sharding, chapter 4 and 6. Read time about 14 min.</div>
+        <h1>Design Consistent Hashing</h1>
+        <p class="summary">Consistent hashing places both keys and servers on a circular hash space so that adding or removing a server moves only a small fraction of keys. This chapter explains why modulo hashing fails, how the ring and virtual nodes work, how replication and weighting build on the ring, and the alternatives (rendezvous, jump hash, Maglev) with their trade-offs.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">5 of 28 · Part 2 Building Blocks</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">14 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">hash ring, virtual nodes, minimal key movement, preference list, weighted nodes, rendezvous hashing, jump hash</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Amazon Dynamo, Apache Cassandra, Discord, Akamai, Google Maglev, Memcached ketama</span></div>
+        </div>
+      </header>
+      <section class="content-card">
+        <p class="lead">Any time you spread keys over many machines (cache nodes, database shards, load-balancer backends, partitioned workers) you need a function from key to machine. The obvious function breaks the moment the machine count changes. Consistent hashing is the function that keeps working when the cluster is elastic.</p>
+        <div class="callout"><p><strong>Core idea:</strong> hash servers and keys onto the same circle. A key belongs to the first server found walking clockwise from the key's position. A server joining or leaving only takes over or gives up the arc between itself and its neighbour.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A well-known public design</span>
+        <h2>From MIT papers to Dynamo and Cassandra</h2>
+        <p>Consistent hashing was introduced by Karger and colleagues at MIT in 1997 to relieve web hot spots with distributed caching, and was a founding idea behind Akamai's CDN. A decade later Amazon's Dynamo paper (2007) used it to partition a highly available key-value store, and Cassandra, which adopted Dynamo's partitioning, made "tokens on a ring" a household concept. Discord has written about using a consistent hash ring to route entities to Elixir nodes, and Google's Maglev paper uses a related lookup-table scheme to spread flows across load-balancer backends. Different eras, same trick: make membership change cheap.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Why it exists</span>
+        <h2>The rehashing problem</h2>
+        <p>The standard way to place a key on one of N servers is <code>server = hash(key) mod N</code>. It is uniform, stateless and O(1), which is excellent while N never changes. When N changes, the divisor changes and almost every key lands somewhere new.</p>
+        <p class="mini-heading">The arithmetic</p>
+        <div class="diagram-box">N = 4 → 3 (one server removed). Key hashes repeat with period 12 (lcm of 4 and 3):
+ h:        0 1 2 3 4 5 6 7 8 9 10 11
+ h mod 4:  0 1 2 3 0 1 2 3 0 1 2  3
+ h mod 3:  0 1 2 0 1 2 0 1 2 0 1  2
+ same?     ✓ ✓ ✓ ✗ ✗ ✗ ✗ ✗ ✗ ✗ ✗  ✗      → only 3 of 12 keys stay put = 25%; 75% move
+N = 4 → 5: a key stays only if (h mod 4) = (h mod 5), true for 4 of 20 residues in a period of 20 → ~80% move
+General rule: growing from N to N+1 moves about N/(N+1) of all keys.</div>
+        <p>For a cache tier this is catastrophic: three quarters of cached entries now map to a server that does not have them, hit rate collapses, and the database behind the cache takes the full read load at the worst possible moment (a node just failed or you just scaled up under load). For a sharded database it means moving three quarters of the data. The goal of consistent hashing is the minimum possible movement: when a server is added, only the keys that the new server should own should move, and they should move only to it.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>The hash ring</h2>
+        <ol>
+          <li><strong>Hash space.</strong> Pick a hash function and treat its output range as a circle. With SHA-1 the space is 0 to 2<sup>160</sup> - 1; many implementations use 32 or 64 bits (for example MurmurHash or xxHash) because they are faster and the extra bits add nothing here. Joining the maximum value back to zero makes it a ring.</li>
+          <li><strong>Place servers.</strong> Hash each server's identifier (name, IP and port) onto the ring with the same function.</li>
+          <li><strong>Place keys.</strong> Hash each key onto the same ring.</li>
+          <li><strong>Lookup.</strong> Starting at the key's position, walk clockwise to the first server position. That server owns the key.</li>
+        </ol>
+        <div class="diagram-box">                 0 / 2^32
+                   ●s0
+          k1 ○           ○ k2         k1 → s1 (next clockwise)
+      s3 ●                 ● s1       k2 → s1
+          k4 ○           ○ k3         k3 → s2,  k4 → s3 (wrap past 0 if needed)
+                   ●s2
+ each server owns the arc between its predecessor and itself</div>
+        <p class="mini-heading">Implementation: sorted array and binary search</p>
+        <p>Store the server positions in a sorted array (or a balanced tree). A lookup binary-searches for the first position greater than or equal to the key's hash and wraps to index 0 if none exists. That is O(log V) for V ring points. Adding or removing a server is O(V) for an array rebuild or O(log V) per point in a tree; membership changes are rare so either is fine. The runnable example below does exactly this.</p>
+        <p class="mini-heading">Affected keys on add and remove</p>
+        <ul class="check-list">
+          <li><strong>Add server S4.</strong> Walk counter-clockwise from S4 to its predecessor (S3). Keys in the arc (S3, S4] used to belong to the clockwise neighbour of S4 and now belong to S4. Nothing else moves, and every moved key moves to S4.</li>
+          <li><strong>Remove server S1.</strong> Keys in the arc (S0, S1] move to S1's clockwise successor (S2). Nothing else moves.</li>
+          <li><strong>Expected volume.</strong> With balanced positions, about K/N keys move per change, which is the theoretical minimum (a new server must receive 1/(N+1) of the data to be a fair member).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>The two problems with the basic ring, and virtual nodes</h2>
+        <p>With a handful of randomly placed servers, the arcs between them have wildly different lengths. A server whose arc happens to be 40 percent of the circle owns 40 percent of the keys. Worse, when a server dies, all its keys fall onto exactly one neighbour, which may then fail from the added load, cascading around the ring. Two symptoms: uneven partition sizes and a non-uniform key distribution.</p>
+        <p>The fix is virtual nodes (vnodes). Each physical server is hashed onto the ring many times, under names such as <code>A#0, A#1, …, A#199</code>. Each of those points is a vnode that owns the arc before it. Because each server now owns many small arcs scattered around the ring, the law of large numbers evens things out: relative standard deviation of load shrinks roughly like 1/sqrt(vnodes per server).</p>
+        <div class="diagram-box">1 vnode per server:    A............B.....C.................D....      uneven arcs
+many vnodes:           A B C D C A D B A C D B C A B D ...         interleaved, even
+a dead server's arcs are adjacent to many different survivors → its load spreads over all of them</div>
+        <p class="mini-heading">Measured, not hand-waved</p>
+        <p>Running the code on this page (4 servers, 50,000 keys) gives these relative standard deviations of keys-per-server. Your exact numbers will vary with the hash function, but the shape is stable.</p>
+        <table class="data-table">
+          <thead><tr><th>Vnodes per server</th><th>Relative std-dev of load</th><th>Reading</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>about 79%</td><td>Unusable; some servers carry multiples of others.</td></tr>
+            <tr><td>10</td><td>about 57%</td><td>Still badly skewed.</td></tr>
+            <tr><td>100</td><td>about 11%</td><td>Acceptable for many uses.</td></tr>
+            <tr><td>1,000</td><td>about 2.4%</td><td>Tight, at a larger memory cost for the ring.</td></tr>
+          </tbody>
+        </table>
+        <p>The trade-off is cost. The ring now has servers x vnodes points; a thousand servers with 256 vnodes each is 256,000 points, only a few megabytes, but membership changes touch many ranges, metadata gossip grows, and (in storage systems) a single node failure involves streaming many small ranges from many peers. Cassandra's default was 256 tokens per node for years, then newer versions lowered the default to 16 and added an allocation algorithm that places tokens to balance load rather than picking them at random; the lesson is that random vnodes are the simple answer and smarter placement is the refinement.</p>
+        <div class="insight-box"><strong>Vnodes also buy heterogeneity.</strong> Give a machine with twice the capacity twice as many vnodes and it receives about twice the keys. The example verifies this: weights 1:2 yield roughly 18,000 and 32,000 of 50,000 keys. Weighted vnodes are how real clusters absorb mixed hardware generations and how you drain a node gradually (reduce its vnodes step by step).</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive</span>
+        <h2>Replication on the ring: the preference list</h2>
+        <p>Storage systems (chapter 6) store each key on N replicas. On a ring the natural rule is: the owner is the first server clockwise, and the next N-1 distinct physical servers clockwise hold the other copies. Dynamo calls this the preference list. Two subtleties:</p>
+        <ul class="check-list">
+          <li><strong>Skip vnodes of servers already chosen.</strong> Neighbouring vnodes often belong to the same machine; counting them would put two replicas on one box and lose durability. Walk until you have N distinct physical nodes (the example does this and asserts it).</li>
+          <li><strong>Place replicas across failure domains.</strong> Extend the "distinct" rule to distinct racks and zones, so one power domain cannot hold all copies.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Alternatives to the ring</h2>
+        <table class="data-table">
+          <thead><tr><th>Scheme</th><th>How it works</th><th>Lookup cost</th><th>Strength</th><th>Weakness</th></tr></thead>
+          <tbody>
+            <tr><td>Ring with vnodes</td><td>Sorted points, clockwise successor</td><td>O(log V)</td><td>Supports arbitrary add/remove, weights, replication</td><td>Needs memory for points; tuning vnodes</td></tr>
+            <tr><td>Rendezvous (highest random weight)</td><td>For each key, score every server with hash(key, server) and choose the highest</td><td>O(N)</td><td>No ring state; excellent balance; trivially supports top-k replicas</td><td>Linear scan per lookup, fine for tens of nodes, poor for thousands</td></tr>
+            <tr><td>Jump consistent hash</td><td>A tiny arithmetic loop mapping a 64-bit key to one of N numbered buckets</td><td>O(ln N), zero memory</td><td>Near-perfect balance and minimal movement</td><td>Buckets are numbered 0..N-1; can only grow or shrink at the end, no arbitrary removal or weights</td></tr>
+            <tr><td>Maglev hashing</td><td>Precomputed permutation-filled lookup table</td><td>O(1)</td><td>Very fast, near-even; built for load balancers</td><td>Table rebuild on change; some extra key movement versus the ring</td></tr>
+            <tr><td>Bounded-load consistent hashing</td><td>Ring plus a cap on per-node load; overflow goes to the next node</td><td>O(log V)</td><td>Prevents any node exceeding a multiple of the average load</td><td>Some keys land away from their ideal owner, hurting locality</td></tr>
+            <tr><td>Fixed partitions (e.g. 1024 slots), slot-to-node map</td><td>hash(key) mod M picks a slot; a table assigns slots to nodes</td><td>O(1)</td><td>Simple; explicit control; Redis Cluster uses 16,384 hash slots</td><td>Needs a coordinated slot map and migration tooling</td></tr>
+          </tbody>
+        </table>
+        <p>An opinionated summary: for distributed caches and sharded stores with elastic membership, use a ring with vnodes or the fixed-slot variant; for a small, rarely changing pool where you want perfect simplicity, rendezvous hashing is a gem; for sharding into numbered, append-only buckets, jump hash is hard to beat; for load balancers where packet-processing speed matters, look at Maglev.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Runnable example: hash ring with virtual nodes</h2>
+        <p>The ring stores <code>[position, node]</code> pairs sorted by position, binary-searches for the successor, and wraps around. The script then measures load skew against vnode count, verifies that adding a node moves roughly 1/N of the keys and only to the new node, confirms that removing a node moves only that node's keys, checks that replicas land on distinct physical nodes, and demonstrates weighted nodes.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-js">import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+const h32 = s =&gt; createHash('sha1').update(s).digest().readUInt32BE(0);   // position on a 2^32 ring
+
+export class HashRing {
+  constructor(vnodes = 100) { this.vnodes = vnodes; this.points = []; this.weights = new Map(); } // sorted [pos, node]
+  add(node, weight = 1) {
+    this.weights.set(node, weight);
+    for (let i = 0; i &lt; this.vnodes * weight; i++) this.points.push([h32(`${node}#${i}`), node]);
+    this.points.sort((a, b) =&gt; a[0] - b[0]);
+  }
+  remove(node) { this.weights.delete(node); this.points = this.points.filter(p =&gt; p[1] !== node); }
+  #firstAtOrAfter(pos) {                       // binary search, wraps around the ring
+    let lo = 0, hi = this.points.length;
+    while (lo &lt; hi) { const m = (lo + hi) &gt;&gt; 1; this.points[m][0] &lt; pos ? (lo = m + 1) : (hi = m); }
+    return lo % this.points.length;
+  }
+  get(key) { return this.points[this.#firstAtOrAfter(h32(key))][1]; }
+  // replication: walk clockwise collecting n DISTINCT physical nodes
+  preferenceList(key, n) {
+    const out = [], seen = new Set(); let i = this.#firstAtOrAfter(h32(key));
+    for (let step = 0; step &lt; this.points.length &amp;&amp; out.length &lt; n; step++, i = (i + 1) % this.points.length) {
+      const node = this.points[i][1]; if (!seen.has(node)) { seen.add(node); out.push(node); }
+    }
+    return out;
+  }
+}
+
+const keys = Array.from({ length: 50000 }, (_, i) =&gt; `key:${i}`);
+const spread = (ring, nodes) =&gt; {
+  const c = Object.fromEntries(nodes.map(n =&gt; [n, 0])); keys.forEach(k =&gt; c[ring.get(k)]++);
+  const v = Object.values(c), mean = v.reduce((a, b) =&gt; a + b) / v.length;
+  return { sd: Math.sqrt(v.reduce((a, b) =&gt; a + (b - mean) ** 2, 0) / v.length) / mean, c };
+};
+const nodes = ['A', 'B', 'C', 'D'];
+
+// 1) skew vs virtual nodes (coefficient of variation of keys per node)
+for (const vn of [1, 10, 100, 1000]) {
+  const r = new HashRing(vn); nodes.forEach(n =&gt; r.add(n));
+  console.log(`vnodes=${String(vn).padEnd(4)} relative std-dev of load: ${(100 * spread(r, nodes).sd).toFixed(1)}%`);
+}
+// 2) minimal movement on add: 4 -&gt; 5 nodes
+const ring = new HashRing(200); nodes.forEach(n =&gt; ring.add(n));
+const before = new Map(keys.map(k =&gt; [k, ring.get(k)]));
+ring.add('E');
+let moved = 0, toE = 0;
+for (const k of keys) { const now = ring.get(k); if (now !== before.get(k)) { moved++; if (now === 'E') toE++; } }
+console.log(`add E: moved ${(100 * moved / keys.length).toFixed(1)}% of keys (ideal 20%), all to E: ${moved === toE}`);
+assert.equal(moved, toE);                                        // keys only ever move TO the new node
+assert.ok(moved / keys.length &gt; 0.1 &amp;&amp; moved / keys.length &lt; 0.3);
+// 3) remove: only the removed node's keys move
+const snap = new Map(keys.map(k =&gt; [k, ring.get(k)])); ring.remove('B');
+for (const k of keys) if (snap.get(k) !== 'B') assert.equal(ring.get(k), snap.get(k));
+// 4) replicas land on distinct physical nodes
+const pl = ring.preferenceList('user:42', 3);
+assert.equal(new Set(pl).size, 3); console.log('preference list for user:42 -&gt;', pl.join(','));
+// 5) weighted node gets ~2x the load
+const w = new HashRing(200); w.add('small'); w.add('big', 2);
+const cw = spread(w, ['small', 'big']).c; console.log('weights 1:2 -&gt;', cw);
+assert.ok(cw.big / cw.small &gt; 1.6 &amp;&amp; cw.big / cw.small &lt; 2.4);
+console.log('all checks passed');</code></pre>
+        <p class="code-caption">Prints the relative standard deviation for 1, 10, 100 and 1,000 vnodes (about 79%, 57%, 11%, 2.4%), then "add E: moved ~21% of keys (ideal 20%), all to E: true", a 3-node preference list for user:42, a roughly 1:2 weighted split, and "all checks passed". Executed with node.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What goes wrong with consistent hashing</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Cause</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Clients disagree about membership</td><td>Different clients hold different ring versions during a change, so the same key goes to different nodes</td><td>Versioned membership from a coordinator or gossip; servers redirect or proxy misrouted requests; short convergence windows</td></tr>
+            <tr><td>Hot key</td><td>One key is far more popular than others; ring balances keys, not traffic</td><td>Local caches, replicate hot keys to several nodes, key-splitting with suffixes, request coalescing</td></tr>
+            <tr><td>Cache cold-start storm</td><td>New node starts empty; its arc's keys miss until warmed</td><td>Warm up before taking traffic, throttle migration, add one node at a time</td></tr>
+            <tr><td>Cascading overload</td><td>A failed node's load goes to its successor(s); few vnodes means few successors</td><td>Enough vnodes to spread the load; bounded-load variant; headroom of at least one node</td></tr>
+            <tr><td>Hash function mismatch</td><td>Two client libraries use different hash or different vnode naming</td><td>Specify the exact function and key format; ship one reference implementation</td></tr>
+            <tr><td>Data migration during resize</td><td>Moving the arc's data consumes network and disk</td><td>Rate-limit streaming, keep serving from the old owner until the new is caught up</td></tr>
+            <tr><td>Flapping nodes</td><td>A node repeatedly joins and leaves, moving data each time</td><td>Failure-detector hysteresis; treat a short outage as temporary and do not rebalance (hinted handoff)</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production</span>
+        <h2>Gotchas</h2>
+        <ul class="check-list">
+          <li><strong>Hash for uniformity, not secrecy.</strong> MurmurHash3, xxHash or CityHash are fast and uniform. MD5 or SHA-1 work (and are used in the classic ketama scheme) but are slower; do not choose by cryptographic strength.</li>
+          <li><strong>Stable names.</strong> Hash a stable identity (logical node id), not an IP that changes on reschedule, or every restart moves data.</li>
+          <li><strong>Consistency of keys, not just nodes.</strong> The partition key must be the same across writers and readers; a normalised-versus-raw key bug sends reads to the wrong node and looks like data loss.</li>
+          <li><strong>Resize one node at a time</strong> and let the system settle; bulk changes move large fractions and defeat the purpose.</li>
+          <li><strong>Range queries.</strong> Hash partitioning destroys key ordering. If you need ordered scans, use range partitioning (Bigtable style) or secondary indexes; consistent hashing is for point lookups.</li>
+          <li><strong>Operational visibility.</strong> Export per-node key counts and request rates; alert on skew above, say, 20 to 30 percent of the mean, which usually means a hot key or a bad vnode setting.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Design checklist</h2>
+        <ul class="check-list">
+          <li>Explain why mod-N fails with a number (N/(N+1) of keys move).</li>
+          <li>Ring, hash function and key format specified identically for all clients.</li>
+          <li>Virtual nodes chosen (typically 100 or more per server, or weighted by capacity).</li>
+          <li>Lookup structure is sorted array or tree with wrap-around.</li>
+          <li>Replicas placed on distinct physical nodes and failure domains.</li>
+          <li>Membership propagation (gossip or coordinator) and migration plan defined.</li>
+          <li>Hot-key and cascading-overload mitigations identified.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not just use a lookup table from key to server?</summary><p>A per-key table needs memory proportional to the number of keys and a way to keep it replicated and consistent; with billions of keys that is impractical. Consistent hashing computes placement from the key, so there is almost no state. The slot-table hybrid (16,384 slots, as in Redis Cluster) keeps state small by tabling slots, not keys.</p></details>
+        <details><summary>How many virtual nodes should I use?</summary><p>Start at around 100 to 256 per server for random placement and measure. Fewer vnodes means less metadata and fewer streams during repair but worse balance; more vnodes means the reverse. If your system allocates tokens deliberately rather than randomly, far fewer suffice.</p></details>
+        <details><summary>Does consistent hashing solve hot spots?</summary><p>It solves hot servers caused by uneven key counts. It does not solve a hot key; one celebrity key still lands on one node (and its replicas). Use caching, replication of hot keys and request coalescing for that.</p></details>
+        <details><summary>What happens to data on the old owner after a node joins?</summary><p>It must be streamed to the new node and then deleted or compacted away from the old one. Until streaming completes, reads for the moved range should still be served by the old owner or fetched by the new node on demand, otherwise you would return misses for data that exists.</p></details>
+        <details><summary>When is rendezvous hashing better than a ring?</summary><p>When the node count is small (up to a few dozen), when you want the simplest correct code, or when you want a ranked list of nodes per key for replication. It has no ring state to synchronise, which removes a class of bugs.</p></details>
+        <details><summary>How does this relate to database sharding?</summary><p>Hash-sharded databases need the same property when adding shards. In practice many systems use many logical shards (hundreds or thousands) mapped to fewer physical nodes, and rebalancing moves whole logical shards. That is consistent hashing's idea with explicit bookkeeping.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./04-rate-limiter.html">Chapter 4: Design a Rate Limiter</a> — previous chapter; its Redis counters are sharded this way.</li>
+          <li><a href="./06-key-value-store.html">Chapter 6: Design a Key-Value Store</a> — next chapter; the ring is its partitioning layer.</li>
+          <li><a href="../../system-design/consistent-hashing.html">Consistent Hashing</a> — the hub's concept page.</li>
+          <li><a href="../../system-design/sharding.html">Sharding</a> — strategies that consistent hashing supports.</li>
+          <li><a href="../../system-design/load-balancing.html">Load Balancing</a> — hash-based balancing and Maglev context.</li>
+          <li><a href="../../dynamodb-hot-partition-sharding.html">DynamoDB Hot Partition and Sharding</a> — what hot keys do to a hash-partitioned store.</li>
+        </ul>
+      </section>
+
+      <section class="content-card"><span class="section-label">Source</span><p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended.</p><p><strong>Additional resources from the repo:</strong></p><ul><li><a href="https://tom-e-white.com/2007/11/consistent-hashing.html">Consistent Hashing</a></li><li><a href="http://theory.stanford.edu/~tim/s16/l/l1.pdf">CS168: Introduction and Consistent Hashing</a></li><li><a href="http://www.cs.cornell.edu/Projects/ladis2009/papers/Lakshman-ladis2009.PDF">Apache Cassandra</a></li><li><a href="https://blog.discord.com/scaling-elixir-f9b8e1e7c29b">Scaling Discord</a></li><li><a href="https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/44824.pdf">Google Maglev</a></li></ul></section>
+      <section class="content-card takeaways"><h2>Key Takeaway</h2><p>Consistent hashing converts "the cluster changed" from a global reshuffle into a local, proportional move: about K/N keys shift when one of N nodes joins or leaves. Virtual nodes are not an optimisation but a requirement, because without them load is badly skewed. Remember what it does not solve: hot keys, membership agreement between clients, and the data movement itself.</p></section>
+    </main>
+  </body>
+</html>

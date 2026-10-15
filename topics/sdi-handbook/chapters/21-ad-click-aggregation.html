@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design Ad Click Event Aggregation | System Design Interview Handbook | Learning Hub</title>
+    <link rel="stylesheet" href="../../../styles.css" />
+    <script src="../../../read-state.js" defer></script>
+    <script src="../../../highlight.js" defer></script>
+    <script src="../../../chat-widget.js" defer></script>
+    <style>
+      .diagram-box{white-space:pre;background:#0f172a;color:#e2e8f0;border-radius:10px;padding:1.25rem 1.5rem;font-family:'Courier New',monospace;font-size:.82rem;line-height:1.7;overflow-x:auto;margin:1.25rem 0}
+      .diagram-box .dim{color:#64748b}.diagram-box .hi{color:#38bdf8;font-weight:700}.diagram-box .ok{color:#4ade80;font-weight:700}.diagram-box .warn{color:#fb923c;font-weight:700}.diagram-box .step{color:#c084fc}.diagram-box .note{color:#fbbf24}
+      .trade-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+      .trade-col{padding:.85rem 1rem;border-radius:10px;font-size:.93rem}
+      .trade-col.pros{background:#f0fdf4;border:1px solid #bbf7d0}.trade-col.cons{background:#fef2f2;border:1px solid #fecaca}
+      .trade-col h4{margin:0 0 .5rem;font-size:.88rem;font-family:Arial,sans-serif;text-transform:uppercase;letter-spacing:.06em}
+      .trade-col.pros h4{color:#166534}.trade-col.cons h4{color:#991b1b}
+      .trade-col ul{margin:0;padding-left:1.1rem;font-size:.88rem}.trade-col li+li{margin-top:.3rem}
+      .insight-box{background:#fdf4ff;border-left:4px solid #a855f7;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .insight-box strong{color:#7e22ce}
+      .warn-box{background:#fff7ed;border-left:4px solid #f97316;padding:.85rem 1.1rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.93rem}
+      .warn-box strong{color:#c2410c}
+    </style>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="../../system-design-concepts.html">← Back to System Design Learning Guide</a>
+        <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">Created 2026-10-15 from liquidslr/system-design-notes ch.21 (Alex Xu, SDI Vol 2). Deep chapter on a billing-grade ad click aggregation pipeline at 1B clicks/day: capacity maths (about 10K average and 50K peak QPS, 100 GB/day raw), query API, raw plus aggregated data model with filter_id star schema, Kafka to map/aggregate/reduce DAG, event time vs processing time, watermarks, window types, exactly-once via offset-plus-state atomic commit or idempotent sink, dedup, hot-key handling, snapshots, reconciliation, Lambda vs Kappa, ClickHouse/Druid alternative. Includes a runnable Node.js example (tumbling windows, watermark, dedup, crash recovery, top-N heap, reconciliation) that was executed and asserted. Read time about 30 min. Related: message-queue, observability, idempotency, ch20 metrics, ch22 hotel reservation.</div>
+        <h1>Design Ad Click Event Aggregation</h1>
+        <p class="summary">A billing-grade stream pipeline that turns a billion raw ad clicks a day into per-minute counts and a top-100 leaderboard that advertisers can trust to the cent. The hard parts are not throughput; they are late events, duplicates, crashes and proving the numbers are right.</p>
+        <div class="article-meta">
+          <div><span class="meta-label">Chapter</span><span class="meta-value">21 of 28 · Part 5 Data Infrastructure</span></div>
+          <div><span class="meta-label">Read time</span><span class="meta-value">30 min</span></div>
+          <div><span class="meta-label">Core ideas</span><span class="meta-value">Event time, watermarks, tumbling and sliding windows, exactly-once, star-schema pre-aggregation, reconciliation</span></div>
+          <div><span class="meta-label">Real systems</span><span class="meta-value">Kafka, Flink, Spark, Cassandra, ClickHouse, Druid, Hive, S3/Parquet, YARN, Debezium-style CDC</span></div>
+        </div>
+      </header>
+
+      <section class="content-card">
+        <p class="lead">Every time someone taps a sponsored result, a small event is born. Advertisers are charged per click (or use click counts to judge a campaign), so those events are literally money. The design question is how to count a billion of them a day, per ad, per minute, per filter, and keep the answer provably correct while machines die, networks lag and clients lie.</p>
+        <div class="callout"><p><strong>Core idea:</strong> treat the click stream as an append-only log, aggregate it in small event-time windows with a bounded tolerance for lateness, make every step replayable and idempotent, and then run an independent batch job that recomputes the truth from raw data to catch whatever the real-time path got wrong. Speed comes from streaming; trust comes from replay plus reconciliation.</p></div>
+      </section>
+
+      <section class="story-card">
+        <span class="section-label">A public design this echoes</span>
+        <h2>Lambda vs Kappa, and why the argument exists</h2>
+        <p>Nathan Marz popularised the Lambda architecture: a slow-but-exact batch layer (Hadoop, later Spark) plus a fast-but-approximate speed layer, merged at query time. It worked, but teams ended up maintaining two implementations of the same business logic that drifted apart. Jay Kreps (then at LinkedIn, co-creator of Kafka) answered with the Kappa architecture: keep the log as the source of truth and reprocess by replaying it through the <em>same</em> streaming job. Apache Flink's design (checkpointed state, event-time watermarks, exactly-once sinks) is what made Kappa credible for money-grade counting. This chapter lands on Kappa for its main path and keeps a batch reconciler as an auditor, which is the pragmatic hybrid most ad-tech shops end up with.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Why it exists</span>
+        <h2>The business context: ads are sold in milliseconds, billed in minutes</h2>
+        <p>Digital advertising has two very different clocks. Real-time bidding (RTB) is the auction that decides which ad is shown when a page loads: an exchange asks bidders, picks a winner and returns a creative, all inside roughly a second (typically well below 100-200 ms per bidder). That path is latency-critical and lives in its own serving stack. <em>This</em> chapter is about the other clock: the reporting and billing path, where a few minutes of delay is fine but a wrong number is not.</p>
+        <p>The consumers of this system are advertisers and analysts looking at dashboards (how many clicks did ad X get in the last 30 minutes; which are the hottest 100 ads right now), the billing system that invoices per click, and fraud/optimisation systems that tune targeting. A one percent error at this scale is millions of dollars of disputed invoices. So the non-functional priority order is: correctness, then fault tolerance and replayability, then freshness (minutes), and only then cost.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 1 · Scope and requirements</span>
+        <h2>Requirements and back-of-the-envelope maths</h2>
+        <p class="mini-heading">Functional</p>
+        <ul class="check-list">
+          <li>Return the number of clicks for <code>ad_id</code> over the last Y minutes (a range query).</li>
+          <li>Return the top 100 most clicked <code>ad_id</code>s over a configurable recent window, refreshed every minute.</li>
+          <li>Support filtering of both queries by attributes such as <code>ip</code>, <code>user_id</code>, <code>country</code>.</li>
+          <li>Handle late events, duplicate events and partial failures with a recovery story.</li>
+        </ul>
+        <p class="mini-heading">Non-functional</p>
+        <ul class="check-list">
+          <li>Correctness over speed: results feed billing.</li>
+          <li>End-to-end latency of a few minutes for the aggregate; no sub-second requirement here.</li>
+          <li>Resilient to node, broker and network failures with automatic recovery and no manual reconciliation of the happy path.</li>
+          <li>Scale: 1 billion clicks per day, 2 million ads, click volume growing about 30% year over year.</li>
+        </ul>
+        <p class="mini-heading">The arithmetic</p>
+        <table class="data-table">
+          <thead><tr><th>Quantity</th><th>Derivation</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Average click QPS</td><td>10<sup>9</sup> / 86,400 s = 11,574, rounded to the interview-friendly 10<sup>4</sup></td><td>about 10,000/s</td></tr>
+            <tr><td>Peak QPS</td><td>5x average (campaign launches, prime time, bot bursts)</td><td>about 50,000/s</td></tr>
+            <tr><td>Raw event size</td><td>ad_id, timestamp, user_id, ip, country, a few flags</td><td>about 0.1 KB</td></tr>
+            <tr><td>Raw bytes per day</td><td>10<sup>9</sup> x 0.1 KB</td><td>100 GB/day</td></tr>
+            <tr><td>Raw bytes per month</td><td>100 GB x 30</td><td>about 3 TB</td></tr>
+            <tr><td>Raw bytes per year (+30% growth)</td><td>100 GB x 365 = 36.5 TB, growing</td><td>~37 TB, then ~47 TB</td></tr>
+            <tr><td>Peak ingest bandwidth</td><td>50,000/s x 0.1 KB</td><td>5 MB/s (trivial for Kafka)</td></tr>
+            <tr><td>Aggregate rows/day, upper bound</td><td>at most one row per (ad, minute) that received a click; there are at most 10<sup>9</sup> clicks so at most 10<sup>9</sup> rows, in practice far fewer because clicks cluster on popular ads</td><td>well under 24 GB/day at ~24 B/row, <em>per filter dimension</em></td></tr>
+            <tr><td>In-memory state per open window</td><td>2M ads x ~50 B per hash entry</td><td>about 100 MB, fits on one node</td></tr>
+          </tbody>
+        </table>
+        <div class="insight-box"><strong>Insight:</strong> 5 MB/s is not a big-data bandwidth problem; a single decent Kafka broker moves tens of MB/s. The scale difficulty is the combination of volume, correctness and replay: you must be able to re-aggregate 100 GB per day of history after a bug, and that is why raw storage and idempotent processing dominate the design, not raw ingest speed. The number to state out loud is the multiplier on aggregates: every extra filter dimension multiplies row count.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Step 2 · API and data model</span>
+        <h2>Query API and the three tables you actually need</h2>
+        <p>Clients here are dashboards, not end users, so a small read-only REST API is enough. Ingest does not go through it: clicks arrive from the ad-serving tier or click-redirect service straight into the log.</p>
+        <table class="data-table">
+          <thead><tr><th>Endpoint</th><th>Parameters</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /v1/ads/{ad_id}/aggregated_count</code></td><td><code>from</code> (default now-1m), <code>to</code> (default now), <code>filter</code> (pre-defined filter id such as "non-US")</td><td><code>{ad_id, count}</code></td></tr>
+            <tr><td><code>GET /v1/ads/popular_ads</code></td><td><code>count</code> (N), <code>window</code> (M minutes), <code>filter</code></td><td>ordered list of <code>ad_id</code>s</td></tr>
+          </tbody>
+        </table>
+        <p>Two design remarks. First, <code>filter</code> is an opaque id and not free-form predicates; this is deliberate, because it ties the API to what has been <em>pre-aggregated</em> (more below). Second, the top-N endpoint is a lookup into a precomputed table, never a scan: its latency is O(1) in data size.</p>
+        <p class="mini-heading">Raw table (the source of truth)</p>
+        <table class="data-table">
+          <thead><tr><th>ad_id</th><th>click_timestamp</th><th>user_id</th><th>ip</th><th>country</th></tr></thead>
+          <tbody><tr><td>ad001</td><td>2021-01-01 00:00:01</td><td>user1</td><td>207.148.22.22</td><td>USA</td></tr></tbody>
+        </table>
+        <p class="mini-heading">Aggregate table (the serving copy)</p>
+        <table class="data-table">
+          <thead><tr><th>ad_id</th><th>click_minute</th><th>filter_id</th><th>count</th></tr></thead>
+          <tbody><tr><td>ad001</td><td>202101010000</td><td>0012</td><td>2</td></tr><tr><td>ad001</td><td>202101010001</td><td>0023</td><td>6</td></tr></tbody>
+        </table>
+        <p class="mini-heading">Top-N table</p>
+        <p><code>most_clicked_ads(window_size int, update_time_minute timestamp, most_clicked_ads json_array)</code>, one row per (window size, filter) holding the current ranking, rewritten every minute.</p>
+        <p>The <code>filter_id</code> indirection is a tiny dimension table mapping an id to a predicate (region = US, ip = 123.1.2.3, user_id = *). That is exactly a data-warehouse <strong>star schema</strong>: a fact table (counts) keyed by dimensions. Pre-computing every requested combination makes reads trivial but means each dimension multiplies row count, so you cap the allowed filters and make adding one a deliberate, reviewed event.</p>
+        <p class="mini-heading">Why store both raw and aggregated</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Keep raw events</h4><ul><li>Recompute after a logic bug or new dimension.</li><li>Audit and dispute resolution: "show me the clicks you billed".</li><li>Feeds reconciliation and ML/fraud training.</li><li>Cheap if parked in cold storage as columnar files.</li></ul></div>
+          <div class="trade-col cons"><h4>Raw alone is not enough</h4><ul><li>Scanning terabytes per dashboard refresh is slow and costly.</li><li>Cannot serve top-N in milliseconds.</li><li>Aggregates are derived and lossy, so they cannot be the only copy either.</li></ul></div>
+        </div>
+        <p>Storage choices follow the access pattern, not fashion. Raw writes are 10-50K/s, append-only, rarely read: Cassandra (LSM-tree, write-optimised, scales linearly) or object storage with Parquet/ORC are natural. The aggregate table is both write-heavy (rewritten each minute) and read-heavy (dashboards, alerts) with simple key lookups by (ad_id, minute range): Cassandra again works, partitioned by <code>(ad_id, filter_id)</code> with <code>click_minute</code> as a clustering column so a range query is a contiguous slice. See the <a href="../../cassandra.html">Cassandra</a> page for the LSM and partitioning model.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">High-level design</span>
+        <h2>Log in, DAG out</h2>
+        <p>Dumping clicks synchronously into the aggregator couples two systems with very different failure behaviours: if the consumer stalls, producers back up and you start dropping money. A durable log between them absorbs bursts and lets each side fail independently. We use two logs: one for raw clicks, one for aggregation output.</p>
+        <div class="diagram-box"><span class="hi">Ad click sources</span> (log watchers / click-redirect svc)
+        <span class="dim">│  at-least-once, key = ad_id</span>
+        <span class="step">▼</span>
+ ┌────────────────────┐        ┌────────────────────────┐
+ │ <span class="hi">Kafka topic #1</span>    │──────► │ <span class="ok">Raw event store</span> (Cassandra │ <span class="dim">cold: Parquet on S3</span>
+ │ raw ad_click       │  sink  │ or object store)       │
+ └─────────┬──────────┘        └───────────▲────────────┘
+           │                               │ batch read
+           ▼                               │
+ ┌──────────────────────────────┐   ┌──────┴────────────┐
+ │ <span class="hi">Aggregation service</span> (DAG)   │   │ <span class="warn">Recalculation /    │
+ │  map ─► aggregate ─► reduce  │   │ reconciliation</span>     │
+ └─────────┬────────────────────┘   └──────┬────────────┘
+           ▼                               │ results
+ ┌────────────────────┐ ◄──────────────────┘
+ │ <span class="hi">Kafka topic #2</span>    │  (per-minute counts, top-N)
+ │ aggregated results │
+ └─────────┬──────────┘
+           │ sink (idempotent / transactional)
+           ▼
+ ┌────────────────────┐      ┌────────────────────┐
+ │ <span class="ok">Aggregate DB</span>       │ ◄────│ Query service / API │ ◄── dashboards, billing
+ └────────────────────┘      └────────────────────┘</div>
+        <p>Topic one carries <code>(ad_id, click_timestamp, user_id, ip, country)</code>. Topic two carries two shapes: <code>(ad_id, click_minute, count)</code> and <code>(update_time_minute, most_clicked_ads)</code>. The second topic exists for a subtle reason: it lets the final write to the database be the <em>last</em> step of an exactly-once chain. The DB sink reads a topic of already-final results, and its offset commit and DB write can be reconciled atomically, or made idempotent, in isolation from the heavy computation upstream.</p>
+
+        <p class="mini-heading">The aggregation service as a map / aggregate / reduce DAG</p>
+        <p>Think of the service as a small directed acyclic graph of single-purpose operators, with intermediate data in memory and shuffles over TCP or shared memory, the same dataflow idea Flink, Spark Streaming and Beam use.</p>
+        <ul class="check-list">
+          <li><strong>Map</strong> reads from Kafka, validates, normalises (strip bad timestamps, resolve country from IP, drop bot traffic) and routes each event by <code>hash(ad_id) mod K</code> to aggregator K. You can skip it by key-partitioning the topic by ad_id and letting aggregators consume partitions directly, but a map stage earns its keep when you do not control the producers (events for one ad may land on any partition) or need a transformation stage.</li>
+          <li><strong>Aggregate</strong> keeps an in-memory hash map <code>ad_id -> count</code> per window, plus a bounded min-heap of size N for the local top N. At each minute boundary it emits its counts and local top-N downstream.</li>
+          <li><strong>Reduce</strong> merges the per-node top-N lists into the final global top 100 and writes topic two.</li>
+        </ul>
+        <div class="diagram-box"><span class="dim">use-case 1: count of ad_id (3 aggregators, ad_id mod 3)</span>
+ Kafka ─► <span class="hi">Map</span> ─┬─► Agg0 {ad0:9, ad3:4 ...} ─┐
+              ├─► Agg1 {ad1:7, ad4:2 ...} ─┼─► (write per-minute counts)
+              └─► Agg2 {ad2:5, ad5:8 ...} ─┘
+
+<span class="dim">use-case 2: top-N (each Agg keeps a size-N min-heap)</span>
+ Agg0 top3 [ad3:40, ad9:35, ad0:30] ─┐
+ Agg1 top3 [ad1:90, ad4:20, ad7:18] ─┼─► <span class="hi">Reduce</span>: merge 3x3 candidates ─► global top3
+ Agg2 top3 [ad2:55, ad5:50, ad8:48] ─┘</div>
+        <div class="insight-box"><strong>Why local top-N is enough:</strong> because events are partitioned by ad_id, every ad's complete count lives on exactly one aggregator. So each ad in the global top N is necessarily in the top N of its own node, and the reducer only has to merge K lists of N. Partition by anything else (user, region) and the counts of one ad are split across nodes, local top-N lists are no longer sufficient, and the answer silently goes wrong. The reduce step costs O(K N log N) per minute, microseconds.</div>
+
+        <p class="mini-heading">Filtering via pre-aggregation (star schema)</p>
+        <p>To answer "clicks for ad X from the US" instantly, the aggregator emits one counter <em>per (ad, minute, dimension value)</em>: <code>(ad001, 202101010001, USA, 100)</code>, <code>(ad001, 202101010001, GBR, 200)</code>, <code>(ad001, 202101010001, others, 3000)</code>. Reads become a key lookup. The price is write amplification: with D enabled dimension combinations each click increments up to D counters, and cardinality can explode (ip as a dimension is nearly unbounded). Mitigations that work in practice: cap dimensions to low-cardinality columns (country, device, placement), bucket long tails into an "others" row as above, push high-cardinality filtering (arbitrary ip or user) to the raw store or an OLAP engine, and use sketches (HyperLogLog) when the question is "unique users", not clicks.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Batch vs stream</span>
+        <h2>Streaming, batching, Lambda and Kappa</h2>
+        <table class="data-table">
+          <thead><tr><th></th><th>Online service</th><th>Batch</th><th>Streaming</th></tr></thead>
+          <tbody>
+            <tr><td>Input</td><td>User requests</td><td>Bounded, finite dataset</td><td>Unbounded stream</td></tr>
+            <tr><td>Output</td><td>Responses</td><td>Materialised views, reports</td><td>Materialised views, running aggregates</td></tr>
+            <tr><td>Measured by</td><td>Availability, latency</td><td>Throughput</td><td>Throughput and latency</td></tr>
+            <tr><td>Example</td><td>Checkout API</td><td>MapReduce, Spark batch</td><td>Flink, Kafka Streams</td></tr>
+          </tbody>
+        </table>
+        <p>Our hot path is streaming, and historical correction is batch. Lambda keeps those as two separate code paths whose results are reconciled at query time. Kappa runs everything through one streaming engine: to reprocess, point a second instance of the same job at the stored raw data (or replay the Kafka topic if retention allows), write to a fresh output, then swap. The chapter's design is Kappa: a <em>recalculation service</em> reads raw events from storage, feeds them to a dedicated aggregation cluster (so live traffic is not slowed down), and publishes results to topic two, which flows through the same sink.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>Kappa</h4><ul><li>One codebase for live and replay: no semantic drift.</li><li>Fix-and-reprocess is an ordinary deploy.</li><li>Replay is the same code path used every minute, so it is exercised constantly.</li></ul></div>
+          <div class="trade-col cons"><h4>Kappa costs</h4><ul><li>Needs a streaming engine strong in state, event time and exactly-once.</li><li>Reprocessing months of data through a stream job is slower than a native batch scan.</li><li>Retention of a replayable source must be paid for.</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Time</span>
+        <h2>Event time, processing time and the watermark</h2>
+        <p>Each click has two times: <strong>event time</strong> (when the user clicked, stamped by the client or edge) and <strong>processing time</strong> (when the aggregator sees it). Between them sit mobile radio sleeps, retries, queue lag, a consumer restart. If you bucket by processing time, a click that happened at 12:00:59 but is processed at 12:01:02 is billed in the wrong minute, and a catch-up after an outage would pile an hour of clicks into one bucket. For billing and reporting that is wrong, so we use event time.</p>
+        <table class="data-table">
+          <thead><tr><th></th><th>Pros</th><th>Cons</th></tr></thead>
+          <tbody>
+            <tr><td>Event time</td><td>Matches reality; replay gives identical results; outages do not distort buckets</td><td>Client clocks lie; malicious clients can forge times; late events exist and need a policy</td></tr>
+            <tr><td>Processing time</td><td>Trivial; server clock is trustworthy; never late</td><td>Wrong buckets on any delay; replay gives different numbers; bills the wrong period</td></tr>
+          </tbody>
+        </table>
+        <div class="warn-box"><strong>Do not trust the device clock raw.</strong> Production systems stamp the click at a server-side edge (the click-redirect hop) and carry that as event time, or record both client and server timestamps and clamp the client value to a sane band around the server value. Reject or quarantine events whose event time is far in the future or older than your maximum allowed lateness.</div>
+        <p class="mini-heading">Watermarks, in plain terms</p>
+        <p>With event time, "when is minute 12:00 complete?" is unanswerable with certainty: a straggler might still be in flight. A <strong>watermark</strong> is the system's running estimate: "I believe I have now seen every event with event time up to W". A simple, robust heuristic is <code>watermark = max_event_time_seen - allowed_lateness</code>. A window [t, t+1min) is <em>closed</em>, its result emitted, and its state freed when the watermark passes t+1min. The chapter draws this as extending the window: a window "waits" an extra period so that stragglers can still land in it.</p>
+        <div class="diagram-box"><span class="dim">1-minute tumbling windows, allowed lateness = 15 s</span>
+ event time ─►   12:00        12:01        12:02
+                 │ win A      │ win B      │ win C
+ arrivals:  e1(12:00:10) e2(12:00:58)  e3(12:01:04)  <span class="warn">e2'(12:00:59, delivered late)</span>  e4(12:01:20)
+ maxEventTime:   12:00:10 ...12:00:58...12:01:04.......12:01:04.........12:01:20
+ watermark   :   11:59:55 ...12:00:43...12:00:49.......12:00:49.........12:01:05
+                                                       <span class="ok">late e2' still lands in win A (A is open)</span>
+                                                                          <span class="warn">win A closes here: wm 12:01:05 ≥ 12:01:00</span>
+                                                       a straggler arriving after this is "late data": drop, side-output, or correct downstream</div>
+        <ul class="check-list">
+          <li>Short watermark: low latency, more late events dropped from the real-time result.</li>
+          <li>Long watermark: fewer misses, higher latency and more open-window state in memory.</li>
+          <li>Whatever you choose some events arrive later. Do not chase the 0.001% tail with a 30-minute watermark; ship the tail to a side output and let the nightly reconciler or a corrective update fix it.</li>
+        </ul>
+        <p>Flink offers all three options (drop, <code>allowedLateness</code> that re-fires the window with an updated result, or a side output) and bounded-out-of-orderness watermark generators that implement exactly the heuristic above. A subtle production issue: in a multi-partition source, the operator watermark is the <em>minimum</em> across input partitions, so one idle or stuck partition freezes every window in the job. Configure idleness detection, and alert on watermark lag (processing time minus watermark), which is the single most useful health signal in an event-time pipeline.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Windows</span>
+        <h2>Which window for which query</h2>
+        <table class="data-table">
+          <thead><tr><th>Window</th><th>Shape</th><th>Use here</th></tr></thead>
+          <tbody>
+            <tr><td>Tumbling (fixed)</td><td>Non-overlapping equal slices: [0,1), [1,2)...; every event in exactly one window</td><td>The per-minute click count. Cheap: one counter per (ad, window).</td></tr>
+            <tr><td>Hopping</td><td>Fixed length, advances by a smaller hop, so windows overlap (length 5 min, hop 1 min)</td><td>Smoothed series; each event lands in length/hop windows, so cost multiplies.</td></tr>
+            <tr><td>Sliding</td><td>Window ends at "now" and moves continuously or on each event</td><td>Top N in the last M minutes.</td></tr>
+            <tr><td>Session</td><td>Gap-based; closes after inactivity</td><td>Not needed for ad counts; relevant for user-journey analytics.</td></tr>
+          </tbody>
+        </table>
+        <p>Implementation trick that saves enormous cost: do not recompute the M-minute top-N from raw events. Pre-aggregate in 1-minute tumbling buckets and let the sliding window be a <em>sum of the last M minute buckets</em>. When the window advances one minute you add the newest bucket and subtract the expired one, because counting is invertible, which makes the update O(distinct ads touched), not O(events). Top-N itself is not invertible (you cannot remove an expired minute from a heap), so keep the per-ad totals map for the window, update it incrementally, and rebuild the size-N heap from it each minute: O(A log N) for A active ads, trivial for 2M ads once a minute.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Delivery semantics</span>
+        <h2>Exactly-once: what it really means and how to get it</h2>
+        <p>Three guarantees: at-most-once (may lose), at-least-once (may duplicate), exactly-once (neither). At-least-once is the right default for logs and metrics, where a 0.1% duplicate rate is noise. Here a 0.1% error on a billion clicks a day is a million disputed clicks, so we need the <em>effect</em> of exactly-once, even if the transport is at-least-once.</p>
+        <p class="mini-heading">Where duplicates come from</p>
+        <ul class="check-list">
+          <li><strong>Client / upstream retries</strong>: a user double-taps; a mobile SDK resends after a timeout; an ad server retries a produce call that actually succeeded. Mitigation is a stable <code>event_id</code> (a UUID or deterministic hash of ad, user, impression id) assigned at the source plus dedup downstream. Deliberate fraud (click farms, scripts) is a different problem for a risk engine, not for the aggregator.</li>
+          <li><strong>Consumer crash between "process" and "ack"</strong>: the aggregator emits a count downstream but dies before committing the Kafka offset, so a replacement re-reads from the last committed offset and emits again.</li>
+        </ul>
+        <div class="diagram-box"><span class="dim">Failure on the last hop (offset 100)</span>
+ Kafka offset:  ... 98 99 <span class="hi">100</span> 101
+ Aggregator A:  process(100) ─► <span class="ok">emit downstream OK</span> ─► <span class="warn">✗ crash before commit offset</span>
+ Aggregator B:  resumes from committed offset 99 ─► process(100) <span class="warn">again</span> ─► emit duplicate</div>
+        <p>Three fixes, in increasing correctness:</p>
+        <ol>
+          <li><strong>Save the offset in external storage (HDFS/S3) after emitting.</strong> If you crash between emit and save you re-emit (duplicate); if you save first and crash before emitting, the result is lost forever. Neither order is correct, because two different systems are updated non-atomically.</li>
+          <li><strong>Atomic commit of offset + output.</strong> Make "write result to downstream" and "advance input offset" a single transaction. In Kafka this is the transactional API: idempotent producers (producer id + sequence numbers reject duplicate retries per partition), <code>transactional.id</code> for fencing zombie instances, <code>sendOffsetsToTransaction</code> to include the consumer offset in the same atomic commit as the output records, and consumers reading with <code>isolation.level=read_committed</code>. Flink achieves the equivalent with periodic checkpoints (Chandy-Lamport style barriers snapshot operator state plus source offsets consistently) and a two-phase-commit sink.</li>
+          <li><strong>Make the sink idempotent.</strong> If every output row has a deterministic natural key (<code>ad_id|window_start|filter</code>) and the value is the <em>final computed number</em> for that window, writing it twice is a no-op overwrite (an upsert). Then replays, restarts and the nightly recompute all converge on the same state with no distributed transaction at all. This is the best practical answer for the database hop.</li>
+        </ol>
+        <div class="warn-box"><strong>Gotcha:</strong> Cassandra counter columns (<code>UPDATE ... SET c = c + 1</code>) are not idempotent: a retry after a timeout may or may not have been applied, and replays double count. Write computed totals into ordinary columns keyed by (ad, minute) and overwrite them. Likewise "increment by delta" messages are fragile; "set to value" messages are safe.</div>
+        <p>So the end-to-end recipe: at-least-once ingest with event ids, in-job dedup (or Kafka idempotence on the producer side), checkpointed state with transactional offset commits inside the stream engine, and an idempotent upsert into the serving DB. Exactly-once is a property of the whole chain, and any one non-idempotent hop breaks it.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Scale</span>
+        <h2>Scaling the three decoupled tiers</h2>
+        <p class="mini-heading">1. The message queue</p>
+        <ul class="check-list">
+          <li>Producers scale freely: add more, no coordination.</li>
+          <li>Consumers scale by joining a consumer group, but parallelism is capped by partition count. Over-provision partitions up front (partition count is painful to change: it breaks key-to-partition mapping and per-key ordering). For 50K events/s peak, a few dozen partitions already leave generous headroom; hundreds are common to allow future growth.</li>
+          <li>Rebalancing with thousands of consumers is slow and can stall consumption; use cooperative/incremental rebalancing, static membership, and schedule capacity changes off-peak.</li>
+          <li>Partition by <code>ad_id</code> so one aggregator owns an ad. Optionally split topics by geography (<code>topic_na</code>, <code>topic_eu</code>) to keep traffic regional and shrink blast radius.</li>
+          <li>Size retention for your worst-case outage plus replay needs (days), and watch consumer lag as the primary autoscaling signal.</li>
+        </ul>
+        <p class="mini-heading">2. The aggregation service</p>
+        <p>Map and reduce nodes are stateless or lightly stateful and scale by adding nodes. Per-node throughput scales via multi-threading (simple, bounded by one machine) or via multi-process under a resource manager such as YARN or Kubernetes (more scalable and isolating; more operational surface). Production stacks pick the second and let the engine (Flink task slots, Spark executors) own it.</p>
+        <p class="mini-heading">3. The database</p>
+        <p>Cassandra scales horizontally by consistent hashing with virtual nodes: add a node and it takes over token ranges automatically, no manual resharding. Design the partition key so a hot ad does not create a hot partition (include a time bucket in the partition key, for example <code>(ad_id, day)</code>, and cluster by minute). The aggregate table is small compared with raw data, so write amplification from filters is the main sizing driver.</p>
+        <p class="mini-heading">The hot-key problem</p>
+        <p>A Super Bowl ad can draw orders of magnitude more clicks than the median ad, and key partitioning sends them all to one aggregator, which becomes the straggler that holds the window open for everyone. Remedies:</p>
+        <table class="data-table">
+          <thead><tr><th>Technique</th><th>How</th><th>Trade-off</th></tr></thead>
+          <tbody>
+            <tr><td>Elastic helpers</td><td>Overloaded node asks the resource manager for extra workers; splits its events into groups, each helper counts one group, partial sums returned to the owner</td><td>Reactive; needs resource headroom and a fast scheduler</td></tr>
+            <tr><td>Global-local (two-stage) aggregation</td><td>Stage 1 pre-aggregates locally on every node before the shuffle (like a MapReduce combiner); stage 2 merges the few partial sums per key</td><td>Shuffle volume drops from events to nodes x keys; only works for decomposable aggregates (count, sum, max)</td></tr>
+            <tr><td>Key salting</td><td>Append a random salt 0..s to hot keys (<code>ad9#3</code>), count per salted key, then merge in a second stage</td><td>Extra stage; need to know which keys are hot (detect via sampling)</td></tr>
+            <tr><td>Split distinct aggregation</td><td>For count-distinct, hash the user id into buckets, aggregate per bucket, then sum</td><td>Only for distinct counts; more complexity</td></tr>
+          </tbody>
+        </table>
+        <p>Counting is a commutative monoid (associative, with identity zero), which is precisely why pre-aggregation and salting are safe here. Plan the same thinking for any new metric: if it cannot be merged from partials (exact median, for example), hot keys will hurt more.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Fault tolerance</span>
+        <h2>Surviving a dead aggregator</h2>
+        <p>Aggregators hold windows in memory. Kafka offsets alone are not enough to recover: if the node dies at 12:04:30 holding 4.5 minutes of partial state for a 5-minute top-N window, restarting from the last committed offset would require re-reading everything since the window began, which is slow, and you also cannot trivially know which events were already counted.</p>
+        <p>The standard answer is a <strong>consistent snapshot of (input offset, operator state)</strong>, taken periodically (every few seconds to a minute) and stored on durable storage (HDFS, S3, a state backend like RocksDB with incremental checkpoints). Recovery: a replacement node loads the latest snapshot and resumes consuming from the offset recorded in <em>that same snapshot</em>. Everything after the snapshot is replayed deterministically, and because replayed output is idempotent the world converges.</p>
+        <div class="diagram-box"> t0 ────────── t1 ────────── t2 ──────── ✗ crash
+ offset 1000    offset 1800    offset 2600
+ [<span class="ok">snapshot S1</span>]    [<span class="ok">snapshot S2</span>]   work since S2 is <span class="warn">lost</span> (in memory only)
+
+ recovery:  load S2 (state + offset 1800) ─► re-read 1800..now from Kafka ─► continue
+            outputs for already-emitted windows are re-upserted by key: no double count</div>
+        <p>Snapshot frequency is a classic trade-off: frequent snapshots shorten replay and RTO but cost IO and (if synchronous) latency; asynchronous, incremental checkpoints make high frequency cheap. Also snapshot <em>the dedup set</em> or make it TTL-bound, otherwise a replay can double count events in the gap. Test recovery for real: kill -9 an aggregator during a game-day and diff the outputs; the runnable example below does exactly this in miniature.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Deep dive · Correctness</span>
+        <h2>Monitoring and reconciliation</h2>
+        <p>Because the output is revenue, you do not merely hope the pipeline is right; you measure it and audit it.</p>
+        <table class="data-table">
+          <thead><tr><th>Signal</th><th>What it tells you</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td>End-to-end latency (event time to visible-in-DB)</td><td>Freshness; derive by propagating timestamps through stages</td><td>Page if p99 exceeds the few-minute budget</td></tr>
+            <tr><td>Consumer lag (records-lag per partition)</td><td>Aggregators falling behind; Kafka queue "size" is meaningless on a log, so use lag, not depth</td><td>Autoscale consumers; check hot partitions</td></tr>
+            <tr><td>Watermark lag, late-event rate</td><td>Clock skew, upstream delays, stuck partition</td><td>Investigate source; raise lateness only if justified</td></tr>
+            <tr><td>Dedup hit rate</td><td>Retry storms or a producer bug</td><td>Sudden jump means upstream incident</td></tr>
+            <tr><td>CPU, memory, GC, disk on aggregators</td><td>Capacity and state growth</td><td>Scale or tune state backend</td></tr>
+            <tr><td>Events in vs events out, per minute</td><td>Conservation check: clicks in = sum of counts + dropped late + dropped dupes</td><td>Alert on any non-zero residual</td></tr>
+          </tbody>
+        </table>
+        <p>The <strong>reconciliation job</strong> is a nightly (or hourly for the previous hour) batch that recomputes per-minute counts directly from the raw store, with no lateness cut-off, and diffs them against the aggregate database. Mismatches are repaired by re-emitting the corrected values through topic two (idempotent upsert), and the size and cause of the diff become a data-quality metric. Typical findings: late events beyond the watermark, a bad deploy, a poisoned partition. This is the safety net that justifies a short watermark in the first place.</p>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Alternative design</span>
+        <h2>Buy instead of build: Hive plus OLAP</h2>
+        <p>The generic DAG is what you describe in an interview to show understanding. In 2026 many teams would assemble it from products: ingest to Kafka, land raw data on object storage (queryable via Hive/Trino/Spark), and send a second stream into an OLAP store such as <strong>ClickHouse</strong> or <strong>Apache Druid</strong>, which natively roll up on ingest (Druid's rollup, ClickHouse's SummingMergeTree/AggregatingMergeTree and materialized views) and answer "group by ad, filter by country, last 30 minutes" in tens of milliseconds over billions of rows. Elasticsearch on top of Hive is the older variant of this idea.</p>
+        <div class="trade-grid">
+          <div class="trade-col pros"><h4>OLAP-engine approach</h4><ul><li>Ad-hoc filters and group-bys without pre-declaring dimensions.</li><li>Far less custom code to run and debug.</li><li>Built-in rollup, approximate distinct (HLL), columnar compression.</li></ul></div>
+          <div class="trade-col cons"><h4>Where it hurts</h4><ul><li>Exactly-once and late-data semantics vary by engine and need careful ingest configuration.</li><li>Expensive for the very high cardinality combos you can pre-aggregate away.</li><li>Another cluster family to operate; correctness proof still needs raw data and reconciliation.</li></ul></div>
+        </div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Trade-offs</span>
+        <h2>Decision table</h2>
+        <table class="data-table">
+          <thead><tr><th>Decision</th><th>Chosen</th><th>Alternative</th><th>Why chosen</th></tr></thead>
+          <tbody>
+            <tr><td>Time basis</td><td>Event time + watermark</td><td>Processing time</td><td>Billing needs the right bucket and deterministic replay</td></tr>
+            <tr><td>Architecture</td><td>Kappa, one streaming path</td><td>Lambda</td><td>One codebase; replay is the same code</td></tr>
+            <tr><td>Delivery</td><td>At-least-once + idempotent effects</td><td>True 2PC everywhere</td><td>Same correctness, far less coordination</td></tr>
+            <tr><td>Filtering</td><td>Pre-aggregated star schema</td><td>Query raw/OLAP at read time</td><td>O(1) reads, but caps flexibility</td></tr>
+            <tr><td>Late tail</td><td>Short watermark + nightly reconcile</td><td>Very long watermark</td><td>Low latency without losing the tail</td></tr>
+            <tr><td>Storage</td><td>Cassandra (+ cold Parquet)</td><td>SQL / OLAP</td><td>Write-heavy keyed workload, linear scale</td></tr>
+            <tr><td>Hot keys</td><td>Elastic helpers / two-stage</td><td>Over-provision everywhere</td><td>Pay only for the skew you have</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Failure modes</span>
+        <h2>What breaks and what you do about it</h2>
+        <table class="data-table">
+          <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Aggregator crash</td><td>Stalled partitions, lag spike</td><td>Snapshot + offset restore on another node; idempotent upserts absorb replay</td></tr>
+            <tr><td>Broker loss</td><td>Under-replicated partitions</td><td>Replication factor 3, <code>min.insync.replicas=2</code>, <code>acks=all</code> on click ingest</td></tr>
+            <tr><td>Duplicate burst from a retrying client</td><td>Counts too high</td><td>Event ids, dedup state with TTL, producer idempotence</td></tr>
+            <tr><td>Clock skew / forged timestamps</td><td>Events far in the future or past; watermark jumps ahead and closes windows early</td><td>Server-side stamping, clamp event time, per-source watermark sanity bounds</td></tr>
+            <tr><td>Stuck or idle partition</td><td>Watermark frozen, no windows close</td><td>Idleness timeout, alert on watermark lag</td></tr>
+            <tr><td>Hot ad</td><td>One node at 100%, window latency grows</td><td>Salting, two-stage aggregation, elastic workers</td></tr>
+            <tr><td>Aggregation logic bug shipped</td><td>Wrong counts for hours</td><td>Fix, replay raw events through recalculation cluster, overwrite by key; reconciliation proves it</td></tr>
+            <tr><td>DB sink outage</td><td>Topic two grows</td><td>Log absorbs it; sink catches up on recovery, upserts are safe</td></tr>
+            <tr><td>Poison message</td><td>Job crash loops</td><td>Validate in map stage; dead-letter topic</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Scaling and production gotchas</span>
+        <h2>Things that bite after launch</h2>
+        <ul class="check-list">
+          <li><strong>Partition count is a one-way door.</strong> Pick it for next year's volume (30% yearly growth compounds to 3.7x in five years), not today's.</li>
+          <li><strong>Rebalances are stop-the-world for a group.</strong> A flapping consumer causes continual rebalances; use static membership and tune session timeouts.</li>
+          <li><strong>State size grows with lateness.</strong> Every extra minute of allowed lateness keeps another window of 2M-key state alive; and the dedup set grows with the dedup horizon.</li>
+          <li><strong>Back-pressure beats data loss.</strong> When the sink slows, the engine should throttle reads from Kafka; do not buffer unbounded in memory.</li>
+          <li><strong>Reprocessing storms.</strong> Replaying a week of events can saturate shared brokers and DB; run recalculation on an isolated cluster and rate-limit the write-back.</li>
+          <li><strong>Time zones and minute keys.</strong> Always store UTC epoch minutes; format only at the edge. Daylight-saving bugs in billing are a rite of passage.</li>
+          <li><strong>Schema evolution.</strong> Use a registry (Avro/Protobuf) with compatibility checks; a new nullable field must not break replay of last month's events.</li>
+          <li><strong>Privacy.</strong> IP and user id are personal data under GDPR-style regimes; set retention and hashing policy for the raw store.</li>
+          <li><strong>Query-side caching.</strong> Dashboards poll; cache top-N results for the minute they are valid, keyed by (window, filter).</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Runnable code</span>
+        <h2>A miniature exactly-once aggregator</h2>
+        <p>The program below is a single-file model of the core: event-time tumbling windows with a lateness watermark, id-based dedup, an idempotent keyed sink, a snapshot of (offset, state) with crash recovery, a bounded min-heap for top-N, and a reconciliation pass that proves the only discrepancy is the late events. It is deterministic (seeded generator): 3,000 unique clicks with jitter, about 2% arriving three minutes late, plus 100 duplicate retries.</p>
+        <span class="code-label">JavaScript Example</span>
+<pre><code class="language-js">// Ad-click aggregation: event-time tumbling windows, watermark, dedup,
+// snapshot+offset recovery, top-N via min-heap over a sliding window, reconciliation.
+import assert from 'node:assert/strict';
+
+const MIN = 60_000;
+const minuteOf = (ts) =&gt; Math.floor(ts / MIN) * MIN;
+
+class MinHeap {                       // bounded heap keeps the N largest counts
+  #a = []; #cmp;
+  constructor(cmp) { this.#cmp = cmp; }
+  get size() { return this.#a.length; }
+  peek() { return this.#a[0]; }
+  push(x) {
+    const a = this.#a; a.push(x);
+    let i = a.length - 1;
+    while (i &gt; 0) {
+      const p = (i - 1) &gt;&gt; 1;
+      if (this.#cmp(a[i], a[p]) &gt;= 0) break;
+      [a[i], a[p]] = [a[p], a[i]]; i = p;
+    }
+  }
+  pop() {
+    const a = this.#a, top = a[0], last = a.pop();
+    if (a.length) {
+      a[0] = last; let i = 0;
+      for (;;) {
+        let l = 2 * i + 1, r = l + 1, m = i;
+        if (l &lt; a.length &amp;&amp; this.#cmp(a[l], a[m]) &lt; 0) m = l;
+        if (r &lt; a.length &amp;&amp; this.#cmp(a[r], a[m]) &lt; 0) m = r;
+        if (m === i) break;
+        [a[i], a[m]] = [a[m], a[i]]; i = m;
+      }
+    }
+    return top;
+  }
+  toSortedDesc() { return [...this.#a].sort((x, y) =&gt; this.#cmp(y, x)); }
+}
+
+function topN(counts, n) {            // counts: Map adId -&gt; count
+  const cmp = (x, y) =&gt; x[1] - y[1] || (y[0] &lt; x[0] ? -1 : 1); // tie-break: smaller id wins
+  const h = new MinHeap(cmp);
+  for (const e of counts) { h.push(e); if (h.size &gt; n) h.pop(); }
+  return h.toSortedDesc().map(([ad, c]) =&gt; `${ad}:${c}`);
+}
+
+class Aggregator {
+  constructor({ lateness = MIN, sink }) {
+    this.lateness = lateness; this.sink = sink;
+    this.offset = 0;                 // next log offset to read
+    this.open = new Map();           // windowStart -&gt; Map(adId -&gt; count)
+    this.seen = new Set();           // dedup ids (production: TTL'd store keyed by event id)
+    this.maxEventTime = 0;
+    this.closedBefore = 0;           // windows with start &lt; closedBefore are final
+    this.lateDropped = 0; this.dupes = 0;
+  }
+  process(log, limit = Infinity) {
+    let n = 0;
+    while (this.offset &lt; log.length &amp;&amp; n++ &lt; limit) {
+      const ev = log[this.offset++];
+      if (this.seen.has(ev.id)) { this.dupes++; continue; }
+      this.seen.add(ev.id);
+      const w = minuteOf(ev.ts);
+      if (w &lt; this.closedBefore) { this.lateDropped++; continue; } // too late: reconcile later
+      if (!this.open.has(w)) this.open.set(w, new Map());
+      const m = this.open.get(w); m.set(ev.ad, (m.get(ev.ad) ?? 0) + 1);
+      this.maxEventTime = Math.max(this.maxEventTime, ev.ts);
+      this.#closeReady();
+    }
+  }
+  #closeReady() {
+    const watermark = this.maxEventTime - this.lateness;
+    for (const w of [...this.open.keys()].sort((a, b) =&gt; a - b)) {
+      if (w + MIN &lt;= watermark) {
+        for (const [ad, c] of this.open.get(w)) this.sink.upsert(`${ad}|${w}`, c); // idempotent key
+        this.open.delete(w); this.closedBefore = Math.max(this.closedBefore, w + MIN);
+      }
+    }
+  }
+  flush() { this.maxEventTime += 10 * MIN; this.#closeReady(); }
+  snapshot() {
+    return structuredClone({ offset: this.offset, open: [...this.open].map(([w, m]) =&gt; [w, [...m]]),
+      seen: [...this.seen], maxEventTime: this.maxEventTime, closedBefore: this.closedBefore,
+      lateDropped: this.lateDropped, dupes: this.dupes });
+  }
+  static restore(s, opts) {
+    const a = new Aggregator(opts); s = structuredClone(s);
+    a.offset = s.offset; a.open = new Map(s.open.map(([w, m]) =&gt; [w, new Map(m)]));
+    a.seen = new Set(s.seen); a.maxEventTime = s.maxEventTime; a.closedBefore = s.closedBefore;
+    a.lateDropped = s.lateDropped; a.dupes = s.dupes; return a;
+  }
+}
+
+class Sink {                          // keyed upsert =&gt; replays are harmless (idempotent sink)
+  rows = new Map(); writes = 0;
+  upsert(k, v) { this.rows.set(k, v); this.writes++; }
+  countFor(ad, fromMin, toMin) {      // answers GET /ads/{id}/aggregated_count
+    let t = 0;
+    for (const [k, v] of this.rows) { const [a, w] = k.split('|'); if (a === ad &amp;&amp; +w &gt;= fromMin &amp;&amp; +w &lt; toMin) t += v; }
+    return t;
+  }
+  topInWindow(fromMin, toMin, n) {    // sliding-window top-N built from per-minute rows
+    const agg = new Map();
+    for (const [k, v] of this.rows) { const [a, w] = k.split('|'); if (+w &gt;= fromMin &amp;&amp; +w &lt; toMin) agg.set(a, (agg.get(a) ?? 0) + v); }
+    return topN(agg, n);
+  }
+}
+
+// ---- deterministic workload ----
+let seed = 42; const rnd = () =&gt; (seed = (seed * 1664525 + 1013904223) &gt;&gt;&gt; 0) / 2 ** 32;
+const base = Date.UTC(2021, 0, 1);
+const log = []; let id = 0;
+for (let i = 0; i &lt; 3000; i++) {
+  const ad = 'ad' + (rnd() &lt; 0.4 ? 1 : 2 + Math.floor(rnd() * 8));   // ad1 is a hot key
+  const ts = base + i * 40 + Math.floor(rnd() * 3000) - (rnd() &lt; 0.02 ? 3 * MIN : 0); // jitter + some very late
+  log.push({ id: 'e' + id++, ad, ts, country: rnd() &lt; 0.5 ? 'US' : 'GB' });
+}
+for (let i = 0; i &lt; 100; i++) log.push(log[Math.floor(rnd() * log.length)]); // producer retries =&gt; duplicates
+
+// run A: uninterrupted
+const sinkA = new Sink(); const A = new Aggregator({ sink: sinkA }); A.process(log); A.flush();
+// run B: crash after 2800 events, recover from the snapshot taken at 1000, replay from its offset
+const sinkB = new Sink(); let B = new Aggregator({ sink: sinkB });
+B.process(log, 1000); const snap = B.snapshot(); B.process(log, 1800); // work after snapshot is lost on crash
+B = Aggregator.restore(snap, { sink: sinkB }); B.process(log); B.flush();
+assert.deepEqual([...sinkB.rows].sort(), [...sinkA.rows].sort()); // same result despite crash + replayed upserts
+assert.ok(sinkB.writes &gt; sinkA.writes);                            // replay re-wrote some keys (idempotent)
+
+// reconciliation: batch recompute from raw using event time, dedupe by id, no lateness cut-off
+const truth = new Map(); const ids = new Set();
+for (const e of log) { if (ids.has(e.id)) continue; ids.add(e.id); const k = `${e.ad}|${minuteOf(e.ts)}`; truth.set(k, (truth.get(k) ?? 0) + 1); }
+let diff = 0; for (const [k, v] of truth) diff += v - (sinkA.rows.get(k) ?? 0);
+assert.equal(diff, A.lateDropped);   // the only discrepancy is exactly the events beyond the watermark
+const total = [...sinkA.rows.values()].reduce((s, v) =&gt; s + v, 0);
+assert.equal(total + A.lateDropped, ids.size);
+
+const end = base + 3 * MIN;
+console.log('unique events      :', ids.size, '| duplicates dropped:', A.dupes, '| late dropped:', A.lateDropped);
+console.log('crash-recovery ok  :', true, '| sink writes A/B:', sinkA.writes, sinkB.writes);
+console.log('reconciliation gap :', diff, '(= late events, repaired by batch)');
+console.log('ad1 clicks min0-3  :', sinkA.countFor('ad1', base, end));
+console.log('top-3 over 3 min   :', sinkA.topInWindow(base, end, 3).join(', '));</code></pre>
+        <p class="code-caption">Prints unique-event, duplicate and late counts (3000 / 100 / 70), confirms the crash-and-restore run produces byte-identical sink contents (28 writes vs 29 because one key was rewritten idempotently), shows the reconciliation gap of 70 equal to the late drops, the ad1 count over three minutes, and the top-3 ads. All assertions pass under Node 20+.</p>
+        <div class="insight-box"><strong>Read the output as a proof sketch:</strong> the assertion that crash-recovery equals the uninterrupted run is the property you actually care about. If it ever fails in your real pipeline, you have found a non-idempotent hop or state that was not part of the snapshot.</div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Checklist</span>
+        <h2>Interview and design review checklist</h2>
+        <ul class="check-list">
+          <li>Stated scale: 1B/day, ~10K QPS average, ~50K peak, 100 GB/day raw, 3 TB/month, 30% growth.</li>
+          <li>Both queries mapped to concrete tables; filters via pre-aggregated <code>filter_id</code>.</li>
+          <li>Raw (cold) and aggregated (hot) data both kept, with a reason for each.</li>
+          <li>Kafka between every stage; partition key = ad_id; partitions over-provisioned.</li>
+          <li>Map / aggregate / reduce explained, including why local top-N is sufficient.</li>
+          <li>Event time with watermark; trade-off between latency and completeness named.</li>
+          <li>Tumbling for counts, sliding for top-N; implemented as sums of minute buckets.</li>
+          <li>Exactly-once via atomic offset+output commit or an idempotent keyed sink; dedup source named.</li>
+          <li>Hot-key plan; snapshot-and-offset recovery; recalculation path (Kappa).</li>
+          <li>Monitoring (lag, watermark lag, latency) and a nightly reconciliation job.</li>
+          <li>Mentioned the buy option: ClickHouse or Druid plus raw lake.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">FAQ · Common Questions</span>
+        <h2>Frequently Asked Questions</h2>
+        <details><summary>Why not just use processing time? It is simpler and never late.</summary><p>Because the bucket would depend on infrastructure health. After a two-minute consumer stall every click would be billed to the recovery minute, and replaying yesterday's data would produce different numbers than the first run. Event time makes the result a pure function of the data, which is what you need to reprocess and to audit.</p></details>
+        <details><summary>How long should the watermark be?</summary><p>Look at the measured distribution of (arrival time minus event time) for your traffic and set lateness near the 99th or 99.9th percentile; typically seconds to a couple of minutes. Then rely on reconciliation for the rest. Making it longer buys diminishing completeness for linearly growing latency and state.</p></details>
+        <details><summary>Does Kafka give me exactly-once for free?</summary><p>Only inside Kafka-to-Kafka pipelines using idempotent producers and transactions with read_committed consumers. The moment you write to an external database you need either a transactional/two-phase sink or an idempotent upsert. In this design the upsert by (ad, minute, filter) is the simpler and more robust choice.</p></details>
+        <details><summary>A single ad gets 30% of all traffic. What now?</summary><p>That is the hot-key problem. Detect it (per-key rate sampling), then salt that key into s sub-keys for stage-one counting and merge in stage two; or use a combiner so each node ships one partial sum per minute. Because counting is associative and commutative this is exact, not approximate.</p></details>
+        <details><summary>How do you answer "unique users who clicked" instead of clicks?</summary><p>Exact distinct counts do not merge cheaply across partitions. Use a HyperLogLog sketch per (ad, minute), which merges by register-wise max and costs a few KB with about 1% error, or aggregate exact distincts only for a small whitelist of high-value ads. State the accuracy trade-off explicitly because billing generally needs exact click counts, while reach metrics tolerate error.</p></details>
+        <details><summary>What if the reconciliation job disagrees with the stream result?</summary><p>The raw log is the truth by definition. Treat the diff as an incident: classify (late data, bug, dropped partition), re-emit corrected values through the normal idempotent path so downstream consumers see a normal update, and fix the root cause. If invoices already went out, a credit note process covers the delta.</p></details>
+      </section>
+
+      <section class="content-card">
+        <h2>Related Topics</h2>
+        <ul>
+          <li><a href="./20-metrics-monitoring-alerting.html">Chapter 20: Metrics Monitoring and Alerting</a> — another time-series aggregation pipeline, with similar rollups and late data issues.</li>
+          <li><a href="./22-hotel-reservation.html">Chapter 22: Hotel Reservation System</a> — next chapter: correctness under concurrency instead of under streaming.</li>
+          <li><a href="./19-distributed-message-queue.html">Chapter 19: Distributed Message Queue</a> — the log that this whole design leans on.</li>
+          <li><a href="../../system-design/message-queue.html">Message Queues</a> — delivery guarantees, ordering and consumer groups.</li>
+          <li><a href="../../system-design/idempotency.html">Idempotency</a> — the keyed-upsert principle behind exactly-once effects.</li>
+          <li><a href="../../system-design/observability.html">Observability</a> — lag, latency and data-quality signals.</li>
+          <li><a href="../../event-driven-architecture-guide.html">Event-Driven Architecture Guide</a> — log-centred design patterns.</li>
+          <li><a href="../../cassandra.html">Cassandra</a> — storage model for the raw and aggregate tables.</li>
+        </ul>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Source</span>
+        <p>Based on the chapter notes at <a href="https://github.com/liquidslr/system-design-notes">liquidslr/system-design-notes</a> (study notes on <em>System Design Interview – An Insider's Guide</em> by Alex Xu), restructured and extended. The notes list no additional resource links for this chapter.</p>
+      </section>
+
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>An ad click aggregator is a correctness problem wearing a throughput costume. Partition by ad_id, bucket by event time with a bounded watermark, make every write idempotent and every stage replayable from a snapshot, and then audit the whole thing nightly against raw data. If you can replay it and reconcile it, you can trust it.</p>
+      </section>
+    </main>
+  </body>
+</html>

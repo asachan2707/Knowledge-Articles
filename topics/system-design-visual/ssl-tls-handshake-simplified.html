@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SSL/TLS Handshake — Simplified | System Design: The Complete Guide | Learning Hub</title>
+  <link rel="stylesheet" href="../../styles.css" />
+  <script src="../../read-state.js" defer></script>
+  <script src="../../highlight.js" defer></script>
+  <script src="../../chat-widget.js" defer></script>
+  <style>
+    .module-tag {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: var(--accent-soft, #f0e8d8);
+      color: var(--accent, #a0522d);
+      margin-bottom: 0.4rem;
+    }
+    .diagram-wrap {
+      overflow-x: auto;
+      margin: 1.2rem 0;
+    }
+    .diagram-wrap svg {
+      display: block;
+      max-width: 100%;
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    .compare-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+      background: var(--surface, #faf8f4);
+    }
+    .compare-card h4 {
+      margin: 0 0 0.5rem;
+      font-size: 0.95rem;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .compare-card ul {
+      margin: 0;
+      padding-left: 1.1rem;
+      font-size: 0.88rem;
+    }
+    .compare-card ul li { margin-bottom: 0.25rem; }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin: 0.6rem 0;
+    }
+    .pill {
+      padding: 0.25rem 0.65rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 0.82rem;
+      background: #fff;
+    }
+    .steps-list { counter-reset: step-counter; list-style: none; padding: 0; }
+    .steps-list li {
+      counter-increment: step-counter;
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+      font-size: 0.9rem;
+    }
+    .steps-list li::before {
+      content: counter(step-counter);
+      flex-shrink: 0;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 50%;
+      background: var(--accent, #a0522d);
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 0.05rem;
+    }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+    @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+    table.sd-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+    table.sd-table th { background: var(--accent-soft, #f0e8d8); text-align: left; padding: 7px 10px; font-size: 0.8rem; }
+    table.sd-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    table.sd-table tr:last-child td { border-bottom: none; }
+    .realworld-badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      background: #e8f4e8;
+      color: #2d6a2d;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      margin-right: 0.3rem;
+    }
+  
+    .nav-row { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin:1.5rem 0; }
+    .nav-row .resource-link { max-width:none; }
+    .nav-next { text-align:right; }
+    @media (max-width:640px){ .nav-row{grid-template-columns:1fr;} .nav-next{text-align:left;} }
+  </style>
+</head>
+<body>
+<main class="page container">
+  <header class="page-header">
+    <a class="back-link" href="../system-design-complete-visual-guide.html#networking">← Back to System Design: The Complete Guide</a>
+    <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Split out 2026-10-15 from the single-page System Design: The Complete Guide. Module 02 of the guide (Networking &amp; Protocols). The handshake that turns a plain TCP connection into an encrypted one, step by step.</div>
+    <span class="module-tag">Module 02 · Networking &amp; Protocols</span>
+    <h1>SSL/TLS Handshake — Simplified</h1>
+    <p class="summary">The handshake that turns a plain TCP connection into an encrypted one, step by step.</p>
+    <div class="article-meta">
+      <span class="meta-item">2 min read · topic 8 of 8 in Networking</span>
+    </div>
+  </header>
+
+  <section class="content-card">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs><marker id="arrowN" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#888"/>
+            </marker></defs></svg>
+      <div class="diagram-wrap">
+        <svg viewBox="0 0 620 180" xmlns="http://www.w3.org/2000/svg" font-family="Arial,sans-serif" font-size="12">
+          <rect x="20" y="10" width="100" height="30" rx="6" fill="#dbeafe" stroke="#93c5fd"/>
+          <text x="70" y="30" text-anchor="middle" font-weight="700">Client</text>
+          <rect x="500" y="10" width="100" height="30" rx="6" fill="#dbeafe" stroke="#93c5fd"/>
+          <text x="550" y="30" text-anchor="middle" font-weight="700">Server</text>
+
+          <!-- vertical lines -->
+          <line x1="70" y1="40" x2="70" y2="175" stroke="#93c5fd" stroke-dasharray="4,3"/>
+          <line x1="550" y1="40" x2="550" y2="175" stroke="#93c5fd" stroke-dasharray="4,3"/>
+
+          <!-- step 1: ClientHello -->
+          <line x1="70" y1="60" x2="540" y2="60" stroke="#555" stroke-width="1.5" marker-end="url(#arrowN)"/>
+          <text x="305" y="56" text-anchor="middle" fill="#333" font-size="11">① ClientHello (TLS version, cipher suites, random)</text>
+
+          <!-- step 2: ServerHello + cert -->
+          <line x1="540" y1="85" x2="80" y2="85" stroke="#555" stroke-width="1.5" marker-end="url(#arrowN)"/>
+          <text x="305" y="81" text-anchor="middle" fill="#333" font-size="11">② ServerHello + Certificate + ServerHelloDone</text>
+
+          <!-- step 3: key exchange -->
+          <line x1="70" y1="115" x2="540" y2="115" stroke="#555" stroke-width="1.5" marker-end="url(#arrowN)"/>
+          <text x="305" y="111" text-anchor="middle" fill="#333" font-size="11">③ ClientKeyExchange (pre-master secret, encrypted w/ server pub key)</text>
+
+          <!-- step 4: finished -->
+          <line x1="70" y1="140" x2="540" y2="140" stroke="#2d6a2d" stroke-width="1.5" marker-end="url(#arrowN)"/>
+          <text x="305" y="136" text-anchor="middle" fill="#2d6a2d" font-size="11">④ Both derive session key → Finished (encrypted)</text>
+
+          <text x="305" y="168" text-anchor="middle" fill="#888" font-size="10">Symmetric encryption begins for all data transfer</text>
+        </svg>
+      </div>
+  </section>
+
+  <div class="nav-row"><a class="resource-link nav-prev" href="./big-endian-vs-little-endian.html"><span class="resource-meta">← Previous</span><span class="resource-title">Big Endian vs Little Endian</span></a><div></div></div>
+  <section class="content-card">
+    <h2>Related Reading</h2>
+    <ul>
+      <li><a href="../system-design-concepts.html">System Design Learning Guide: 33 Concepts + Interview Handbook</a> — the sequenced path with case studies.</li>
+      <li><a href="../system-design-complete-visual-guide.html#networking">Networking &amp; Protocols</a> — all topics in this module.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

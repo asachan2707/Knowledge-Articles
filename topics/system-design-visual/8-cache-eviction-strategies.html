@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>8 Cache Eviction Strategies | System Design: The Complete Guide | Learning Hub</title>
+  <link rel="stylesheet" href="../../styles.css" />
+  <script src="../../read-state.js" defer></script>
+  <script src="../../highlight.js" defer></script>
+  <script src="../../chat-widget.js" defer></script>
+  <style>
+    .module-tag {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: var(--accent-soft, #f0e8d8);
+      color: var(--accent, #a0522d);
+      margin-bottom: 0.4rem;
+    }
+    .diagram-wrap {
+      overflow-x: auto;
+      margin: 1.2rem 0;
+    }
+    .diagram-wrap svg {
+      display: block;
+      max-width: 100%;
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    .compare-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+      background: var(--surface, #faf8f4);
+    }
+    .compare-card h4 {
+      margin: 0 0 0.5rem;
+      font-size: 0.95rem;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    .compare-card ul {
+      margin: 0;
+      padding-left: 1.1rem;
+      font-size: 0.88rem;
+    }
+    .compare-card ul li { margin-bottom: 0.25rem; }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin: 0.6rem 0;
+    }
+    .pill {
+      padding: 0.25rem 0.65rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 0.82rem;
+      background: #fff;
+    }
+    .steps-list { counter-reset: step-counter; list-style: none; padding: 0; }
+    .steps-list li {
+      counter-increment: step-counter;
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+      font-size: 0.9rem;
+    }
+    .steps-list li::before {
+      content: counter(step-counter);
+      flex-shrink: 0;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 50%;
+      background: var(--accent, #a0522d);
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 0.05rem;
+    }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+    @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+    table.sd-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+    table.sd-table th { background: var(--accent-soft, #f0e8d8); text-align: left; padding: 7px 10px; font-size: 0.8rem; }
+    table.sd-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    table.sd-table tr:last-child td { border-bottom: none; }
+    .realworld-badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      background: #e8f4e8;
+      color: #2d6a2d;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      margin-right: 0.3rem;
+    }
+  
+    .nav-row { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin:1.5rem 0; }
+    .nav-row .resource-link { max-width:none; }
+    .nav-next { text-align:right; }
+    @media (max-width:640px){ .nav-row{grid-template-columns:1fr;} .nav-next{text-align:left;} }
+  </style>
+</head>
+<body>
+<main class="page container">
+  <header class="page-header">
+    <a class="back-link" href="../system-design-complete-visual-guide.html#caching">← Back to System Design: The Complete Guide</a>
+    <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Split out 2026-10-15 from the single-page System Design: The Complete Guide. Module 05 of the guide (Caching). LRU, LFU, FIFO, TTL and others: the logic and the best fit for each.</div>
+    <span class="module-tag">Module 05 · Caching</span>
+    <h1>8 Cache Eviction Strategies</h1>
+    <p class="summary">LRU, LFU, FIFO, TTL and others: the logic and the best fit for each.</p>
+    <div class="article-meta">
+      <span class="meta-item">2 min read · topic 4 of 5 in Caching</span>
+    </div>
+  </header>
+
+  <section class="content-card">
+      <table class="sd-table">
+        <thead><tr><th>Strategy</th><th>Logic</th><th>Best for</th></tr></thead>
+        <tbody>
+          <tr><td>LRU</td><td>Evict least recently accessed</td><td>General purpose (most common)</td></tr>
+          <tr><td>MRU</td><td>Evict most recently used first</td><td>When recent items unlikely to be re-read</td></tr>
+          <tr><td>LFU</td><td>Evict lowest access frequency</td><td>Long-lived caches, popularity-skewed data</td></tr>
+          <tr><td>FIFO</td><td>Evict oldest-inserted item first</td><td>Simple queues, fairness over recency</td></tr>
+          <tr><td>SLRU</td><td>Two segments: probationary → protected</td><td>Avoid one-time scan polluting hot cache</td></tr>
+          <tr><td>TTL</td><td>Fixed lifespan per item</td><td>Session data, tokens, OTPs</td></tr>
+          <tr><td>Two-Tiered</td><td>In-memory L1 + distributed L2</td><td>High-performance apps needing failover</td></tr>
+          <tr><td>Random Replacement</td><td>Evict random item</td><td>Simple, when access pattern is truly random</td></tr>
+        </tbody>
+      </table>
+
+  </section>
+
+  <section class="content-card">
+    <h2>Go deeper</h2>
+    <ul>
+      <li><a href="../system-design/caching.html">Caching</a> — concept 03 in the Learning Guide: full mechanics, code and trade-offs.</li>
+      <li><a href="./core-concepts-deep-dive.html">Core Concepts Deep Dive</a> — the trade-off treatment of this topic, with runnable JavaScript.</li>
+    </ul>
+  </section>
+  <div class="nav-row"><a class="resource-link nav-prev" href="./4-cache-failure-modes.html"><span class="resource-meta">← Previous</span><span class="resource-title">4 Cache Failure Modes</span></a><a class="resource-link nav-next" href="./netflix-evcache-4-caching-patterns.html"><span class="resource-meta">Next →</span><span class="resource-title">Netflix EVCache — 4 Caching Patterns</span></a></div>
+  <section class="content-card">
+    <h2>Related Reading</h2>
+    <ul>
+      <li><a href="../system-design-concepts.html">System Design Learning Guide: 33 Concepts + Interview Handbook</a> — the sequenced path with case studies.</li>
+      <li><a href="../system-design-complete-visual-guide.html#caching">Caching</a> — all topics in this module.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

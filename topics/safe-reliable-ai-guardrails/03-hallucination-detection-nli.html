@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hallucination Detection with Natural Language Inference | Guardrails Course</title>
+    <link rel="stylesheet" href="../../styles.css" />
+    <script src="../../read-state.js" defer></script>
+    <script src="../../highlight.js" defer></script>
+    <script src="../../chat-widget.js" defer></script>
+  </head>
+  <body>
+    <main class="page container">
+      <header class="page-header">
+        <a class="back-link" href="./index.html">← Back to Safe and Reliable AI via Guardrails</a>
+        <figure class="article-hero">
+          <img class="article-hero-img" src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=1600&h=700&fit=crop&auto=format&q=80" alt="Laptop with code and notes" loading="lazy" />
+          <div class="article-hero-overlay"></div>
+          <div class="article-hero-content"><span class="article-hero-kicker">Guardrails Course · 3 of 7 · Lessons 5–6 · ~8 min</span></div>
+        </figure>
+        <h1>Hallucination Detection with Natural Language Inference</h1>
+        <p class="summary">How to catch hallucinations as groundedness failures: split the answer into sentences, retrieve supporting sources, run NLI, and wrap the validator in a guard inside the chatbot.</p>
+        <div class="article-meta">
+          <span class="meta-item">Source: <a href="https://www.deeplearning.ai/courses/safe-and-reliable-ai-via-guardrails" target="_blank" rel="noopener">DeepLearning.AI × GuardrailsAI</a> (<a href="https://learn.deeplearning.ai/courses/safe-and-reliable-ai-via-guardrails/lesson/p1nyu/checking-for-hallucinations-with-natural-language-inference-" target="_blank" rel="noopener">L5</a> · <a href="https://learn.deeplearning.ai/courses/safe-and-reliable-ai-via-guardrails/lesson/j85wm/using-hallucination-guardrail-in-a-chatbot" target="_blank" rel="noopener">L6</a>)</span>
+          <span class="meta-item">Instructor: Shreya Rajpal (GuardrailsAI) · Domain: AI Safety · Guardrails</span>
+        </div>
+      </header>
+      <div class="ai-summary" hidden aria-hidden="true" data-purpose="analysis-context">PAGE SUMMARY (hidden, for analysis). Child 03. Covers L5 Checking for hallucinations with NLI and L6 Using hallucination guardrail in a chatbot. Premise/hypothesis, entailment/contradiction/neutral, all-MiniLM-L6-v2 top-5 retrieval, guard wrapper, grounded vs factual example. Runnable JS with stand-in models.</div>
+
+      <section class="content-card">
+        <p class="lead">Hallucination detection becomes tractable once you stop asking “is it true?” and ask “is it supported by what I trust?”.</p>
+        <div class="callout"><p><strong>Core idea:</strong> Groundedness = every output sentence is entailed by at least one trusted source.</p></div>
+      </section>
+
+      <section class="content-card">
+        <span class="section-label">Lesson 5</span>
+        <h2>Checking for hallucinations with Natural Language Inference</h2>
+        <p>The instructor notes that hallucinations have caused real consequences, including lawsuits and fines. The course narrows the problem to <strong>groundedness</strong>: you have trusted sources, and the question is whether the model’s output is faithful to them.</p><h3>NLI in one paragraph</h3><p>An NLI model takes a <strong>premise</strong> (trusted text) and a <strong>hypothesis</strong> (a claim) and labels the pair <em>entailment</em> (premise supports the claim), <em>contradiction</em>, or <em>neutral</em> (premise does not say). The course uses a fine-tuned NLI “provenance” model published under the Guardrails AI Hugging Face organisation, run through a Hugging Face pipeline.</p><h3>The validator algorithm</h3><ol><li><strong>Sentence-split</strong> the LLM output (NLTK tokenizer).</li><li><strong>Retrieve relevant sources</strong> per sentence: embed sources and sentence with the same model (all-MiniLM-L6-v2), cosine similarity, take the top 5.</li><li><strong>Entailment check</strong>: sentence as hypothesis, each retrieved source as premise.</li><li><strong>Decide</strong>: a sentence is grounded if any source entails it; fail the output if any sentence is not.</li></ol><ul><li>Class shape: <code>__init__(embedding_model, sources, entailment_model)</code>, <code>sentence_splitter()</code>, <code>find_relevant_sources()</code>, <code>check_entailment()</code>, <code>validate()</code>. All three components are held as instance state so every method can reach them.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Lesson 6</span>
+        <h2>Using the hallucination guardrail in a chatbot</h2>
+        <ul><li><strong>Direct use</strong> of a validator suits testing and debugging.</li><li><strong>Wrapping in a Guard</strong> adds: combining multiple guardrails, streaming support, OpenAI-compatible endpoints, centralised logging and error handling.</li><li><strong>Grounded is not the same as true.</strong> “The sun rises in the east” passes against the sources; “The sun is a star” <em>fails</em> even though it is factually true, because the sources do not contain it. That is the intended behaviour for a company chatbot.</li><li><strong>Integration:</strong> swap the OpenAI client for one pointed at the guard server; catch the validation exception and implement graceful handling.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">Code</span>
+        <h2>Groundedness guard: split, retrieve, entail</h2>
+        <p>Stand-ins: hashed bag-of-words for embeddings and a lexical entailment rule for NLI. The pipeline, the top-k retrieval and the guard wrapper are the real structure.</p>
+        <span class="code-label">JavaScript Example</span>
+        <pre><code class="language-javascript">// ── Mini guardrails core (mirrors the Guardrails AI vocabulary: Validator, Guard, on_fail) ──
+class ValidationError extends Error {}
+const pass = () =&gt; ({ outcome: &#x27;pass&#x27; });
+const fail = (errorMessage, fixValue) =&gt; ({ outcome: &#x27;fail&#x27;, errorMessage, fixValue });
+
+class Guard {
+  constructor(name = &#x27;guard&#x27;) { this.name = name; this.rules = []; this.log = []; }
+  use(validator, onFail = &#x27;exception&#x27;) { this.rules.push({ validator, onFail }); return this; }
+  validate(text) {
+    let cur = text;
+    for (const { validator, onFail } of this.rules) {
+      const r = validator.validate(cur);
+      this.log.push({ validator: validator.constructor.name, outcome: r.outcome, onFail });
+      if (r.outcome === &#x27;pass&#x27;) continue;
+      if (onFail === &#x27;exception&#x27;) throw new ValidationError(`Validation failed for ${this.name}: ${r.errorMessage}`);
+      if (onFail === &#x27;fix&#x27; &amp;&amp; r.fixValue !== undefined) cur = r.fixValue;   // replace and continue
+      else if (onFail === &#x27;filter&#x27;) return null;                              // drop the whole value
+      // &#x27;noop&#x27;: record the failure, keep the value
+    }
+    return cur;
+  }
+}
+
+// Hallucination = &quot;not grounded in sources I trust&quot;. Pipeline from the lesson:
+//   split output into sentences -&gt; retrieve top-k relevant sources per sentence (embeddings + cosine)
+//   -&gt; NLI(premise=source, hypothesis=sentence) -&gt; fail if any sentence is not entailed.
+// Stand-ins: hashed bag-of-words &quot;embedding&quot; and a lexical NLI, so this runs with zero downloads.
+// In the course these are all-MiniLM-L6-v2 and a fine-tuned NLI &quot;provenance&quot; model.
+const STOP = new Set(&#x27;a an the is are was were of in on at to and or for it its this that with by be as from&#x27;.split(&#x27; &#x27;));
+const NEG = new Set([&#x27;not&#x27;, &#x27;no&#x27;, &#x27;never&#x27;, &#x27;cannot&#x27;, &quot;isn&#x27;t&quot;, &quot;doesn&#x27;t&quot;, &quot;don&#x27;t&quot;]);
+const toks = s =&gt; (s.toLowerCase().match(/[a-z&#x27;]+/g) || []);
+const content = s =&gt; toks(s).filter(w =&gt; !STOP.has(w) &amp;&amp; !NEG.has(w)).map(w =&gt; w.replace(/(es|s)$/, &#x27;&#x27;));
+
+function embed(text, dim = 64) {                         // hashed bag-of-words, L2-normalised
+  const v = new Float64Array(dim);
+  for (const w of content(text)) { let h = 0; for (const c of w) h = (h * 31 + c.charCodeAt(0)) &gt;&gt;&gt; 0; v[h % dim] += 1; }
+  const n = Math.hypot(...v) || 1; return v.map(x =&gt; x / n);
+}
+const cosine = (a, b) =&gt; a.reduce((s, x, i) =&gt; s + x * b[i], 0);
+
+function nli(premise, hypothesis) {                      // -&gt; &#x27;entailment&#x27; | &#x27;contradiction&#x27; | &#x27;neutral&#x27;
+  const p = new Set(content(premise)), h = content(hypothesis);
+  const covered = h.filter(w =&gt; p.has(w)).length / (h.length || 1);
+  const negP = toks(premise).some(w =&gt; NEG.has(w)), negH = toks(hypothesis).some(w =&gt; NEG.has(w));
+  if (covered &gt;= 0.8 &amp;&amp; negP !== negH) return &#x27;contradiction&#x27;;
+  return covered &gt;= 0.8 ? &#x27;entailment&#x27; : &#x27;neutral&#x27;;
+}
+
+class HallucinationValidator {
+  constructor(sources, { topK = 5, embedFn = embed, nliFn = nli } = {}) {
+    this.sources = sources; this.topK = topK; this.embedFn = embedFn; this.nliFn = nliFn;
+    this.sourceVecs = sources.map(s =&gt; embedFn(s));      // pre-compute once, not per request
+  }
+  sentenceSplitter(text) { return text.split(/(?&lt;=[.!?])\s+/).filter(Boolean); }
+  findRelevantSources(sentence) {
+    const q = this.embedFn(sentence);
+    return this.sources.map((s, i) =&gt; ({ s, sim: cosine(q, this.sourceVecs[i]) }))
+      .sort((a, b) =&gt; b.sim - a.sim).slice(0, this.topK).map(x =&gt; x.s);
+  }
+  checkEntailment(premise, hypothesis) { return this.nliFn(premise, hypothesis) === &#x27;entailment&#x27;; }
+  validate(text) {
+    const hallucinated = this.sentenceSplitter(text).filter(sent =&gt;
+      !this.findRelevantSources(sent).some(src =&gt; this.checkEntailment(src, sent)));
+    return hallucinated.length ? fail(`Hallucinated content: ${JSON.stringify(hallucinated)}`) : pass();
+  }
+}
+//---demo---
+const SOURCES = [
+  &#x27;The sun rises in the east.&#x27;,
+  &quot;Alfredo&#x27;s Pizza Cafe opens at 11am daily.&quot;,
+  &#x27;Delivery is free for orders over 25 USD.&#x27;,
+];
+const v = new HallucinationValidator(SOURCES);
+// 1) Using the validator directly: good for tests and debugging.
+for (const t of [&#x27;The sun rises in the east.&#x27;, &#x27;The sun is a star.&#x27;, &#x27;The sun never rises in the east.&#x27;])
+  console.log(`direct  | ${v.validate(t).outcome.padEnd(4)} | ${t}`);
+
+// 2) Wrapped in a Guard: combine validators, choose on_fail, collect a log.
+const outputGuard = new Guard(&#x27;output&#x27;).use(v, &#x27;exception&#x27;);
+const llm = q =&gt; /open/.test(q) ? &quot;Alfredo&#x27;s Pizza Cafe opens at 11am daily.&quot; : &#x27;Our Veggie Supreme has bell peppers. It bakes for 12 minutes.&#x27;;
+for (const q of [&#x27;When do you open?&#x27;, &#x27;Tell me about the Veggie Supreme&#x27;]) {
+  try { console.log(&#x27;guarded |&#x27;, outputGuard.validate(llm(q))); }
+  catch (e) { console.log(&#x27;guarded |&#x27;, e.message.slice(0, 110)); }
+}
+console.log(&#x27;log     |&#x27;, JSON.stringify(outputGuard.log));</code></pre>
+        <span class="code-label">Output (ran under Node.js)</span>
+        <pre><code>direct  | pass | The sun rises in the east.
+direct  | fail | The sun is a star.
+direct  | fail | The sun never rises in the east.
+guarded | Alfredo&#x27;s Pizza Cafe opens at 11am daily.
+guarded | Validation failed for output: Hallucinated content: [&quot;Our Veggie Supreme has bell peppers.&quot;,&quot;It bakes for 12 m
+log     | [{&quot;validator&quot;:&quot;HallucinationValidator&quot;,&quot;outcome&quot;:&quot;pass&quot;,&quot;onFail&quot;:&quot;exception&quot;},{&quot;validator&quot;:&quot;HallucinationValidator&quot;,&quot;outcome&quot;:&quot;fail&quot;,&quot;onFail&quot;:&quot;exception&quot;}]</code></pre>
+      </section><p class="note"><em>Scope note: the course teaches this in Python with the Guardrails AI framework and downloadable models. This page re-implements the same <strong>shape</strong> in dependency-free JavaScript with deterministic stand-ins for the models, so every line runs here. Lesson details come from the public lesson pages (video transcripts were not available verbatim); the graded quiz needs sign-in and is not covered.</em></p>
+      <section class="content-card">
+        <span class="section-label">Senior notes</span>
+        <h2>Failure modes and scaling</h2>
+        <ul><li><strong>Pre-compute source embeddings</strong> in the constructor; recomputing per request is the first latency bug.</li><li><strong>Sentence granularity cuts both ways.</strong> Claims spanning two sentences (“It opens at 11. That is when it closes.”) lose their referent; coreference needs context windows or paragraph-level checks.</li><li><strong>Top-k is a recall knob.</strong> Too small and a supported claim looks unsupported; too large and NLI cost rises linearly per sentence.</li><li><strong>NLI inputs are length-limited</strong> (typically a few hundred tokens), so long sources must be chunked.</li><li><strong>Decide what a false positive costs.</strong> Strict groundedness blocks harmless small talk; pair with on_fail=fix or a canned fallback for those cases.</li><li><strong>Where this is used:</strong> RAG for support, legal and finance assistants, where “only say what the sources say” is a contractual requirement.</li></ul>
+      </section>
+      <section class="content-card">
+        <span class="section-label">YouTube</span>
+        <h2>Watch &amp; Learn</h2>
+        <ul><li><a href="https://www.youtube.com/results?search_query=natural+language+inference+NLI+explained+entailment+contradiction+neutral" target="_blank" rel="noopener">Natural Language Inference explained</a> <em>(YouTube search)</em> — Intuition for entailment, contradiction and neutral.</li><li><a href="https://www.youtube.com/results?search_query=detect+LLM+hallucinations+RAG+groundedness" target="_blank" rel="noopener">Detecting hallucinations in RAG</a> <em>(YouTube search)</em> — Groundedness checks in production RAG systems.</li></ul>
+        <p class="note"><em>The course videos live inside the DeepLearning.AI player and have no public YouTube link. Entries with a direct video link were verified earlier via YouTube’s oEmbed endpoint; entries marked “YouTube search” open a search for the named talk or topic, because exact video IDs could not be verified from here and are not guessed.</em></p>
+      </section>
+      <section class="content-card">
+        <span class="section-label">FAQ</span>
+        <h2>Frequently Asked Questions</h2>
+        <h3>Why use NLI instead of asking another LLM “is this true?”</h3>
+        <p>An NLI model is small, consistent, private and cheap to run per sentence. An LLM judge is stochastic, rate-limited and sends data to a third party.</p>
+        <h3>Does passing mean the answer is correct?</h3>
+        <p>No. It means the answer is supported by your sources. If the sources are wrong, a grounded answer is wrong.</p>
+      </section>
+      <section class="content-card takeaways">
+        <h2>Key Takeaway</h2>
+        <p>Check claims against your sources sentence by sentence; treat grounded as the goal and factual as out of scope.</p>
+      </section>
+
+      <section class="content-card">
+        <h2>Course Navigation</h2>
+        <ul><li>Previous: <a href="./02-what-are-guardrails-first-guardrail.html">What Are Guardrails &amp; Your First Guardrail</a></li><li>Up: <a href="./index.html">Safe and Reliable AI via Guardrails — course hub</a></li><li>Next: <a href="./04-keeping-chatbot-on-topic.html">Keeping a Chatbot on Topic</a></li></ul>
+      </section>
+    </main>
+  </body>
+</html>

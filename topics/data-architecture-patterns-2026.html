@@ -205,6 +205,118 @@ async function reprocessFromEventLog(db, fromDate) {
         <h2>Key Takeaway</h2>
         <p>Data architecture patterns are tools for answering three questions: where data lives, how it's refined, and how it flows. The Medallion pattern is currently the most universally applicable — it works with any storage layer and gives you clear quality gates. Lambda Architecture is being superseded by Kappa as streaming matures. Data Mesh is the right answer for large organisations where centralised teams are the bottleneck. Know all 12 patterns, but choose based on your team's maturity and your data's nature — not based on what the biggest tech companies use.</p>
       </section>
+
+      <!-- ─── ETL VS ELT ──────────────────────────────────────────────────── -->
+      <section class="content-card">
+        <h2>ETL vs. ELT: The Complete Data Pipeline Interview Guide</h2>
+        <p>The most common data engineering interview topic — and the one where candidates most
+        often give shallow answers. The question is not just "what do they stand for" but
+        "when does each pattern win and why."</p>
+
+        <h3>Core Comparison</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.88rem;margin:1rem 0">
+          <thead><tr style="background:#f1f5f9"><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Dimension</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">ETL (Extract, Transform, Load)</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">ELT (Extract, Load, Transform)</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Where transform runs</strong></td><td style="padding:.55rem .8rem">Dedicated transformation server before load</td><td style="padding:.55rem .8rem">Inside the target data warehouse</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Raw data stored?</strong></td><td style="padding:.55rem .8rem">No — transformed data only</td><td style="padding:.55rem .8rem">Yes — raw data always preserved</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Schema-on-write vs. read</strong></td><td style="padding:.55rem .8rem">Schema-on-write — structure enforced before load</td><td style="padding:.55rem .8rem">Schema-on-read — raw loaded, structure applied at query time</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Scalability</strong></td><td style="padding:.55rem .8rem">Bottlenecked by transform server CPU/memory</td><td style="padding:.55rem .8rem">Scales with data warehouse compute (BigQuery, Snowflake)</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Reprocessing</strong></td><td style="padding:.55rem .8rem">Expensive — raw data may be gone</td><td style="padding:.55rem .8rem">Cheap — raw data always present; re-run transformations</td></tr>
+            <tr><td style="padding:.55rem .8rem"><strong>Best for</strong></td><td style="padding:.55rem .8rem">Sensitive data (PII must be masked before storage), on-prem DWs, strict governance</td><td style="padding:.55rem .8rem">Cloud DWs (BigQuery, Snowflake, Redshift), high-volume semi-structured data</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Key Interview Topics</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.88rem;margin:1rem 0">
+          <thead><tr style="background:#f1f5f9"><th style="padding:.6rem .8rem;text-align:left;font-weight:700">Topic</th><th style="padding:.6rem .8rem;text-align:left;font-weight:700">What Interviewers Expect</th></tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Batch vs. Streaming</strong></td><td style="padding:.55rem .8rem">Latency/cost tradeoff; when micro-batch is the right compromise</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Full vs. Incremental loads</strong></td><td style="padding:.55rem .8rem">Incremental with watermarks; handling late-arriving data</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>CDC (Change Data Capture)</strong></td><td style="padding:.55rem .8rem">Debezium-style log-based CDC vs. trigger-based; replication lag</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Idempotency &amp; Retries</strong></td><td style="padding:.55rem .8rem">Exactly-once vs. at-least-once; idempotency keys for retries</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9"><td style="padding:.55rem .8rem"><strong>Orchestration</strong></td><td style="padding:.55rem .8rem">DAG-based (Airflow, dbt); dependency management, SLA alerts</td></tr>
+            <tr><td style="padding:.55rem .8rem"><strong>Backfills</strong></td><td style="padding:.55rem .8rem">Historical reprocessing without overwriting current data; partition strategy</td></tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-javascript">// Incremental load with watermark — the correct pattern for most production pipelines
+class IncrementalPipeline {
+  constructor({ sourceDb, targetDw, watermarkStore }) {
+    this.source    = sourceDb;
+    this.target    = targetDw;
+    this.watermarks = watermarkStore;
+  }
+
+  async run(tableName) {
+    // Get last successful watermark — where we left off
+    const lastWatermark = await this.watermarks.get(tableName) ?? new Date(0);
+    const runStart = new Date();
+
+    // Step 1: Extract — only rows changed since last run
+    const rows = await this.source.query(`
+      SELECT * FROM ${tableName}
+      WHERE updated_at > $1
+      ORDER BY updated_at ASC
+    `, [lastWatermark]);
+
+    if (rows.length === 0) {
+      console.log(`[${tableName}] No new rows since ${lastWatermark.toISOString()}`);
+      return { processed: 0 };
+    }
+
+    // Step 2: Transform — apply business rules in-pipeline (ETL) or pass through (ELT)
+    const transformed = rows.map(row => this.transform(row));
+
+    // Step 3: Load with UPSERT — idempotent on primary key
+    await this.target.upsert(tableName, transformed, { conflictKey: "id" });
+
+    // Step 4: Advance watermark ONLY after successful load
+    const newWatermark = rows[rows.length - 1].updated_at;
+    await this.watermarks.set(tableName, newWatermark);
+
+    console.log(`[${tableName}] Processed ${rows.length} rows, watermark → ${newWatermark}`);
+    return { processed: rows.length, watermark: newWatermark };
+  }
+
+  transform(row) {
+    // Mask PII before storage (ETL use case — transform before load)
+    return {
+      ...row,
+      email:  row.email ? row.email.replace(/(.{2}).*(@.*)/, "$1***$2") : null,
+      phone:  row.phone ? "***-***-" + row.phone.slice(-4) : null,
+      // Normalize timestamps to UTC
+      updated_at: new Date(row.updated_at).toISOString()
+    };
+  }
+}
+
+// Change Data Capture pattern — log-based CDC (Debezium style)
+class CDCConsumer {
+  constructor(kafkaConsumer, targetStore) {
+    this.consumer = kafkaConsumer;
+    this.target   = targetStore;
+  }
+
+  async start() {
+    for await (const message of this.consumer) {
+      const event = JSON.parse(message.value);
+
+      // CDC events carry operation type
+      switch (event.op) {
+        case "c": // CREATE
+          await this.target.insert(event.after);
+          break;
+        case "u": // UPDATE
+          await this.target.upsert(event.after, { conflictKey: "id" });
+          break;
+        case "d": // DELETE
+          await this.target.softDelete(event.before.id, { deletedAt: event.ts_ms });
+          break;
+      }
+    }
+  }
+}</code></pre>
+      </section>
     </main>
   </body>
 </html>
