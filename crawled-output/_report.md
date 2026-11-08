@@ -5,7 +5,7 @@
 | Root URL | https://help.salesforce.com/s/articleView?id=ind.admin_life_sciences.htm&type=5 |
 | Total pages | 3 |
 | Max depth | 3 |
-| Generated | 2026-11-01T09:57:36.216Z |
+| Generated | 2026-11-08T09:46:51.014Z |
 
 ## Pages by Depth
 
